@@ -36,6 +36,45 @@ WhatApp Media Archiver organises your WhatsApp media into a structured folder hi
 | Animated GIFs | `Media/WhatsApp Animated Gifs/` |
 | Documents | `Media/WhatsApp Documents/` |
 
+---
+
+## Archive Structure
+
+After a successful run, the archive will be organized as follows:
+
+```
+<output>/
+├── Contacts/
+│   ├── John Doe (0039123456789)/
+│   │   ├── 2023/
+│   │   │   ├── Received/
+│   │   │   └── Sent/
+│   │   └── 2024/
+│   │       ├── Received/
+│   │       └── Sent/
+│   └── Unknown (0044987654321)/
+│       └── 2022/
+│           └── Received/
+├── Groups/
+│   ├── Family Chat/
+│   │   ├── 2023/
+│   │   └── 2024/
+│   └── Work Team/
+│       └── 2024/
+├── .wa_media_archiver.db
+├── wa_media_archiver.log
+├── missing_media_report.csv
+└── duplicate_media_report.csv
+```
+
+- Files in **Contacts** folders retain their original filename
+- Files in **Groups** folders have the sender name appended: `IMG-20230115-WA0001_JohnDoe.jpg`
+- Your own sent media in groups is appended with `_Me`
+- All copied files have their **modified date set to the original WhatsApp timestamp**
+- Contact folder names use the `00` prefix for phone numbers (e.g. `0039...`), not `+`
+
+---
+
 ### Platform
 
 The main script runs on **Linux and macOS**.
@@ -367,43 +406,6 @@ python3 wa_media_archiver.py \
 ```
 
 > 💡 `--wa_root` is not required in restore mode. The script reads `.wa_media_archiver.db` from the archive and reconstructs `<output>/Media/` in place. Use `--dry-run` to preview what would be written.
-
----
-
-## Output Structure
-
-After a successful run, the archive will be organized as follows:
-
-```
-<output>/
-├── Contacts/
-│   ├── John Doe (0039123456789)/
-│   │   ├── 2023/
-│   │   │   ├── Received/
-│   │   │   └── Sent/
-│   │   └── 2024/
-│   │       ├── Received/
-│   │       └── Sent/
-│   └── Unknown (0044987654321)/
-│       └── 2022/
-│           └── Received/
-├── Groups/
-│   ├── Family Chat/
-│   │   ├── 2023/
-│   │   └── 2024/
-│   └── Work Team/
-│       └── 2024/
-├── .wa_media_archiver.db
-├── wa_media_archiver.log
-├── missing_media_report.csv
-└── duplicate_media_report.csv
-```
-
-- Files in **Contacts** folders retain their original filename
-- Files in **Groups** folders have the sender name appended: `IMG-20230115-WA0001_JohnDoe.jpg`
-- Your own sent media in groups is appended with `_Me`
-- All copied files have their **modified date set to the original WhatsApp timestamp**
-- Contact folder names use the `00` prefix for phone numbers (e.g. `0039...`), not `+`
 
 ---
 
