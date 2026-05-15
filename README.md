@@ -3,7 +3,7 @@
 
 ## Overview
 
-WhatApp Media Archiver organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database (`msgstore.db`). Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
+WhatsApp Media Archiver organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database (`msgstore.db`). Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
 
 > ⚠️ **This tool is designed to run on a backup copy of your WhatsApp data — never on live device files.** For safeguard reasons, this script will always make a copy of your data.
 
@@ -457,6 +457,7 @@ The script is **safe to re-run** on an existing archive:
 - Very old media is likely missing from disk even if present in the database. Use `missing_media_report.csv` to assist manual recovery.
 - Group names reflect the **current** name at time of DB export, not historical names.
 - Stickers are not archived in this version.
+- **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared.
 
 ---
 

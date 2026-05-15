@@ -336,7 +336,8 @@ def _unique_group_name(desired: str, existing: set) -> str:
 
 def sync_group_names(group_subjects: dict, output_root: str,
                      group_index: dict, logger: logging.Logger,
-                     conn: sqlite3.Connection | None = None) -> dict:
+                     conn: sqlite3.Connection | None = None,
+                     dry_run: bool = False) -> dict:
     """
     Detect group renames since the last run and rename folders on disk.
     group_subjects: {str(chat_row_id): current chat_subject} built from query rows.
@@ -372,22 +373,25 @@ def sync_group_names(group_subjects: dict, output_root: str,
                 )
                 continue
             else:
-                os.rename(old_path, new_path)
-                logger.info(f"RENAMED group folder: {old_folder} -> {new_folder}")
-                if conn is not None:
-                    old_prefix = f"Groups/{old_folder}/"
-                    new_prefix = f"Groups/{new_folder}/"
-                    # Known race: os.rename is immediate; this UPDATE is committed
-                    # later in main(). A crash between the two leaves archive_copies
-                    # with stale paths (restore mode will report those files as
-                    # unrestorable on the next run). Accepted — no mitigation.
-                    conn.execute(
-                        "UPDATE archive_copies "
-                        "SET archive_path = ? || SUBSTR(archive_path, ?) "
-                        "WHERE archive_path LIKE ? ESCAPE '\\'",
-                        (new_prefix, len(old_prefix) + 1,
-                         f"{escape_like(old_prefix)}%")
-                    )
+                if dry_run:
+                    logger.info(f"[DRY RUN] Would rename group folder: {old_folder} -> {new_folder}")
+                else:
+                    os.rename(old_path, new_path)
+                    logger.info(f"RENAMED group folder: {old_folder} -> {new_folder}")
+                    if conn is not None:
+                        old_prefix = f"Groups/{old_folder}/"
+                        new_prefix = f"Groups/{new_folder}/"
+                        # Known race: os.rename is immediate; this UPDATE is committed
+                        # later in main(). A crash between the two leaves archive_copies
+                        # with stale paths (restore mode will report those files as
+                        # unrestorable on the next run). Accepted — no mitigation.
+                        conn.execute(
+                            "UPDATE archive_copies "
+                            "SET archive_path = ? || SUBSTR(archive_path, ?) "
+                            "WHERE archive_path LIKE ? ESCAPE '\\'",
+                            (new_prefix, len(old_prefix) + 1,
+                             f"{escape_like(old_prefix)}%")
+                        )
         else:
             logger.debug(
                 f"Group folder name changed but no folder on disk yet: "
@@ -419,10 +423,10 @@ def resolve_group_folder(chat_row_id: int, chat_subject: str | None,
     return folder
 
 
-
 def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
                       folder_index: dict, logger: logging.Logger,
-                      conn: sqlite3.Connection | None = None) -> dict:
+                      conn: sqlite3.Connection | None = None,
+                      dry_run: bool = False) -> dict:
     """
     Compare current contact names against the persisted folder index.
     If a contact name has changed since the last run, rename the folder
@@ -462,24 +466,27 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
                 )
                 continue
             else:
-                os.rename(old_path, new_path)
-                logger.info(
-                    f"RENAMED contact folder: {old_folder} -> {new_folder}"
-                )
-                if conn is not None:
-                    old_prefix = f"Contacts/{old_folder}/"
-                    new_prefix = f"Contacts/{new_folder}/"
-                    # Known race: os.rename is immediate; this UPDATE is committed
-                    # later in main(). A crash between the two leaves archive_copies
-                    # with stale paths (restore mode will report those files as
-                    # unrestorable on the next run). Accepted — no mitigation.
-                    conn.execute(
-                        "UPDATE archive_copies "
-                        "SET archive_path = ? || SUBSTR(archive_path, ?) "
-                        "WHERE archive_path LIKE ? ESCAPE '\\'",
-                        (new_prefix, len(old_prefix) + 1,
-                         f"{escape_like(old_prefix)}%")
+                if dry_run:
+                    logger.info(f"[DRY RUN] Would rename contact folder: {old_folder} -> {new_folder}")
+                else:
+                    os.rename(old_path, new_path)
+                    logger.info(
+                        f"RENAMED contact folder: {old_folder} -> {new_folder}"
                     )
+                    if conn is not None:
+                        old_prefix = f"Contacts/{old_folder}/"
+                        new_prefix = f"Contacts/{new_folder}/"
+                        # Known race: os.rename is immediate; this UPDATE is committed
+                        # later in main(). A crash between the two leaves archive_copies
+                        # with stale paths (restore mode will report those files as
+                        # unrestorable on the next run). Accepted — no mitigation.
+                        conn.execute(
+                            "UPDATE archive_copies "
+                            "SET archive_path = ? || SUBSTR(archive_path, ?) "
+                            "WHERE archive_path LIKE ? ESCAPE '\\'",
+                            (new_prefix, len(old_prefix) + 1,
+                             f"{escape_like(old_prefix)}%")
+                        )
         else:
             logger.debug(
                 f"Folder name changed but no folder on disk yet: "
@@ -1253,18 +1260,18 @@ def main():
             logger.info(f"Group index loaded: {len(group_index)} known group(s).")
 
             # --- Sync folder names for renamed contacts ---
-            if not args.dry_run:
-                folder_index = sync_folder_names(
-                    contacts, number_map, args.output, folder_index, logger,
-                    conn=archive_conn
-                )
+            folder_index = sync_folder_names(
+                contacts, number_map, args.output, folder_index, logger,
+                conn=archive_conn if not args.dry_run else None,
+                dry_run=args.dry_run,
+            )
 
             # --- Sync folder names for renamed groups ---
-            if not args.dry_run:
-                group_index = sync_group_names(
-                    group_subjects, args.output, group_index, logger,
-                    conn=archive_conn
-                )
+            group_index = sync_group_names(
+                group_subjects, args.output, group_index, logger,
+                conn=archive_conn if not args.dry_run else None,
+                dry_run=args.dry_run,
+            )
 
             report_path = os.path.join(args.output, 'missing_media_report.csv')
 
