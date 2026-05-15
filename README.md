@@ -38,8 +38,8 @@ WhatApp Media Archiver organises your WhatsApp media into a structured folder hi
 
 ### Platform
 
-The main script runs on **Linux only**.
-Windows users can use `windows_extractor_companion.ps1` to pull the database and contacts via ADB, then transfer to Linux. See [windows_documentation.md](windows_documentation.md).
+The main script runs on **Linux and macOS**.
+Windows users can use `windows_extractor_companion.ps1` to pull the database and contacts via ADB, then transfer to Linux or macOS. See [windows_documentation.md](windows_documentation.md).
 
 ---
 
@@ -77,11 +77,11 @@ Enable it and note the **cryptographic key** — a long alphanumeric string. Thi
 
 #### Android
 
-##### Recommended — Automatic Retrieval (Linux and Windows)
+##### Recommended — Automatic Retrieval (Linux, macOS and Windows)
 
 The simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the script (or the companion script on Windows) handle the pull and decryption automatically.
 
-**On Linux** — pass `--mode adb` when running the script:
+**On Linux and macOS** — pass `--mode adb` when running the script:
 
 ```bash
 python3 wa_media_archiver.py \
@@ -93,7 +93,9 @@ python3 wa_media_archiver.py \
 
 The script pulls the encrypted backup and contacts directly from the device and decrypts on the fly. No separate steps needed.
 
-**On Windows** — use the companion script, then transfer to Linux:
+> 💡 **macOS**: ADB must be installed first. Run `brew install android-platform-tools` (requires [Homebrew](https://brew.sh)).
+
+**On Windows** — use the companion script, then transfer to Linux or macOS:
 
 ```powershell
 .\windows_extractor_companion.ps1 -DecryptDB -E2EKey "your_cryptographic_key"
@@ -198,9 +200,9 @@ How WhatsApp media is stored in iTunes/Finder backups, and how to provide it to 
 
 Contacts are optional but strongly recommended — without them, folder names will show raw phone numbers instead of contact names.
 
-When using automatic retrieval (`--mode adb` on Linux, or the Windows companion script), contacts are pulled automatically. No extra steps needed.
+When using automatic retrieval (`--mode adb` on Linux and macOS, or the Windows companion script), contacts are pulled automatically. No extra steps needed.
 
-For manual pull on Linux:
+For manual pull on Linux and macOS:
 
 ```bash
 adb shell content query \
@@ -449,7 +451,7 @@ The script is **safe to re-run** on an existing archive:
 
 ## Known Limitations
 
-- **Linux only for the main script.** Windows users should use `windows_extractor_companion.ps1` to extract the database and contacts on Windows, then transfer to Linux to run `wa_media_archiver.py`.
+- **Windows is not natively supported.** Windows users should use `windows_extractor_companion.ps1` to extract the database and contacts, then transfer to Linux or macOS to run `wa_media_archiver.py`.
 - Very old media is likely missing from disk even if present in the database. Use `missing_media_report.csv` to assist manual recovery.
 - Group names reflect the **current** name at time of DB export, not historical names.
 - Stickers are not archived in this version.
