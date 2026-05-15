@@ -47,11 +47,9 @@ Windows users can use `windows_extractor_companion.ps1` to pull the database and
 
 ### 1. Python Environment
 
-Ensure Python 3.10+ is installed, then install the required dependency:
+Ensure Python 3.10+ is installed.
 
-```bash
-python3 -m pip install wa-crypt-tools
-```
+For encrypted backup decryption, the script uses `wa-crypt-tools`. It is installed automatically the first time it is needed — no manual step required.
 
 ---
 
@@ -81,6 +79,10 @@ Enable it and note the **cryptographic key** — a long alphanumeric string. Thi
 
 The simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the script (or the companion script on Windows) handle the pull and decryption automatically.
 
+> 💡 **ADB required on all platforms.** Install it before running `--mode adb`:
+> - **Linux**: `sudo apt install adb` (Debian/Ubuntu) or `sudo dnf install android-tools` (Fedora)
+> - **macOS**: `brew install android-platform-tools` (requires [Homebrew](https://brew.sh))
+
 **On Linux and macOS** — pass `--mode adb` when running the script:
 
 ```bash
@@ -92,8 +94,6 @@ python3 wa_media_archiver.py \
 ```
 
 The script pulls the encrypted backup and contacts directly from the device and decrypts on the fly. No separate steps needed.
-
-> 💡 **macOS**: ADB must be installed first. Run `brew install android-platform-tools` (requires [Homebrew](https://brew.sh)).
 
 **On Windows** — use the companion script, then transfer to Linux or macOS:
 
