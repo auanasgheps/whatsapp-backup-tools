@@ -1,7 +1,7 @@
 # ==============================================================================
 # WA Media Archiver - Windows Companion Script
 # Pulls WhatsApp database and contacts from an Android device via ADB
-# For use before running wa_archiver.py on Linux
+# For use before running wa_media_archiver.py on Linux or macOS
 # v0.2
 # ==============================================================================
 
@@ -130,7 +130,7 @@ function Pull-MsgStore {
     Write-Host "  Local : $destFile"        -ForegroundColor Gray
 
     # Redirect all ADB output to console only, never capture it
-    adb pull $MSGSTORE_REMOTE $destFile
+    adb pull $MSGSTORE_REMOTE "$destFile"
     if ($LASTEXITCODE -ne 0) {
         Write-ErrorMsg "Failed to pull msgstore. Make sure WhatsApp is installed and the path is correct."
         return $null
@@ -164,7 +164,7 @@ function Pull-Contacts {
 
     # Filter WhatsApp contacts on the PowerShell side
     $waContacts = $raw | Where-Object { $_ -match "@s.whatsapp.net" }
-    [System.IO.File]::WriteAllLines($destFile, $waContacts)
+    [System.IO.File]::WriteAllLines($destFile, $waContacts, (New-Object System.Text.UTF8Encoding($false)))
 
     $count = ($waContacts | Measure-Object).Count
     Write-Success "Contacts pulled successfully. Found $count WhatsApp contacts."
@@ -192,7 +192,7 @@ function Decrypt-MsgStore {
     if (Test-Path $destFile) {
         Write-WarningMsg "Overwriting existing decrypted database: $destFile"
     }
-    python -m wa_crypt_tools.wadecrypt $Key $CryptFile $destFile
+    python -m wa_crypt_tools.wadecrypt "$Key" "$CryptFile" "$destFile"
     if ($LASTEXITCODE -ne 0) {
         Write-ErrorMsg "Decryption failed. Please check your E2E key."
         Write-Host "  You can retry manually:" -ForegroundColor Gray
@@ -240,27 +240,22 @@ function Write-Summary {
     }
 
     Write-Host ""
-    Write-Host "Next steps:"                                                  -ForegroundColor Yellow
-    Write-Host "  1. Transfer the output folder to your Linux machine"        -ForegroundColor Gray
-    Write-Host "  2. Transfer your WhatsApp Media folder to Linux as well"    -ForegroundColor Gray
-    Write-Host "  3. Run wa_archiver.py on Linux"                             -ForegroundColor Gray
+    Write-Host "Next steps:"                                                          -ForegroundColor Yellow
+    Write-Host "  1. Transfer the output folder to your Linux or macOS machine"       -ForegroundColor Gray
+    Write-Host "  2. Transfer your WhatsApp Media folder to Linux or macOS as well"   -ForegroundColor Gray
+    Write-Host "  3. Run wa_media_archiver.py on Linux or macOS"                      -ForegroundColor Gray
     Write-Host ""
     Write-Host "Example command:" -ForegroundColor Yellow
 
     # Build command hint line by line - no dynamic string construction
-    Write-Host "  python wa_archiver.py \"          -ForegroundColor White
+    Write-Host "  python3 wa_media_archiver.py \"          -ForegroundColor White
 
     if ($DecryptedPath) {
         Write-Host "    --msgstore /path/to/msgstore.db \" -ForegroundColor White
     }
     else {
         Write-Host "    --msgstore /path/to/msgstore.db.crypt15 \" -ForegroundColor White
-        if ($E2EKey) {
-            Write-Host "    --e2e $E2EKey \" -ForegroundColor White
-        }
-        else {
-            Write-Host "    --e2e YOUR_E2E_KEY \" -ForegroundColor White
-        }
+        Write-Host "    --e2e YOUR_E2E_KEY \" -ForegroundColor White
     }
 
     Write-Host "    --wa_root /path/to/WhatsApp \"  -ForegroundColor White
