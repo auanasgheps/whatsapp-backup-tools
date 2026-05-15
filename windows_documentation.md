@@ -1,6 +1,6 @@
 # WA Media Archiver — Windows Companion Script
 
-> The main archiver (`wa_media_archiver.py`) runs on Linux only. This companion script handles the extraction step on Windows so you can transfer the files to your Linux machine and proceed normally.
+> The main archiver (`wa_media_archiver.py`) runs on Linux and macOS. This companion script handles the extraction step on Windows so you can transfer the files to your Linux or macOS machine and proceed normally.
 
 ---
 
@@ -20,7 +20,7 @@
 | Database | Pulls `msgstore.db.crypt15` from the phone |
 | Contacts | Pulls and filters WhatsApp contacts via ADB content provider |
 | Decryption | Optional — decrypts on Windows if `-DecryptDB` and `-E2EKey` are provided |
-| Summary | Prints the exact `wa_media_archiver.py` command to run on Linux |
+| Summary | Prints the exact `wa_media_archiver.py` command to run on Linux or macOS |
 
 ---
 
@@ -51,6 +51,6 @@
 
 After the script completes:
 
-1. Transfer the output folder to your Linux machine
-2. Transfer your WhatsApp Media folder to Linux as well
-3. Run `wa_media_archiver.py` on Linux — the script prints the exact command at the end
+1. Transfer the output folder to your Linux or macOS machine
+2. Transfer your WhatsApp Media folder to Linux or macOS as well
+3. Run `wa_media_archiver.py` on Linux or macOS — the script prints the exact command at the end
