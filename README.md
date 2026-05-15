@@ -1,7 +1,5 @@
 
-# WhatsApp Media Archiver — Documentation v0.15
-
----
+# WhatsApp Media Archiver
 
 ## Overview
 
@@ -432,10 +430,6 @@ python3 wa_media_archiver.py \
 The reconstructed tree is written to `<output>/Media/`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
 
 **How it works:** During every real (non-dry-run) forward run, the script records each original WhatsApp `file_path` and the archive path it was copied to, in `.wa_media_archiver.db`. Restore mode reads this data and copies each unique original file back to its original relative path. If the same file was archived from multiple chats, it is restored exactly once.
-
-**Requirements:**
-- The archive must have been created with v0.12 or later. Archives built with an earlier version have no restore data in the database — re-run forward mode on the archive first (with a current `msgstore.db`) to build it.
-- `--wa_root` and `--msgstore` are not required in restore mode.
 
 **Limitations:**
 - Restored file timestamps reflect the WhatsApp message timestamp (same as in the archive), not the original on-device creation date.
