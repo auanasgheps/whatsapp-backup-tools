@@ -2,7 +2,7 @@
 Tests for wa_media_archiver.py
 
 Run with:
-    pytest test_wa_media_archiver.py -v
+    pytest tests/ -v
 
 Requires:
     pip install pytest
@@ -20,12 +20,13 @@ import pytest
 # We skip the if __name__ == '__main__' block because we import, not run it.
 # ---------------------------------------------------------------------------
 
-sys.path.insert(0, os.path.dirname(__file__))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 import importlib.util
 
 spec = importlib.util.spec_from_file_location(
     "wa_media_archiver",
-    os.path.join(os.path.dirname(__file__), "wa_media_archiver.py"),
+    os.path.join(_ROOT, "wa_media_archiver.py"),
 )
 wa = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wa)
