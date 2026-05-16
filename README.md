@@ -10,7 +10,7 @@ WhatsApp Media Archiver organises your WhatsApp media into a structured folder h
 ### Features
 
 - Structured archival: `Contacts/` and `Groups/` top-level folders
-- Year and `Sent/`/`Received/` subfolders for 1-to-1 chats
+- Year and `Sent/`and `Received/` subfolders for 1-to-1 chats
 - Sender name appended to filenames in group chats
 - Correct file timestamps preserved from the WhatsApp database
 - Contact number change tracking — consolidates old and new numbers into one folder
@@ -90,7 +90,8 @@ Windows users can use `windows_extractor_companion.ps1` to pull the database and
 - **`wa-crypt-tools`** — used for encrypted backup decryption; installed automatically on first use
 - **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database
 - **iOS/iPadOS**: End-to-end encrypted backup must be **disabled**
-- **ADB** required for automatic retrieval (`--mode adb`). Windows users use the companion script instead
+- **ADB** required for automatic retrieval (`--mode adb`).   
+  - Windows users use the companion script instead
 
 See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: E2E backup configuration, database extraction (Android and iOS), contacts pull, and locating your media folder.
 
