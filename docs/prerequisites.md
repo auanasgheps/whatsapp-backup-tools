@@ -109,46 +109,36 @@ python3 wa_media_archiver.py \
 
 ---
 
-### iOS / iPadOS ⚠️ Work in Progress
+### iOS / iPadOS
 
-> ⚠️ **This path has not been tested with this script.** The steps below are based on the [WhatsApp-Chat-Exporter](https://github.com/KnugiHK/WhatsApp-Chat-Exporter) documentation by KnugiHK. Whether the extracted database is compatible with `wa_media_archiver.py` — and how media files should be provided — has not yet been verified. Contributions and test reports are welcome.
+WhatsApp on iOS stores its data inside an iTunes backup. You can extract it on Windows, macOS, and Linux using **[iTunes Backup Explorer](https://github.com/MaxiHuHe04/iTunes-Backup-Explorer)**.
 
-WhatsApp on iOS stores its database inside an iTunes (Windows) or Finder (macOS) device backup. ADB is not involved.
+#### Step 1 — Create a device backup
 
-**Step 1 — Create a device backup**
+**Windows** — Install [Apple Devices](https://apps.microsoft.com/detail/9NP83LWLPZ9K) from the Microsoft Store. Connect your iPhone or iPad and create a backup from the app. Encrypted and unencrypted backups are both supported by iTunes Backup Explorer.
 
-Connect your iPhone or iPad and create an unencrypted backup:
-- **Windows**: iTunes → device summary → Back Up Now. Ensure "Encrypt local backup" is **off**.
-- **macOS**: Finder → device → General → Back up all data on your iPhone to this Mac. Ensure encryption is **off**.
+**macOS** — Connect your iPhone or iPad and open Finder. Select your device and click "Back Up Now". Encrypted and unencrypted backups are both supported.
 
-If your backup is encrypted, you must either turn off backup encryption in iTunes/Finder, or install the `iphone_backup_decrypt` package to decrypt it in place:
+#### Step 2 — Install iTunes Backup Explorer
 
-```bash
-pip install git+https://github.com/KnugiHK/iphone_backup_decrypt
-```
+Download [iTunes Backup Explorer](https://github.com/MaxiHuHe04/iTunes-Backup-Explorer) — available for Windows, macOS, and Linux. Open your device backup in the app.
 
-**Step 2 — Locate the backup folder**
+#### Step 3 — Extract WhatsApp data
 
-iTunes and Finder store backups in a fixed location:
-
-- **Windows**: `C:\Users\<Username>\AppData\Roaming\Apple Computer\MobileSync\Backup\<device id>\`
-- **macOS**: `~/Library/Application Support/MobileSync/Backup/<device id>/`
-
-`<device id>` is a long hex string identifying your device. If you have multiple backups, each has its own folder.
-
-**Step 3 — Extract the WhatsApp database**
-
-Inside the backup folder, files are stored under hashed names rather than their original paths. The WhatsApp database is always stored as:
+In iTunes Backup Explorer, navigate to:
 
 ```
-7c7fba66680ef796b916b067077cc246adacf01d
+Application Groups → AppDomainGroup-group.net.whatsapp.WhatsApp.shared
 ```
 
-Copy this file and rename it to `msgstore.db`. This is the file you pass to `--msgstore`.
+Copy the following files:
 
-**Step 4 — Media files**
+| File | Purpose |
+|---|---|
+| `ChatStorage.sqlite` | WhatsApp database — pass directly to `--msgstore` |
+| `ContactsV2.sqlite` | WhatsApp contacts |
 
-How WhatsApp media is stored in iTunes/Finder backups, and how to provide it to `--wa_root`, is not yet documented. This is the main open question for iOS support.
+> ⚠️ **Script compatibility is not yet implemented.** `ChatStorage.sqlite` uses a different schema than Android's `msgstore.db` — support is planned for a future release. `ContactsV2.sqlite` is a SQLite database and cannot be passed to `--contacts` (which expects the ADB text format) — iOS contact names are not yet supported and folder names will show raw phone numbers. Contributions and test reports are welcome.
 
 ---
 
