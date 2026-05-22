@@ -10,6 +10,7 @@ Requires:
 
 import logging
 import os
+import plistlib
 import sqlite3
 import sys
 
@@ -30,6 +31,20 @@ spec = importlib.util.spec_from_file_location(
 )
 wa = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wa)
+
+import importlib.util as _ilu
+
+_ios_spec = _ilu.spec_from_file_location(
+    "ios_handler", os.path.join(_ROOT, "ios_handler.py")
+)
+ios = _ilu.module_from_spec(_ios_spec)
+_ios_spec.loader.exec_module(ios)
+
+_br_spec = _ilu.spec_from_file_location(
+    "backup_reader", os.path.join(_ROOT, "backup_reader.py")
+)
+br = _ilu.module_from_spec(_br_spec)
+_br_spec.loader.exec_module(br)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +337,746 @@ class TestBuildNumberMap:
 
 
 # ===========================================================================
+# iOS: validate_ios_schema
+# ===========================================================================
+
+def _make_ios_msgstore(missing_table=None, missing_col=None):
+    """
+    Build an in-memory SQLite DB mimicking ChatStorage.sqlite.
+    Pass missing_table='ZWAMESSAGE' to omit a table.
+    Pass missing_col=('ZWAMESSAGE', 'ZMESSAGEDATE') to drop a column.
+    """
+    conn = sqlite3.connect(":memory:")
+    schema = {
+        'ZWAMESSAGE': [
+            'Z_PK INTEGER PRIMARY KEY',
+            'ZMESSAGEDATE REAL',
+            'ZISFROMME INTEGER',
+            'ZCHATSESSION INTEGER',
+            'ZMEDIAITEM INTEGER',
+            'ZFROMJID TEXT',
+        ],
+        'ZWACHATSESSION': [
+            'Z_PK INTEGER PRIMARY KEY',
+            'ZCONTACTJID TEXT',
+            'ZGROUPINFO INTEGER',
+            'ZPARTNERNAME TEXT',
+        ],
+        'ZWAMEDIAITEM': [
+            'Z_PK INTEGER PRIMARY KEY',
+            'ZMEDIALOCALPATH TEXT',
+            'ZMEDIAURL TEXT',
+            'ZTITLE TEXT',
+        ],
+    }
+    for table, cols in schema.items():
+        if table == missing_table:
+            continue
+        if missing_col and missing_col[0] == table:
+            cols = [c for c in cols if not c.startswith(missing_col[1])]
+        conn.execute(f"CREATE TABLE {table} ({', '.join(cols)})")
+    conn.commit()
+    return conn
+
+
+class TestValidateIosSchema:
+    def test_valid_schema_passes(self, logger):
+        conn = _make_ios_msgstore()
+        ios.validate_ios_schema(conn.cursor(), logger)  # should not raise
+
+    def test_missing_zwamessage_aborts(self, logger):
+        conn = _make_ios_msgstore(missing_table='ZWAMESSAGE')
+        with pytest.raises(SystemExit):
+            ios.validate_ios_schema(conn.cursor(), logger)
+
+    def test_missing_zwachatsession_aborts(self, logger):
+        conn = _make_ios_msgstore(missing_table='ZWACHATSESSION')
+        with pytest.raises(SystemExit):
+            ios.validate_ios_schema(conn.cursor(), logger)
+
+    def test_missing_zwamediaitem_aborts(self, logger):
+        conn = _make_ios_msgstore(missing_table='ZWAMEDIAITEM')
+        with pytest.raises(SystemExit):
+            ios.validate_ios_schema(conn.cursor(), logger)
+
+    def test_missing_column_aborts(self, logger):
+        conn = _make_ios_msgstore(missing_col=('ZWAMESSAGE', 'ZMESSAGEDATE'))
+        with pytest.raises(SystemExit):
+            ios.validate_ios_schema(conn.cursor(), logger)
+
+    def test_extra_tables_are_allowed(self, logger):
+        conn = _make_ios_msgstore()
+        conn.execute("CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY)")
+        conn.commit()
+        ios.validate_ios_schema(conn.cursor(), logger)  # should not raise
+
+
+# ===========================================================================
+# iOS: validate_ios_wa_root
+# ===========================================================================
+
+class TestValidateIosWaRoot:
+    def test_valid_root_with_message_dir_passes(self, tmp_path, logger):
+        (tmp_path / 'Message').mkdir()
+        ios.validate_ios_wa_root(str(tmp_path), logger)  # should not raise
+
+    def test_missing_message_dir_aborts(self, tmp_path, logger):
+        # tmp_path exists but has no Message/ subdirectory
+        with pytest.raises(SystemExit):
+            ios.validate_ios_wa_root(str(tmp_path), logger)
+
+    def test_nonexistent_path_aborts(self, tmp_path, logger):
+        with pytest.raises(SystemExit):
+            ios.validate_ios_wa_root(str(tmp_path / 'nonexistent'), logger)
+
+
+# ===========================================================================
+# iOS: build_ios_query structural checks
+# ===========================================================================
+
+class TestBuildIosQuery:
+    def test_zpartnername_not_null_in_group_block(self):
+        query = ios.build_ios_query(None, None)
+        assert 'ZPARTNERNAME IS NOT NULL' in query
+
+    def test_media_name_restricted_to_documents_paths(self):
+        query = ios.build_ios_query(None, None)
+        # ZTITLE is wrapped in a CASE guarded by the Documents path check
+        assert "LIKE '%Documents%'" in query
+        assert 'ZTITLE' in query
+
+    def test_group_detection_uses_zgroupinfo_not_null(self):
+        query = ios.build_ios_query(None, None)
+        assert 'ZGROUPINFO IS NOT NULL' in query
+
+    def test_one_to_one_detection_uses_zgroupinfo_null(self):
+        query = ios.build_ios_query(None, None)
+        assert 'ZGROUPINFO IS NULL' in query
+
+    def test_union_all_present(self):
+        query = ios.build_ios_query(None, None)
+        assert 'UNION ALL' in query
+
+    def test_limit_clause_included(self):
+        query = ios.build_ios_query(limit=50, since_ms=None)
+        assert 'LIMIT 50' in query
+
+    def test_no_limit_when_none(self):
+        query = ios.build_ios_query(limit=None, since_ms=None)
+        assert 'LIMIT' not in query
+
+    def test_since_clause_included(self):
+        since_ms = 1704067200000
+        query = ios.build_ios_query(None, since_ms)
+        apple_since = (since_ms / 1000.0) - ios.APPLE_EPOCH_OFFSET
+        # The float value appears literally in the query string
+        assert str(apple_since) in query
+
+    def test_no_since_no_date_filter(self):
+        query = ios.build_ios_query(None, None)
+        assert 'ZMESSAGEDATE >=' not in query
+
+
+# ===========================================================================
+# iOS: build_ios_group_subjects_query structural checks
+# ===========================================================================
+
+class TestBuildIosGroupSubjectsQuery:
+    def test_only_groups_returned(self):
+        query = ios.build_ios_group_subjects_query(None)
+        assert 'ZGROUPINFO IS NOT NULL' in query
+
+    def test_zpartnername_not_null_filter_present(self):
+        query = ios.build_ios_group_subjects_query(None)
+        assert 'ZPARTNERNAME IS NOT NULL' in query
+
+    def test_since_clause_included(self):
+        since_ms = 1704067200000
+        query = ios.build_ios_group_subjects_query(since_ms)
+        apple_since = (since_ms / 1000.0) - ios.APPLE_EPOCH_OFFSET
+        assert str(apple_since) in query
+
+    def test_no_since_no_date_filter(self):
+        query = ios.build_ios_group_subjects_query(None)
+        assert 'ZMESSAGEDATE >=' not in query
+
+
+# ===========================================================================
+# Platform detection
+# ===========================================================================
+
+class TestDetectDbPlatform:
+    def test_ios_db_detected(self, tmp_path):
+        db_path = str(tmp_path / 'ios.db')
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+        assert wa.detect_db_platform(db_path) == 'ios'
+
+    def test_android_db_detected(self, tmp_path):
+        db_path = str(tmp_path / 'android.db')
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE message (_id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+        assert wa.detect_db_platform(db_path) == 'android'
+
+
+# ===========================================================================
+# Backup reader: detect_encrypted
+# ===========================================================================
+
+class TestDetectEncrypted:
+    def test_unencrypted_manifest_plist_returns_false(self, tmp_path):
+        with open(tmp_path / 'Manifest.plist', 'wb') as f:
+            plistlib.dump({'IsEncrypted': False}, f)
+        assert br.detect_encrypted(str(tmp_path)) is False
+
+    def test_encrypted_manifest_plist_returns_true(self, tmp_path):
+        with open(tmp_path / 'Manifest.plist', 'wb') as f:
+            plistlib.dump({'IsEncrypted': True}, f)
+        assert br.detect_encrypted(str(tmp_path)) is True
+
+    def test_info_plist_without_flag_falls_back_to_manifest(self, tmp_path):
+        # Info.plist exists but has no IsEncrypted key → fall back to Manifest.plist
+        with open(tmp_path / 'Info.plist', 'wb') as f:
+            plistlib.dump({'DeviceName': 'iPhone'}, f)
+        with open(tmp_path / 'Manifest.plist', 'wb') as f:
+            plistlib.dump({'IsEncrypted': True}, f)
+        assert br.detect_encrypted(str(tmp_path)) is True
+
+    def test_missing_plist_files_exits(self, tmp_path):
+        # No Info.plist or Manifest.plist → SystemExit
+        with pytest.raises(SystemExit):
+            br.detect_encrypted(str(tmp_path))
+
+    def test_nonexistent_directory_exits(self, tmp_path):
+        with pytest.raises(SystemExit):
+            br.detect_encrypted(str(tmp_path / 'nonexistent'))
+
+
+# ===========================================================================
+# Backup reader: extract_to_temp
+# ===========================================================================
+
+class TestExtractToTemp:
+    def test_copies_file_to_temp_and_returns_path(self, tmp_path):
+        hash_dir = tmp_path / 'ab'
+        hash_dir.mkdir()
+        fake_file = hash_dir / ('ab' + 'c' * 38)
+        fake_file.write_bytes(b'sqlite data')
+        manifest_map = {'ChatStorage.sqlite': str(fake_file)}
+
+        temp_path = br.extract_to_temp(manifest_map, 'ChatStorage.sqlite')
+        try:
+            assert os.path.isfile(temp_path)
+            with open(temp_path, 'rb') as f:
+                assert f.read() == b'sqlite data'
+        finally:
+            os.unlink(temp_path)
+
+    def test_preserves_file_extension(self, tmp_path):
+        src = tmp_path / 'srcfile'
+        src.write_bytes(b'data')
+        manifest_map = {'ContactsV2.sqlite': str(src)}
+
+        temp_path = br.extract_to_temp(manifest_map, 'ContactsV2.sqlite')
+        try:
+            assert temp_path.endswith('.sqlite')
+        finally:
+            os.unlink(temp_path)
+
+    def test_file_not_in_manifest_exits(self):
+        with pytest.raises(SystemExit):
+            br.extract_to_temp({}, 'ChatStorage.sqlite')
+
+    def test_hash_file_missing_from_disk_exits(self, tmp_path):
+        manifest_map = {'ChatStorage.sqlite': str(tmp_path / 'nonexistent_hash')}
+        with pytest.raises(SystemExit):
+            br.extract_to_temp(manifest_map, 'ChatStorage.sqlite')
+
+
+# ===========================================================================
+# Group folder resolution
+# ===========================================================================
+
+class TestResolveGroupFolder:
+    def test_new_group_assigned_sanitized_name(self):
+        index = {}
+        folder = wa.resolve_group_folder('42', 'Family Chat', index)
+        assert folder == 'Family Chat'
+        assert index['42']['folder'] == 'Family Chat'
+
+    def test_existing_group_returns_stable_name(self):
+        # Even if subject has changed, the stable folder from the index is returned.
+        index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
+        folder = wa.resolve_group_folder('42', 'NewName', index)
+        assert folder == 'OldName'
+
+    def test_none_subject_gets_unknown_fallback(self):
+        index = {}
+        folder = wa.resolve_group_folder('99', None, index)
+        assert 'Unknown Group' in folder
+        assert '99' in folder
+
+    def test_name_collision_with_existing_group_disambiguated(self):
+        index = {'10': {'folder': 'Friends', 'subject': 'Friends'}}
+        folder = wa.resolve_group_folder('20', 'Friends', index)
+        assert folder == 'Friends (2)'
+
+    def test_special_chars_in_subject_sanitized(self):
+        index = {}
+        folder = wa.resolve_group_folder('1', 'Chat: Family/Work', index)
+        assert '/' not in folder
+        assert ':' not in folder
+
+
+# ===========================================================================
+# Archive DB: record_file_archived and check_db_health
+# ===========================================================================
+
+class TestRecordFileArchived:
+    def test_creates_file_and_copy_records(self, tmp_path):
+        conn = wa.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+        md5 = b'\x01' * 16
+        wa.record_file_archived(cursor, 'orig.jpg', md5,
+                                'Contacts/Alice (00111)/2024/Received/orig.jpg')
+        conn.commit()
+        row = conn.execute(
+            "SELECT md5 FROM files WHERE original_path = 'orig.jpg'"
+        ).fetchone()
+        assert row[0] == md5
+        copy = conn.execute(
+            "SELECT archive_path FROM archive_copies WHERE original_path = 'orig.jpg'"
+        ).fetchone()
+        assert 'Contacts/Alice (00111)/2024/Received/orig.jpg' == copy[0]
+        conn.close()
+
+    def test_duplicate_archive_path_silently_ignored(self, tmp_path):
+        conn = wa.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+        md5 = b'\x01' * 16
+        wa.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
+        wa.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
+        ).fetchone()[0]
+        assert count == 1
+        conn.close()
+
+    def test_multiple_archive_paths_for_same_original(self, tmp_path):
+        conn = wa.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+        md5 = b'\x01' * 16
+        wa.record_file_archived(cursor, 'orig.jpg', md5, 'path1.jpg')
+        wa.record_file_archived(cursor, 'orig.jpg', md5, 'path2.jpg')
+        conn.commit()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
+        ).fetchone()[0]
+        assert count == 2
+        conn.close()
+
+
+class TestCheckDbHealth:
+    def test_healthy_db_passes(self, tmp_path, logger):
+        conn = wa.open_archive_db(str(tmp_path))
+        wa.check_db_health(conn, logger)  # should not raise
+        conn.close()
+
+
+# ===========================================================================
+# CSV reports
+# ===========================================================================
+
+class TestWriteMissingReport:
+    def test_no_rows_does_not_create_file(self, tmp_path, logger):
+        path = str(tmp_path / 'missing.csv')
+        wa.write_missing_report(path, [], logger)
+        assert not os.path.exists(path)
+
+    def test_rows_written_to_csv_with_correct_fields(self, tmp_path, logger):
+        rows = [{
+            'message_id': 1,
+            'timestamp_human': '2024-01-15 00:00:00',
+            'original_filename': 'img.jpg',
+            'mime_type': 'image/jpeg',
+            'sender': 'Alice',
+            'chat_name': 'Family',
+            'direction': 'Received',
+            'file_path': 'Media/WhatsApp Images/img.jpg',
+            'message_url': 'https://mmg.whatsapp.net/v/example',
+            'media_name': '',
+        }]
+        path = str(tmp_path / 'missing.csv')
+        wa.write_missing_report(path, rows, logger)
+        assert os.path.isfile(path)
+        with open(path, encoding='utf-8') as f:
+            content = f.read()
+        assert 'message_id' in content
+        assert 'img.jpg' in content
+        assert 'Alice' in content
+
+
+class TestWriteDuplicateReport:
+    def test_no_duplicates_does_not_create_file(self, tmp_path, logger):
+        conn = wa.open_archive_db(str(tmp_path))
+        path = str(tmp_path / 'dups.csv')
+        wa.write_duplicate_report(path, conn, logger)
+        conn.close()
+        assert not os.path.exists(path)
+
+    def test_duplicates_written_to_csv(self, tmp_path, logger):
+        import hashlib
+        conn = wa.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+        md5 = hashlib.md5(b'data').digest()
+        cursor.execute("INSERT INTO files VALUES (?, ?)", ('orig.jpg', md5))
+        cursor.execute("INSERT INTO archive_copies VALUES (?, ?)",
+                       ('orig.jpg', 'Contacts/Alice (00111)/2024/Received/orig.jpg'))
+        cursor.execute("INSERT INTO archive_copies VALUES (?, ?)",
+                       ('orig.jpg', 'Groups/Family/2024/orig_Alice.jpg'))
+        conn.commit()
+        path = str(tmp_path / 'dups.csv')
+        wa.write_duplicate_report(path, conn, logger)
+        conn.close()
+        assert os.path.isfile(path)
+        with open(path, encoding='utf-8') as f:
+            content = f.read()
+        assert 'md5_hex' in content
+        assert 'file_count' in content
+
+
+# ===========================================================================
+# Contact/group rename sync
+# ===========================================================================
+
+class TestSyncFolderNames:
+    def test_unchanged_name_leaves_folder_intact(self, tmp_path, logger):
+        contacts_root = tmp_path / 'Contacts'
+        contacts_root.mkdir()
+        (contacts_root / 'Alice (00111)').mkdir()
+        folder_index = {'111': 'Alice (00111)'}
+        contacts = {'111': 'Alice'}
+        result = wa.sync_folder_names(
+            contacts, {}, str(tmp_path), folder_index, logger
+        )
+        assert result['111'] == 'Alice (00111)'
+        assert (contacts_root / 'Alice (00111)').exists()
+
+    def test_changed_name_renames_folder_on_disk(self, tmp_path, logger):
+        contacts_root = tmp_path / 'Contacts'
+        contacts_root.mkdir()
+        (contacts_root / 'OldName (00111)').mkdir()
+        folder_index = {'111': 'OldName (00111)'}
+        contacts = {'111': 'NewName'}
+        result = wa.sync_folder_names(
+            contacts, {}, str(tmp_path), folder_index, logger
+        )
+        assert result['111'] == 'NewName (00111)'
+        assert not (contacts_root / 'OldName (00111)').exists()
+        assert (contacts_root / 'NewName (00111)').exists()
+
+    def test_rename_skipped_when_target_exists_index_unchanged(self, tmp_path, logger):
+        contacts_root = tmp_path / 'Contacts'
+        contacts_root.mkdir()
+        (contacts_root / 'OldName (00111)').mkdir()
+        (contacts_root / 'NewName (00111)').mkdir()  # target already exists
+        folder_index = {'111': 'OldName (00111)'}
+        contacts = {'111': 'NewName'}
+        result = wa.sync_folder_names(
+            contacts, {}, str(tmp_path), folder_index, logger
+        )
+        # Index must stay on old name — otherwise the next run routes media wrong
+        assert result['111'] == 'OldName (00111)'
+
+    def test_name_changed_no_folder_on_disk_index_updated(self, tmp_path, logger):
+        # Name changed but folder has never been created; index should update anyway
+        folder_index = {'111': 'OldName (00111)'}
+        contacts = {'111': 'NewName'}
+        result = wa.sync_folder_names(
+            contacts, {}, str(tmp_path), folder_index, logger
+        )
+        assert result['111'] == 'NewName (00111)'
+
+    def test_new_contact_registered_in_index(self, tmp_path, logger):
+        result = wa.sync_folder_names(
+            {'111': 'Alice'}, {}, str(tmp_path), {}, logger
+        )
+        assert '111' in result
+
+    def test_number_map_resolves_old_to_canonical(self, tmp_path, logger):
+        # Contact is known by old number '111'; canonical is '222'
+        contacts = {'111': 'Alice'}
+        number_map = {'111': '222'}
+        result = wa.sync_folder_names(
+            contacts, number_map, str(tmp_path), {}, logger
+        )
+        # Registered under canonical '222', folder uses canonical number
+        assert '222' in result
+        assert result['222'] == 'Alice (00222)'
+
+
+class TestSyncGroupNames:
+    def test_unchanged_subject_leaves_folder_intact(self, tmp_path, logger):
+        groups_root = tmp_path / 'Groups'
+        groups_root.mkdir()
+        (groups_root / 'Family').mkdir()
+        group_index = {'42': {'folder': 'Family', 'subject': 'Family'}}
+        result = wa.sync_group_names(
+            {'42': 'Family'}, str(tmp_path), group_index, logger
+        )
+        assert result['42']['folder'] == 'Family'
+        assert (groups_root / 'Family').exists()
+
+    def test_changed_subject_renames_folder_on_disk(self, tmp_path, logger):
+        groups_root = tmp_path / 'Groups'
+        groups_root.mkdir()
+        (groups_root / 'OldName').mkdir()
+        group_index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
+        result = wa.sync_group_names(
+            {'42': 'NewName'}, str(tmp_path), group_index, logger
+        )
+        assert result['42']['folder'] == 'NewName'
+        assert not (groups_root / 'OldName').exists()
+        assert (groups_root / 'NewName').exists()
+
+    def test_rename_skipped_when_target_exists_index_unchanged(self, tmp_path, logger):
+        groups_root = tmp_path / 'Groups'
+        groups_root.mkdir()
+        (groups_root / 'OldName').mkdir()
+        (groups_root / 'NewName').mkdir()  # target already exists
+        group_index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
+        result = wa.sync_group_names(
+            {'42': 'NewName'}, str(tmp_path), group_index, logger
+        )
+        # Index unchanged when rename is skipped
+        assert result['42']['folder'] == 'OldName'
+
+    def test_new_group_not_in_index_is_skipped(self, tmp_path, logger):
+        # New groups are not yet in group_index; sync_group_names skips them
+        result = wa.sync_group_names(
+            {'99': 'Brand New Group'}, str(tmp_path), {}, logger
+        )
+        assert '99' not in result
+
+
+# ===========================================================================
+# Core processing: process_rows
+# ===========================================================================
+
+class TestProcessRows:
+    """
+    Uses a fixed timestamp of 1705276800000 (2024-01-15 00:00:00 UTC).
+    All destination path assertions use year='2024'.
+    """
+
+    _TS = 1705276800000  # 2024-01-15 00:00:00 UTC
+
+    def _row(self, msg_id=1, timestamp=None, file_path='img.jpg',
+             mime_type=None, chat_row_id='42', chat_subject='Family',
+             sender='111', key_from_me=0, message_url=None, media_name=None):
+        return (msg_id, timestamp if timestamp is not None else self._TS,
+                file_path, mime_type, chat_row_id, chat_subject,
+                sender, key_from_me, message_url, media_name)
+
+    def _setup_src(self, tmp_path, name='img.jpg', content=b'image data'):
+        src_dir = tmp_path / 'src'
+        src_dir.mkdir(exist_ok=True)
+        (src_dir / name).write_bytes(content)
+        return str(src_dir)
+
+    def _resolver(self, src_dir):
+        return lambda fp: os.path.join(src_dir, fp)
+
+    # --- Routing ---
+
+    def test_group_chat_routed_to_groups_folder(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(chat_subject='Family', sender='111', key_from_me=0)]
+        stats, _, _, missing = wa.process_rows(
+            rows, 1, {'111': 'Alice'}, {}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=False,
+        )
+        assert stats['copied'] == 1
+        assert stats['missing'] == 0
+        assert os.path.isfile(
+            os.path.join(out, 'Groups', 'Family', '2024', 'img_Alice.jpg')
+        )
+
+    def test_group_own_message_tagged_me(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        # key_from_me=1, sender=None — own group message
+        rows = [self._row(chat_subject='Family', sender=None, key_from_me=1)]
+        stats, _, _, _ = wa.process_rows(
+            rows, 1, {}, {}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=False,
+        )
+        assert stats['copied'] == 1
+        assert os.path.isfile(
+            os.path.join(out, 'Groups', 'Family', '2024', 'img_Me.jpg')
+        )
+
+    def test_one_to_one_received_routed_to_received_folder(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        # chat_subject=None → 1-to-1 chat
+        rows = [self._row(chat_subject=None, sender='111', key_from_me=0)]
+        stats, _, _, _ = wa.process_rows(
+            rows, 1, {'111': 'Alice'}, {}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=False,
+        )
+        assert stats['copied'] == 1
+        assert os.path.isfile(
+            os.path.join(out, 'Contacts', 'Alice (00111)', '2024', 'Received', 'img.jpg')
+        )
+
+    def test_one_to_one_sent_routed_to_sent_folder(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(chat_subject=None, sender='111', key_from_me=1)]
+        wa.process_rows(
+            rows, 1, {'111': 'Alice'}, {}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=False,
+        )
+        assert os.path.isfile(
+            os.path.join(out, 'Contacts', 'Alice (00111)', '2024', 'Sent', 'img.jpg')
+        )
+
+    def test_unknown_sender_falls_back_to_phone_number(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(chat_subject=None, sender='999', key_from_me=0)]
+        wa.process_rows(
+            rows, 1, {}, {}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=False,
+        )
+        assert os.path.isfile(
+            os.path.join(out, 'Contacts', 'Unknown (00999)', '2024', 'Received', 'img.jpg')
+        )
+
+    def test_number_map_consolidates_old_number_to_canonical(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(chat_subject=None, sender='111', key_from_me=0)]
+        # 111 is the old number; 222 is canonical; contacts only knows 222
+        wa.process_rows(
+            rows, 1, {'222': 'Alice'}, {'111': '222'}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=False,
+        )
+        assert os.path.isfile(
+            os.path.join(out, 'Contacts', 'Alice (00222)', '2024', 'Received', 'img.jpg')
+        )
+
+    # --- Missing / invalid rows ---
+
+    def test_missing_source_file_added_to_missing_rows(self, tmp_path, logger):
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(file_path='nonexistent.jpg')]
+        stats, _, _, missing = wa.process_rows(
+            rows, 1, {}, {}, {}, {},
+            lambda fp: str(tmp_path / 'nowhere' / fp),
+            out, logger, dry_run=False,
+        )
+        assert stats['missing'] == 1
+        assert stats['copied'] == 0
+        assert len(missing) == 1
+
+    def test_null_file_path_added_to_missing_rows(self, tmp_path, logger):
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(file_path=None)]
+        stats, _, _, missing = wa.process_rows(
+            rows, 1, {}, {}, {}, {},
+            lambda fp: fp,
+            out, logger, dry_run=False,
+        )
+        assert stats['missing'] == 1
+        assert len(missing) == 1
+
+    def test_null_timestamp_counted_as_warning_not_copied(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(timestamp=None)]
+        stats, _, _, _ = wa.process_rows(
+            rows, 1, {}, {}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=False,
+        )
+        assert stats['warnings'] == 1
+        assert stats['copied'] == 0
+
+    # --- Dry run ---
+
+    def test_dry_run_increments_copied_but_writes_no_file(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(chat_subject='Family', sender='111')]
+        stats, _, _, _ = wa.process_rows(
+            rows, 1, {'111': 'Alice'}, {}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=True,
+        )
+        assert stats['copied'] == 1
+        assert not os.path.isfile(
+            os.path.join(out, 'Groups', 'Family', '2024', 'img_Alice.jpg')
+        )
+
+    # --- Re-run / deduplication ---
+
+    def test_identical_file_skipped_on_rerun(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path, content=b'same data')
+        out = str(tmp_path / 'out')
+        # Pre-place identical file at the expected destination
+        dest_dir = os.path.join(out, 'Groups', 'Family', '2024')
+        os.makedirs(dest_dir)
+        with open(os.path.join(dest_dir, 'img_Alice.jpg'), 'wb') as f:
+            f.write(b'same data')
+        rows = [self._row(chat_subject='Family', sender='111')]
+        stats, _, _, _ = wa.process_rows(
+            rows, 1, {'111': 'Alice'}, {}, {}, {},
+            self._resolver(src_dir), out, logger, dry_run=False,
+        )
+        assert stats['skipped'] == 1
+        assert stats['copied'] == 0
+
+    # --- Archive DB integration ---
+
+    def test_archive_db_updated_on_new_copy(self, tmp_path, logger):
+        src_dir = self._setup_src(tmp_path)
+        out = str(tmp_path / 'out')
+        os.makedirs(out)
+        rows = [self._row(chat_subject=None, sender='111', key_from_me=0,
+                          file_path='img.jpg')]
+        archive_conn = wa.open_archive_db(out)
+        try:
+            wa.process_rows(
+                rows, 1, {'111': 'Alice'}, {}, {}, {},
+                self._resolver(src_dir), out, logger, dry_run=False,
+                conn=archive_conn,
+            )
+            archive_conn.commit()
+            count = archive_conn.execute(
+                "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'img.jpg'"
+            ).fetchone()[0]
+            assert count == 1
+        finally:
+            archive_conn.close()
+
+
+# ===========================================================================
 # Filesystem: resolve_unique_dest
 # ===========================================================================
 
@@ -435,3 +1190,221 @@ class TestGroupPersistence:
         loaded = wa.load_groups_from_db(conn)
         conn.close()
         assert loaded == index
+
+
+# ===========================================================================
+# iOS: timestamp conversion
+# ===========================================================================
+
+class TestIosTimestampConversion:
+    def test_apple_epoch_offset_value(self):
+        assert ios.APPLE_EPOCH_OFFSET == 978307200
+
+    def test_query_contains_epoch_conversion(self):
+        query = ios.build_ios_query(None, None)
+        assert "978307200" in query
+        assert "1000" in query
+
+    def test_since_converted_to_apple_epoch(self):
+        # Unix epoch ms for 2024-01-01 00:00:00 UTC = 1704067200000
+        since_ms = 1704067200000
+        query = ios.build_ios_query(None, since_ms)
+        expected_apple = (since_ms / 1000.0) - ios.APPLE_EPOCH_OFFSET
+        assert str(int(expected_apple)) in query or f"{expected_apple:.1f}" in query
+
+
+# ===========================================================================
+# iOS: build_manifest_map
+# ===========================================================================
+
+def _make_manifest_db(tmp_path, rows):
+    """
+    Create a synthetic Manifest.db with the given rows.
+    rows: list of (fileID, relativePath) tuples.
+    """
+    db_path = tmp_path / "Manifest.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE Files (
+            fileID       TEXT PRIMARY KEY,
+            domain       TEXT,
+            relativePath TEXT
+        )
+    """)
+    for file_id, relative_path in rows:
+        conn.execute(
+            "INSERT INTO Files VALUES (?, ?, ?)",
+            (file_id, br._WA_DOMAIN, relative_path)
+        )
+    conn.commit()
+    conn.close()
+    return tmp_path
+
+
+class TestBuildManifestMap:
+    def test_returns_expected_mapping(self, tmp_path):
+        file_id = "ab" + "c" * 38  # 40-char hex-like string
+        _make_manifest_db(tmp_path, [(file_id, "ChatStorage.sqlite")])
+        result = br.build_manifest_map(str(tmp_path))
+        expected_path = os.path.join(str(tmp_path), file_id[:2], file_id)
+        assert result == {"ChatStorage.sqlite": expected_path}
+
+    def test_multiple_files(self, tmp_path):
+        rows = [
+            ("aa" + "1" * 38, "ChatStorage.sqlite"),
+            ("bb" + "2" * 38, "Message/Media/file.jpg"),
+        ]
+        _make_manifest_db(tmp_path, rows)
+        result = br.build_manifest_map(str(tmp_path))
+        assert len(result) == 2
+        assert "ChatStorage.sqlite" in result
+        assert "Message/Media/file.jpg" in result
+
+    def test_empty_backup_returns_empty_dict(self, tmp_path):
+        _make_manifest_db(tmp_path, [])
+        result = br.build_manifest_map(str(tmp_path))
+        assert result == {}
+
+    def test_missing_manifest_db_exits(self, tmp_path):
+        with pytest.raises(SystemExit):
+            br.build_manifest_map(str(tmp_path))
+
+
+# ===========================================================================
+# iOS: load_ios_contacts
+# ===========================================================================
+
+def _make_contacts_db(tmp_path, rows):
+    """
+    Create a synthetic ContactsV2.sqlite.
+    rows: list of (jid, full_name) tuples.
+    """
+    db_path = tmp_path / "ContactsV2.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE ZWAADDRESSBOOKCONTACT (
+            ZWHATSAPPID TEXT,
+            ZFULLNAME   TEXT
+        )
+    """)
+    for jid, name in rows:
+        conn.execute("INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (?, ?)", (jid, name))
+    conn.commit()
+    conn.close()
+    return str(db_path)
+
+
+class TestLoadIosContacts:
+    def test_parses_jid_to_number(self, tmp_path, logger):
+        path = _make_contacts_db(tmp_path, [
+            ("393357214425@s.whatsapp.net", "Alice")
+        ])
+        result = ios.load_ios_contacts(path, logger)
+        assert result == {"393357214425": "Alice"}
+
+    def test_multiple_contacts(self, tmp_path, logger):
+        path = _make_contacts_db(tmp_path, [
+            ("111@s.whatsapp.net", "Alice"),
+            ("222@s.whatsapp.net", "Bob"),
+        ])
+        result = ios.load_ios_contacts(path, logger)
+        assert result == {"111": "Alice", "222": "Bob"}
+
+    def test_non_whatsapp_jids_excluded(self, tmp_path, logger):
+        path = _make_contacts_db(tmp_path, [
+            ("111@s.whatsapp.net", "Alice"),
+            ("222@other.net", "Bob"),
+        ])
+        result = ios.load_ios_contacts(path, logger)
+        assert "222" not in result
+        assert "111" in result
+
+    def test_null_name_excluded(self, tmp_path, logger):
+        path = _make_contacts_db(tmp_path, [
+            ("111@s.whatsapp.net", None),
+            ("222@s.whatsapp.net", "Bob"),
+        ])
+        result = ios.load_ios_contacts(path, logger)
+        assert "111" not in result
+        assert result["222"] == "Bob"
+
+    def test_missing_file_returns_empty(self, tmp_path, logger):
+        result = ios.load_ios_contacts(str(tmp_path / "nonexistent.sqlite"), logger)
+        assert result == {}
+
+
+# ===========================================================================
+# iOS: build_ios_number_map
+# ===========================================================================
+
+def _make_ios_sessions_db(pairs):
+    """
+    Build an in-memory ZWACHATSESSION DB with ZCONTACTABID grouping.
+    pairs: list of (old_jid, new_jid, shared_abid) tuples.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE ZWACHATSESSION (
+            Z_PK              INTEGER PRIMARY KEY,
+            ZCONTACTJID       TEXT,
+            ZGROUPINFO        INTEGER,
+            ZCONTACTABID      INTEGER,
+            ZLASTMESSAGEDATE  REAL
+        )
+    """)
+    pk = 1
+    ts = 1000.0
+    for old_jid, new_jid, abid in pairs:
+        conn.execute(
+            "INSERT INTO ZWACHATSESSION VALUES (?, ?, NULL, ?, ?)",
+            (pk, old_jid, abid, ts)
+        )
+        pk += 1
+        ts += 100.0
+        conn.execute(
+            "INSERT INTO ZWACHATSESSION VALUES (?, ?, NULL, ?, ?)",
+            (pk, new_jid, abid, ts)
+        )
+        pk += 1
+        ts += 100.0
+    conn.commit()
+    return conn
+
+
+class TestBuildIosNumberMap:
+    def test_single_number_change(self, logger):
+        conn = _make_ios_sessions_db([
+            ("111@s.whatsapp.net", "222@s.whatsapp.net", 42)
+        ])
+        result = ios.build_ios_number_map(conn.cursor(), logger)
+        assert result == {"111": "222"}
+
+    def test_chain_resolved(self, logger):
+        # A -> B -> C: use separate abids per pair, share via timestamps
+        conn = _make_ios_sessions_db([
+            ("111@s.whatsapp.net", "222@s.whatsapp.net", 1),
+            ("222@s.whatsapp.net", "333@s.whatsapp.net", 2),
+        ])
+        result = ios.build_ios_number_map(conn.cursor(), logger)
+        # 222 -> 333 directly; 111 -> 222 -> 333 via chain resolution
+        assert result.get("222") == "333"
+        assert result.get("111") == "333"
+
+    def test_no_pairs_returns_empty(self, logger):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZCONTACTABID INTEGER,
+                ZLASTMESSAGEDATE REAL
+            )
+        """)
+        result = ios.build_ios_number_map(conn.cursor(), logger)
+        assert result == {}
+
+    def test_missing_table_returns_empty(self, logger):
+        conn = sqlite3.connect(":memory:")
+        result = ios.build_ios_number_map(conn.cursor(), logger)
+        assert result == {}

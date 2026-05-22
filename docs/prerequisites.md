@@ -23,13 +23,13 @@ Enable it and note the **cryptographic key** — a long alphanumeric string. Thi
 
 > If this step is skipped, the `.crypt15` backup file cannot be decrypted and the script will not work on a non-rooted device.
 
-**iOS / iPadOS users** — End-to-end encrypted backup must be **disabled**. If it is enabled, the database inside the iTunes/Finder backup is encrypted in a way that cannot be decrypted by this script. Disable it in WhatsApp before creating your device backup.
+**iOS / iPadOS users** — End-to-end encrypted backup must be **disabled**. If it is enabled, the database inside the iPhone backup is encrypted in a way that cannot be read by this script. Disable it in WhatsApp before creating your device backup.
 
 ---
 
-## 3. Obtaining the WhatsApp Database
+## 3. Android Setup
 
-### Android
+### Obtaining the Database
 
 #### Recommended — Automatic Retrieval (Linux, macOS and Windows)
 
@@ -71,7 +71,7 @@ Use this if you prefer to extract and decrypt the database yourself, or if autom
 adb pull /data/data/com.whatsapp/databases/msgstore.db
 ```
 
-No decryption needed. Skip to [Obtaining WhatsApp Contacts](#4-obtaining-whatsapp-contacts).
+No decryption needed.
 
 **Non-rooted device** — pull and decrypt manually:
 
@@ -109,40 +109,7 @@ python3 wa_media_archiver.py \
 
 ---
 
-### iOS / iPadOS
-
-WhatsApp on iOS stores its data inside an iTunes backup. You can extract it on Windows, macOS, and Linux using **[iTunes Backup Explorer](https://github.com/MaxiHuHe04/iTunes-Backup-Explorer)**.
-
-#### Step 1 — Create a device backup
-
-**Windows** — Install [Apple Devices](https://apps.microsoft.com/detail/9NP83LWLPZ9K) from the Microsoft Store. Connect your iPhone or iPad and create a backup from the app. Encrypted and unencrypted backups are both supported by iTunes Backup Explorer.
-
-**macOS** — Connect your iPhone or iPad and open Finder. Select your device and click "Back Up Now". Encrypted and unencrypted backups are both supported.
-
-#### Step 2 — Install iTunes Backup Explorer
-
-Download [iTunes Backup Explorer](https://github.com/MaxiHuHe04/iTunes-Backup-Explorer) — available for Windows, macOS, and Linux. Open your device backup in the app.
-
-#### Step 3 — Extract WhatsApp data
-
-In iTunes Backup Explorer, navigate to:
-
-```
-Application Groups → AppDomainGroup-group.net.whatsapp.WhatsApp.shared
-```
-
-Copy the following files:
-
-| File | Purpose |
-|---|---|
-| `ChatStorage.sqlite` | WhatsApp database — pass directly to `--msgstore` |
-| `ContactsV2.sqlite` | WhatsApp contacts |
-
-> ⚠️ **Script compatibility is not yet implemented.** `ChatStorage.sqlite` uses a different schema than Android's `msgstore.db` — support is planned for a future release. `ContactsV2.sqlite` is a SQLite database and cannot be passed to `--contacts` (which expects the ADB text format) — iOS contact names are not yet supported and folder names will show raw phone numbers. Contributions and test reports are welcome.
-
----
-
-## 4. Obtaining WhatsApp Contacts
+### Obtaining WhatsApp Contacts
 
 Contacts are optional but strongly recommended — without them, folder names will show raw phone numbers instead of contact names.
 
@@ -163,7 +130,7 @@ Pass the file to the script with `--contacts`.
 
 ---
 
-## 5. Locating Your WhatsApp Media Folder
+### Locating Your WhatsApp Media Folder
 
 The script needs the root of your WhatsApp folder on disk — the folder that **contains** the `Media/` subfolder.
 
@@ -179,3 +146,55 @@ The script needs the root of your WhatsApp folder on disk — the folder that **
 Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_root`.
 
 > ⚠️ **Run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower — the script hashes and copies every file in the archive. Running locally is strongly recommended.
+
+---
+
+## 4. iOS / iPadOS Setup
+
+WhatsApp on iOS stores its database and media inside an iPhone backup. The script reads the backup directly via `--ios_backup` — no third-party extraction tool required.
+
+### Step 1 — Disable WhatsApp E2E encrypted backup
+
+If End-to-end encrypted backup is enabled in WhatsApp, the backup cannot be read. Disable it before creating the backup:
+
+```
+Settings → Chats → Chat Backup → End-to-end Encrypted Backup → Turn Off
+```
+
+### Step 2 — Create a device backup
+
+**macOS** — Connect your iPhone or iPad and open Finder. Select your device and click "Back Up Now". Choose an **unencrypted** backup.
+
+**Windows** — Install [Apple Devices](https://apps.microsoft.com/detail/9NP83LWLPZ9K) from the Microsoft Store. Connect your device and create an **unencrypted** backup.
+
+> ⚠️ **Encrypted backups are not supported.** If your backup is encrypted, the script will exit immediately with instructions to disable encryption and re-create the backup.
+
+### Step 3 — Locate the backup directory
+
+**macOS:**
+```
+~/Library/Application Support/MobileSync/Backup/<UDID>/
+```
+
+**Windows (iTunes):**
+```
+%AppData%\Apple\MobileSync\Backup\<UDID>\
+```
+
+**Windows (Apple Devices app):**
+```
+C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>\
+```
+
+The backup directory is the folder that contains `Manifest.db`. Pass it to `--ios_backup`.
+
+### Step 4 — Run the script
+
+```bash
+python3 wa_media_archiver.py \
+  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --output /path/to/output \
+  --dry-run
+```
+
+Contacts are automatically extracted from the backup. No `--contacts` or `--wa_root` needed.

@@ -9,6 +9,8 @@ usage: wa_media_archiver.py [-h]
                       [-e2e E2E_KEY]
                       [-c CONTACTS]
                       [-wa WA_ROOT]
+                      [--ios_backup PATH]
+                      [--ios_contacts PATH]
                       -o OUTPUT
                       [-l LOG]
                       [-mode {adb,restore}]
@@ -19,13 +21,15 @@ usage: wa_media_archiver.py [-h]
 
 | Argument | Required | Description |
 |---|---|---|
-| `-msg` / `--msgstore` | No | Path to `msgstore.db` or `msgstore.db.crypt15`. Defaults to `msgstore.db` in the current folder |
+| `-msg` / `--msgstore` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Not needed with `--ios_backup`. Defaults to `msgstore.db` in the current folder |
 | `-e2e` / `--e2e_key` | If encrypted | Your cryptographic key for `.crypt15` decryption |
-| `-c` / `--contacts` | No | Path to the `wa_contacts` file exported via ADB |
-| `-wa` / `--wa_root` | Unless `--mode restore` | Root path of your WhatsApp folder containing `Media/` |
+| `-c` / `--contacts` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
+| `-wa` / `--wa_root` | Android / iOS pre-extracted | Root path of your WhatsApp folder. Android: folder containing `Media/`. iOS pre-extracted: `AppDomainGroup-group.net.whatsapp.WhatsApp.shared` folder. Not required with `--ios_backup` or `--mode restore` |
+| `--ios_backup` | iOS (recommended) | Path to the iPhone backup directory (the folder containing `Manifest.db`). Mutually exclusive with `--wa_root` |
+| `--ios_contacts` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios_backup` if omitted |
 | `-o` / `--output` | **Yes** | Destination folder for the archive |
 | `-l` / `--log` | No | Custom log file path. Defaults to `<output>/wa_media_archiver.log` |
-| `-mode` / `--mode` | No | `adb` = automatically pull msgstore and contacts from a connected Android device; `restore` = reconstruct original `Media/` tree from the archive |
+| `-mode` / `--mode` | No | `adb` = automatically pull msgstore and contacts from a connected Android device; `restore` = reconstruct original `Media/` tree from the archive (Android archives only) |
 | `--dry-run` | No | Simulate the run without copying any files |
 | `--limit N` | No | Cap rows returned per query block (groups and 1-to-1 capped independently). Useful for test runs |
 | `--since DATE` | No | Only include messages on or after this date (`YYYY-MM-DD`). Combines freely with `--limit` |
@@ -34,7 +38,7 @@ usage: wa_media_archiver.py [-h]
 
 ## Usage Examples
 
-#### Dry run first — always recommended before a real run
+#### Android — dry run first (always recommended)
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db \
@@ -44,7 +48,50 @@ python3 wa_media_archiver.py \
   --dry-run
 ```
 
-#### Manual decryption (pre-decrypted file passed to script)
+#### Android — full run
+```bash
+python3 wa_media_archiver.py \
+  --msgstore /path/to/msgstore.db \
+  --wa_root /path/to/WhatsApp \
+  --output /path/to/output \
+  --contacts /path/to/wa_contacts
+```
+
+#### iOS — standard flow (backup read directly)
+```bash
+python3 wa_media_archiver.py \
+  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --output /path/to/output \
+  --dry-run
+```
+
+> 💡 `--wa_root` and `--contacts` are not needed. The script extracts `ChatStorage.sqlite` and `ContactsV2.sqlite` directly from the backup.
+
+#### iOS — full run
+```bash
+python3 wa_media_archiver.py \
+  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --output /path/to/output
+```
+
+#### iOS — with explicit contacts file
+```bash
+python3 wa_media_archiver.py \
+  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --ios_contacts /path/to/ContactsV2.sqlite \
+  --output /path/to/output
+```
+
+#### iOS — pre-extracted mode (advanced)
+```bash
+python3 wa_media_archiver.py \
+  --msgstore /path/to/ChatStorage.sqlite \
+  --wa_root /path/to/AppDomainGroup-group.net.whatsapp.WhatsApp.shared \
+  --ios_contacts /path/to/ContactsV2.sqlite \
+  --output /path/to/output
+```
+
+#### Manual decryption (Android, pre-decrypted file)
 
 ```bash
 # Step 1: decrypt manually
@@ -81,15 +128,6 @@ python3 wa_media_archiver.py \
 ```
 
 > 💡 Even in dry run mode, decryption still occurs so the DB can be queried. The decrypted `msgstore.db` is written to disk as a side effect regardless of `--dry-run`.
-
-#### Run without contacts file
-```bash
-python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp \
-  --output /path/to/output
-```
-> Phone numbers will be used as folder names where contacts are not resolved.
 
 #### Test run — recent files only
 ```bash
@@ -130,6 +168,7 @@ python3 wa_media_archiver.py \
 ```
 
 > 💡 `--wa_root` is not required in restore mode. The script reads `.wa_media_archiver.db` from the archive and reconstructs `<output>/Media/` in place. Use `--dry-run` to preview what would be written.
+> ⚠️ Restore mode is supported for **Android archives only**. Running it against an iOS archive exits with a clear error.
 
 ---
 
@@ -148,6 +187,8 @@ python3 wa_media_archiver.py \
 ## Restore Mode
 
 Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly inside the archive folder, without needing the original device or database. This is useful when re-importing media into tools that expect the original WhatsApp layout.
+
+> ⚠️ **Android archives only.** iOS media is stored at `Message/Media/...` paths that have no equivalent reconstruction target outside the iPhone backup format. Running restore mode on an iOS archive exits with a clear error.
 
 ```bash
 python3 wa_media_archiver.py \
