@@ -46,6 +46,12 @@ _br_spec = _ilu.spec_from_file_location(
 br = _ilu.module_from_spec(_br_spec)
 _br_spec.loader.exec_module(br)
 
+_android_spec = _ilu.spec_from_file_location(
+    "android_handler", os.path.join(_ROOT, "android_handler.py")
+)
+android_handler = _ilu.module_from_spec(_android_spec)
+_android_spec.loader.exec_module(android_handler)
+
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a silent logger so test output stays clean
@@ -168,11 +174,11 @@ class TestUniqueGroupName:
 
 class TestBuildQuery:
     def test_documents_included(self):
-        query = wa.build_query(None, None)
+        query = android_handler.build_query(None, None)
         assert "Media/WhatsApp Documents/%" in query
 
     def test_all_media_types_present(self):
-        query = wa.build_query(None, None)
+        query = android_handler.build_query(None, None)
         for path in [
             "Media/WhatsApp Images/%",
             "Media/WhatsApp Video/%",
@@ -185,19 +191,19 @@ class TestBuildQuery:
             assert path in query, f"Missing from query: {path}"
 
     def test_limit_clause_included(self):
-        query = wa.build_query(limit=100, since_ms=None)
+        query = android_handler.build_query(limit=100, since_ms=None)
         assert "LIMIT 100" in query
 
     def test_no_limit_when_none(self):
-        query = wa.build_query(limit=None, since_ms=None)
+        query = android_handler.build_query(limit=None, since_ms=None)
         assert "LIMIT" not in query
 
     def test_since_clause_included(self):
-        query = wa.build_query(limit=None, since_ms=1700000000000)
+        query = android_handler.build_query(limit=None, since_ms=1700000000000)
         assert "1700000000000" in query
 
     def test_both_union_blocks_have_documents(self):
-        query = wa.build_query(None, None)
+        query = android_handler.build_query(None, None)
         assert query.count("Media/WhatsApp Documents/%") == 2
 
 
@@ -258,24 +264,24 @@ class TestValidateSchema:
     def test_valid_schema_passes(self, logger):
         conn = _make_msgstore()
         cur = conn.cursor()
-        wa.validate_schema(cur, logger)  # should not raise
+        android_handler.validate_schema(cur, logger)  # should not raise
 
     def test_missing_table_aborts(self, logger):
         conn = sqlite3.connect(":memory:")  # completely empty DB
         cur = conn.cursor()
         with pytest.raises(SystemExit):
-            wa.validate_schema(cur, logger)
+            android_handler.validate_schema(cur, logger)
 
     def test_missing_column_aborts(self, logger):
         conn = _make_msgstore(missing_col=("message", "timestamp"))
         cur = conn.cursor()
         with pytest.raises(SystemExit):
-            wa.validate_schema(cur, logger)
+            android_handler.validate_schema(cur, logger)
 
     def test_extra_tables_are_allowed(self, logger):
         conn = _make_msgstore(extra_tables=["props", "message_thumbnail"])
         cur = conn.cursor()
-        wa.validate_schema(cur, logger)  # should not raise
+        android_handler.validate_schema(cur, logger)  # should not raise
 
 
 # ===========================================================================
@@ -315,24 +321,24 @@ def _make_number_change_db(pairs):
 class TestBuildNumberMap:
     def test_empty_table_returns_empty_map(self, logger):
         conn = _make_number_change_db([])
-        result = wa.build_number_map(conn.cursor(), logger)
+        result = android_handler.build_number_map(conn.cursor(), logger)
         assert result == {}
 
     def test_single_change(self, logger):
         conn = _make_number_change_db([("111", "222")])
-        result = wa.build_number_map(conn.cursor(), logger)
+        result = android_handler.build_number_map(conn.cursor(), logger)
         assert result == {"111": "222"}
 
     def test_chain_resolved(self, logger):
         # A -> B -> C should resolve A -> C
         conn = _make_number_change_db([("111", "222"), ("222", "333")])
-        result = wa.build_number_map(conn.cursor(), logger)
+        result = android_handler.build_number_map(conn.cursor(), logger)
         assert result["111"] == "333"
         assert result["222"] == "333"
 
     def test_missing_table_returns_empty(self, logger):
         conn = sqlite3.connect(":memory:")  # no tables at all
-        result = wa.build_number_map(conn.cursor(), logger)
+        result = android_handler.build_number_map(conn.cursor(), logger)
         assert result == {}
 
 
@@ -1124,23 +1130,23 @@ class TestValidateWaRoot:
         media = tmp_path / "Media"
         media.mkdir()
         (media / "WhatsApp Images").mkdir()
-        wa.validate_wa_root(str(tmp_path), logger)  # should not raise
+        android_handler.validate_wa_root(str(tmp_path), logger)  # should not raise
 
     def test_nonexistent_path_aborts(self, tmp_path, logger):
         with pytest.raises(SystemExit):
-            wa.validate_wa_root(str(tmp_path / "does_not_exist"), logger)
+            android_handler.validate_wa_root(str(tmp_path / "does_not_exist"), logger)
 
     def test_media_folder_passed_directly_aborts(self, tmp_path, logger):
         media = tmp_path / "Media"
         media.mkdir()
         with pytest.raises(SystemExit):
-            wa.validate_wa_root(str(media), logger)
+            android_handler.validate_wa_root(str(media), logger)
 
     def test_subfolder_of_media_passed_aborts(self, tmp_path, logger):
         images = tmp_path / "WhatsApp Images"
         images.mkdir()
         with pytest.raises(SystemExit):
-            wa.validate_wa_root(str(images), logger)
+            android_handler.validate_wa_root(str(images), logger)
 
     def test_root_with_no_subfolders_warns_but_continues(self, tmp_path, logger):
         # Media/ exists but is empty — should warn, not abort
@@ -1154,7 +1160,7 @@ class TestValidateWaRoot:
                 handler_called.append(record.levelno)
 
         caplog_logger.addHandler(Capture())
-        wa.validate_wa_root(str(tmp_path), caplog_logger)  # must not raise SystemExit
+        android_handler.validate_wa_root(str(tmp_path), caplog_logger)  # must not raise SystemExit
         assert logging.WARNING in handler_called
 
 
