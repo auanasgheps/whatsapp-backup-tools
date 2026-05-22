@@ -343,6 +343,54 @@ class TestBuildNumberMap:
 
 
 # ===========================================================================
+# Android: load_contacts
+# ===========================================================================
+
+class TestLoadAndroidContacts:
+    def test_parses_display_name_and_number(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text("Row: display_name=Alice, data1=391234567890\n", encoding='utf-8')
+        result = android_handler.load_contacts(str(f), logger)
+        assert result == {"391234567890": "Alice"}
+
+    def test_multiple_contacts(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: display_name=Alice, data1=111\n"
+            "Row: display_name=Bob, data1=222\n",
+            encoding='utf-8',
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result == {"111": "Alice", "222": "Bob"}
+
+    def test_email_addresses_excluded(self, tmp_path, logger):
+        # data1 values containing @ are skipped by the regex
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: display_name=Alice, data1=alice@example.com\n"
+            "Row: display_name=Bob, data1=222\n",
+            encoding='utf-8',
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert "alice@example.com" not in result
+        assert result.get("222") == "Bob"
+
+    def test_empty_file_returns_empty(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text("", encoding='utf-8')
+        result = android_handler.load_contacts(str(f), logger)
+        assert result == {}
+
+    def test_missing_file_returns_empty(self, tmp_path, logger):
+        result = android_handler.load_contacts(str(tmp_path / "nonexistent.txt"), logger)
+        assert result == {}
+
+    def test_none_path_returns_empty(self, logger):
+        result = android_handler.load_contacts(None, logger)
+        assert result == {}
+
+
+# ===========================================================================
 # iOS: validate_ios_schema
 # ===========================================================================
 
