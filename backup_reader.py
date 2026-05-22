@@ -11,7 +11,8 @@ import tempfile
 # Knows nothing about WhatsApp schema; handles only the backup file structure.
 # ==============================================================================
 
-_WA_DOMAIN = 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared'
+_WA_DOMAIN          = 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared'
+_WA_BUSINESS_DOMAIN = 'AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared'
 
 
 def detect_encrypted(backup_dir: str) -> bool:
@@ -57,7 +58,8 @@ def detect_encrypted(backup_dir: str) -> bool:
     return bool(is_encrypted)
 
 
-def build_manifest_map(backup_dir: str) -> dict[str, str]:
+def build_manifest_map(backup_dir: str,
+                       domain: str = _WA_DOMAIN) -> dict[str, str]:
     """
     Build a {relativePath: absolute_hash_file_path} map for all WhatsApp files
     in the backup. Reads Manifest.db once at startup; all subsequent lookups
@@ -83,13 +85,11 @@ def build_manifest_map(backup_dir: str) -> dict[str, str]:
 
     with contextlib.closing(sqlite3.connect(manifest_db)) as conn:
         rows = conn.execute(
-            """
-            SELECT fileID, relativePath
-            FROM Files
-            WHERE domain = ?
-              AND relativePath IS NOT NULL
-            """,
-            (_WA_DOMAIN,),
+            "SELECT fileID, relativePath "
+            "FROM Files "
+            "WHERE domain = ? "
+            "  AND relativePath IS NOT NULL",
+            (domain,),
         ).fetchall()
 
     result = {}

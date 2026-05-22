@@ -20,13 +20,13 @@ import backup_reader
 import ios_handler
 
 # ==============================================================================
-# WA Media Archiver — v0.17
+# WA Media Archiver — v0.18
 # Archives WhatsApp media into a structured folder hierarchy using msgstore.db
 # (Android) or ChatStorage.sqlite (iOS). Run on a backup copy of your data.
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.17'
+__version__ = '0.18'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -872,6 +872,10 @@ def main():
                         metavar='PATH',
                         help='Path to ContactsV2.sqlite from an iOS backup '
                              '(optional; auto-extracted from --ios_backup if omitted).')
+    parser.add_argument('--business',
+                        action='store_true',
+                        help='Target WhatsApp Business instead of the regular WhatsApp app. '
+                             'Affects the ADB pull path (Android) and the backup domain (iOS).')
     parser.add_argument('-o', '--output',
                         required=True,
                         help='Output root folder for the archive')
@@ -940,7 +944,9 @@ def main():
             raise SystemExit(1)
 
         logger.info("Building manifest map from backup...")
-        manifest_map = backup_reader.build_manifest_map(args.ios_backup)
+        ios_domain = (backup_reader._WA_BUSINESS_DOMAIN if args.business
+                      else backup_reader._WA_DOMAIN)
+        manifest_map = backup_reader.build_manifest_map(args.ios_backup, domain=ios_domain)
         if not manifest_map:
             logger.warning(
                 f"Manifest map is empty — no WhatsApp files found in the backup at: "
@@ -994,13 +1000,16 @@ def main():
             raise SystemExit(1)
 
         logger.info("Pulling msgstore backup via ADB...")
+        if args.business:
+            wa_db_adb_path = ('/storage/emulated/0/Android/media/com.whatsapp.w4b'
+                              '/WhatsApp Business/Databases/msgstore.db.crypt15')
+        else:
+            wa_db_adb_path = ('/storage/emulated/0/Android/media/com.whatsapp'
+                              '/WhatsApp/Databases/msgstore.db.crypt15')
         try:
-            subprocess.run([
-                'adb', 'pull',
-                '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp'
-                '/Databases/msgstore.db.crypt15',
-                'msgstore.db.crypt15'
-            ], check=True, stderr=subprocess.PIPE)
+            subprocess.run(
+                ['adb', 'pull', wa_db_adb_path, 'msgstore.db.crypt15'],
+                check=True, stderr=subprocess.PIPE)
         except subprocess.CalledProcessError as e:
             logger.error(
                 f"ADB pull failed.\n"
