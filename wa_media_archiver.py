@@ -15,14 +15,16 @@ import tempfile
 import zlib
 from datetime import datetime
 
+import android_handler
+
 # ==============================================================================
-# WA Media Archiver — v0.16
+# WA Media Archiver — v0.17
 # Archives WhatsApp media into a structured folder hierarchy using msgstore.db
 # (Android) or ChatStorage.sqlite (iOS). Run on a backup copy of your data.
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.16'
+__version__ = '0.17'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -513,243 +515,6 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
 
     return updated_index
 
-
-# ---------------------------------------------------------------------------
-# Number consolidation map (handles contact number changes)
-# ---------------------------------------------------------------------------
-
-def build_number_map(cursor: sqlite3.Cursor,
-                     logger: logging.Logger) -> dict:
-    """
-    Build a map of old_number -> new_number from WhatsApp's own
-    number change records. This ensures all media for a contact
-    that changed their number ends up in one folder.
-
-    Chains are resolved: if A->B and B->C, A maps to C.
-    """
-    try:
-        cursor.execute("""
-            SELECT jid_old.user, jid_new.user
-            FROM message_system_number_change mnc
-            LEFT JOIN jid AS jid_old ON jid_old._id = mnc.old_jid_row_id
-            LEFT JOIN jid AS jid_new ON jid_new._id = mnc.new_jid_row_id
-            WHERE jid_old.user IS NOT NULL
-            AND jid_new.user IS NOT NULL
-        """)
-        raw_pairs = cursor.fetchall()
-    except sqlite3.OperationalError as e:
-        logger.warning(f"Number-change table unavailable ({e}); skipping consolidation.")
-        return {}
-
-    # Build a direct map first
-    direct = {old: new for old, new in raw_pairs}
-
-    # Resolve chains: A->B->C becomes A->C
-    def resolve(number, visited=None):
-        if visited is None:
-            visited = set()
-        if number in visited:
-            # Cycle guard — should never happen in real data
-            logger.warning(f"Cycle detected in number change chain: {number}")
-            return number
-        visited.add(number)
-        if number in direct:
-            return resolve(direct[number], visited)
-        return number
-
-    consolidated = {old: resolve(old) for old in direct}
-    logger.info(
-        f"Number consolidation map built: {len(consolidated)} "
-        f"old number(s) mapped to current numbers."
-    )
-    return consolidated
-
-
-# ---------------------------------------------------------------------------
-# Schema validation
-# ---------------------------------------------------------------------------
-
-_REQUIRED_TABLES = {'message', 'message_media', 'chat', 'jid', 'jid_map'}
-
-_REQUIRED_COLUMNS = {
-    'message':       {'_id', 'timestamp', 'sender_jid_row_id', 'from_me'},
-    'message_media': {'file_path', 'mime_type', 'chat_row_id', 'message_row_id',
-                      'message_url', 'media_name'},
-    'chat':          {'_id', 'subject', 'jid_row_id'},
-    'jid':           {'_id', 'user'},
-    'jid_map':       {'lid_row_id', 'jid_row_id'},
-}
-
-
-def validate_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
-    """Abort with a clear error if any required table or column is missing."""
-    tables = {row[0] for row in cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )}
-    missing_tables = _REQUIRED_TABLES - tables
-    if missing_tables:
-        logger.error(
-            f"Schema validation failed — missing tables: {sorted(missing_tables)}"
-        )
-        raise SystemExit(1)
-
-    for table, required_cols in _REQUIRED_COLUMNS.items():
-        actual_cols = {row[1] for row in cursor.execute(
-            f"PRAGMA table_info({table})"
-        )}
-        missing_cols = required_cols - actual_cols
-        if missing_cols:
-            logger.error(
-                f"Schema validation failed — missing columns in '{table}': "
-                f"{sorted(missing_cols)}"
-            )
-            raise SystemExit(1)
-
-    logger.info("Schema validated.")
-
-
-_MEDIA_SUBFOLDERS = {
-    'WhatsApp Images', 'WhatsApp Video', 'WhatsApp Audio',
-    'WhatsApp Voice Notes', 'WhatsApp Video Notes', 'WhatsApp Animated Gifs',
-    'WhatsApp Documents',
-}
-
-
-def validate_wa_root(wa_root: str, logger: logging.Logger):
-    """
-    Verify that wa_root is the correct WhatsApp folder (the one containing Media/).
-    Aborts with a diagnostic hint for the most common mistakes.
-    """
-    if not os.path.isdir(wa_root):
-        logger.error(f"--wa_root does not exist or is not a directory: {wa_root}")
-        raise SystemExit(1)
-
-    media_dir = os.path.join(wa_root, 'Media')
-    if not os.path.isdir(media_dir):
-        folder_name = os.path.basename(os.path.normpath(wa_root))
-        if folder_name == 'Media':
-            hint = "It looks like you passed the Media/ folder — pass its parent instead."
-        elif any(os.path.isdir(os.path.join(wa_root, s)) for s in _MEDIA_SUBFOLDERS):
-            hint = ("It looks like you passed a subfolder inside Media/ — "
-                    "pass the WhatsApp/ folder that contains Media/ instead.")
-        else:
-            hint = "Expected structure: <wa_root>/Media/WhatsApp Images/ etc."
-        logger.error(f"--wa_root has no Media/ subfolder: {wa_root}\n  {hint}")
-        raise SystemExit(1)
-
-    found = [s for s in _MEDIA_SUBFOLDERS if os.path.isdir(os.path.join(media_dir, s))]
-    if not found:
-        logger.warning(
-            f"Media/ found but no WhatsApp media subfolders detected under {media_dir}. "
-            f"The archive will likely be empty. "
-            f"Expected at least one of: {sorted(_MEDIA_SUBFOLDERS)}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# DB query
-# ---------------------------------------------------------------------------
-
-def build_group_subjects_query(since_ms: int | None) -> str:
-    """
-    Lightweight query returning the current subject for every group chat in scope.
-    Used to detect renames before processing begins.
-    No LIMIT — covers all groups regardless of --limit on the main query.
-    """
-    since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
-    return f"""
-        SELECT DISTINCT CAST(message_media.chat_row_id AS TEXT), chat.subject
-        FROM message_media
-        JOIN chat    ON message_media.chat_row_id    = chat._id
-        JOIN message ON message_media.message_row_id = message._id
-        WHERE chat.subject IS NOT NULL
-        {since_clause}
-    """
-
-
-def build_query(limit: int | None, since_ms: int | None) -> str:
-    """
-    Build the main media extraction query.
-    If limit is provided, each UNION ALL block is independently
-    capped to that number of rows, giving a balanced sample
-    from both group chats and 1-to-1 chats.
-    If since_ms is provided, only messages at or after that timestamp
-    (milliseconds) are included.
-    """
-    limit_clause = f"LIMIT {limit}" if limit else ""
-    since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
-
-    return f"""
-SELECT * FROM (
-    -- Group chats
-    SELECT
-        message._id                         AS message_id,
-        message.timestamp                   AS timestamp,
-        message_media.file_path             AS file_path,
-        message_media.mime_type             AS mime_type,
-        message_media.chat_row_id           AS chat_row_id,
-        chat.subject                        AS chat_subject,
-        ifnull(jid2.user, jid.user)         AS sender,
-        message.from_me                     AS key_from_me,
-        message_media.message_url           AS message_url,
-        message_media.media_name            AS media_name
-    FROM message_media
-    LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
-    LEFT JOIN message ON message_media.message_row_id = message._id
-    LEFT JOIN jid     ON jid._id = message.sender_jid_row_id
-    LEFT JOIN (
-        SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-        FROM jid_map
-        GROUP BY lid_row_id
-    ) jid_map ON jid_map.lid_row_id = message.sender_jid_row_id
-    LEFT JOIN jid AS jid2 ON jid2._id = jid_map.jid_row_id
-    WHERE (
-        message_media.file_path LIKE 'Media/WhatsApp Images/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
-    )
-    AND chat.subject IS NOT NULL
-    {since_clause}
-    {limit_clause}
-)
-
-UNION ALL
-
-SELECT * FROM (
-    -- 1-to-1 chats
-    SELECT
-        message._id                         AS message_id,
-        message.timestamp                   AS timestamp,
-        message_media.file_path             AS file_path,
-        message_media.mime_type             AS mime_type,
-        message_media.chat_row_id           AS chat_row_id,
-        NULL                                AS chat_subject,
-        jid.user                            AS sender,
-        message.from_me                     AS key_from_me,
-        message_media.message_url           AS message_url,
-        message_media.media_name            AS media_name
-    FROM message_media
-    LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
-    LEFT JOIN message ON message_media.message_row_id = message._id
-    LEFT JOIN jid     ON jid._id = chat.jid_row_id
-    WHERE (
-        message_media.file_path LIKE 'Media/WhatsApp Images/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
-    )
-    AND chat.subject IS NULL
-    {since_clause}
-    {limit_clause}
-)
-"""
 
 # ---------------------------------------------------------------------------
 # Core processing
@@ -1282,13 +1047,7 @@ def main():
                 "The supplied contacts file will be used; iOS auto-extracted contacts "
                 "will be ignored. Omit --contacts to use the backup's ContactsV2.sqlite."
             )
-        logger.info(f"Reading contacts from: {args.contacts}")
-        with open(args.contacts, 'r', encoding='utf-8') as f:
-            content = f.read()
-        for name, number in re.findall(
-                r"display_name=(.+?), data1=([^@\n\r]+)", content):
-            contacts[number.strip()] = name.strip()
-        logger.info(f"Loaded {len(contacts)} contacts.")
+        contacts = android_handler.load_contacts(args.contacts, logger)
 
     # --- Decrypt if needed ---
     if args.msgstore.endswith('.crypt15'):
@@ -1379,13 +1138,13 @@ def main():
             )
 
         else:
-            validate_schema(cursor, logger)
-            validate_wa_root(args.wa_root, logger)
-            number_map = build_number_map(cursor, logger)
+            android_handler.validate_schema(cursor, logger)
+            android_handler.validate_wa_root(args.wa_root, logger)
+            number_map = android_handler.build_number_map(cursor, logger)
 
-            query = build_query(args.limit, since_ms)
+            query = android_handler.build_query(args.limit, since_ms)
             group_subjects = dict(
-                cursor.execute(build_group_subjects_query(since_ms)).fetchall()
+                cursor.execute(android_handler.build_group_subjects_query(since_ms)).fetchall()
             )
 
         # Count without loading all rows into memory
