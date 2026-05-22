@@ -21,8 +21,9 @@ WhatsApp Media Archiver organises your WhatsApp media into a structured folder h
 - Duplicate media detection across runs — CSV report of files with identical content at multiple archive paths
 - Missing media CSV report for manual recovery of old or deleted files
 - Dry run mode for safe previewing before a full run
+- **iOS support** — reads directly from an iPhone backup (`--ios_backup`); no third-party extraction tool required
 - Encrypted backup support (`msgstore.db.crypt15`) via `wa-crypt-tools`
-- Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive
+- Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
 
 ### Supported Media Types
 
@@ -141,12 +142,16 @@ The script is **safe to re-run** on an existing archive:
 - Group names reflect the **current** name at time of DB export, not historical names.
 - Stickers are not archived in this version.
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared.
+- **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `--mode restore` on an iOS archive exits with a clear error.
+- **iOS encrypted backups are not supported.** If your iPhone backup is encrypted, disable encryption in Finder (macOS) or Apple Devices (Windows), create a new backup, then re-run.
+- **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book (`ZCONTACTABID = NULL`) appear as separate folders.
 
 ---
 
 ## Credits
 
-This project was inspired by [Wa_Immich_Tagger](https://github.com/mac12m99/Wa_Immich_Tagger) by mac12m99, a tool that tags WhatsApp media into Immich with chat and sender metadata. That script provided the initial DB query pattern that this tool builds on.
+- Inspired by [Wa_Immich_Tagger](https://github.com/mac12m99/Wa_Immich_Tagger) by mac12m99 — provided the initial Android DB query pattern.
+- iOS backup reading approach inspired by [whatsapp-chat-exporter](https://github.com/KnugiHK/whatsapp-chat-exporter) by KnugiHK — the idea of reading directly from the iPhone backup via `Manifest.db` instead of requiring a third-party extraction tool. iOS implementation in this project is original code.
 
 ---
 

@@ -16,13 +16,13 @@ import zlib
 from datetime import datetime
 
 # ==============================================================================
-# WA Media Archiver — v0.15
-# Archives WhatsApp media into a structured folder hierarchy using msgstore.db.
-# Run on a backup copy of your WhatsApp data.
+# WA Media Archiver — v0.16
+# Archives WhatsApp media into a structured folder hierarchy using msgstore.db
+# (Android) or ChatStorage.sqlite (iOS). Run on a backup copy of your data.
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.15'
+__version__ = '0.16'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -150,6 +150,22 @@ def setup_logging(log_path: str) -> logging.Logger:
         logger.addHandler(fh)
         logger.addHandler(ch)
     return logger
+
+
+# ---------------------------------------------------------------------------
+# Platform detection
+# ---------------------------------------------------------------------------
+
+def detect_db_platform(path: str) -> str:
+    """
+    Inspect a WhatsApp database and return 'ios' or 'android'.
+    iOS databases contain ZWAMESSAGE; Android databases do not.
+    """
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+    return 'ios' if 'ZWAMESSAGE' in tables else 'android'
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +756,7 @@ SELECT * FROM (
 # ---------------------------------------------------------------------------
 
 def process_rows(rows, total: int, contacts, number_map, folder_index, group_index,
-                 wa_root, output_root, logger, dry_run, conn=None):
+                 media_resolver, output_root, logger, dry_run, conn=None):
     stats = {'copied': 0, 'skipped': 0, 'missing': 0, 'warnings': 0}
     updated_index = dict(folder_index)
     updated_group_index = dict(group_index)
@@ -774,20 +790,17 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
             continue
 
         # --- Resolve source path ---
-        src = os.path.join(wa_root, *file_path.split('/'))
-        is_document = file_path.startswith('Media/WhatsApp Documents/')
-        filename = (media_name if media_name else os.path.basename(file_path)) \
-            if is_document else os.path.basename(file_path)
+        src = media_resolver(file_path)
+        filename = media_name if media_name else os.path.basename(file_path)
         is_group = chat_subject is not None
 
-        if not os.path.isfile(src):
+        if src is None or not os.path.isfile(src):
             if is_group:
                 chat_display = chat_subject
                 canonical = number_map.get(sender, sender)
                 sender_display = 'Me' if (key_from_me == 1 or not sender) \
                     else contacts.get(canonical, format_phone(canonical))
             else:
-                # Resolve number change before contact lookup
                 canonical = number_map.get(sender, sender) if sender else None
                 chat_display = contacts.get(canonical, canonical) \
                     if canonical else 'Unknown'
@@ -796,7 +809,7 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
                     if canonical else 'Unknown'
 
             logger.warning(
-                f"MISSING source file (message_id={msg_id}): {src}"
+                f"MISSING source file (message_id={msg_id}): {file_path}"
             )
             missing_rows.append({
                 'message_id':        msg_id,
@@ -837,7 +850,6 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
 
         # --- 1-to-1 CHAT ---
         else:
-            # Resolve number change to canonical number
             contact_number = number_map.get(sender, sender) \
                 if sender else 'unknown'
             contact_display = contacts.get(contact_number, None)
@@ -845,7 +857,6 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
                 contact_display or contact_number, contact_number
             )
 
-            # Update the folder index with the current resolved name
             updated_index[contact_number] = folder_name
 
             direction = 'Sent' if key_from_me == 1 else 'Received'
@@ -866,23 +877,27 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
                 stats['copied'] += 1
             continue
 
-        # --- Hash source file ---
-        src_hash = file_md5(src)
-
-        # --- Conflict / duplicate resolution ---
-        resolved = resolve_unique_dest(dest_path, src, logger, src_hash=src_hash)
-        if resolved is None:
-            stats['skipped'] += 1
-            if cursor is not None:
-                rel = os.path.relpath(dest_path, output_root).replace(os.sep, '/')
-                record_file_archived(cursor, file_path, src_hash, rel)
-            continue
+        # --- Conflict / duplicate resolution (lazy src hash: only when dest exists) ---
+        if os.path.exists(dest_path):
+            src_hash = file_md5(src)
+            resolved = resolve_unique_dest(dest_path, src, logger, src_hash=src_hash)
+            if resolved is None:
+                stats['skipped'] += 1
+                if cursor is not None:
+                    rel = os.path.relpath(dest_path, output_root).replace(os.sep, '/')
+                    record_file_archived(cursor, file_path, src_hash, rel)
+                continue
+        else:
+            src_hash = None
+            resolved = dest_path
 
         # --- Copy and set timestamps ---
         os.makedirs(dest_dir, exist_ok=True)
         try:
             shutil.copy2(src, resolved)
             set_file_times(resolved, timestamp)
+            if src_hash is None:
+                src_hash = file_md5(resolved)
             logger.debug(f"COPIED: {src} -> {resolved}")
             stats['copied'] += 1
             if cursor is not None:
@@ -919,6 +934,27 @@ def run_restore_mode(args, logger):
                 "the restore data, then run restore mode again."
             )
             raise SystemExit(1)
+
+        # Detect platform(s) present in the archive.
+        # A mixed iOS+Android archive warns but proceeds with Android paths only.
+        # A pure iOS archive is rejected — iOS paths have no restore target.
+        has_ios = conn.execute(
+            "SELECT 1 FROM archive_copies WHERE original_path LIKE 'Message/%' LIMIT 1"
+        ).fetchone()
+        has_android = conn.execute(
+            "SELECT 1 FROM archive_copies WHERE original_path LIKE 'Media/%' LIMIT 1"
+        ).fetchone()
+        if has_ios and not has_android:
+            logger.error(
+                "Restore mode is only supported for Android archives. "
+                "iOS original paths cannot be reconstructed into a usable media folder."
+            )
+            raise SystemExit(1)
+        if has_ios and has_android:
+            logger.warning(
+                "This archive contains both iOS and Android entries. "
+                "Only Android entries (Media/...) will be restored."
+            )
 
         logger.info(f"Restore data loaded: {file_count} unique original file(s).")
 
@@ -1036,24 +1072,39 @@ def main():
     parser = argparse.ArgumentParser(
         prog='wa_media_archiver.py',
         description='Archive WhatsApp media into a structured folder hierarchy.',
-        epilog='Requires an unencrypted msgstore.db or a crypt15 backup + e2e key.'
+        epilog=(
+            'Android: requires msgstore.db or a crypt15 backup + e2e key. '
+            'iOS: pass --ios_backup to read directly from an iPhone backup.'
+        )
     )
     parser.add_argument('--version', action='version',
                         version=f'WhatsApp Media Archiver v{__version__}')
     parser.add_argument('-msg', '--msgstore',
                         default='msgstore.db',
-                        help='Path to msgstore.db[.crypt15] '
-                             '(default: current folder)')
+                        help='Path to msgstore.db[.crypt15] or ChatStorage.sqlite '
+                             '(default: current folder). Not needed with --ios_backup.')
     parser.add_argument('-e2e', '--e2e_key',
                         help='E2E decryption key for encrypted '
                              'msgstore.db.crypt15')
     parser.add_argument('-c', '--contacts',
-                        help='Path to contacts export file')
+                        help='Path to contacts export file (Android ADB format)')
     parser.add_argument('-wa', '--wa_root',
                         required=False,
                         default=None,
                         help='Root path of WhatsApp folder on disk '
-                             '(required unless --mode restore)')
+                             '(Android: folder containing Media/; '
+                             'iOS pre-extracted: AppDomainGroup folder). '
+                             'Not required with --ios_backup or --mode restore.')
+    parser.add_argument('--ios_backup',
+                        default=None,
+                        metavar='PATH',
+                        help='Path to iPhone backup directory (contains Manifest.db). '
+                             'Mutually exclusive with --wa_root for iOS.')
+    parser.add_argument('--ios_contacts',
+                        default=None,
+                        metavar='PATH',
+                        help='Path to ContactsV2.sqlite from an iOS backup '
+                             '(optional; auto-extracted from --ios_backup if omitted).')
     parser.add_argument('-o', '--output',
                         required=True,
                         help='Output root folder for the archive')
@@ -1064,7 +1115,8 @@ def main():
     parser.add_argument('-mode', '--mode',
                         choices=['adb', 'restore'],
                         help='adb = pull msgstore and contacts via ADB; '
-                             'restore = reconstruct original Media/ tree from archive')
+                             'restore = reconstruct original Media/ tree from archive '
+                             '(Android archives only)')
     parser.add_argument('--dry-run',
                         action='store_true',
                         help='Simulate the run without copying any files')
@@ -1082,8 +1134,14 @@ def main():
                              '(format: YYYY-MM-DD). Combines with --limit.')
     args = parser.parse_args()
 
-    if args.mode != 'restore' and not args.wa_root:
-        parser.error("--wa_root / -wa is required unless --mode restore")
+    if args.ios_backup and args.wa_root:
+        parser.error("--ios_backup and --wa_root are mutually exclusive.")
+
+    if args.ios_backup and args.mode == 'adb':
+        parser.error("--ios_backup and --mode adb are mutually exclusive.")
+
+    if args.mode != 'restore' and not args.ios_backup and not args.wa_root:
+        parser.error("--wa_root / -wa is required unless --ios_backup or --mode restore")
 
     # --- Output dir and logging ---
     os.makedirs(args.output, exist_ok=True)
@@ -1097,14 +1155,76 @@ def main():
         run_restore_mode(args, logger)
         return
 
-    validate_wa_root(args.wa_root, logger)
-
     if args.dry_run:
         logger.info("*** DRY RUN MODE — no files will be copied ***")
 
     logger.info(f"=== WhatsApp Archiver v{__version__} started ===")
 
-    # --- Contacts ---
+    # -------------------------------------------------------------------------
+    # iOS backup mode — read directly from the iPhone backup
+    # -------------------------------------------------------------------------
+    if args.ios_backup:
+        from backup_reader import detect_encrypted, build_manifest_map, extract_to_temp
+        from ios_handler import (validate_ios_schema, validate_ios_wa_root,
+                                 build_ios_query, build_ios_group_subjects_query,
+                                 build_ios_number_map, load_ios_contacts)
+
+        if detect_encrypted(args.ios_backup):
+            logger.error(
+                "Your iPhone backup is encrypted. Open Finder (macOS) or "
+                "Apple Devices (Windows), disable backup encryption, create a "
+                "new backup, then re-run."
+            )
+            raise SystemExit(1)
+
+        logger.info("Building manifest map from backup...")
+        manifest_map = build_manifest_map(args.ios_backup)
+        if not manifest_map:
+            logger.warning(
+                f"Manifest map is empty — no WhatsApp files found in the backup at: "
+                f"{args.ios_backup}\n"
+                f"  Make sure --ios_backup points to the backup root directory "
+                f"(the folder that contains Manifest.db), and that the backup "
+                f"includes WhatsApp data."
+            )
+        else:
+            logger.info(f"Manifest map built: {len(manifest_map)} WhatsApp file(s).")
+
+        logger.info("Extracting ChatStorage.sqlite from backup...")
+        tmp_msgstore = extract_to_temp(manifest_map, 'ChatStorage.sqlite')
+        atexit.register(os.unlink, tmp_msgstore)
+        args.msgstore = tmp_msgstore
+
+        if args.ios_contacts:
+            ios_contacts_path = args.ios_contacts
+        elif manifest_map.get('ContactsV2.sqlite'):
+            logger.info("Extracting ContactsV2.sqlite from backup...")
+            tmp_contacts = extract_to_temp(manifest_map, 'ContactsV2.sqlite')
+            atexit.register(os.unlink, tmp_contacts)
+            ios_contacts_path = tmp_contacts
+        else:
+            logger.warning("ContactsV2.sqlite not found in backup; proceeding without contacts.")
+            ios_contacts_path = None
+
+        platform = 'ios'
+        media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
+
+    # -------------------------------------------------------------------------
+    # wa_root mode — Android or iOS pre-extracted
+    # -------------------------------------------------------------------------
+    else:
+        from ios_handler import (validate_ios_schema, validate_ios_wa_root,
+                                 build_ios_query, build_ios_group_subjects_query,
+                                 build_ios_number_map, load_ios_contacts)
+
+        ios_contacts_path = args.ios_contacts
+        platform = None  # resolved after decryption
+
+        def _wa_root_resolver(fp):
+            return os.path.join(args.wa_root, *fp.split('/'))
+        media_resolver = _wa_root_resolver
+
+    # --- Contacts (Android ADB format) ---
     contacts = {}
 
     if args.mode == 'adb':
@@ -1156,6 +1276,12 @@ def main():
         atexit.register(os.unlink, tmp.name)
 
     if args.contacts:
+        if args.ios_backup:
+            logger.warning(
+                "--contacts was provided alongside --ios_backup. "
+                "The supplied contacts file will be used; iOS auto-extracted contacts "
+                "will be ignored. Omit --contacts to use the backup's ContactsV2.sqlite."
+            )
         logger.info(f"Reading contacts from: {args.contacts}")
         with open(args.contacts, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -1213,34 +1339,54 @@ def main():
     if not os.path.isfile(args.msgstore):
         logger.error(f"Database file not found: {args.msgstore}")
         raise SystemExit(1)
+
+    # Resolve platform for wa_root mode (after possible decryption)
+    if platform is None:
+        platform = detect_db_platform(args.msgstore)
+        logger.info(f"Detected platform: {platform}")
+
+    # --- Parse --since and --limit once, before the platform fork ---
+    since_ms = None
+    if args.since:
+        try:
+            since_ms = int(datetime.strptime(args.since, '%Y-%m-%d').timestamp() * 1000)
+        except ValueError:
+            logger.error(f"Invalid --since date '{args.since}'. Expected format: YYYY-MM-DD")
+            raise SystemExit(1)
+        logger.info(f"SINCE filter active: on or after {args.since}.")
+    if args.limit:
+        logger.info(f"LIMIT active: {args.limit} rows per query block "
+                    f"({args.limit * 2} max total rows).")
+
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()
 
-        # --- Validate WhatsApp DB schema ---
-        validate_schema(cursor, logger)
+        if platform == 'ios':
+            validate_ios_schema(cursor, logger)
 
-        # --- Build number consolidation map ---
-        number_map = build_number_map(cursor, logger)
+            if args.wa_root:
+                validate_ios_wa_root(args.wa_root, logger)
 
-        # --- Build queries ---
-        logger.info("Executing query...")
-        since_ms = None
-        if args.since:
-            try:
-                since_ms = int(datetime.strptime(args.since, '%Y-%m-%d').timestamp() * 1000)
-            except ValueError:
-                logger.error(f"Invalid --since date '{args.since}'. Expected format: YYYY-MM-DD")
-                raise SystemExit(1)
-            logger.info(f"SINCE filter active: on or after {args.since}.")
-        if args.limit:
-            logger.info(f"LIMIT active: {args.limit} rows per query block "
-                f"({args.limit * 2} max total rows).")
-        query = build_query(args.limit, since_ms)
+            number_map = build_ios_number_map(cursor, logger)
 
-        # Prelim: group subjects for rename sync (no LIMIT — covers all groups in scope)
-        group_subjects = dict(
-            cursor.execute(build_group_subjects_query(since_ms)).fetchall()
-        )
+            # Load iOS contacts (from --ios_contacts or auto-extracted temp file)
+            if not contacts and ios_contacts_path:
+                contacts = load_ios_contacts(ios_contacts_path, logger)
+
+            query = build_ios_query(args.limit, since_ms)
+            group_subjects = dict(
+                cursor.execute(build_ios_group_subjects_query(since_ms)).fetchall()
+            )
+
+        else:
+            validate_schema(cursor, logger)
+            validate_wa_root(args.wa_root, logger)
+            number_map = build_number_map(cursor, logger)
+
+            query = build_query(args.limit, since_ms)
+            group_subjects = dict(
+                cursor.execute(build_group_subjects_query(since_ms)).fetchall()
+            )
 
         # Count without loading all rows into memory
         total_rows = cursor.execute(
@@ -1276,10 +1422,11 @@ def main():
             report_path = os.path.join(args.output, 'missing_media_report.csv')
 
             # --- Stream main query ---
+            logger.info("Executing query...")
             cursor.execute(query)
             stats, updated_index, updated_group_index, missing_rows = process_rows(
                 cursor, total_rows, contacts, number_map, folder_index, group_index,
-                args.wa_root, args.output, logger, args.dry_run,
+                media_resolver, args.output, logger, args.dry_run,
                 conn=archive_conn if not args.dry_run else None,
             )
 
