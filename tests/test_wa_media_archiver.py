@@ -1326,6 +1326,54 @@ class TestBuildManifestMap:
 
 
 # ===========================================================================
+# Backup reader: build_manifest_map domain filtering (WhatsApp Business)
+# ===========================================================================
+
+def _make_manifest_db_multi_domain(tmp_path, rows):
+    """
+    Create a Manifest.db with rows as (fileID, domain, relativePath) tuples.
+    Allows testing domain-based filtering directly.
+    """
+    db_path = tmp_path / "Manifest.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE Files (
+            fileID       TEXT PRIMARY KEY,
+            domain       TEXT,
+            relativePath TEXT
+        )
+    """)
+    for file_id, domain, relative_path in rows:
+        conn.execute("INSERT INTO Files VALUES (?, ?, ?)", (file_id, domain, relative_path))
+    conn.commit()
+    conn.close()
+
+
+class TestBuildManifestMapDomain:
+    def test_default_domain_excludes_business_files(self, tmp_path):
+        _make_manifest_db_multi_domain(tmp_path, [
+            ("aa" + "1" * 38, br._WA_DOMAIN,          "ChatStorage.sqlite"),
+            ("bb" + "2" * 38, br._WA_BUSINESS_DOMAIN, "ChatStorage.sqlite"),
+        ])
+        result = br.build_manifest_map(str(tmp_path))
+        assert len(result) == 1
+        assert list(result.values())[0].endswith("aa" + "1" * 38)
+
+    def test_business_domain_excludes_regular_files(self, tmp_path):
+        _make_manifest_db_multi_domain(tmp_path, [
+            ("aa" + "1" * 38, br._WA_DOMAIN,          "ChatStorage.sqlite"),
+            ("bb" + "2" * 38, br._WA_BUSINESS_DOMAIN, "ChatStorage.sqlite"),
+        ])
+        result = br.build_manifest_map(str(tmp_path), domain=br._WA_BUSINESS_DOMAIN)
+        assert len(result) == 1
+        assert list(result.values())[0].endswith("bb" + "2" * 38)
+
+    def test_business_domain_constant_value(self):
+        assert br._WA_BUSINESS_DOMAIN == \
+            'AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared'
+
+
+# ===========================================================================
 # iOS: load_ios_contacts
 # ===========================================================================
 

@@ -68,7 +68,11 @@ Use this if you prefer to extract and decrypt the database yourself, or if autom
 **Rooted device** — pull the unencrypted database directly:
 
 ```bash
+# Regular WhatsApp
 adb pull /data/data/com.whatsapp/databases/msgstore.db
+
+# WhatsApp Business
+adb pull /data/data/com.whatsapp.w4b/databases/msgstore.db
 ```
 
 No decryption needed.
@@ -78,14 +82,14 @@ No decryption needed.
 Step 1 — Pull the encrypted backup:
 
 ```bash
+# Regular WhatsApp
 adb pull /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Databases/msgstore.db.crypt15
+
+# WhatsApp Business
+adb pull /storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp\ Business/Databases/msgstore.db.crypt15
 ```
 
-Or browse to it manually at:
-
-```
-Android/media/com.whatsapp/WhatsApp/Databases/msgstore.db.crypt15
-```
+Or browse to the respective folder manually.
 
 Step 2 — Decrypt:
 

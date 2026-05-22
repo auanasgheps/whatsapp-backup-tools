@@ -11,6 +11,7 @@ usage: wa_media_archiver.py [-h]
                       [-wa WA_ROOT]
                       [--ios_backup PATH]
                       [--ios_contacts PATH]
+                      [--business]
                       -o OUTPUT
                       [-l LOG]
                       [-mode {adb,restore}]
@@ -27,6 +28,7 @@ usage: wa_media_archiver.py [-h]
 | `-wa` / `--wa_root` | Android / iOS pre-extracted | Root path of your WhatsApp folder. Android: folder containing `Media/`. iOS pre-extracted: `AppDomainGroup-group.net.whatsapp.WhatsApp.shared` folder. Not required with `--ios_backup` or `--mode restore` |
 | `--ios_backup` | iOS (recommended) | Path to the iPhone backup directory (the folder containing `Manifest.db`). Mutually exclusive with `--wa_root` |
 | `--ios_contacts` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios_backup` if omitted |
+| `--business` | No | Target **WhatsApp Business** instead of the regular WhatsApp app. Affects the ADB pull path (Android `--mode adb`) and the backup domain (iOS `--ios_backup`). Not needed when using `--wa_root` — just point it at the `WhatsApp Business/` folder |
 | `-o` / `--output` | **Yes** | Destination folder for the archive |
 | `-l` / `--log` | No | Custom log file path. Defaults to `<output>/wa_media_archiver.log` |
 | `-mode` / `--mode` | No | `adb` = automatically pull msgstore and contacts from a connected Android device; `restore` = reconstruct original `Media/` tree from the archive (Android archives only) |
