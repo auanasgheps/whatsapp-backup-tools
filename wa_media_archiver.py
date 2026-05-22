@@ -16,6 +16,8 @@ import zlib
 from datetime import datetime
 
 import android_handler
+import backup_reader
+import ios_handler
 
 # ==============================================================================
 # WA Media Archiver — v0.17
@@ -929,12 +931,7 @@ def main():
     # iOS backup mode — read directly from the iPhone backup
     # -------------------------------------------------------------------------
     if args.ios_backup:
-        from backup_reader import detect_encrypted, build_manifest_map, extract_to_temp
-        from ios_handler import (validate_ios_schema, validate_ios_wa_root,
-                                 build_ios_query, build_ios_group_subjects_query,
-                                 build_ios_number_map, load_ios_contacts)
-
-        if detect_encrypted(args.ios_backup):
+        if backup_reader.detect_encrypted(args.ios_backup):
             logger.error(
                 "Your iPhone backup is encrypted. Open Finder (macOS) or "
                 "Apple Devices (Windows), disable backup encryption, create a "
@@ -943,7 +940,7 @@ def main():
             raise SystemExit(1)
 
         logger.info("Building manifest map from backup...")
-        manifest_map = build_manifest_map(args.ios_backup)
+        manifest_map = backup_reader.build_manifest_map(args.ios_backup)
         if not manifest_map:
             logger.warning(
                 f"Manifest map is empty — no WhatsApp files found in the backup at: "
@@ -956,7 +953,7 @@ def main():
             logger.info(f"Manifest map built: {len(manifest_map)} WhatsApp file(s).")
 
         logger.info("Extracting ChatStorage.sqlite from backup...")
-        tmp_msgstore = extract_to_temp(manifest_map, 'ChatStorage.sqlite')
+        tmp_msgstore = backup_reader.extract_to_temp(manifest_map, 'ChatStorage.sqlite')
         atexit.register(os.unlink, tmp_msgstore)
         args.msgstore = tmp_msgstore
 
@@ -964,7 +961,7 @@ def main():
             ios_contacts_path = args.ios_contacts
         elif manifest_map.get('ContactsV2.sqlite'):
             logger.info("Extracting ContactsV2.sqlite from backup...")
-            tmp_contacts = extract_to_temp(manifest_map, 'ContactsV2.sqlite')
+            tmp_contacts = backup_reader.extract_to_temp(manifest_map, 'ContactsV2.sqlite')
             atexit.register(os.unlink, tmp_contacts)
             ios_contacts_path = tmp_contacts
         else:
@@ -978,10 +975,6 @@ def main():
     # wa_root mode — Android or iOS pre-extracted
     # -------------------------------------------------------------------------
     else:
-        from ios_handler import (validate_ios_schema, validate_ios_wa_root,
-                                 build_ios_query, build_ios_group_subjects_query,
-                                 build_ios_number_map, load_ios_contacts)
-
         ios_contacts_path = args.ios_contacts
         platform = None  # resolved after decryption
 
@@ -1121,20 +1114,20 @@ def main():
         cursor = msgstore_conn.cursor()
 
         if platform == 'ios':
-            validate_ios_schema(cursor, logger)
+            ios_handler.validate_ios_schema(cursor, logger)
 
             if args.wa_root:
-                validate_ios_wa_root(args.wa_root, logger)
+                ios_handler.validate_ios_wa_root(args.wa_root, logger)
 
-            number_map = build_ios_number_map(cursor, logger)
+            number_map = ios_handler.build_ios_number_map(cursor, logger)
 
             # Load iOS contacts (from --ios_contacts or auto-extracted temp file)
             if not contacts and ios_contacts_path:
-                contacts = load_ios_contacts(ios_contacts_path, logger)
+                contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
 
-            query = build_ios_query(args.limit, since_ms)
+            query = ios_handler.build_ios_query(args.limit, since_ms)
             group_subjects = dict(
-                cursor.execute(build_ios_group_subjects_query(since_ms)).fetchall()
+                cursor.execute(ios_handler.build_ios_group_subjects_query(since_ms)).fetchall()
             )
 
         else:
