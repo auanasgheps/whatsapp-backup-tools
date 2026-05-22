@@ -1010,9 +1010,10 @@ class TestProcessRows:
         src_dir = self._setup_src(tmp_path)
         out = str(tmp_path / 'out')
         os.makedirs(out)
-        rows = [self._row(timestamp=None)]
+        # _row() cannot produce a None timestamp (it substitutes _TS), so build directly.
+        row = (1, None, 'img.jpg', None, '42', 'Family', '111', 0, None, None)
         stats, _, _, _ = wa.process_rows(
-            rows, 1, {}, {}, {}, {},
+            [row], 1, {}, {}, {}, {},
             self._resolver(src_dir), out, logger, dry_run=False,
         )
         assert stats['warnings'] == 1
