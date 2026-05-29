@@ -21,13 +21,13 @@ import backup_reader
 import ios_handler
 
 # ==============================================================================
-# WA Media Archiver — v0.19
+# WA Media Archiver — v0.20
 # Archives WhatsApp media into a structured folder hierarchy using msgstore.db
 # (Android) or ChatStorage.sqlite (iOS). Run on a backup copy of your data.
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.19'
+__version__ = '0.20'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -943,7 +943,7 @@ def main():
     # iOS backup mode — read directly from the iPhone backup
     # -------------------------------------------------------------------------
     if args.ios_backup:
-        if backup_reader.detect_encrypted(args.ios_backup):
+        if backup_reader.detect_encrypted(args.ios_backup, logger):
             logger.error(
                 "Your iPhone backup is encrypted. Open Finder (macOS) or "
                 "Apple Devices (Windows), disable backup encryption, create a "
@@ -954,7 +954,7 @@ def main():
         logger.info("Building manifest map from backup...")
         ios_domain = (backup_reader._WA_BUSINESS_DOMAIN if args.business
                       else backup_reader._WA_DOMAIN)
-        manifest_map = backup_reader.build_manifest_map(args.ios_backup, domain=ios_domain)
+        manifest_map = backup_reader.build_manifest_map(args.ios_backup, logger, domain=ios_domain)
         if not manifest_map:
             logger.warning(
                 f"Manifest map is empty — no WhatsApp files found in the backup at: "
@@ -967,7 +967,7 @@ def main():
             logger.info(f"Manifest map built: {len(manifest_map)} WhatsApp file(s).")
 
         logger.info("Extracting ChatStorage.sqlite from backup...")
-        tmp_msgstore = backup_reader.extract_to_temp(manifest_map, 'ChatStorage.sqlite')
+        tmp_msgstore = backup_reader.extract_to_temp(manifest_map, 'ChatStorage.sqlite', logger)
         atexit.register(os.unlink, tmp_msgstore)
         args.msgstore = tmp_msgstore
 
@@ -975,7 +975,7 @@ def main():
             ios_contacts_path = args.ios_contacts
         elif manifest_map.get('ContactsV2.sqlite'):
             logger.info("Extracting ContactsV2.sqlite from backup...")
-            tmp_contacts = backup_reader.extract_to_temp(manifest_map, 'ContactsV2.sqlite')
+            tmp_contacts = backup_reader.extract_to_temp(manifest_map, 'ContactsV2.sqlite', logger)
             atexit.register(os.unlink, tmp_contacts)
             ios_contacts_path = tmp_contacts
         else:
@@ -1034,20 +1034,11 @@ def main():
             from wa_crypt_tools.lib.db.dbfactory import DatabaseFactory
             from wa_crypt_tools.lib.key.keyfactory import KeyFactory
         except ImportError:
-            logger.info("wa-crypt-tools not found — installing...")
-            try:
-                subprocess.run(
-                    [sys.executable, '-m', 'pip', 'install', 'wa-crypt-tools'],
-                    check=True
-                )
-            except subprocess.CalledProcessError:
-                logger.error(
-                    "Failed to install wa-crypt-tools automatically.\n"
-                    "  Run manually: pip3 install wa-crypt-tools"
-                )
-                raise SystemExit(1)
-            from wa_crypt_tools.lib.db.dbfactory import DatabaseFactory
-            from wa_crypt_tools.lib.key.keyfactory import KeyFactory
+            logger.error(
+                "wa-crypt-tools is required for decryption but is not installed.\n"
+                "  Run: pip install wa-crypt-tools"
+            )
+            raise SystemExit(1)
 
         with open(args.msgstore, 'rb') as msg:
             raw = msg.read()
@@ -1106,7 +1097,7 @@ def main():
 
             query = ios_handler.build_ios_query(args.limit, since_ms)
             group_subjects = dict(
-                cursor.execute(ios_handler.build_ios_group_subjects_query(since_ms)).fetchall()
+                cursor.execute(ios_handler.build_ios_group_subjects_query()).fetchall()
             )
 
         else:
@@ -1116,7 +1107,7 @@ def main():
 
             query = android_handler.build_query(args.limit, since_ms)
             group_subjects = dict(
-                cursor.execute(android_handler.build_group_subjects_query(since_ms)).fetchall()
+                cursor.execute(android_handler.build_group_subjects_query()).fetchall()
             )
 
         # Count without loading all rows into memory

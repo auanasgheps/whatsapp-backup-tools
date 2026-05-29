@@ -128,29 +128,27 @@ def build_number_map(cursor: sqlite3.Cursor,
     return consolidated
 
 
-def build_group_subjects_query(since_ms: int | None) -> str:
+def build_group_subjects_query() -> str:
     """
-    Lightweight query returning the current subject for every group chat in scope.
+    Lightweight query returning the current subject for every group chat.
     Used to detect renames before processing begins.
-    No LIMIT — covers all groups regardless of --limit on the main query.
+    Intentionally unfiltered — rename detection must cover all known groups,
+    not just those active since --since.
     """
-    since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
-    return f"""
+    return """
         SELECT DISTINCT CAST(message_media.chat_row_id AS TEXT), chat.subject
         FROM message_media
         JOIN chat    ON message_media.chat_row_id    = chat._id
         JOIN message ON message_media.message_row_id = message._id
         WHERE chat.subject IS NOT NULL
-        {since_clause}
     """
 
 
 def build_query(limit: int | None, since_ms: int | None) -> str:
     """
     Build the main media extraction query.
-    If limit is provided, each UNION ALL block is independently
-    capped to that number of rows, giving a balanced sample
-    from both group chats and 1-to-1 chats.
+    If limit is provided, it applies to the combined result of group chats and
+    1-to-1 chats (i.e. a true total cap, not per-block).
     If since_ms is provided, only messages at or after that timestamp
     (milliseconds) are included.
     """
@@ -159,74 +157,75 @@ def build_query(limit: int | None, since_ms: int | None) -> str:
 
     return f"""
 SELECT * FROM (
-    -- Group chats
-    SELECT
-        message._id                         AS message_id,
-        message.timestamp                   AS timestamp,
-        message_media.file_path             AS file_path,
-        message_media.mime_type             AS mime_type,
-        message_media.chat_row_id           AS chat_row_id,
-        chat.subject                        AS chat_subject,
-        ifnull(jid2.user, jid.user)         AS sender,
-        message.from_me                     AS key_from_me,
-        message_media.message_url           AS message_url,
-        message_media.media_name            AS media_name
-    FROM message_media
-    LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
-    LEFT JOIN message ON message_media.message_row_id = message._id
-    LEFT JOIN jid     ON jid._id = message.sender_jid_row_id
-    LEFT JOIN (
-        SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-        FROM jid_map
-        GROUP BY lid_row_id
-    ) jid_map ON jid_map.lid_row_id = message.sender_jid_row_id
-    LEFT JOIN jid AS jid2 ON jid2._id = jid_map.jid_row_id
-    WHERE (
-        message_media.file_path LIKE 'Media/WhatsApp Images/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+    SELECT * FROM (
+        -- Group chats
+        SELECT
+            message._id                         AS message_id,
+            message.timestamp                   AS timestamp,
+            message_media.file_path             AS file_path,
+            message_media.mime_type             AS mime_type,
+            message_media.chat_row_id           AS chat_row_id,
+            chat.subject                        AS chat_subject,
+            ifnull(jid2.user, jid.user)         AS sender,
+            message.from_me                     AS key_from_me,
+            message_media.message_url           AS message_url,
+            message_media.media_name            AS media_name
+        FROM message_media
+        LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
+        LEFT JOIN message ON message_media.message_row_id = message._id
+        LEFT JOIN jid     ON jid._id = message.sender_jid_row_id
+        LEFT JOIN (
+            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+            FROM jid_map
+            GROUP BY lid_row_id
+        ) jid_map ON jid_map.lid_row_id = message.sender_jid_row_id
+        LEFT JOIN jid AS jid2 ON jid2._id = jid_map.jid_row_id
+        WHERE (
+            message_media.file_path LIKE 'Media/WhatsApp Images/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+        )
+        AND chat.subject IS NOT NULL
+        {since_clause}
     )
-    AND chat.subject IS NOT NULL
-    {since_clause}
-    {limit_clause}
-)
 
-UNION ALL
+    UNION ALL
 
-SELECT * FROM (
-    -- 1-to-1 chats
-    SELECT
-        message._id                         AS message_id,
-        message.timestamp                   AS timestamp,
-        message_media.file_path             AS file_path,
-        message_media.mime_type             AS mime_type,
-        message_media.chat_row_id           AS chat_row_id,
-        NULL                                AS chat_subject,
-        jid.user                            AS sender,
-        message.from_me                     AS key_from_me,
-        message_media.message_url           AS message_url,
-        message_media.media_name            AS media_name
-    FROM message_media
-    LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
-    LEFT JOIN message ON message_media.message_row_id = message._id
-    LEFT JOIN jid     ON jid._id = chat.jid_row_id
-    WHERE (
-        message_media.file_path LIKE 'Media/WhatsApp Images/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
-        OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+    SELECT * FROM (
+        -- 1-to-1 chats
+        SELECT
+            message._id                         AS message_id,
+            message.timestamp                   AS timestamp,
+            message_media.file_path             AS file_path,
+            message_media.mime_type             AS mime_type,
+            message_media.chat_row_id           AS chat_row_id,
+            NULL                                AS chat_subject,
+            jid.user                            AS sender,
+            message.from_me                     AS key_from_me,
+            message_media.message_url           AS message_url,
+            message_media.media_name            AS media_name
+        FROM message_media
+        LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
+        LEFT JOIN message ON message_media.message_row_id = message._id
+        LEFT JOIN jid     ON jid._id = chat.jid_row_id
+        WHERE (
+            message_media.file_path LIKE 'Media/WhatsApp Images/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+        )
+        AND chat.subject IS NULL
+        {since_clause}
     )
-    AND chat.subject IS NULL
-    {since_clause}
-    {limit_clause}
 )
+{limit_clause}
 """
 
 
@@ -247,5 +246,12 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
     for name, number in re.findall(
             r"display_name=(.+?), data1=([^@\n\r]+)", content):
         contacts[number.strip()] = name.strip()
-    logger.info(f"Loaded {len(contacts)} Android contacts.")
+    if not contacts:
+        logger.warning(
+            "Contacts file was read but no WhatsApp contacts were found. "
+            "Folder names will show raw phone numbers.\n"
+            "  If using --mode adb, check that the device contacts permission is granted."
+        )
+    else:
+        logger.info(f"Loaded {len(contacts)} Android contacts.")
     return contacts

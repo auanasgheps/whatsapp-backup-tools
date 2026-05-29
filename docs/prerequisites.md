@@ -5,7 +5,11 @@
 
 Ensure Python 3.10+ is installed.
 
-For encrypted backup decryption, the script uses `wa-crypt-tools`. It is installed automatically the first time it is needed — no manual step required.
+For encrypted backup decryption, the script uses `wa-crypt-tools`. Install it before your first run if you need decryption:
+
+```bash
+pip install wa-crypt-tools
+```
 
 ---
 

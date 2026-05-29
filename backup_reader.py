@@ -1,9 +1,9 @@
 import contextlib
+import logging
 import os
 import plistlib
 import shutil
 import sqlite3
-import sys
 import tempfile
 
 # ==============================================================================
@@ -15,15 +15,14 @@ _WA_DOMAIN          = 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared'
 _WA_BUSINESS_DOMAIN = 'AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared'
 
 
-def detect_encrypted(backup_dir: str) -> bool:
+def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
     """
     Return True if the iPhone backup is encrypted.
     Reads the IsEncrypted flag from Manifest.plist in the backup directory.
     """
     if not os.path.isdir(backup_dir):
-        print(
-            f"ERROR: --ios_backup path does not exist or is not a directory: {backup_dir}",
-            file=sys.stderr,
+        logger.error(
+            f"--ios_backup path does not exist or is not a directory: {backup_dir}"
         )
         raise SystemExit(1)
 
@@ -31,11 +30,10 @@ def detect_encrypted(backup_dir: str) -> bool:
     if not os.path.isfile(info_path):
         manifest_path = os.path.join(backup_dir, 'Manifest.plist')
         if not os.path.isfile(manifest_path):
-            print(
-                f"ERROR: Neither Info.plist nor Manifest.plist found in: {backup_dir}\n"
+            logger.error(
+                f"Neither Info.plist nor Manifest.plist found in: {backup_dir}\n"
                 f"  Make sure --ios_backup points to the backup directory "
-                f"(the folder that contains Manifest.db).",
-                file=sys.stderr,
+                f"(the folder that contains Manifest.db)."
             )
             raise SystemExit(1)
         plist_path = manifest_path
@@ -59,6 +57,7 @@ def detect_encrypted(backup_dir: str) -> bool:
 
 
 def build_manifest_map(backup_dir: str,
+                       logger: logging.Logger,
                        domain: str = _WA_DOMAIN) -> dict[str, str]:
     """
     Build a {relativePath: absolute_hash_file_path} map for all WhatsApp files
@@ -68,18 +67,16 @@ def build_manifest_map(backup_dir: str,
     Hash files are stored at <backup_dir>/<fileID[:2]>/<fileID>.
     """
     if not os.path.isdir(backup_dir):
-        print(
-            f"ERROR: --ios_backup path does not exist or is not a directory: {backup_dir}",
-            file=sys.stderr,
+        logger.error(
+            f"--ios_backup path does not exist or is not a directory: {backup_dir}"
         )
         raise SystemExit(1)
 
     manifest_db = os.path.join(backup_dir, 'Manifest.db')
     if not os.path.isfile(manifest_db):
-        print(
-            f"ERROR: Manifest.db not found in: {backup_dir}\n"
-            f"  Make sure --ios_backup points to the backup root directory.",
-            file=sys.stderr,
+        logger.error(
+            f"Manifest.db not found in: {backup_dir}\n"
+            f"  Make sure --ios_backup points to the backup root directory."
         )
         raise SystemExit(1)
 
@@ -101,7 +98,8 @@ def build_manifest_map(backup_dir: str,
 
 
 def extract_to_temp(manifest_map: dict[str, str],
-                    relative_path: str) -> str:
+                    relative_path: str,
+                    logger: logging.Logger) -> str:
     """
     Copy a single file from the backup hash tree to a NamedTemporaryFile.
     Returns the temp file path. Caller is responsible for deleting it on exit.
@@ -111,18 +109,16 @@ def extract_to_temp(manifest_map: dict[str, str],
     """
     src = manifest_map.get(relative_path)
     if src is None:
-        print(
-            f"ERROR: '{relative_path}' not found in backup manifest.\n"
-            f"  This file may not exist in the WhatsApp domain of this backup.",
-            file=sys.stderr,
+        logger.error(
+            f"'{relative_path}' not found in backup manifest.\n"
+            f"  This file may not exist in the WhatsApp domain of this backup."
         )
         raise SystemExit(1)
 
     if not os.path.isfile(src):
-        print(
-            f"ERROR: Backup hash file not found on disk: {src}\n"
-            f"  The backup may be incomplete or corrupt.",
-            file=sys.stderr,
+        logger.error(
+            f"Backup hash file not found on disk: {src}\n"
+            f"  The backup may be incomplete or corrupt."
         )
         raise SystemExit(1)
 
