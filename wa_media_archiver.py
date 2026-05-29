@@ -3,7 +3,6 @@ import argparse
 import contextlib
 import csv
 import hashlib
-import io
 import logging
 import os
 import re
@@ -27,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.21'
+__version__ = '0.22'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1041,8 +1040,9 @@ def main():
             raise SystemExit(1)
 
         with open(args.msgstore, 'rb') as msg:
+            db = DatabaseFactory.from_file(msg)
+            msg.seek(0)
             raw = msg.read()
-        db = DatabaseFactory.from_file(io.BytesIO(raw))
         key = KeyFactory.new(args.e2e_key)
         decrypted = db.decrypt(key, raw)
         try:
