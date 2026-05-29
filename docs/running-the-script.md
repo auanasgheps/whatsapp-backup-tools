@@ -3,6 +3,23 @@
 
 ## Command Reference
 
+```
+usage: wa_media_archiver.py [-h]
+                      [-msg MSGSTORE]
+                      [-e2e E2E_KEY]
+                      [-c CONTACTS]
+                      [-wa WA_ROOT]
+                      [--ios_backup PATH]
+                      [--ios_contacts PATH]
+                      [--business]
+                      -o OUTPUT
+                      [-l LOG]
+                      [-mode {adb,restore}]
+                      [--dry-run]
+                      [--limit N]
+                      [--since DATE]
+```
+
 | Argument | Required | Description |
 |---|---|---|
 | `-msg` / `--msgstore` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Not needed with `--ios_backup`. Defaults to `msgstore.db` in the current folder |
