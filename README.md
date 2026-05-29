@@ -27,15 +27,7 @@ WhatsApp Media Archiver organises your WhatsApp media into a structured folder h
 
 ### Supported Media Types
 
-| Type | Folder |
-|---|---|
-| Images | `Media/WhatsApp Images/` |
-| Videos | `Media/WhatsApp Video/` |
-| Shared audio | `Media/WhatsApp Audio/` |
-| Voice messages | `Media/WhatsApp Voice Notes/` |
-| Video messages | `Media/WhatsApp Video Notes/` |
-| Animated GIFs | `Media/WhatsApp Animated Gifs/` |
-| Documents | `Media/WhatsApp Documents/` |
+Supported media types: images, videos, audio, voice messages, video messages, animated GIFs, and documents.
 
 ---
 
