@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.28'
+__version__ = '0.29'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -254,8 +254,9 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS contacts (
-            number  TEXT PRIMARY KEY,
-            folder  TEXT NOT NULL
+            number        TEXT PRIMARY KEY,
+            folder        TEXT NOT NULL,
+            display_name  TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS groups (
             chat_row_id  TEXT PRIMARY KEY,
@@ -277,16 +278,16 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
 
 
 def load_contacts_from_db(conn: sqlite3.Connection) -> dict:
-    """Load contact folder index: number -> folder."""
-    return {row[0]: row[1]
-            for row in conn.execute("SELECT number, folder FROM contacts")}
+    """Load contact folder index: number -> (folder, display_name)."""
+    return {row[0]: (row[1], row[2])
+            for row in conn.execute("SELECT number, folder, display_name FROM contacts")}
 
 
 def save_contacts_to_db(conn: sqlite3.Connection, index: dict):
     """Persist contact folder index to DB."""
     conn.executemany(
-        "INSERT OR REPLACE INTO contacts (number, folder) VALUES (?, ?)",
-        index.items()
+        "INSERT OR REPLACE INTO contacts (number, folder, display_name) VALUES (?, ?, ?)",
+        ((number, folder, display_name) for number, (folder, display_name) in index.items())
     )
 
 
@@ -462,15 +463,17 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
         # Resolve to canonical number in case of number change
         canonical = number_map.get(number, number)
         new_folder = build_contact_folder_name(display_name, canonical)
-        old_folder = folder_index.get(canonical)
+        entry = folder_index.get(canonical)
+        old_folder = entry[0] if entry is not None else None
 
         if old_folder is None:
             # First time we have seen this contact — just register it
-            updated_index[canonical] = new_folder
+            updated_index[canonical] = (new_folder, display_name)
             continue
 
         if old_folder == new_folder:
-            # Name unchanged — nothing to do
+            # Name unchanged — update display_name in case it changed subtly
+            updated_index[canonical] = (new_folder, display_name)
             continue
 
         # Name has changed — rename folder on disk if it exists
@@ -513,7 +516,7 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
                 f"{old_folder} -> {new_folder}"
             )
 
-        updated_index[canonical] = new_folder
+        updated_index[canonical] = (new_folder, display_name)
 
     return updated_index
 
@@ -620,16 +623,14 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
             contact_number = number_map.get(sender, sender) \
                 if sender else 'unknown'
             contact_display = contacts.get(contact_number, None)
-            # If no live contacts loaded, preserve the folder name from the
-            # index (previous run) rather than falling back to "Unknown".
             if contact_display is None and contact_number in updated_index:
-                folder_name = updated_index[contact_number]
-            else:
-                folder_name = build_contact_folder_name(
-                    contact_display or contact_number, contact_number
-                )
-
-            updated_index[contact_number] = folder_name
+                # No live contacts — use display_name stored from a previous run
+                _, stored_display = updated_index[contact_number]
+                contact_display = stored_display or None
+            folder_name = build_contact_folder_name(
+                contact_display or contact_number, contact_number
+            )
+            updated_index[contact_number] = (folder_name, contact_display or '')
 
             direction = 'Sent' if key_from_me == 1 else 'Received'
             dest_filename = filename
