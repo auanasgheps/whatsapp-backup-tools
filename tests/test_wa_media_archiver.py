@@ -214,6 +214,17 @@ class TestBuildQuery:
         query = android_handler.build_query(None, None)
         assert query.count("Media/WhatsApp Documents/%") == 2
 
+    def test_limit_applies_to_combined_result(self):
+        # LIMIT must appear once, outside both UNION ALL blocks (total cap)
+        query = android_handler.build_query(limit=50, since_ms=None)
+        # The outer LIMIT should be last in the query, not duplicated
+        assert query.count("LIMIT 50") == 1
+        assert query.strip().endswith("LIMIT 50")
+
+    def test_group_subjects_query_has_no_date_filter(self):
+        query = android_handler.build_group_subjects_query()
+        assert 'timestamp >=' not in query
+
 
 # ===========================================================================
 # Schema validation (needs an in-memory SQLite DB)
@@ -397,6 +408,16 @@ class TestLoadAndroidContacts:
         result = android_handler.load_contacts(None, logger)
         assert result == {}
 
+    def test_empty_contacts_emits_warning(self, tmp_path, caplog):
+        import logging as _logging
+        f = tmp_path / "contacts.txt"
+        f.write_text("", encoding='utf-8')
+        log = _logging.getLogger("warn_test")
+        log.setLevel(_logging.WARNING)
+        with caplog.at_level(_logging.WARNING, logger="warn_test"):
+            android_handler.load_contacts(str(f), log)
+        assert any("no WhatsApp contacts" in r.message for r in caplog.records)
+
 
 # ===========================================================================
 # iOS: validate_ios_schema
@@ -545,21 +566,15 @@ class TestBuildIosQuery:
 
 class TestBuildIosGroupSubjectsQuery:
     def test_only_groups_returned(self):
-        query = ios.build_ios_group_subjects_query(None)
+        query = ios.build_ios_group_subjects_query()
         assert 'ZGROUPINFO IS NOT NULL' in query
 
     def test_zpartnername_not_null_filter_present(self):
-        query = ios.build_ios_group_subjects_query(None)
+        query = ios.build_ios_group_subjects_query()
         assert 'ZPARTNERNAME IS NOT NULL' in query
 
-    def test_since_clause_included(self):
-        since_ms = 1704067200000
-        query = ios.build_ios_group_subjects_query(since_ms)
-        apple_since = (since_ms / 1000.0) - ios.APPLE_EPOCH_OFFSET
-        assert str(apple_since) in query
-
-    def test_no_since_no_date_filter(self):
-        query = ios.build_ios_group_subjects_query(None)
+    def test_no_date_filter(self):
+        query = ios.build_ios_group_subjects_query()
         assert 'ZMESSAGEDATE >=' not in query
 
 
@@ -590,32 +605,32 @@ class TestDetectDbPlatform:
 # ===========================================================================
 
 class TestDetectEncrypted:
-    def test_unencrypted_manifest_plist_returns_false(self, tmp_path):
+    def test_unencrypted_manifest_plist_returns_false(self, tmp_path, logger):
         with open(tmp_path / 'Manifest.plist', 'wb') as f:
             plistlib.dump({'IsEncrypted': False}, f)
-        assert br.detect_encrypted(str(tmp_path)) is False
+        assert br.detect_encrypted(str(tmp_path), logger) is False
 
-    def test_encrypted_manifest_plist_returns_true(self, tmp_path):
+    def test_encrypted_manifest_plist_returns_true(self, tmp_path, logger):
         with open(tmp_path / 'Manifest.plist', 'wb') as f:
             plistlib.dump({'IsEncrypted': True}, f)
-        assert br.detect_encrypted(str(tmp_path)) is True
+        assert br.detect_encrypted(str(tmp_path), logger) is True
 
-    def test_info_plist_without_flag_falls_back_to_manifest(self, tmp_path):
+    def test_info_plist_without_flag_falls_back_to_manifest(self, tmp_path, logger):
         # Info.plist exists but has no IsEncrypted key → fall back to Manifest.plist
         with open(tmp_path / 'Info.plist', 'wb') as f:
             plistlib.dump({'DeviceName': 'iPhone'}, f)
         with open(tmp_path / 'Manifest.plist', 'wb') as f:
             plistlib.dump({'IsEncrypted': True}, f)
-        assert br.detect_encrypted(str(tmp_path)) is True
+        assert br.detect_encrypted(str(tmp_path), logger) is True
 
-    def test_missing_plist_files_exits(self, tmp_path):
+    def test_missing_plist_files_exits(self, tmp_path, logger):
         # No Info.plist or Manifest.plist → SystemExit
         with pytest.raises(SystemExit):
-            br.detect_encrypted(str(tmp_path))
+            br.detect_encrypted(str(tmp_path), logger)
 
-    def test_nonexistent_directory_exits(self, tmp_path):
+    def test_nonexistent_directory_exits(self, tmp_path, logger):
         with pytest.raises(SystemExit):
-            br.detect_encrypted(str(tmp_path / 'nonexistent'))
+            br.detect_encrypted(str(tmp_path / 'nonexistent'), logger)
 
 
 # ===========================================================================
@@ -623,14 +638,14 @@ class TestDetectEncrypted:
 # ===========================================================================
 
 class TestExtractToTemp:
-    def test_copies_file_to_temp_and_returns_path(self, tmp_path):
+    def test_copies_file_to_temp_and_returns_path(self, tmp_path, logger):
         hash_dir = tmp_path / 'ab'
         hash_dir.mkdir()
         fake_file = hash_dir / ('ab' + 'c' * 38)
         fake_file.write_bytes(b'sqlite data')
         manifest_map = {'ChatStorage.sqlite': str(fake_file)}
 
-        temp_path = br.extract_to_temp(manifest_map, 'ChatStorage.sqlite')
+        temp_path = br.extract_to_temp(manifest_map, 'ChatStorage.sqlite', logger)
         try:
             assert os.path.isfile(temp_path)
             with open(temp_path, 'rb') as f:
@@ -638,25 +653,25 @@ class TestExtractToTemp:
         finally:
             os.unlink(temp_path)
 
-    def test_preserves_file_extension(self, tmp_path):
+    def test_preserves_file_extension(self, tmp_path, logger):
         src = tmp_path / 'srcfile'
         src.write_bytes(b'data')
         manifest_map = {'ContactsV2.sqlite': str(src)}
 
-        temp_path = br.extract_to_temp(manifest_map, 'ContactsV2.sqlite')
+        temp_path = br.extract_to_temp(manifest_map, 'ContactsV2.sqlite', logger)
         try:
             assert temp_path.endswith('.sqlite')
         finally:
             os.unlink(temp_path)
 
-    def test_file_not_in_manifest_exits(self):
+    def test_file_not_in_manifest_exits(self, logger):
         with pytest.raises(SystemExit):
-            br.extract_to_temp({}, 'ChatStorage.sqlite')
+            br.extract_to_temp({}, 'ChatStorage.sqlite', logger)
 
-    def test_hash_file_missing_from_disk_exits(self, tmp_path):
+    def test_hash_file_missing_from_disk_exits(self, tmp_path, logger):
         manifest_map = {'ChatStorage.sqlite': str(tmp_path / 'nonexistent_hash')}
         with pytest.raises(SystemExit):
-            br.extract_to_temp(manifest_map, 'ChatStorage.sqlite')
+            br.extract_to_temp(manifest_map, 'ChatStorage.sqlite', logger)
 
 
 # ===========================================================================
@@ -1305,32 +1320,32 @@ def _make_manifest_db(tmp_path, rows):
 
 
 class TestBuildManifestMap:
-    def test_returns_expected_mapping(self, tmp_path):
+    def test_returns_expected_mapping(self, tmp_path, logger):
         file_id = "ab" + "c" * 38  # 40-char hex-like string
         _make_manifest_db(tmp_path, [(file_id, "ChatStorage.sqlite")])
-        result = br.build_manifest_map(str(tmp_path))
+        result = br.build_manifest_map(str(tmp_path), logger)
         expected_path = os.path.join(str(tmp_path), file_id[:2], file_id)
         assert result == {"ChatStorage.sqlite": expected_path}
 
-    def test_multiple_files(self, tmp_path):
+    def test_multiple_files(self, tmp_path, logger):
         rows = [
             ("aa" + "1" * 38, "ChatStorage.sqlite"),
             ("bb" + "2" * 38, "Message/Media/file.jpg"),
         ]
         _make_manifest_db(tmp_path, rows)
-        result = br.build_manifest_map(str(tmp_path))
+        result = br.build_manifest_map(str(tmp_path), logger)
         assert len(result) == 2
         assert "ChatStorage.sqlite" in result
         assert "Message/Media/file.jpg" in result
 
-    def test_empty_backup_returns_empty_dict(self, tmp_path):
+    def test_empty_backup_returns_empty_dict(self, tmp_path, logger):
         _make_manifest_db(tmp_path, [])
-        result = br.build_manifest_map(str(tmp_path))
+        result = br.build_manifest_map(str(tmp_path), logger)
         assert result == {}
 
-    def test_missing_manifest_db_exits(self, tmp_path):
+    def test_missing_manifest_db_exits(self, tmp_path, logger):
         with pytest.raises(SystemExit):
-            br.build_manifest_map(str(tmp_path))
+            br.build_manifest_map(str(tmp_path), logger)
 
 
 # ===========================================================================
@@ -1358,21 +1373,21 @@ def _make_manifest_db_multi_domain(tmp_path, rows):
 
 
 class TestBuildManifestMapDomain:
-    def test_default_domain_excludes_business_files(self, tmp_path):
+    def test_default_domain_excludes_business_files(self, tmp_path, logger):
         _make_manifest_db_multi_domain(tmp_path, [
             ("aa" + "1" * 38, br._WA_DOMAIN,          "ChatStorage.sqlite"),
             ("bb" + "2" * 38, br._WA_BUSINESS_DOMAIN, "ChatStorage.sqlite"),
         ])
-        result = br.build_manifest_map(str(tmp_path))
+        result = br.build_manifest_map(str(tmp_path), logger)
         assert len(result) == 1
         assert list(result.values())[0].endswith("aa" + "1" * 38)
 
-    def test_business_domain_excludes_regular_files(self, tmp_path):
+    def test_business_domain_excludes_regular_files(self, tmp_path, logger):
         _make_manifest_db_multi_domain(tmp_path, [
             ("aa" + "1" * 38, br._WA_DOMAIN,          "ChatStorage.sqlite"),
             ("bb" + "2" * 38, br._WA_BUSINESS_DOMAIN, "ChatStorage.sqlite"),
         ])
-        result = br.build_manifest_map(str(tmp_path), domain=br._WA_BUSINESS_DOMAIN)
+        result = br.build_manifest_map(str(tmp_path), logger, domain=br._WA_BUSINESS_DOMAIN)
         assert len(result) == 1
         assert list(result.values())[0].endswith("bb" + "2" * 38)
 

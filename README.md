@@ -87,7 +87,7 @@ The script runs on **Linux, macOS, and Windows** (Python 3.10+).
 ## Prerequisites
 
 - **Python 3.10+** required
-- **`wa-crypt-tools`** — used for encrypted backup decryption; installed automatically on first use
+- **`wa-crypt-tools`** — required for encrypted backup decryption (`pip install wa-crypt-tools`)
 - **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database
 - **iOS/iPadOS**: End-to-end encrypted backup must be **disabled**
 - **ADB** required for automatic retrieval (`--mode adb`)

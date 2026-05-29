@@ -74,19 +74,14 @@ def validate_ios_wa_root(wa_root: str, logger: logging.Logger):
         raise SystemExit(1)
 
 
-def build_ios_group_subjects_query(since_ms: int | None) -> str:
+def build_ios_group_subjects_query() -> str:
     """
-    Lightweight query returning the current subject for every group chat in scope.
+    Lightweight query returning the current subject for every group chat.
     Used to detect renames before processing begins.
-    since_ms is Unix epoch milliseconds; converted to Apple epoch seconds internally.
+    Intentionally unfiltered — rename detection must cover all known groups,
+    not just those active since --since.
     """
-    if since_ms is not None:
-        ios_since = (since_ms / 1000.0) - APPLE_EPOCH_OFFSET
-        since_clause = f"AND m.ZMESSAGEDATE >= {ios_since}"
-    else:
-        since_clause = ""
-
-    return f"""
+    return """
         SELECT DISTINCT CAST(cs.Z_PK AS TEXT), cs.ZPARTNERNAME
         FROM ZWACHATSESSION cs
         JOIN ZWAMESSAGE m ON m.ZCHATSESSION = cs.Z_PK
@@ -94,7 +89,6 @@ def build_ios_group_subjects_query(since_ms: int | None) -> str:
         WHERE cs.ZGROUPINFO IS NOT NULL
           AND cs.ZPARTNERNAME IS NOT NULL
           AND mi.ZMEDIALOCALPATH IS NOT NULL
-          {since_clause}
     """
 
 
@@ -124,53 +118,54 @@ def build_ios_query(limit: int | None, since_ms: int | None) -> str:
 
     return f"""
 SELECT * FROM (
-    -- Group chats
-    SELECT
-        m.Z_PK                                                         AS message_id,
-        CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
-        'Message/' || mi.ZMEDIALOCALPATH                               AS file_path,
-        NULL                                                           AS mime_type,
-        CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
-        cs.ZPARTNERNAME                                                AS chat_subject,
-        SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID, '@') - 1)            AS sender,
-        m.ZISFROMME                                                    AS key_from_me,
-        mi.ZMEDIAURL                                                   AS message_url,
-        CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
-             THEN mi.ZTITLE END                                        AS media_name
-    FROM ZWAMESSAGE m
-    JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
-    JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
-    WHERE cs.ZGROUPINFO IS NOT NULL
-      AND mi.ZMEDIALOCALPATH IS NOT NULL
-      AND cs.ZPARTNERNAME IS NOT NULL
-      {since_clause}
-    {limit_clause}
-)
+    SELECT * FROM (
+        -- Group chats
+        SELECT
+            m.Z_PK                                                         AS message_id,
+            CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+            'Message/' || mi.ZMEDIALOCALPATH                               AS file_path,
+            NULL                                                           AS mime_type,
+            CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
+            cs.ZPARTNERNAME                                                AS chat_subject,
+            SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID, '@') - 1)            AS sender,
+            m.ZISFROMME                                                    AS key_from_me,
+            mi.ZMEDIAURL                                                   AS message_url,
+            CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
+                 THEN mi.ZTITLE END                                        AS media_name
+        FROM ZWAMESSAGE m
+        JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+        JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
+        WHERE cs.ZGROUPINFO IS NOT NULL
+          AND mi.ZMEDIALOCALPATH IS NOT NULL
+          AND cs.ZPARTNERNAME IS NOT NULL
+          {since_clause}
+    )
 
-UNION ALL
+    UNION ALL
 
-SELECT * FROM (
-    -- 1-to-1 chats
-    SELECT
-        m.Z_PK                                                         AS message_id,
-        CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
-        'Message/' || mi.ZMEDIALOCALPATH                               AS file_path,
-        NULL                                                           AS mime_type,
-        CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
-        NULL                                                           AS chat_subject,
-        SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1)    AS sender,
-        m.ZISFROMME                                                    AS key_from_me,
-        mi.ZMEDIAURL                                                   AS message_url,
-        CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
-             THEN mi.ZTITLE END                                        AS media_name
-    FROM ZWAMESSAGE m
-    JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
-    JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
-    WHERE cs.ZGROUPINFO IS NULL
-      AND mi.ZMEDIALOCALPATH IS NOT NULL
-      {since_clause}
-    {limit_clause}
+    SELECT * FROM (
+        -- 1-to-1 chats
+        SELECT
+            m.Z_PK                                                         AS message_id,
+            CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+            'Message/' || mi.ZMEDIALOCALPATH                               AS file_path,
+            NULL                                                           AS mime_type,
+            CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
+            NULL                                                           AS chat_subject,
+            SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1)    AS sender,
+            m.ZISFROMME                                                    AS key_from_me,
+            mi.ZMEDIAURL                                                   AS message_url,
+            CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
+                 THEN mi.ZTITLE END                                        AS media_name
+        FROM ZWAMESSAGE m
+        JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+        JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
+        WHERE cs.ZGROUPINFO IS NULL
+          AND mi.ZMEDIALOCALPATH IS NOT NULL
+          {since_clause}
+    )
 )
+{limit_clause}
 """
 
 
