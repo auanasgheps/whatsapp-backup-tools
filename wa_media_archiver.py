@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.22'
+__version__ = '0.23'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1046,9 +1046,9 @@ def main():
         key = KeyFactory.new(args.e2e_key)
         decrypted = db.decrypt(key, raw)
         try:
-            output_file = zlib.decompressobj().decompress(decrypted)
+            output_file = zlib.decompress(decrypted)
         except zlib.error:
-            output_file = decrypted  # already plain SQLite (newer wa_crypt_tools)
+            output_file = decrypted  # already plain SQLite (no zlib wrapper)
         args.msgstore = os.path.join(args.output, 'msgstore.db')
         if os.path.exists(args.msgstore):
             logger.warning(f"Overwriting existing {args.msgstore} with decrypted database.")
