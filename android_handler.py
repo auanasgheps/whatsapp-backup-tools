@@ -147,12 +147,13 @@ def build_group_subjects_query() -> str:
 def build_query(limit: int | None, since_ms: int | None) -> str:
     """
     Build the main media extraction query.
-    If limit is provided, it applies to the combined result of group chats and
-    1-to-1 chats (i.e. a true total cap, not per-block).
+    If limit is provided, it is split evenly between the group chats and
+    1-to-1 chats blocks (LIMIT N//2 each), so both types are always
+    represented. Total rows returned is at most N.
     If since_ms is provided, only messages at or after that timestamp
     (milliseconds) are included.
     """
-    limit_clause = f"LIMIT {limit}" if limit else ""
+    block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
     since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
 
     return f"""
@@ -191,6 +192,7 @@ SELECT * FROM (
         )
         AND chat.subject IS NOT NULL
         {since_clause}
+        {block_limit_clause}
     )
 
     UNION ALL
@@ -223,9 +225,9 @@ SELECT * FROM (
         )
         AND chat.subject IS NULL
         {since_clause}
+        {block_limit_clause}
     )
 )
-{limit_clause}
 """
 
 

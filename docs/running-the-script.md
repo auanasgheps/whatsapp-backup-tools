@@ -33,7 +33,7 @@ usage: wa_media_archiver.py [-h]
 | `-l` / `--log` | No | Custom log file path. Defaults to `<output>/wa_media_archiver.log` |
 | `-mode` / `--mode` | No | `adb` = automatically pull msgstore and contacts from a connected Android device; `restore` = reconstruct original `Media/` tree from the archive (Android archives only) |
 | `--dry-run` | No | Simulate the run without copying any files |
-| `--limit N` | No | Cap total rows returned across all chats. Useful for test runs |
+| `--limit N` | No | Cap rows returned per chat type (N/2 from groups, N/2 from 1-to-1). Total rows ≤ N. Useful for test runs |
 | `--since DATE` | No | Only include messages on or after this date (`YYYY-MM-DD`). Combines freely with `--limit` |
 
 ---
