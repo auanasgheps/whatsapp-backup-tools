@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.27'
+__version__ = '0.28'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -620,9 +620,14 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
             contact_number = number_map.get(sender, sender) \
                 if sender else 'unknown'
             contact_display = contacts.get(contact_number, None)
-            folder_name = build_contact_folder_name(
-                contact_display or contact_number, contact_number
-            )
+            # If no live contacts loaded, preserve the folder name from the
+            # index (previous run) rather than falling back to "Unknown".
+            if contact_display is None and contact_number in updated_index:
+                folder_name = updated_index[contact_number]
+            else:
+                folder_name = build_contact_folder_name(
+                    contact_display or contact_number, contact_number
+                )
 
             updated_index[contact_number] = folder_name
 
