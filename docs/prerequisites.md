@@ -31,15 +31,16 @@ Enable it and note the **cryptographic key** — a long alphanumeric string. Thi
 
 ### Obtaining the Database
 
-#### Recommended — Automatic Retrieval (Linux, macOS and Windows)
+#### Recommended — Automatic Retrieval (`--mode adb`)
 
-The simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the script (or the companion script on Windows) handle the pull and decryption automatically.
+The simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the script handle the pull and decryption automatically.
 
-> 💡 **ADB required on all platforms.** Install it before running `--mode adb`:
+> 💡 **ADB required.** Install it before running `--mode adb`:
 > - **Linux**: `sudo apt install adb` (Debian/Ubuntu) or `sudo dnf install android-tools` (Fedora)
 > - **macOS**: `brew install android-platform-tools` (requires [Homebrew](https://brew.sh))
+> - **Windows**: Download [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) and add the folder to your PATH
 
-**On Linux and macOS** — pass `--mode adb` when running the script:
+Run the script with `--mode adb`:
 
 ```bash
 python3 wa_media_archiver.py \
@@ -50,14 +51,6 @@ python3 wa_media_archiver.py \
 ```
 
 The script pulls the encrypted backup and contacts directly from the device and decrypts on the fly. No separate steps needed.
-
-**On Windows** — use the companion script, then transfer to Linux or macOS:
-
-```powershell
-.\windows_extractor_companion.ps1 -DecryptDB -E2EKey "your_cryptographic_key"
-```
-
-See [windows_documentation.md](windows_documentation.md) for full details.
 
 ---
 
@@ -117,7 +110,7 @@ python3 wa_media_archiver.py \
 
 Contacts are optional but strongly recommended — without them, folder names will show raw phone numbers instead of contact names.
 
-When using automatic retrieval (`--mode adb` on Linux and macOS, or the Windows companion script), contacts are pulled automatically. No extra steps needed.
+When using automatic retrieval (`--mode adb`), contacts are pulled automatically. No extra steps needed.
 
 For manual pull on Linux and macOS:
 

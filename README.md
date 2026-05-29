@@ -21,7 +21,7 @@ WhatsApp Media Archiver organises your WhatsApp media into a structured folder h
 - Duplicate media detection across runs — CSV report of files with identical content at multiple archive paths
 - Missing media CSV report for manual recovery of old or deleted files
 - Dry run mode for safe previewing before a full run
-- **iOS support** — reads directly from an iPhone backup (`--ios_backup`); no third-party extraction tool required
+- iOS support — reads directly from an iPhone backup (`--ios_backup`); no third-party extraction tool required
 - Encrypted backup support (`msgstore.db.crypt15`) via `wa-crypt-tools`
 - Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
 
@@ -78,8 +78,7 @@ After a successful run, the archive will be organized as follows:
 
 ### Platform
 
-The main script runs on **Linux and macOS**.
-Windows users can use `windows_extractor_companion.ps1` to pull the database and contacts via ADB, then transfer to Linux or macOS. See [docs/windows_documentation.md](docs/windows_documentation.md).
+The script runs on **Linux, macOS, and Windows** (Python 3.10+).
 
 > ⚠️ **Run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower.
 
@@ -91,8 +90,7 @@ Windows users can use `windows_extractor_companion.ps1` to pull the database and
 - **`wa-crypt-tools`** — used for encrypted backup decryption; installed automatically on first use
 - **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database
 - **iOS/iPadOS**: End-to-end encrypted backup must be **disabled**
-- **ADB** required for automatic retrieval (`--mode adb`).   
-  - Windows users use the companion script instead
+- **ADB** required for automatic retrieval (`--mode adb`)
 
 See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: E2E backup configuration, database extraction (Android and iOS), contacts pull, and locating your media folder.
 
@@ -137,7 +135,6 @@ The script is **safe to re-run** on an existing archive:
 
 ## Known Limitations
 
-- **Windows is not natively supported.** Windows users should use `windows_extractor_companion.ps1` to extract the database and contacts, then transfer to Linux or macOS to run `wa_media_archiver.py`.
 - Very old media is likely missing from disk even if present in the database. Use `missing_media_report.csv` to assist manual recovery.
 - Group names reflect the **current** name at time of DB export, not historical names.
 - Stickers are not archived in this version.
