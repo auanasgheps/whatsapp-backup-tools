@@ -112,7 +112,7 @@ Contacts are optional but strongly recommended — without them, folder names wi
 
 When using automatic retrieval (`--mode adb`), contacts are pulled automatically. No extra steps needed.
 
-For manual pull on Linux and macOS:
+For manual pull:
 
 ```bash
 adb shell content query \
