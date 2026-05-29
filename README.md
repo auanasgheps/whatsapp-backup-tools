@@ -101,15 +101,7 @@ python3 wa_media_archiver.py \
   --dry-run
 ```
 
-Full run:
-
-```bash
-python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp \
-  --output /path/to/output \
-  --contacts /path/to/wa_contacts
-```
+> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 
 See [docs/running-the-script.md](docs/running-the-script.md) for the full command reference, all usage examples, output files description, and restore mode.
 

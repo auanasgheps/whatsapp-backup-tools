@@ -3,23 +3,6 @@
 
 ## Command Reference
 
-```
-usage: wa_media_archiver.py [-h]
-                      [-msg MSGSTORE]
-                      [-e2e E2E_KEY]
-                      [-c CONTACTS]
-                      [-wa WA_ROOT]
-                      [--ios_backup PATH]
-                      [--ios_contacts PATH]
-                      [--business]
-                      -o OUTPUT
-                      [-l LOG]
-                      [-mode {adb,restore}]
-                      [--dry-run]
-                      [--limit N]
-                      [--since DATE]
-```
-
 | Argument | Required | Description |
 |---|---|---|
 | `-msg` / `--msgstore` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Not needed with `--ios_backup`. Defaults to `msgstore.db` in the current folder |
@@ -38,9 +21,37 @@ usage: wa_media_archiver.py [-h]
 
 ---
 
+## Line Continuation by Shell
+
+The examples below use `\` to split long commands across multiple lines. Replace it with the correct character for your shell:
+
+| Shell | Character |
+|---|---|
+| bash / zsh (Linux, macOS) | `\` |
+| PowerShell (Windows) | `` ` `` |
+| cmd.exe (Windows) | `^` |
+
+---
+
 ## Usage Examples
 
-#### Android — dry run first (always recommended)
+### Android
+
+#### ADB mode — automatic pull and decrypt (recommended)
+
+```bash
+python3 wa_media_archiver.py \
+  --mode adb \
+  --e2e your_cryptographic_key \
+  --wa_root /path/to/WhatsApp \
+  --output /path/to/output \
+  --dry-run
+```
+
+> 💡 The script pulls the encrypted database and contacts directly from the connected device and decrypts on the fly. No separate steps needed.
+
+#### Manual — decrypted database
+
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db \
@@ -50,16 +61,25 @@ python3 wa_media_archiver.py \
   --dry-run
 ```
 
-#### Android — full run
+#### Manual — encrypted database (script decrypts)
+
 ```bash
 python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db \
+  --msgstore /path/to/msgstore.db.crypt15 \
+  --e2e your_cryptographic_key \
   --wa_root /path/to/WhatsApp \
   --output /path/to/output \
-  --contacts /path/to/wa_contacts
+  --dry-run
 ```
 
-#### iOS — standard flow (backup read directly)
+> 💡 Even in dry run mode, decryption still occurs so the DB can be queried. The decrypted `msgstore.db` is written to disk regardless of `--dry-run`.
+
+---
+
+### iOS
+
+#### Standard flow — backup read directly (recommended)
+
 ```bash
 python3 wa_media_archiver.py \
   --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
@@ -69,79 +89,12 @@ python3 wa_media_archiver.py \
 
 > 💡 `--wa_root` and `--contacts` are not needed. The script extracts `ChatStorage.sqlite` and `ContactsV2.sqlite` directly from the backup.
 
-#### iOS — full run
-```bash
-python3 wa_media_archiver.py \
-  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
-  --output /path/to/output
-```
+---
 
-#### iOS — with explicit contacts file
-```bash
-python3 wa_media_archiver.py \
-  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
-  --ios_contacts /path/to/ContactsV2.sqlite \
-  --output /path/to/output
-```
-
-#### iOS — pre-extracted mode (advanced)
-```bash
-python3 wa_media_archiver.py \
-  --msgstore /path/to/ChatStorage.sqlite \
-  --wa_root /path/to/AppDomainGroup-group.net.whatsapp.WhatsApp.shared \
-  --ios_contacts /path/to/ContactsV2.sqlite \
-  --output /path/to/output
-```
-
-#### Manual decryption (Android, pre-decrypted file)
-
-```bash
-# Step 1: decrypt manually
-wadecrypt your_key msgstore.db.crypt15 msgstore.db
-
-# Step 2: run the script
-python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp \
-  --output /path/to/output \
-  --contacts /path/to/wa_contacts
-```
-
-#### Automatic decryption (script handles it)
-
-```bash
-python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db.crypt15 \
-  --e2e your_cryptographic_key \
-  --wa_root /path/to/WhatsApp \
-  --output /path/to/output \
-  --contacts /path/to/wa_contacts
-```
-
-#### Dry run with encrypted database
-
-```bash
-python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db.crypt15 \
-  --e2e your_cryptographic_key \
-  --wa_root /path/to/WhatsApp \
-  --output /path/to/output \
-  --dry-run
-```
-
-> 💡 Even in dry run mode, decryption still occurs so the DB can be queried. The decrypted `msgstore.db` is written to disk as a side effect regardless of `--dry-run`.
+### Advanced
 
 #### Test run — recent files only
-```bash
-python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp \
-  --output /path/to/output \
-  --since 2025-01-01 \
-  --dry-run
-```
 
-#### Test run — recent files, capped row count
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db \
@@ -152,17 +105,18 @@ python3 wa_media_archiver.py \
   --dry-run
 ```
 
-#### Row limit only (balanced sample across all time)
+#### iOS — pre-extracted mode
+
 ```bash
 python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp \
-  --output /path/to/output \
-  --limit 250 \
-  --dry-run
+  --msgstore /path/to/ChatStorage.sqlite \
+  --wa_root /path/to/AppDomainGroup-group.net.whatsapp.WhatsApp.shared \
+  --ios_contacts /path/to/ContactsV2.sqlite \
+  --output /path/to/output
 ```
 
 #### Restore original Media/ folder structure
+
 ```bash
 python3 wa_media_archiver.py \
   --mode restore \
@@ -191,12 +145,6 @@ python3 wa_media_archiver.py \
 Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly inside the archive folder, without needing the original device or database. This is useful when re-importing media into tools that expect the original WhatsApp layout.
 
 > ⚠️ **Android archives only.** iOS media is stored at `Message/Media/...` paths that have no equivalent reconstruction target outside the iPhone backup format. Running restore mode on an iOS archive exits with a clear error.
-
-```bash
-python3 wa_media_archiver.py \
-  --mode restore \
-  --output /path/to/output
-```
 
 The reconstructed tree is written to `<output>/Media/`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
 
