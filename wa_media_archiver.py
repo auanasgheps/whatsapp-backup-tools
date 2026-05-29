@@ -11,6 +11,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import io
+import zipfile
 import zlib
 from datetime import datetime
 
@@ -20,13 +22,13 @@ import backup_reader
 import ios_handler
 
 # ==============================================================================
-# WA Media Archiver — v0.20
+# WA Media Archiver
 # Archives WhatsApp media into a structured folder hierarchy using msgstore.db
 # (Android) or ChatStorage.sqlite (iOS). Run on a backup copy of your data.
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.24'
+__version__ = '0.25'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1046,8 +1048,13 @@ def main():
         key = KeyFactory.new(args.e2e_key)
         decrypted = db.decrypt(key, raw)
         _SQLITE_MAGIC = b'SQLite format 3'
+        _ZIP_MAGIC = b'PK\x03\x04'
         if decrypted[:15] == _SQLITE_MAGIC:
             output_file = decrypted
+        elif decrypted[:3] == _ZIP_MAGIC:
+            with zipfile.ZipFile(io.BytesIO(decrypted)) as zf:
+                db_name = next(n for n in zf.namelist() if n.endswith('.db'))
+                output_file = zf.read(db_name)
         else:
             output_file = zlib.decompress(decrypted)
         args.msgstore = os.path.join(args.output, 'msgstore.db')
