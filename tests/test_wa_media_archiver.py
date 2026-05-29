@@ -12,7 +12,9 @@ import logging
 import os
 import plistlib
 import sqlite3
+import subprocess
 import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -51,6 +53,12 @@ _android_spec = _ilu.spec_from_file_location(
 )
 android_handler = _ilu.module_from_spec(_android_spec)
 _android_spec.loader.exec_module(android_handler)
+
+_adb_spec = _ilu.spec_from_file_location(
+    "adb_extractor", os.path.join(_ROOT, "adb_extractor.py")
+)
+adb = _ilu.module_from_spec(_adb_spec)
+_adb_spec.loader.exec_module(adb)
 
 
 # ---------------------------------------------------------------------------
@@ -1511,3 +1519,91 @@ class TestBuildIosNumberMap:
         conn = sqlite3.connect(":memory:")
         result = ios.build_ios_number_map(conn.cursor(), logger)
         assert result == {}
+
+
+# ===========================================================================
+# adb_extractor
+# ===========================================================================
+
+class TestCheckAdb:
+    def test_found(self, logger):
+        with patch("adb_extractor.shutil.which", return_value="/usr/bin/adb"):
+            assert adb.check_adb(logger) is True
+
+    def test_not_found(self, logger):
+        with patch("adb_extractor.shutil.which", return_value=None):
+            assert adb.check_adb(logger) is False
+
+
+class TestCheckDeviceConnected:
+    def _make_result(self, stdout):
+        r = MagicMock()
+        r.stdout = stdout.encode()
+        return r
+
+    def test_device_connected(self, logger):
+        output = "List of devices attached\nemulator-5554\tdevice\n"
+        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+            assert adb.check_device_connected(logger) is True
+
+    def test_no_devices(self, logger):
+        output = "List of devices attached\n"
+        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+            assert adb.check_device_connected(logger) is False
+
+    def test_unauthorized_not_counted(self, logger):
+        output = "List of devices attached\n98abc123\tunauthorized\n"
+        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+            assert adb.check_device_connected(logger) is False
+
+    def test_adb_failure(self, logger):
+        with patch("adb_extractor.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"error")):
+            assert adb.check_device_connected(logger) is False
+
+
+class TestPullMsgstore:
+    def test_regular_path(self, logger, tmp_path):
+        with patch("adb_extractor.subprocess.run") as mock_run:
+            result = adb.pull_msgstore(str(tmp_path), business=False, logger=logger)
+            call_args = mock_run.call_args[0][0]
+            assert 'com.whatsapp/WhatsApp' in call_args[2]
+            assert 'com.whatsapp.w4b' not in call_args[2]
+        assert result == str(tmp_path / 'msgstore.db.crypt15') or \
+               result == os.path.join(str(tmp_path), 'msgstore.db.crypt15')
+
+    def test_business_path(self, logger, tmp_path):
+        with patch("adb_extractor.subprocess.run") as mock_run:
+            adb.pull_msgstore(str(tmp_path), business=True, logger=logger)
+            call_args = mock_run.call_args[0][0]
+            assert 'com.whatsapp.w4b' in call_args[2]
+
+    def test_failure_raises(self, logger, tmp_path):
+        with patch("adb_extractor.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"fail")):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb.pull_msgstore(str(tmp_path), logger=logger)
+
+
+class TestPullContacts:
+    def test_filters_whatsapp_lines(self, logger, tmp_path):
+        raw = (
+            "Row: 0 display_name=Alice, data1=391234567890@s.whatsapp.net\n"
+            "Row: 1 display_name=Bob, data1=bob@gmail.com\n"
+            "Row: 2 display_name=Carol, data1=390987654321@s.whatsapp.net\n"
+        )
+        mock_result = MagicMock()
+        mock_result.stdout = raw.encode()
+        with patch("adb_extractor.subprocess.run", return_value=mock_result):
+            dest = adb.pull_contacts(str(tmp_path), logger=logger)
+
+        content = open(dest, encoding='utf-8').read()
+        assert '@s.whatsapp.net' in content
+        assert 'bob@gmail.com' not in content
+        assert content.count('@s.whatsapp.net') == 2
+
+    def test_failure_raises(self, logger, tmp_path):
+        with patch("adb_extractor.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"fail")):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb.pull_contacts(str(tmp_path), logger=logger)

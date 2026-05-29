@@ -1,56 +1,47 @@
-# WA Media Archiver — Windows Companion Script
+# WA Media Archiver — Windows Guide
 
-> The main archiver (`wa_media_archiver.py`) runs on Linux and macOS. This companion script handles the extraction step on Windows so you can transfer the files to your Linux or macOS machine and proceed normally.
+> `wa_media_archiver.py` runs natively on Windows. No companion script is needed.
 
 ---
 
 ## Prerequisites
 
+- Python 3.10+
 - [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) (ADB) installed and in PATH
 - USB Debugging enabled on your Android device, and the device authorized on this computer
-- Python 3.x on Windows — only required if decrypting on Windows with `-DecryptDB`. Optional, but recommended.
 
 ---
 
-## What the Script Does
+## Running on Windows
+
+Use the same `--mode adb` workflow as on Linux or macOS. The script handles pulling the database and contacts from the device, decrypting, and archiving in one step:
+
+```powershell
+python wa_media_archiver.py --mode adb --e2e_key "your_key" --wa_root "C:\path\to\WhatsApp" --output "C:\path\to\archive"
+```
+
+For WhatsApp Business:
+
+```powershell
+python wa_media_archiver.py --mode adb --business --e2e_key "your_key" --wa_root "C:\path\to\WhatsApp Business" --output "C:\path\to\archive"
+```
+
+The `--wa_root` folder is your WhatsApp media folder (the one containing the `Media/` subfolder). You can copy this from the device in advance, or mount it directly if your device is accessible as a drive.
+
+---
+
+## What happens when you run `--mode adb`
 
 | Step | Action |
 |---|---|
-| Prerequisites | Checks ADB is installed and a device is connected |
-| Database | Pulls `msgstore.db.crypt15` from the phone |
+| ADB check | Verifies `adb` is on PATH and a device is connected |
+| Database | Pulls `msgstore.db.crypt15` from the phone into a temp folder |
 | Contacts | Pulls and filters WhatsApp contacts via ADB content provider |
-| Decryption | Optional — decrypts on Windows if `-DecryptDB` and `-E2EKey` are provided |
-| Summary | Prints the exact `wa_media_archiver.py` command to run on Linux or macOS |
+| Decryption | Decrypts the database using the provided `--e2e_key` |
+| Archive | Copies media into the structured output folder |
 
 ---
 
-## Usage
+## Network shares
 
-```powershell
-# Pull only — decrypt on Linux
-.\windows_extractor_companion.ps1
-
-# Pull to a custom output folder
-.\windows_extractor_companion.ps1 -OutputDir "C:\Users\You\Desktop\wa_backup"
-
-# Pull and decrypt on Windows
-.\windows_extractor_companion.ps1 -DecryptDB -E2EKey "your_cryptographic_key"
-```
-
-> ⚠️ PowerShell uses single-dash flags: `-DecryptDB`, not `--DecryptDB`.
-
-| Parameter | Required | Description |
-|---|---|---|
-| `-OutputDir` | No | Folder for pulled files. Defaults to `.\wa_pull` |
-| `-DecryptDB` | No | Decrypt the pulled `.crypt15` file on Windows |
-| `-E2EKey` | If `-DecryptDB` | Your cryptographic key for decryption |
-
----
-
-## Next Steps
-
-After the script completes:
-
-1. Transfer the output folder to your Linux or macOS machine
-2. Transfer your WhatsApp Media folder to Linux or macOS as well
-3. Run `wa_media_archiver.py` on Linux or macOS — the script prints the exact command at the end
+If your output folder or `--wa_root` is on a network share (e.g. `\\server\share\...`), the script will warn you. Network shares may cause slower performance and may not preserve file timestamps correctly. A local path is recommended when possible.
