@@ -127,7 +127,9 @@ SELECT * FROM (
             NULL                                                           AS mime_type,
             CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
             cs.ZPARTNERNAME                                                AS chat_subject,
-            SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID, '@') - 1)            AS sender,
+            CASE WHEN INSTR(m.ZFROMJID, '@') > 0
+                 THEN SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID, '@') - 1)
+                 ELSE m.ZFROMJID END                                        AS sender,
             m.ZISFROMME                                                    AS key_from_me,
             mi.ZMEDIAURL                                                   AS message_url,
             CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
@@ -152,7 +154,9 @@ SELECT * FROM (
             NULL                                                           AS mime_type,
             CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
             NULL                                                           AS chat_subject,
-            SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1)    AS sender,
+            CASE WHEN INSTR(cs.ZCONTACTJID, '@') > 0
+                 THEN SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1)
+                 ELSE cs.ZCONTACTJID END                                    AS sender,
             m.ZISFROMME                                                    AS key_from_me,
             mi.ZMEDIAURL                                                   AS message_url,
             CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
@@ -186,8 +190,12 @@ def build_ios_number_map(cursor: sqlite3.Cursor,
     try:
         cursor.execute("""
             SELECT
-                SUBSTR(cs_old.ZCONTACTJID, 1, INSTR(cs_old.ZCONTACTJID, '@') - 1),
-                SUBSTR(cs_new.ZCONTACTJID, 1, INSTR(cs_new.ZCONTACTJID, '@') - 1)
+                CASE WHEN INSTR(cs_old.ZCONTACTJID, '@') > 0
+                     THEN SUBSTR(cs_old.ZCONTACTJID, 1, INSTR(cs_old.ZCONTACTJID, '@') - 1)
+                     ELSE cs_old.ZCONTACTJID END,
+                CASE WHEN INSTR(cs_new.ZCONTACTJID, '@') > 0
+                     THEN SUBSTR(cs_new.ZCONTACTJID, 1, INSTR(cs_new.ZCONTACTJID, '@') - 1)
+                     ELSE cs_new.ZCONTACTJID END
             FROM ZWACHATSESSION cs_old
             JOIN ZWACHATSESSION cs_new
               ON  cs_old.ZCONTACTABID = cs_new.ZCONTACTABID
