@@ -881,24 +881,24 @@ class TestSyncFolderNames:
         contacts_root = tmp_path / 'Contacts'
         contacts_root.mkdir()
         (contacts_root / 'Alice (00111)').mkdir()
-        folder_index = {'111': 'Alice (00111)'}
+        folder_index = {'111': ('Alice (00111)', 'Alice')}
         contacts = {'111': 'Alice'}
         result = wa.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
-        assert result['111'] == 'Alice (00111)'
+        assert result['111'][0] == 'Alice (00111)'
         assert (contacts_root / 'Alice (00111)').exists()
 
     def test_changed_name_renames_folder_on_disk(self, tmp_path, logger):
         contacts_root = tmp_path / 'Contacts'
         contacts_root.mkdir()
         (contacts_root / 'OldName (00111)').mkdir()
-        folder_index = {'111': 'OldName (00111)'}
+        folder_index = {'111': ('OldName (00111)', 'OldName')}
         contacts = {'111': 'NewName'}
         result = wa.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
-        assert result['111'] == 'NewName (00111)'
+        assert result['111'][0] == 'NewName (00111)'
         assert not (contacts_root / 'OldName (00111)').exists()
         assert (contacts_root / 'NewName (00111)').exists()
 
@@ -907,22 +907,22 @@ class TestSyncFolderNames:
         contacts_root.mkdir()
         (contacts_root / 'OldName (00111)').mkdir()
         (contacts_root / 'NewName (00111)').mkdir()  # target already exists
-        folder_index = {'111': 'OldName (00111)'}
+        folder_index = {'111': ('OldName (00111)', 'OldName')}
         contacts = {'111': 'NewName'}
         result = wa.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
         # Index must stay on old name — otherwise the next run routes media wrong
-        assert result['111'] == 'OldName (00111)'
+        assert result['111'][0] == 'OldName (00111)'
 
     def test_name_changed_no_folder_on_disk_index_updated(self, tmp_path, logger):
         # Name changed but folder has never been created; index should update anyway
-        folder_index = {'111': 'OldName (00111)'}
+        folder_index = {'111': ('OldName (00111)', 'OldName')}
         contacts = {'111': 'NewName'}
         result = wa.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
-        assert result['111'] == 'NewName (00111)'
+        assert result['111'][0] == 'NewName (00111)'
 
     def test_new_contact_registered_in_index(self, tmp_path, logger):
         result = wa.sync_folder_names(
@@ -939,7 +939,7 @@ class TestSyncFolderNames:
         )
         # Registered under canonical '222', folder uses canonical number
         assert '222' in result
-        assert result['222'] == 'Alice (00222)'
+        assert result['222'][0] == 'Alice (00222)'
 
 
 class TestSyncGroupNames:
@@ -1287,7 +1287,7 @@ class TestValidateWaRoot:
 class TestContactPersistence:
     def test_save_and_load_round_trip(self, tmp_path):
         conn = wa.open_archive_db(str(tmp_path))
-        index = {"391234567890": "Alice (00391234567890)"}
+        index = {"391234567890": ("Alice (00391234567890)", "Alice")}
         wa.save_contacts_to_db(conn, index)
         conn.commit()
         loaded = wa.load_contacts_from_db(conn)
@@ -1296,12 +1296,12 @@ class TestContactPersistence:
 
     def test_update_existing_contact(self, tmp_path):
         conn = wa.open_archive_db(str(tmp_path))
-        wa.save_contacts_to_db(conn, {"111": "Old Name (00111)"})
-        wa.save_contacts_to_db(conn, {"111": "New Name (00111)"})
+        wa.save_contacts_to_db(conn, {"111": ("Old Name (00111)", "Old Name")})
+        wa.save_contacts_to_db(conn, {"111": ("New Name (00111)", "New Name")})
         conn.commit()
         loaded = wa.load_contacts_from_db(conn)
         conn.close()
-        assert loaded["111"] == "New Name (00111)"
+        assert loaded["111"] == ("New Name (00111)", "New Name")
 
 
 class TestGroupPersistence:
