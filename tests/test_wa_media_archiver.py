@@ -200,7 +200,7 @@ class TestBuildQuery:
 
     def test_limit_clause_included(self):
         query = android_handler.build_query(limit=100, since_ms=None)
-        assert "LIMIT 100" in query
+        assert "LIMIT 50" in query  # N//2 per block
 
     def test_no_limit_when_none(self):
         query = android_handler.build_query(limit=None, since_ms=None)
@@ -215,11 +215,10 @@ class TestBuildQuery:
         assert query.count("Media/WhatsApp Documents/%") == 2
 
     def test_limit_applies_to_combined_result(self):
-        # LIMIT must appear once, outside both UNION ALL blocks (total cap)
+        # LIMIT N//2 must appear twice (once per block), not on the outer wrapper
         query = android_handler.build_query(limit=50, since_ms=None)
-        # The outer LIMIT should be last in the query, not duplicated
-        assert query.count("LIMIT 50") == 1
-        assert query.strip().endswith("LIMIT 50")
+        assert query.count("LIMIT 25") == 2
+        assert not query.strip().endswith("LIMIT 50")
 
     def test_group_subjects_query_has_no_date_filter(self):
         query = android_handler.build_group_subjects_query()
@@ -542,7 +541,7 @@ class TestBuildIosQuery:
 
     def test_limit_clause_included(self):
         query = ios.build_ios_query(limit=50, since_ms=None)
-        assert 'LIMIT 50' in query
+        assert 'LIMIT 25' in query  # N//2 per block
 
     def test_no_limit_when_none(self):
         query = ios.build_ios_query(limit=None, since_ms=None)

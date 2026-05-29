@@ -109,7 +109,7 @@ def build_ios_query(limit: int | None, since_ms: int | None) -> str:
         message_url  — ZWAMEDIAITEM.ZMEDIAURL
         media_name   — ZWAMEDIAITEM.ZTITLE (original filename for documents)
     """
-    limit_clause = f"LIMIT {limit}" if limit else ""
+    block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
     if since_ms is not None:
         ios_since = (since_ms / 1000.0) - APPLE_EPOCH_OFFSET
         since_clause = f"AND m.ZMESSAGEDATE >= {ios_since}"
@@ -141,6 +141,7 @@ SELECT * FROM (
           AND mi.ZMEDIALOCALPATH IS NOT NULL
           AND cs.ZPARTNERNAME IS NOT NULL
           {since_clause}
+        {block_limit_clause}
     )
 
     UNION ALL
@@ -167,9 +168,9 @@ SELECT * FROM (
         WHERE cs.ZGROUPINFO IS NULL
           AND mi.ZMEDIALOCALPATH IS NOT NULL
           {since_clause}
+        {block_limit_clause}
     )
 )
-{limit_clause}
 """
 
 

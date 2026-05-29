@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.26'
+__version__ = '0.27'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1076,8 +1076,8 @@ def main():
             raise SystemExit(1)
         logger.info(f"SINCE filter active: on or after {args.since}.")
     if args.limit:
-        logger.info(f"LIMIT active: {args.limit} rows per query block "
-                    f"({args.limit * 2} max total rows).")
+        logger.info(f"LIMIT active: {args.limit // 2} rows per chat type "
+                    f"({args.limit} max total rows).")
 
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()
