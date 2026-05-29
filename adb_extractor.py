@@ -35,7 +35,7 @@ def check_device_connected(logger) -> bool:
         return False
 
     lines = result.stdout.decode(errors='replace').splitlines()
-    connected = [l for l in lines if l.strip().endswith('device')]
+    connected = [line for line in lines if line.strip().endswith('device')]
     if connected:
         return True
 
@@ -90,7 +90,7 @@ def pull_contacts(output_dir: str, logger=None) -> str:
         raise
 
     lines = result.stdout.decode(errors='replace').splitlines()
-    wa_lines = [l for l in lines if '@s.whatsapp.net' in l]
+    wa_lines = [line for line in lines if '@s.whatsapp.net' in line]
     with open(dest, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(wa_lines))
+        f.write('\n'.join(wa_lines) + '\n')
     return dest
