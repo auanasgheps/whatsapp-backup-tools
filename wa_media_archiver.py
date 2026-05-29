@@ -11,8 +11,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import io
-import zipfile
 import zlib
 from datetime import datetime
 
@@ -28,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.25'
+__version__ = '0.26'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1043,20 +1041,13 @@ def main():
 
         with open(args.msgstore, 'rb') as msg:
             db = DatabaseFactory.from_file(msg)
-            msg.seek(0)
-            raw = msg.read()
+            raw = msg.read()  # payload only — from_file already consumed the header
         key = KeyFactory.new(args.e2e_key)
         decrypted = db.decrypt(key, raw)
-        _SQLITE_MAGIC = b'SQLite format 3'
-        _ZIP_MAGIC = b'PK\x03\x04'
-        if decrypted[:15] == _SQLITE_MAGIC:
-            output_file = decrypted
-        elif decrypted[:3] == _ZIP_MAGIC:
-            with zipfile.ZipFile(io.BytesIO(decrypted)) as zf:
-                db_name = next(n for n in zf.namelist() if n.endswith('.db'))
-                output_file = zf.read(db_name)
-        else:
+        try:
             output_file = zlib.decompress(decrypted)
+        except zlib.error:
+            output_file = decrypted  # already plain SQLite (no zlib wrapper)
         args.msgstore = os.path.join(args.output, 'msgstore.db')
         if os.path.exists(args.msgstore):
             logger.warning(f"Overwriting existing {args.msgstore} with decrypted database.")
