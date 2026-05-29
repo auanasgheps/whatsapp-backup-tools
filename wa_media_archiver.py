@@ -15,18 +15,19 @@ import tempfile
 import zlib
 from datetime import datetime
 
+import adb_extractor
 import android_handler
 import backup_reader
 import ios_handler
 
 # ==============================================================================
-# WA Media Archiver — v0.18
+# WA Media Archiver — v0.19
 # Archives WhatsApp media into a structured folder hierarchy using msgstore.db
 # (Android) or ChatStorage.sqlite (iOS). Run on a backup copy of your data.
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.18'
+__version__ = '0.19'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -919,6 +920,13 @@ def main():
     log_path = args.log or os.path.join(args.output, 'wa_media_archiver.log')
     logger = setup_logging(log_path)
 
+    for _label, _path in [('--output', args.output), ('--wa_root', getattr(args, 'wa_root', None))]:
+        if _path and (_path.startswith('\\\\') or _path.startswith('//')):
+            logger.warning(
+                f"{_label} appears to be a network share ({_path}). "
+                "Performance may be degraded and file timestamps may not be preserved."
+            )
+
     if args.mode == 'restore':
         logger.info(f"=== WhatsApp Archiver v{__version__} started (restore mode) ===")
         if args.dry_run:
@@ -992,55 +1000,17 @@ def main():
     contacts = {}
 
     if args.mode == 'adb':
-        if not shutil.which('adb'):
-            logger.error(
-                "ADB not found. Install Android SDK Platform Tools and ensure "
-                "'adb' is on your PATH, then retry."
-            )
+        if not adb_extractor.check_adb(logger):
             raise SystemExit(1)
-
-        logger.info("Pulling msgstore backup via ADB...")
-        if args.business:
-            wa_db_adb_path = ('/storage/emulated/0/Android/media/com.whatsapp.w4b'
-                              '/WhatsApp Business/Databases/msgstore.db.crypt15')
-        else:
-            wa_db_adb_path = ('/storage/emulated/0/Android/media/com.whatsapp'
-                              '/WhatsApp/Databases/msgstore.db.crypt15')
+        if not adb_extractor.check_device_connected(logger):
+            raise SystemExit(1)
+        tmp_dir = tempfile.mkdtemp(prefix='wa_adb_')
+        atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
         try:
-            subprocess.run(
-                ['adb', 'pull', wa_db_adb_path, 'msgstore.db.crypt15'],
-                check=True, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                f"ADB pull failed.\n"
-                f"  {e.stderr.decode(errors='replace').strip()}\n"
-                f"  Make sure the device is connected, USB debugging is enabled, "
-                f"and the connection is authorised on the phone."
-            )
+            args.msgstore = adb_extractor.pull_msgstore(tmp_dir, args.business, logger)
+            args.contacts = adb_extractor.pull_contacts(tmp_dir, logger)
+        except subprocess.CalledProcessError:
             raise SystemExit(1)
-        args.msgstore = 'msgstore.db.crypt15'
-
-        logger.info("Pulling contacts via ADB...")
-        try:
-            result = subprocess.run(
-                ['adb', 'shell', 'content', 'query',
-                 '--uri', 'content://com.android.contacts/data',
-                 '--projection', 'display_name:data1'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                f"ADB contacts query failed.\n"
-                f"  {e.stderr.decode(errors='replace').strip()}"
-            )
-            raise SystemExit(1)
-        tmp = tempfile.NamedTemporaryFile(delete=False, prefix='wa_contacts_', mode='wb')
-        tmp.write(result.stdout)
-        tmp.close()
-        args.contacts = tmp.name
-        atexit.register(os.unlink, tmp.name)
 
     if args.contacts:
         if args.ios_backup:
