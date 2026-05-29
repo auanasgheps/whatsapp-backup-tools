@@ -559,6 +559,52 @@ class TestBuildIosQuery:
         query = ios.build_ios_query(None, None)
         assert 'ZMESSAGEDATE >=' not in query
 
+    def test_group_sender_jid_without_at_uses_full_jid(self):
+        # SUBSTR(jid, 1, INSTR(jid,'@')-1) returns '' when '@' is absent.
+        # The CASE guard must fall back to the full JID instead.
+        conn = _make_ios_msgstore()
+        conn.executescript("""
+            INSERT INTO ZWACHATSESSION VALUES (1, NULL, 1, 'Group A');
+            INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 'nojid');
+        """)
+        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        assert len(rows) == 1
+        sender = rows[0][6]  # sender column
+        assert sender == 'nojid'
+
+    def test_1to1_sender_jid_without_at_uses_full_jid(self):
+        conn = _make_ios_msgstore()
+        conn.executescript("""
+            INSERT INTO ZWACHATSESSION VALUES (1, 'nojid', NULL, NULL);
+            INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL);
+        """)
+        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        assert len(rows) == 1
+        sender = rows[0][6]  # sender column
+        assert sender == 'nojid'
+
+    def test_group_sender_normal_jid_strips_at_suffix(self):
+        conn = _make_ios_msgstore()
+        conn.executescript("""
+            INSERT INTO ZWACHATSESSION VALUES (1, NULL, 1, 'Group A');
+            INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, '447700900123@s.whatsapp.net');
+        """)
+        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        assert rows[0][6] == '447700900123'
+
+    def test_1to1_sender_normal_jid_strips_at_suffix(self):
+        conn = _make_ios_msgstore()
+        conn.executescript("""
+            INSERT INTO ZWACHATSESSION VALUES (1, '447700900456@s.whatsapp.net', NULL, NULL);
+            INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL);
+        """)
+        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        assert rows[0][6] == '447700900456'
+
 
 # ===========================================================================
 # iOS: build_ios_group_subjects_query structural checks
