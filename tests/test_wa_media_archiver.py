@@ -805,8 +805,6 @@ class TestExtractEncrypted:
         """Return a mock EncryptedBackup that extracts fake files."""
         import unittest.mock as mock
 
-        media_dir = tmp_path / 'media'
-
         def fake_extract_file(*, relative_path, domain_like, output_filename):
             if relative_path == 'ChatStorage.sqlite':
                 with open(output_filename, 'wb') as f:
@@ -814,40 +812,55 @@ class TestExtractEncrypted:
             elif relative_path == 'ContactsV2.sqlite':
                 with open(output_filename, 'wb') as f:
                     f.write(b'CONTACTS')
+            elif relative_path == 'Message/Media/WhatsApp Images/IMG001.jpg':
+                with open(output_filename, 'wb') as f:
+                    f.write(b'MEDIAFILE')
             else:
                 raise FileNotFoundError(relative_path)
-
-        def fake_extract_files(*, relative_paths_like, domain_like, output_folder,
-                               preserve_folders):
-            os.makedirs(output_folder, exist_ok=True)
-            img_dir = os.path.join(output_folder, 'Message', 'Media',
-                                   'WhatsApp Images')
-            os.makedirs(img_dir, exist_ok=True)
-            with open(os.path.join(img_dir, 'IMG001.jpg'), 'wb') as f:
-                f.write(b'JPEGDATA')
-            return 1
 
         mock_backup = mock.MagicMock()
         mock_backup.test_decryption.return_value = True
         mock_backup.extract_file.side_effect = fake_extract_file
-        mock_backup.extract_files.side_effect = fake_extract_files
         return mock_backup
 
-    def test_returns_manifest_map_and_msgstore(self, tmp_path, logger):
+    def test_returns_resolver_and_msgstore(self, tmp_path, logger):
         import unittest.mock as mock
         mock_backup = self._make_mock_backup(tmp_path)
         output_dir = tmp_path / 'output'
 
         with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
-            manifest_map, msgstore_path, contacts_path = br.extract_encrypted(
+            msgstore_path, contacts_path, resolver = br.extract_encrypted(
                 str(tmp_path / 'backup'), 'secret', str(output_dir),
                 None, False, logger,
             )
 
         assert os.path.isfile(msgstore_path)
         assert msgstore_path == str(output_dir / 'ChatStorage.sqlite')
-        assert 'Message/Media/WhatsApp Images/IMG001.jpg' in manifest_map
         assert contacts_path is not None
+        # Resolver decrypts on demand
+        media_path = resolver('Message/Media/WhatsApp Images/IMG001.jpg')
+        assert media_path is not None
+        assert os.path.isfile(media_path)
+        # Second call returns the cached path without re-decrypting
+        mock_backup.extract_file.reset_mock()
+        media_path2 = resolver('Message/Media/WhatsApp Images/IMG001.jpg')
+        assert media_path2 == media_path
+        mock_backup.extract_file.assert_not_called()
+
+    def test_resolver_returns_none_for_missing_file(self, tmp_path, logger):
+        import unittest.mock as mock
+        mock_backup = self._make_mock_backup(tmp_path)
+        output_dir = tmp_path / 'output'
+
+        with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
+            _, _, resolver = br.extract_encrypted(
+                str(tmp_path / 'backup'), 'secret', str(output_dir),
+                None, False, logger,
+            )
+
+        # 'nonexistent.jpg' triggers FileNotFoundError in fake_extract_file
+        result = resolver('Message/Media/nonexistent.jpg')
+        assert result is None
 
     def test_wrong_password_exits(self, tmp_path, logger):
         import unittest.mock as mock
@@ -881,7 +894,7 @@ class TestExtractEncrypted:
         fake_contacts = str(tmp_path / 'my_contacts.sqlite')
 
         with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
-            _, _, contacts_path = br.extract_encrypted(
+            _, contacts_path, _ = br.extract_encrypted(
                 str(tmp_path / 'backup'), 'secret', str(output_dir),
                 fake_contacts, False, logger,
             )

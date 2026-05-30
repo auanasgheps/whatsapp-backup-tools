@@ -973,7 +973,7 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
             raise SystemExit(1)
 
         if is_encrypted:
-            manifest_map, msgstore_path, ios_contacts_path = backup_reader.extract_encrypted(
+            msgstore_path, ios_contacts_path, media_resolver = backup_reader.extract_encrypted(
                 args.ios_backup, args.ios_password, args.output,
                 args.ios_contacts, args.business, logger,
             )
@@ -982,10 +982,10 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
                 args.ios_backup, args.output,
                 args.ios_contacts, args.business, logger,
             )
+            media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
 
         args.msgstore = msgstore_path
         platform = 'ios'
-        media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
 
     # -------------------------------------------------------------------------
     # wa_root mode — Android or iOS pre-extracted
