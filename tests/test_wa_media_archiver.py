@@ -446,6 +446,8 @@ def _make_ios_msgstore(missing_table=None, missing_col=None):
             'ZCONTACTJID TEXT',
             'ZGROUPINFO INTEGER',
             'ZPARTNERNAME TEXT',
+            'ZCONTACTABID INTEGER',
+            'ZLASTMESSAGEDATE REAL',
         ],
         'ZWAMEDIAITEM': [
             'Z_PK INTEGER PRIMARY KEY',
@@ -569,7 +571,7 @@ class TestBuildIosQuery:
         # ZMEMBERJID with no '@' returns the full JID as sender.
         conn = _make_ios_msgstore()
         conn.executescript("""
-            INSERT INTO ZWACHATSESSION VALUES (1, NULL, 1, 'Group A');
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, NULL, 1, 'Group A');
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, 'nojid');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL, NULL);
@@ -582,7 +584,7 @@ class TestBuildIosQuery:
     def test_1to1_sender_jid_without_at_uses_full_jid(self):
         conn = _make_ios_msgstore()
         conn.executescript("""
-            INSERT INTO ZWACHATSESSION VALUES (1, 'nojid', NULL, NULL);
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, 'nojid', NULL, NULL);
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL, NULL);
         """)
@@ -594,7 +596,7 @@ class TestBuildIosQuery:
     def test_group_sender_normal_jid_strips_at_suffix(self):
         conn = _make_ios_msgstore()
         conn.executescript("""
-            INSERT INTO ZWACHATSESSION VALUES (1, NULL, 1, 'Group A');
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, NULL, 1, 'Group A');
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL, NULL);
@@ -605,7 +607,7 @@ class TestBuildIosQuery:
     def test_1to1_sender_normal_jid_strips_at_suffix(self):
         conn = _make_ios_msgstore()
         conn.executescript("""
-            INSERT INTO ZWACHATSESSION VALUES (1, '447700900456@s.whatsapp.net', NULL, NULL);
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '447700900456@s.whatsapp.net', NULL, NULL);
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL, NULL);
         """)
@@ -1715,13 +1717,13 @@ def _make_ios_sessions_db(pairs):
     ts = 1000.0
     for old_jid, new_jid, abid in pairs:
         conn.execute(
-            "INSERT INTO ZWACHATSESSION VALUES (?, ?, NULL, ?, ?)",
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTABID, ZLASTMESSAGEDATE) VALUES (?, ?, ?, ?)",
             (pk, old_jid, abid, ts)
         )
         pk += 1
         ts += 100.0
         conn.execute(
-            "INSERT INTO ZWACHATSESSION VALUES (?, ?, NULL, ?, ?)",
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTABID, ZLASTMESSAGEDATE) VALUES (?, ?, ?, ?)",
             (pk, new_jid, abid, ts)
         )
         pk += 1
