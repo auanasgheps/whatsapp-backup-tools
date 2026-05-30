@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.32'
+__version__ = '0.33'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -890,6 +890,11 @@ def parse_args() -> argparse.Namespace:
                         metavar='PATH',
                         help='Path to iPhone backup directory (contains Manifest.db). '
                              'Mutually exclusive with --wa_root for iOS.')
+    parser.add_argument('--ios_password',
+                        default=None,
+                        metavar='PASSWORD',
+                        help='Password for an encrypted iPhone backup. '
+                             'Only needed when the backup is encrypted.')
     parser.add_argument('--ios_contacts',
                         default=None,
                         metavar='PATH',
@@ -960,45 +965,25 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
     # iOS backup mode — read directly from the iPhone backup
     # -------------------------------------------------------------------------
     if args.ios_backup:
-        if backup_reader.detect_encrypted(args.ios_backup, logger):
+        is_encrypted = backup_reader.detect_encrypted(args.ios_backup, logger)
+        if is_encrypted and not args.ios_password:
             logger.error(
-                "Your iPhone backup is encrypted. Open Finder (macOS) or "
-                "Apple Devices (Windows), disable backup encryption, create a "
-                "new backup, then re-run."
+                "Your iPhone backup is encrypted. Re-run with --ios_password <password>."
             )
             raise SystemExit(1)
 
-        logger.info("Building manifest map from backup...")
-        ios_domain = (backup_reader._WA_BUSINESS_DOMAIN if args.business
-                      else backup_reader._WA_DOMAIN)
-        manifest_map = backup_reader.build_manifest_map(args.ios_backup, logger, domain=ios_domain)
-        if not manifest_map:
-            logger.warning(
-                f"Manifest map is empty — no WhatsApp files found in the backup at: "
-                f"{args.ios_backup}\n"
-                f"  Make sure --ios_backup points to the backup root directory "
-                f"(the folder that contains Manifest.db), and that the backup "
-                f"includes WhatsApp data."
+        if is_encrypted:
+            manifest_map, msgstore_path, ios_contacts_path = backup_reader.extract_encrypted(
+                args.ios_backup, args.ios_password, args.output,
+                args.ios_contacts, args.business, logger,
             )
         else:
-            logger.info(f"Manifest map built: {len(manifest_map)} WhatsApp file(s).")
+            manifest_map, msgstore_path, ios_contacts_path = backup_reader.extract_plaintext(
+                args.ios_backup, args.output,
+                args.ios_contacts, args.business, logger,
+            )
 
-        logger.info("Extracting ChatStorage.sqlite from backup...")
-        tmp_msgstore = backup_reader.extract_to_temp(manifest_map, 'ChatStorage.sqlite', logger)
-        atexit.register(os.unlink, tmp_msgstore)
-        args.msgstore = tmp_msgstore
-
-        if args.ios_contacts:
-            ios_contacts_path = args.ios_contacts
-        elif manifest_map.get('ContactsV2.sqlite'):
-            logger.info("Extracting ContactsV2.sqlite from backup...")
-            tmp_contacts = backup_reader.extract_to_temp(manifest_map, 'ContactsV2.sqlite', logger)
-            atexit.register(os.unlink, tmp_contacts)
-            ios_contacts_path = tmp_contacts
-        else:
-            logger.warning("ContactsV2.sqlite not found in backup; proceeding without contacts.")
-            ios_contacts_path = None
-
+        args.msgstore = msgstore_path
         platform = 'ios'
         media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
 

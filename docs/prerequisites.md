@@ -5,11 +5,19 @@
 
 Ensure Python 3.10+ is installed.
 
-For encrypted backup decryption, the script uses `wa-crypt-tools`. Install it before your first run if you need decryption:
+For Android encrypted backup decryption, the script uses `wa-crypt-tools`:
 
 ```bash
 pip install wa-crypt-tools
 ```
+
+For iOS encrypted backup decryption, the script uses `iphone-backup-decrypt`:
+
+```bash
+pip install iphone-backup-decrypt
+```
+
+Install the relevant package before your first run.
 
 ---
 
@@ -154,23 +162,23 @@ Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_r
 
 WhatsApp on iOS stores its database and media inside an iPhone backup. The script reads the backup directly via `--ios_backup` — no third-party extraction tool required.
 
-### Step 1 — Disable WhatsApp E2E encrypted backup
+### Encrypted vs. unencrypted backups
 
-If End-to-end encrypted backup is enabled in WhatsApp, the backup cannot be read. Disable it before creating the backup:
+Both encrypted and unencrypted iPhone backups are supported.
 
-```
-Settings → Chats → Chat Backup → End-to-end Encrypted Backup → Turn Off
-```
+- **Unencrypted backup** — no extra argument needed.
+- **Encrypted backup** — pass `--ios_password <password>` (the password you set in iTunes/Finder/Apple Devices when enabling backup encryption). Make sure `iphone-backup-decrypt` is installed first (`pip install iphone-backup-decrypt`).
 
-### Step 2 — Create a device backup
+> **WhatsApp E2E encrypted backup** (a separate WhatsApp setting) must still be **disabled** before creating the iPhone backup. This is a WhatsApp-level encryption applied on top of the database — the script cannot bypass it.
+> Disable it in WhatsApp: `Settings → Chats → Chat Backup → End-to-end Encrypted Backup → Turn Off`
 
-**macOS** — Connect your iPhone or iPad and open Finder. Select your device and click "Back Up Now". Choose an **unencrypted** backup.
+### Step 1 — Create a device backup
 
-**Windows** — Install [Apple Devices](https://apps.microsoft.com/detail/9NP83LWLPZ9K) from the Microsoft Store. Connect your device and create an **unencrypted** backup.
+**macOS** — Connect your iPhone or iPad and open Finder. Select your device and click "Back Up Now". You may choose encrypted or unencrypted.
 
-> ⚠️ **Encrypted backups are not supported.** If your backup is encrypted, the script will exit immediately with instructions to disable encryption and re-create the backup.
+**Windows** — Install [Apple Devices](https://apps.microsoft.com/detail/9NP83LWLPZ9K) from the Microsoft Store. Connect your device and create a backup.
 
-### Step 3 — Locate the backup directory
+### Step 2 — Locate the backup directory
 
 **macOS:**
 ```
@@ -189,11 +197,23 @@ C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>\
 
 The backup directory is the folder that contains `Manifest.db`. Pass it to `--ios_backup`.
 
-### Step 4 — Run the script
+### Step 3 — Run the script
+
+Unencrypted backup:
 
 ```bash
 python3 wa_media_archiver.py \
   --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --output /path/to/output \
+  --dry-run
+```
+
+Encrypted backup:
+
+```bash
+python3 wa_media_archiver.py \
+  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --ios_password your_backup_password \
   --output /path/to/output \
   --dry-run
 ```
