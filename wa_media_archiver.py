@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.29'
+__version__ = '0.30'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -841,7 +841,8 @@ def run_restore_mode(args, logger):
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main():
+def parse_args() -> argparse.Namespace:
+    """Parse and validate command-line arguments."""
     parser = argparse.ArgumentParser(
         prog='wa_media_archiver.py',
         description='Archive WhatsApp media into a structured folder hierarchy.',
@@ -897,7 +898,6 @@ def main():
     parser.add_argument('--dry-run',
                         action='store_true',
                         help='Simulate the run without copying any files')
-
     parser.add_argument('--limit',
                         type=int,
                         default=None,
@@ -913,37 +913,33 @@ def main():
 
     if args.ios_backup and args.wa_root:
         parser.error("--ios_backup and --wa_root are mutually exclusive.")
-
     if args.ios_backup and args.mode == 'adb':
         parser.error("--ios_backup and --mode adb are mutually exclusive.")
-
     if args.mode != 'restore' and not args.ios_backup and not args.wa_root:
         parser.error("--wa_root / -wa is required unless --ios_backup or --mode restore")
 
-    # --- Output dir and logging ---
-    os.makedirs(args.output, exist_ok=True)
-    log_path = args.log or os.path.join(args.output, 'wa_media_archiver.log')
-    logger = setup_logging(log_path)
+    return args
 
-    for _label, _path in [('--output', args.output), ('--wa_root', getattr(args, 'wa_root', None))]:
-        if _path and (_path.startswith('\\\\') or _path.startswith('//')):
+
+def _warn_network_paths(args: argparse.Namespace, logger: logging.Logger):
+    """Warn if output or wa_root appear to be UNC network share paths."""
+    for label, path in [('--output', args.output),
+                         ('--wa_root', getattr(args, 'wa_root', None))]:
+        if path and (path.startswith('\\\\') or path.startswith('//')):
             logger.warning(
-                f"{_label} appears to be a network share ({_path}). "
+                f"{label} appears to be a network share ({path}). "
                 "Performance may be degraded and file timestamps may not be preserved."
             )
 
-    if args.mode == 'restore':
-        logger.info(f"=== WhatsApp Archiver v{__version__} started (restore mode) ===")
-        if args.dry_run:
-            logger.info("*** DRY RUN MODE — no files will be copied ***")
-        run_restore_mode(args, logger)
-        return
 
-    if args.dry_run:
-        logger.info("*** DRY RUN MODE — no files will be copied ***")
+def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
+    """
+    Resolve all input sources into a ready-to-query state.
 
-    logger.info(f"=== WhatsApp Archiver v{__version__} started ===")
-
+    Handles iOS backup extraction, ADB pull, contacts loading, and decryption.
+    Returns (platform, media_resolver, ios_contacts_path, contacts).
+    platform is None for wa_root mode — caller resolves it after this returns.
+    """
     # -------------------------------------------------------------------------
     # iOS backup mode — read directly from the iPhone backup
     # -------------------------------------------------------------------------
@@ -995,15 +991,13 @@ def main():
     # -------------------------------------------------------------------------
     else:
         ios_contacts_path = args.ios_contacts
-        platform = None  # resolved after decryption
+        platform = None  # resolved by caller after decryption
 
         def _wa_root_resolver(fp):
             return os.path.join(args.wa_root, *fp.split('/'))
         media_resolver = _wa_root_resolver
 
-    # --- Contacts (Android ADB format) ---
-    contacts = {}
-
+    # --- ADB pull ---
     if args.mode == 'adb':
         if not adb_extractor.check_adb(logger):
             raise SystemExit(1)
@@ -1017,6 +1011,8 @@ def main():
         except subprocess.CalledProcessError:
             raise SystemExit(1)
 
+    # --- Load contacts ---
+    contacts = {}
     if args.contacts:
         if args.ios_backup:
             logger.warning(
@@ -1061,7 +1057,14 @@ def main():
             out.write(output_file)
         logger.info("Decryption complete.")
 
-    # --- DB connection ---
+    return platform, media_resolver, ios_contacts_path, contacts
+
+
+def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
+    """Execute a full forward archival run."""
+    platform, media_resolver, ios_contacts_path, contacts = _prepare_input(args, logger)
+
+    # --- Validate DB exists ---
     logger.info(f"Connecting to: {args.msgstore}")
     if not os.path.isfile(args.msgstore):
         logger.error(f"Database file not found: {args.msgstore}")
@@ -1072,7 +1075,7 @@ def main():
         platform = detect_db_platform(args.msgstore)
         logger.info(f"Detected platform: {platform}")
 
-    # --- Parse --since and --limit once, before the platform fork ---
+    # --- Parse --since and --limit ---
     since_ms = None
     if args.since:
         try:
@@ -1096,7 +1099,6 @@ def main():
 
             number_map = ios_handler.build_ios_number_map(cursor, logger)
 
-            # Load iOS contacts (from --ios_contacts or auto-extracted temp file)
             if not contacts and ios_contacts_path:
                 contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
 
@@ -1115,14 +1117,11 @@ def main():
                 cursor.execute(android_handler.build_group_subjects_query()).fetchall()
             )
 
-        # Count without loading all rows into memory
         total_rows = cursor.execute(
             f"SELECT COUNT(*) FROM ({query})"
         ).fetchone()[0]
         logger.info(f"Query returned {total_rows} rows.")
 
-        # --- Open archive DB inside msgstore scope so cursor stays open for streaming ---
-        stats = {'copied': 0, 'skipped': 0, 'missing': 0, 'warnings': 0}
         archive_conn = open_archive_db(args.output)
         try:
             check_db_health(archive_conn, logger)
@@ -1132,14 +1131,12 @@ def main():
             group_index = load_groups_from_db(archive_conn)
             logger.info(f"Group index loaded: {len(group_index)} known group(s).")
 
-            # --- Sync folder names for renamed contacts ---
             folder_index = sync_folder_names(
                 contacts, number_map, args.output, folder_index, logger,
                 conn=archive_conn if not args.dry_run else None,
                 dry_run=args.dry_run,
             )
 
-            # --- Sync folder names for renamed groups ---
             group_index = sync_group_names(
                 group_subjects, args.output, group_index, logger,
                 conn=archive_conn if not args.dry_run else None,
@@ -1148,7 +1145,6 @@ def main():
 
             report_path = os.path.join(args.output, 'missing_media_report.csv')
 
-            # --- Stream main query ---
             logger.info("Executing query...")
             cursor.execute(query)
             stats, updated_index, updated_group_index, missing_rows = process_rows(
@@ -1157,7 +1153,6 @@ def main():
                 conn=archive_conn if not args.dry_run else None,
             )
 
-            # --- Persist small indices, commit, and analyse ---
             if not args.dry_run:
                 archive_conn.commit()
                 save_contacts_to_db(archive_conn, updated_index)
@@ -1167,7 +1162,6 @@ def main():
                 logger.info(f"Archive DB saved: {len(updated_index)} contact(s), "
                             f"{len(updated_group_index)} group(s).")
 
-            # --- Write missing media CSV ---
             if not args.dry_run:
                 write_missing_report(report_path, missing_rows, logger)
             else:
@@ -1176,7 +1170,6 @@ def main():
                     f"{len(missing_rows)} entries to: {report_path}"
                 )
 
-            # --- Write duplicate media CSV ---
             dup_report_path = os.path.join(args.output, 'duplicate_media_report.csv')
             if not args.dry_run:
                 write_duplicate_report(dup_report_path, archive_conn, logger)
@@ -1186,6 +1179,7 @@ def main():
 
     # --- Final summary ---
     db_path = os.path.join(args.output, '.wa_media_archiver.db')
+    log_path = args.log or os.path.join(args.output, 'wa_media_archiver.log')
     logger.info("=== Run complete ===")
     if args.dry_run:
         logger.info("  (DRY RUN — no files were written)")
@@ -1198,6 +1192,26 @@ def main():
         logger.info(f"  {'Missing media report':<20}: {report_path}")
         logger.info(f"  {'Duplicate media report':<20}: {dup_report_path}")
         logger.info(f"  {'Archive DB':<20}: {db_path}")
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.output, exist_ok=True)
+    log_path = args.log or os.path.join(args.output, 'wa_media_archiver.log')
+    logger = setup_logging(log_path)
+    _warn_network_paths(args, logger)
+
+    if args.mode == 'restore':
+        logger.info(f"=== WhatsApp Archiver v{__version__} started (restore mode) ===")
+        if args.dry_run:
+            logger.info("*** DRY RUN MODE — no files will be copied ***")
+        run_restore_mode(args, logger)
+        return
+
+    if args.dry_run:
+        logger.info("*** DRY RUN MODE — no files will be copied ***")
+    logger.info(f"=== WhatsApp Archiver v{__version__} started ===")
+    run_forward_mode(args, logger)
 
 
 if __name__ == '__main__':
