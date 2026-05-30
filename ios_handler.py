@@ -16,10 +16,11 @@ _IOS_REQUIRED_TABLES = {'ZWAMESSAGE', 'ZWACHATSESSION', 'ZWAMEDIAITEM', 'ZWAGROU
 _IOS_REQUIRED_COLUMNS = {
     'ZWAMESSAGE': {
         'Z_PK', 'ZMESSAGEDATE', 'ZISFROMME',
-        'ZCHATSESSION', 'ZMEDIAITEM', 'ZGROUPMEMBER', 'ZPUSHNAME', 'ZFROMJID',
+        'ZCHATSESSION', 'ZMEDIAITEM', 'ZGROUPMEMBER', 'ZPUSHNAME',
     },
     'ZWACHATSESSION': {
         'Z_PK', 'ZCONTACTJID', 'ZGROUPINFO', 'ZPARTNERNAME',
+        'ZCONTACTABID', 'ZLASTMESSAGEDATE',
     },
     'ZWAMEDIAITEM': {
         'Z_PK', 'ZMEDIALOCALPATH', 'ZMEDIAURL', 'ZTITLE',
@@ -262,10 +263,8 @@ def build_ios_pushname_map(cursor: sqlite3.Cursor,
                            logger: logging.Logger) -> dict[str, str]:
     """
     Build a {jid_prefix: pushname} map from ZWAPROFILEPUSHNAME.
-    ZJID may be a phone-number JID (e.g. '491234@s.whatsapp.net') or a LID
-    (e.g. '120363318993@lid'). Stripping the '@...' suffix gives the same
-    prefix that the iOS query extracts from ZFROMJID, so this map resolves
-    group senders stored as LIDs that the address-book contacts dict can't.
+    Used as a fallback for contacts not in ContactsV2.sqlite — e.g. group
+    members who are not saved in the device address book.
     """
     try:
         rows = cursor.execute(
@@ -283,7 +282,6 @@ def build_ios_pushname_map(cursor: sqlite3.Cursor,
             result[prefix] = name
     logger.debug(f"iOS push name map: {len(result)} entries.")
     return result
-
 
 
 def load_ios_contacts(sqlite_path: str,
