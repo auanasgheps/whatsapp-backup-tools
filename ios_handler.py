@@ -11,18 +11,21 @@ import sqlite3
 # Seconds between 1970-01-01 (Unix epoch) and 2001-01-01 (Apple Core Data epoch)
 APPLE_EPOCH_OFFSET = 978307200
 
-_IOS_REQUIRED_TABLES = {'ZWAMESSAGE', 'ZWACHATSESSION', 'ZWAMEDIAITEM'}
+_IOS_REQUIRED_TABLES = {'ZWAMESSAGE', 'ZWACHATSESSION', 'ZWAMEDIAITEM', 'ZWAGROUPMEMBER'}
 
 _IOS_REQUIRED_COLUMNS = {
     'ZWAMESSAGE': {
         'Z_PK', 'ZMESSAGEDATE', 'ZISFROMME',
-        'ZCHATSESSION', 'ZMEDIAITEM', 'ZFROMJID',
+        'ZCHATSESSION', 'ZMEDIAITEM', 'ZGROUPMEMBER', 'ZPUSHNAME', 'ZFROMJID',
     },
     'ZWACHATSESSION': {
         'Z_PK', 'ZCONTACTJID', 'ZGROUPINFO', 'ZPARTNERNAME',
     },
     'ZWAMEDIAITEM': {
         'Z_PK', 'ZMEDIALOCALPATH', 'ZMEDIAURL', 'ZTITLE',
+    },
+    'ZWAGROUPMEMBER': {
+        'Z_PK', 'ZMEMBERJID',
     },
 }
 
@@ -128,12 +131,11 @@ SELECT * FROM (
             CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
             cs.ZPARTNERNAME                                                AS chat_subject,
             CASE
-                 WHEN m.ZFROMJID LIKE '%@g.us' AND INSTR(m.ZFROMJID, '-') > 0
-                      AND INSTR(m.ZFROMJID, '-') < INSTR(m.ZFROMJID, '@')
-                 THEN SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID, '-') - 1)
-                 WHEN INSTR(m.ZFROMJID, '@') > 0
-                 THEN SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID, '@') - 1)
-                 ELSE m.ZFROMJID END                                        AS sender,
+                 WHEN gm.ZMEMBERJID IS NOT NULL AND INSTR(gm.ZMEMBERJID, '@') > 0
+                 THEN SUBSTR(gm.ZMEMBERJID, 1, INSTR(gm.ZMEMBERJID, '@') - 1)
+                 WHEN gm.ZMEMBERJID IS NOT NULL
+                 THEN gm.ZMEMBERJID
+                 ELSE m.ZPUSHNAME END                                      AS sender,
             m.ZISFROMME                                                    AS key_from_me,
             mi.ZMEDIAURL                                                   AS message_url,
             CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
@@ -141,6 +143,7 @@ SELECT * FROM (
         FROM ZWAMESSAGE m
         JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
         JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
+        LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
         WHERE cs.ZGROUPINFO IS NOT NULL
           AND mi.ZMEDIALOCALPATH IS NOT NULL
           AND cs.ZPARTNERNAME IS NOT NULL
