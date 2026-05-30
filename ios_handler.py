@@ -182,6 +182,11 @@ def build_ios_number_map(cursor: sqlite3.Cursor,
     their number, WhatsApp creates a new session sharing the same ZCONTACTABID.
     Ordering by ZLASTMESSAGEDATE gives the old -> new direction.
 
+    Only ZCONTACTABID values shared by exactly 2 sessions are considered — the
+    clean "one person changed their number once" case. Groups of 3+ sessions
+    sharing the same ZCONTACTABID are skipped to avoid misrouting media from
+    unrelated contacts whose address book entries were merged.
+
     Best-effort: only covers contacts present in the device address book.
     Contacts without an address book entry (ZCONTACTABID = NULL) are not
     consolidated — they appear as separate folders.
@@ -205,6 +210,14 @@ def build_ios_number_map(cursor: sqlite3.Cursor,
             WHERE cs_old.ZCONTACTABID IS NOT NULL
               AND cs_old.ZGROUPINFO IS NULL
               AND cs_new.ZGROUPINFO IS NULL
+              AND cs_old.ZCONTACTABID IN (
+                  SELECT ZCONTACTABID
+                  FROM ZWACHATSESSION
+                  WHERE ZCONTACTABID IS NOT NULL
+                    AND ZGROUPINFO IS NULL
+                  GROUP BY ZCONTACTABID
+                  HAVING COUNT(*) = 2
+              )
         """)
         raw_pairs = cursor.fetchall()
     except sqlite3.OperationalError as e:
