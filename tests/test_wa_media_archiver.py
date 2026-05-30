@@ -721,8 +721,175 @@ class TestExtractToTemp:
 
 
 # ===========================================================================
-# Group folder resolution
+# Backup reader: extract_plaintext
 # ===========================================================================
+
+class TestExtractPlaintext:
+    def _make_backup(self, tmp_path):
+        """Minimal fake backup: Manifest.db + hash files for ChatStorage and a media file."""
+        import sqlite3 as _sq
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        manifest_db = tmp_path / 'Manifest.db'
+        conn = _sq.connect(str(manifest_db))
+        conn.execute("""
+            CREATE TABLE Files (
+                fileID TEXT, domain TEXT, relativePath TEXT, flags INTEGER
+            )
+        """)
+        # ChatStorage.sqlite
+        chat_id = 'aa' + 'b' * 38
+        conn.execute("INSERT INTO Files VALUES (?,?,?,1)",
+                     (chat_id, 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared',
+                      'ChatStorage.sqlite'))
+        # Media file
+        media_id = 'cc' + 'd' * 38
+        conn.execute("INSERT INTO Files VALUES (?,?,?,1)",
+                     (media_id, 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared',
+                      'Message/Media/WhatsApp Images/IMG001.jpg'))
+        conn.commit()
+        conn.close()
+        # Create hash directories and files
+        for fid, content in [(chat_id, b'SQLITE'), (media_id, b'JPEGDATA')]:
+            d = tmp_path / fid[:2]
+            d.mkdir(exist_ok=True)
+            (d / fid).write_bytes(content)
+        return tmp_path
+
+    def test_returns_manifest_map_msgstore_path(self, tmp_path, logger):
+        backup_dir = self._make_backup(tmp_path / 'backup')
+        output_dir = tmp_path / 'output'
+        manifest_map, msgstore_path, contacts_path = br.extract_plaintext(
+            str(backup_dir), str(output_dir), None, False, logger
+        )
+        assert 'ChatStorage.sqlite' in manifest_map
+        assert 'Message/Media/WhatsApp Images/IMG001.jpg' in manifest_map
+        assert os.path.isfile(msgstore_path)
+        assert msgstore_path == str(output_dir / 'ChatStorage.sqlite')
+
+    def test_contacts_none_when_not_in_backup(self, tmp_path, logger):
+        backup_dir = self._make_backup(tmp_path / 'backup')
+        output_dir = tmp_path / 'output'
+        _, _, contacts_path = br.extract_plaintext(
+            str(backup_dir), str(output_dir), None, False, logger
+        )
+        assert contacts_path is None
+
+    def test_contacts_override_respected(self, tmp_path, logger):
+        backup_dir = self._make_backup(tmp_path / 'backup')
+        output_dir = tmp_path / 'output'
+        fake_contacts = str(tmp_path / 'contacts.sqlite')
+        _, _, contacts_path = br.extract_plaintext(
+            str(backup_dir), str(output_dir), fake_contacts, False, logger
+        )
+        assert contacts_path == fake_contacts
+
+    def test_overwrite_warning_logged(self, tmp_path, logger):
+        backup_dir = self._make_backup(tmp_path / 'backup')
+        output_dir = tmp_path / 'output'
+        output_dir.mkdir()
+        # Pre-create the DB file so overwrite warning fires
+        (output_dir / 'ChatStorage.sqlite').write_bytes(b'OLD')
+        import unittest.mock as mock
+        with mock.patch.object(logger, 'warning') as mock_warn:
+            br.extract_plaintext(str(backup_dir), str(output_dir), None, False, logger)
+        warning_msgs = ' '.join(str(c) for c in mock_warn.call_args_list)
+        assert 'Overwriting' in warning_msgs or 'overwriting' in warning_msgs.lower()
+
+
+# ===========================================================================
+# Backup reader: extract_encrypted
+# ===========================================================================
+
+class TestExtractEncrypted:
+    def _make_mock_backup(self, tmp_path):
+        """Return a mock EncryptedBackup that extracts fake files."""
+        import unittest.mock as mock
+
+        media_dir = tmp_path / 'media'
+
+        def fake_extract_file(*, relative_path, domain_like, output_filename):
+            if relative_path == 'ChatStorage.sqlite':
+                with open(output_filename, 'wb') as f:
+                    f.write(b'SQLITE')
+            elif relative_path == 'ContactsV2.sqlite':
+                with open(output_filename, 'wb') as f:
+                    f.write(b'CONTACTS')
+            else:
+                raise FileNotFoundError(relative_path)
+
+        def fake_extract_files(*, relative_paths_like, domain_like, output_folder,
+                               preserve_folders):
+            os.makedirs(output_folder, exist_ok=True)
+            img_dir = os.path.join(output_folder, 'Message', 'Media',
+                                   'WhatsApp Images')
+            os.makedirs(img_dir, exist_ok=True)
+            with open(os.path.join(img_dir, 'IMG001.jpg'), 'wb') as f:
+                f.write(b'JPEGDATA')
+            return 1
+
+        mock_backup = mock.MagicMock()
+        mock_backup.test_decryption.return_value = True
+        mock_backup.extract_file.side_effect = fake_extract_file
+        mock_backup.extract_files.side_effect = fake_extract_files
+        return mock_backup
+
+    def test_returns_manifest_map_and_msgstore(self, tmp_path, logger):
+        import unittest.mock as mock
+        mock_backup = self._make_mock_backup(tmp_path)
+        output_dir = tmp_path / 'output'
+
+        with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
+            manifest_map, msgstore_path, contacts_path = br.extract_encrypted(
+                str(tmp_path / 'backup'), 'secret', str(output_dir),
+                None, False, logger,
+            )
+
+        assert os.path.isfile(msgstore_path)
+        assert msgstore_path == str(output_dir / 'ChatStorage.sqlite')
+        assert 'Message/Media/WhatsApp Images/IMG001.jpg' in manifest_map
+        assert contacts_path is not None
+
+    def test_wrong_password_exits(self, tmp_path, logger):
+        import unittest.mock as mock
+        mock_backup = mock.MagicMock()
+        mock_backup.test_decryption.side_effect = ValueError("incorrect passphrase")
+        output_dir = tmp_path / 'output'
+
+        with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
+            with pytest.raises(SystemExit):
+                br.extract_encrypted(
+                    str(tmp_path / 'backup'), 'wrongpw', str(output_dir),
+                    None, False, logger,
+                )
+
+    def test_missing_library_exits(self, tmp_path, logger):
+        import unittest.mock as mock
+        import sys
+        output_dir = tmp_path / 'output'
+
+        with mock.patch.dict(sys.modules, {'iphone_backup_decrypt': None}):
+            with pytest.raises(SystemExit):
+                br.extract_encrypted(
+                    str(tmp_path / 'backup'), 'secret', str(output_dir),
+                    None, False, logger,
+                )
+
+    def test_contacts_override_skips_extraction(self, tmp_path, logger):
+        import unittest.mock as mock
+        mock_backup = self._make_mock_backup(tmp_path)
+        output_dir = tmp_path / 'output'
+        fake_contacts = str(tmp_path / 'my_contacts.sqlite')
+
+        with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
+            _, _, contacts_path = br.extract_encrypted(
+                str(tmp_path / 'backup'), 'secret', str(output_dir),
+                fake_contacts, False, logger,
+            )
+
+        assert contacts_path == fake_contacts
+        # extract_file should only have been called for ChatStorage, not ContactsV2
+        calls = [c.kwargs.get('relative_path') for c in mock_backup.extract_file.call_args_list]
+        assert 'ContactsV2.sqlite' not in calls
 
 class TestResolveGroupFolder:
     def test_new_group_assigned_sanitized_name(self):
