@@ -203,7 +203,7 @@ def extract_encrypted(backup_dir: str,
     by the filtered query is decrypted.
     """
     try:
-        from iphone_backup_decrypt import EncryptedBackup, DomainLike
+        from iphone_backup_decrypt import EncryptedBackup
     except ImportError:
         logger.error(
             "iphone-backup-decrypt is required for encrypted iOS backups but is not installed.\n"
@@ -219,9 +219,11 @@ def extract_encrypted(backup_dir: str,
         logger.error(f"Failed to unlock backup: {e}\n  Check that --ios_password is correct.")
         raise SystemExit(1)
 
-    # Mirror the domain selection logic from build_manifest_map / plaintext path
-    domain_like = (f"%{_WA_BUSINESS_DOMAIN.split('-', 1)[1]}%"
-                   if business else DomainLike.WHATSAPP)
+    # Use a tight domain pattern that targets exactly one app.
+    # DomainLike.WHATSAPP ("%net.whatsapp.%") is deliberately avoided — it
+    # matches both regular and Business domains, which would mix their data.
+    _domain = _WA_BUSINESS_DOMAIN if business else _WA_DOMAIN
+    domain_like = f"%{_domain.split('-', 1)[1]}%"
 
     os.makedirs(output_dir, exist_ok=True)
 
