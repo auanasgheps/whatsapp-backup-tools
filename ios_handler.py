@@ -127,7 +127,11 @@ SELECT * FROM (
             NULL                                                           AS mime_type,
             CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
             cs.ZPARTNERNAME                                                AS chat_subject,
-            CASE WHEN INSTR(m.ZFROMJID, '@') > 0
+            CASE
+                 WHEN m.ZFROMJID LIKE '%@g.us' AND INSTR(m.ZFROMJID, '-') > 0
+                      AND INSTR(m.ZFROMJID, '-') < INSTR(m.ZFROMJID, '@')
+                 THEN SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID, '-') - 1)
+                 WHEN INSTR(m.ZFROMJID, '@') > 0
                  THEN SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID, '@') - 1)
                  ELSE m.ZFROMJID END                                        AS sender,
             m.ZISFROMME                                                    AS key_from_me,
