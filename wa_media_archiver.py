@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.30'
+__version__ = '0.31'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -525,6 +525,104 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
 # Core processing
 # ---------------------------------------------------------------------------
 
+def _build_missing_row(msg_id, timestamp, file_path, mime_type,
+                       chat_subject, sender, key_from_me, message_url, media_name,
+                       contacts, number_map, filename='') -> dict:
+    """Build a missing-media report row for either a null file_path or a missing source file."""
+    canonical = number_map.get(sender, sender) if sender else None
+    if chat_subject is not None:
+        chat_display = chat_subject
+        sender_display = 'Me' if (key_from_me == 1 or not sender) \
+            else contacts.get(canonical, format_phone(canonical or ''))
+    else:
+        chat_display = contacts.get(canonical, canonical) if canonical else 'Unknown'
+        sender_display = 'Me' if key_from_me == 1 \
+            else (contacts.get(canonical, canonical) if canonical else 'Unknown')
+    return {
+        'message_id':        msg_id,
+        'timestamp_human':   human_datetime(timestamp) if timestamp else '',
+        'original_filename': filename,
+        'mime_type':         mime_type or '',
+        'sender':            sender_display,
+        'chat_name':         chat_display or '',
+        'direction':         'Sent' if key_from_me == 1 else 'Received',
+        'file_path':         file_path or '',
+        'message_url':       message_url or '',
+        'media_name':        media_name or '',
+    }
+
+
+def _route_group(chat_row_id, chat_subject, sender, key_from_me,
+                 contacts, number_map, filename, year, output_root,
+                 group_index) -> tuple[str, str]:
+    """Resolve dest_dir and dest_filename for a group chat message. Mutates group_index."""
+    group_name = resolve_group_folder(chat_row_id, chat_subject, group_index)
+    canonical = number_map.get(sender, sender)
+    sender_display = 'Me' if (key_from_me == 1 or not sender) \
+        else contacts.get(canonical, format_phone(canonical))
+    dest_filename = append_sender_to_filename(filename, sender_display)
+    dest_dir = os.path.join(output_root, 'Groups', group_name, year)
+    return dest_dir, dest_filename
+
+
+def _route_contact(sender, key_from_me, contacts, number_map,
+                   filename, year, output_root, contact_index) -> tuple[str, str]:
+    """Resolve dest_dir and dest_filename for a 1-to-1 chat message. Mutates contact_index."""
+    contact_number = number_map.get(sender, sender) if sender else 'unknown'
+    contact_display = contacts.get(contact_number, None)
+    if contact_display is None and contact_number in contact_index:
+        _, stored_display = contact_index[contact_number]
+        contact_display = stored_display or None
+    folder_name = build_contact_folder_name(
+        contact_display or contact_number, contact_number
+    )
+    contact_index[contact_number] = (folder_name, contact_display or '')
+    direction = 'Sent' if key_from_me == 1 else 'Received'
+    dest_dir = os.path.join(output_root, 'Contacts', folder_name, year, direction)
+    return dest_dir, filename
+
+
+def _copy_or_skip(src, dest_path, dest_dir, file_path, timestamp,
+                  output_root, dry_run, logger, cursor) -> tuple[int, int, int]:
+    """
+    Copy src to dest, handling dry-run, dedup, and collision.
+    Returns (copied, skipped, warnings) deltas.
+    """
+    if dry_run:
+        resolved = resolve_unique_dest(dest_path, src, logger)
+        if resolved is None:
+            return 0, 1, 0
+        logger.info(f"[DRY RUN] Would copy: {src} -> {resolved}")
+        return 1, 0, 0
+
+    if os.path.exists(dest_path):
+        src_hash = file_md5(src)
+        resolved = resolve_unique_dest(dest_path, src, logger, src_hash=src_hash)
+        if resolved is None:
+            if cursor is not None:
+                rel = os.path.relpath(dest_path, output_root).replace(os.sep, '/')
+                record_file_archived(cursor, file_path, src_hash, rel)
+            return 0, 1, 0
+    else:
+        src_hash = None
+        resolved = dest_path
+
+    os.makedirs(dest_dir, exist_ok=True)
+    try:
+        shutil.copy2(src, resolved)
+        set_file_times(resolved, timestamp)
+        if src_hash is None:
+            src_hash = file_md5(resolved)
+        logger.debug(f"COPIED: {src} -> {resolved}")
+        if cursor is not None:
+            rel = os.path.relpath(resolved, output_root).replace(os.sep, '/')
+            record_file_archived(cursor, file_path, src_hash, rel)
+        return 1, 0, 0
+    except Exception as e:
+        logger.error(f"ERROR copying {src} -> {resolved}: {e}")
+        return 0, 0, 1
+
+
 def process_rows(rows, total: int, contacts, number_map, folder_index, group_index,
                  media_resolver, output_root, logger, dry_run, conn=None):
     stats = {'copied': 0, 'skipped': 0, 'missing': 0, 'warnings': 0}
@@ -539,146 +637,56 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
         if i % 1000 == 0:
             logger.info(f"Progress: {i}/{total} rows processed...")
 
-        # --- Null/empty file_path guard ---
-        if not file_path:
-            logger.debug(f"SKIP (no file_path): message_id={msg_id}")
-            _canonical = number_map.get(sender, sender) if sender else None
-            missing_rows.append({
-                'message_id':        msg_id,
-                'timestamp_human':   human_datetime(timestamp) if timestamp else '',
-                'original_filename': '',
-                'mime_type':         mime_type or '',
-                'sender':            contacts.get(_canonical, _canonical) if _canonical else 'Me',
-                'chat_name':         chat_subject or (
-                    contacts.get(_canonical, _canonical) if _canonical else 'Unknown'),
-                'direction':         'Sent' if key_from_me == 1 else 'Received',
-                'file_path':         '',
-                'message_url':       message_url or '',
-                'media_name':        media_name or '',
-            })
-            stats['missing'] += 1
-            continue
-
-        # --- Resolve source path ---
-        src = media_resolver(file_path)
-        filename = media_name if media_name else os.path.basename(file_path)
         is_group = chat_subject is not None
 
-        if src is None or not os.path.isfile(src):
-            if is_group:
-                chat_display = chat_subject
-                canonical = number_map.get(sender, sender)
-                sender_display = 'Me' if (key_from_me == 1 or not sender) \
-                    else contacts.get(canonical, format_phone(canonical))
-            else:
-                canonical = number_map.get(sender, sender) if sender else None
-                chat_display = contacts.get(canonical, canonical) \
-                    if canonical else 'Unknown'
-                sender_display = 'Me' if key_from_me == 1 \
-                    else contacts.get(canonical, canonical) \
-                    if canonical else 'Unknown'
-
-            logger.warning(
-                f"MISSING source file (message_id={msg_id}): {file_path}"
-            )
-            missing_rows.append({
-                'message_id':        msg_id,
-                'timestamp_human':   human_datetime(timestamp) if timestamp else '',
-                'original_filename': filename,
-                'mime_type':         mime_type or '',
-                'sender':            sender_display,
-                'chat_name':         chat_display or '',
-                'direction':         'Sent' if key_from_me == 1 else 'Received',
-                'file_path':         file_path,
-                'message_url':       message_url or '',
-                'media_name':        media_name or '',
-            })
+        if not file_path:
+            logger.debug(f"SKIP (no file_path): message_id={msg_id}")
+            missing_rows.append(_build_missing_row(
+                msg_id, timestamp, None, mime_type, chat_subject, sender,
+                key_from_me, message_url, media_name, contacts, number_map,
+            ))
             stats['missing'] += 1
             continue
 
-        # Guard: skip rows with no timestamp
+        src = media_resolver(file_path)
+        filename = media_name if media_name else os.path.basename(file_path)
+
+        if src is None or not os.path.isfile(src):
+            logger.warning(f"MISSING source file (message_id={msg_id}): {file_path}")
+            missing_rows.append(_build_missing_row(
+                msg_id, timestamp, file_path, mime_type, chat_subject, sender,
+                key_from_me, message_url, media_name, contacts, number_map,
+                filename=filename,
+            ))
+            stats['missing'] += 1
+            continue
+
         if not timestamp:
-            logger.warning(
-                f"SKIP (no timestamp): message_id={msg_id}, file={file_path}"
-            )
+            logger.warning(f"SKIP (no timestamp): message_id={msg_id}, file={file_path}")
             stats['warnings'] += 1
             continue
 
         year = get_year(timestamp)
 
-        # --- GROUP CHAT ---
         if is_group:
-            group_name = resolve_group_folder(chat_row_id, chat_subject,
-                                              updated_group_index)
-
-            canonical = number_map.get(sender, sender)
-            sender_display = 'Me' if (key_from_me == 1 or not sender) \
-                else contacts.get(canonical, format_phone(canonical))
-
-            dest_filename = append_sender_to_filename(filename, sender_display)
-            dest_dir = os.path.join(output_root, 'Groups', group_name, year)
-
-        # --- 1-to-1 CHAT ---
-        else:
-            contact_number = number_map.get(sender, sender) \
-                if sender else 'unknown'
-            contact_display = contacts.get(contact_number, None)
-            if contact_display is None and contact_number in updated_index:
-                # No live contacts — use display_name stored from a previous run
-                _, stored_display = updated_index[contact_number]
-                contact_display = stored_display or None
-            folder_name = build_contact_folder_name(
-                contact_display or contact_number, contact_number
+            dest_dir, dest_filename = _route_group(
+                chat_row_id, chat_subject, sender, key_from_me,
+                contacts, number_map, filename, year, output_root, updated_group_index,
             )
-            updated_index[contact_number] = (folder_name, contact_display or '')
-
-            direction = 'Sent' if key_from_me == 1 else 'Received'
-            dest_filename = filename
-            dest_dir = os.path.join(
-                output_root, 'Contacts', folder_name, year, direction
+        else:
+            dest_dir, dest_filename = _route_contact(
+                sender, key_from_me, contacts, number_map,
+                filename, year, output_root, updated_index,
             )
 
         dest_path = os.path.join(dest_dir, dest_filename)
-
-        # --- Dry run ---
-        if dry_run:
-            resolved = resolve_unique_dest(dest_path, src, logger)
-            if resolved is None:
-                stats['skipped'] += 1
-            else:
-                logger.info(f"[DRY RUN] Would copy: {src} -> {resolved}")
-                stats['copied'] += 1
-            continue
-
-        # --- Conflict / duplicate resolution (lazy src hash: only when dest exists) ---
-        if os.path.exists(dest_path):
-            src_hash = file_md5(src)
-            resolved = resolve_unique_dest(dest_path, src, logger, src_hash=src_hash)
-            if resolved is None:
-                stats['skipped'] += 1
-                if cursor is not None:
-                    rel = os.path.relpath(dest_path, output_root).replace(os.sep, '/')
-                    record_file_archived(cursor, file_path, src_hash, rel)
-                continue
-        else:
-            src_hash = None
-            resolved = dest_path
-
-        # --- Copy and set timestamps ---
-        os.makedirs(dest_dir, exist_ok=True)
-        try:
-            shutil.copy2(src, resolved)
-            set_file_times(resolved, timestamp)
-            if src_hash is None:
-                src_hash = file_md5(resolved)
-            logger.debug(f"COPIED: {src} -> {resolved}")
-            stats['copied'] += 1
-            if cursor is not None:
-                rel = os.path.relpath(resolved, output_root).replace(os.sep, '/')
-                record_file_archived(cursor, file_path, src_hash, rel)
-        except Exception as e:
-            logger.error(f"ERROR copying {src} -> {resolved}: {e}")
-            stats['warnings'] += 1
+        copied, skipped, warnings = _copy_or_skip(
+            src, dest_path, dest_dir, file_path, timestamp,
+            output_root, dry_run, logger, cursor,
+        )
+        stats['copied'] += copied
+        stats['skipped'] += skipped
+        stats['warnings'] += warnings
 
     return stats, updated_index, updated_group_index, missing_rows
 
