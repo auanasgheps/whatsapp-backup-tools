@@ -212,7 +212,8 @@ class TestBuildQuery:
 
     def test_both_union_blocks_have_documents(self):
         query = android_handler.build_query(None, None)
-        assert query.count("Media/WhatsApp Documents/%") == 2
+        # 2 occurrences in WHERE clauses + 2 in CASE WHEN guards = 4
+        assert query.count("Media/WhatsApp Documents/%") == 4
 
     def test_limit_applies_to_combined_result(self):
         # LIMIT N//2 must appear twice (once per block), not on the outer wrapper
