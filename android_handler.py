@@ -170,7 +170,8 @@ SELECT * FROM (
             ifnull(jid2.user, jid.user)         AS sender,
             message.from_me                     AS key_from_me,
             message_media.message_url           AS message_url,
-            message_media.media_name            AS media_name
+            CASE WHEN message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+                 THEN message_media.media_name END AS media_name
         FROM message_media
         LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
         LEFT JOIN message ON message_media.message_row_id = message._id
@@ -209,7 +210,8 @@ SELECT * FROM (
             jid.user                            AS sender,
             message.from_me                     AS key_from_me,
             message_media.message_url           AS message_url,
-            message_media.media_name            AS media_name
+            CASE WHEN message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+                 THEN message_media.media_name END AS media_name
         FROM message_media
         LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
         LEFT JOIN message ON message_media.message_row_id = message._id

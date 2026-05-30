@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.31'
+__version__ = '0.32'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -396,6 +396,8 @@ def sync_group_names(group_subjects: dict, output_root: str,
             else:
                 if dry_run:
                     logger.info(f"[DRY RUN] Would rename group folder: {old_folder} -> {new_folder}")
+                    # Don't update index in dry_run — on-disk folder is still the old name.
+                    continue
                 else:
                     os.rename(old_path, new_path)
                     logger.info(f"RENAMED group folder: {old_folder} -> {new_folder}")
@@ -491,6 +493,9 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
             else:
                 if dry_run:
                     logger.info(f"[DRY RUN] Would rename contact folder: {old_folder} -> {new_folder}")
+                    # Don't update index in dry_run — on-disk folder is still the old name,
+                    # so process_rows must route using it to avoid overcounting copies.
+                    continue
                 else:
                     os.rename(old_path, new_path)
                     logger.info(
@@ -638,18 +643,21 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
             logger.info(f"Progress: {i}/{total} rows processed...")
 
         is_group = chat_subject is not None
+        filename = media_name if media_name else (
+            os.path.basename(file_path) if file_path else ''
+        )
 
         if not file_path:
             logger.debug(f"SKIP (no file_path): message_id={msg_id}")
             missing_rows.append(_build_missing_row(
                 msg_id, timestamp, None, mime_type, chat_subject, sender,
                 key_from_me, message_url, media_name, contacts, number_map,
+                filename=filename,
             ))
             stats['missing'] += 1
             continue
 
         src = media_resolver(file_path)
-        filename = media_name if media_name else os.path.basename(file_path)
 
         if src is None or not os.path.isfile(src):
             logger.warning(f"MISSING source file (message_id={msg_id}): {file_path}")
