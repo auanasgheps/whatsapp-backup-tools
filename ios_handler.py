@@ -215,12 +215,13 @@ def build_ios_number_map(cursor: sqlite3.Cursor,
         return {}
 
     direct = {old: new for old, new in raw_pairs if old and new}
+    cyclic: set[str] = set()
 
     def resolve(number, visited=None):
         if visited is None:
             visited = set()
         if number in visited:
-            logger.warning(f"Cycle detected in iOS number change chain: {number}")
+            cyclic.add(number)
             return number
         visited.add(number)
         if number in direct:
@@ -228,6 +229,8 @@ def build_ios_number_map(cursor: sqlite3.Cursor,
         return number
 
     consolidated = {old: resolve(old) for old in direct}
+    if cyclic:
+        logger.debug(f"iOS number change chains: {len(cyclic)} cycle(s) ignored.")
     logger.info(
         f"iOS number consolidation map built: {len(consolidated)} "
         f"old number(s) mapped to current numbers."
