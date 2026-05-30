@@ -832,12 +832,26 @@ class TestExtractEncrypted:
         mock_backup.extract_file.side_effect = fake_extract_file
         return mock_backup
 
-    def test_returns_resolver_and_msgstore(self, tmp_path, logger):
+    def _patch_library(self, mock_backup):
+        """
+        Return a context manager that injects a fake iphone_backup_decrypt
+        module into sys.modules. Works whether or not the real package is
+        installed (avoids ModuleNotFoundError on CI without the package).
+        """
+        import sys
+        import types
         import unittest.mock as mock
+
+        fake_mod = types.ModuleType('iphone_backup_decrypt')
+        fake_mod.EncryptedBackup = mock.MagicMock(return_value=mock_backup)
+        fake_mod.DomainLike = mock.MagicMock()
+        return mock.patch.dict(sys.modules, {'iphone_backup_decrypt': fake_mod})
+
+    def test_returns_resolver_and_msgstore(self, tmp_path, logger):
         mock_backup = self._make_mock_backup(tmp_path)
         output_dir = tmp_path / 'output'
 
-        with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
+        with self._patch_library(mock_backup):
             msgstore_path, contacts_path, resolver = br.extract_encrypted(
                 str(tmp_path / 'backup'), 'secret', str(output_dir),
                 None, False, logger,
@@ -857,17 +871,15 @@ class TestExtractEncrypted:
         mock_backup.extract_file.assert_not_called()
 
     def test_resolver_returns_none_for_missing_file(self, tmp_path, logger):
-        import unittest.mock as mock
         mock_backup = self._make_mock_backup(tmp_path)
         output_dir = tmp_path / 'output'
 
-        with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
+        with self._patch_library(mock_backup):
             _, _, resolver = br.extract_encrypted(
                 str(tmp_path / 'backup'), 'secret', str(output_dir),
                 None, False, logger,
             )
 
-        # 'nonexistent.jpg' triggers FileNotFoundError in fake_extract_file
         result = resolver('Message/Media/nonexistent.jpg')
         assert result is None
 
@@ -877,7 +889,7 @@ class TestExtractEncrypted:
         mock_backup.test_decryption.side_effect = ValueError("incorrect passphrase")
         output_dir = tmp_path / 'output'
 
-        with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
+        with self._patch_library(mock_backup):
             with pytest.raises(SystemExit):
                 br.extract_encrypted(
                     str(tmp_path / 'backup'), 'wrongpw', str(output_dir),
@@ -885,8 +897,8 @@ class TestExtractEncrypted:
                 )
 
     def test_missing_library_exits(self, tmp_path, logger):
-        import unittest.mock as mock
         import sys
+        import unittest.mock as mock
         output_dir = tmp_path / 'output'
 
         with mock.patch.dict(sys.modules, {'iphone_backup_decrypt': None}):
@@ -897,12 +909,11 @@ class TestExtractEncrypted:
                 )
 
     def test_contacts_override_skips_extraction(self, tmp_path, logger):
-        import unittest.mock as mock
         mock_backup = self._make_mock_backup(tmp_path)
         output_dir = tmp_path / 'output'
         fake_contacts = str(tmp_path / 'my_contacts.sqlite')
 
-        with mock.patch('iphone_backup_decrypt.EncryptedBackup', return_value=mock_backup):
+        with self._patch_library(mock_backup):
             _, contacts_path, _ = br.extract_encrypted(
                 str(tmp_path / 'backup'), 'secret', str(output_dir),
                 fake_contacts, False, logger,
