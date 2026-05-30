@@ -190,15 +190,17 @@ def extract_encrypted(backup_dir: str,
                       output_dir: str,
                       ios_contacts_override: str | None,
                       business: bool,
-                      logger: logging.Logger) -> tuple[dict, str, str | None]:
+                      logger: logging.Logger) -> tuple[str, str | None, callable]:
     """
-    Decrypt an encrypted iPhone backup and extract WhatsApp files.
-    Returns (manifest_map, msgstore_path, ios_contacts_path).
+    Decrypt an encrypted iPhone backup and return a lazy media resolver.
+    Returns (msgstore_path, ios_contacts_path, media_resolver).
 
     ChatStorage.sqlite is decrypted to output_dir for re-run support.
     ContactsV2.sqlite is decrypted to a temp file (auto-deleted on exit).
-    All WhatsApp media is decrypted to a temp folder (auto-deleted on exit);
-    manifest_map maps relativePaths to the decrypted temp file paths.
+    Media files are decrypted on demand: media_resolver(relative_path) decrypts
+    the file the first time it is requested and caches it in a temp dir
+    (auto-deleted on exit). This means only the media that is actually referenced
+    by the filtered query is decrypted.
     """
     try:
         from iphone_backup_decrypt import EncryptedBackup, DomainLike
@@ -254,28 +256,26 @@ def extract_encrypted(backup_dir: str,
             logger.warning("ContactsV2.sqlite not found in encrypted backup; proceeding without contacts.")
             os.unlink(tmp_contacts.name)
 
-    # --- Media files ---
-    logger.info("Decrypting WhatsApp media files (this may take a while)...")
+    # --- Lazy media resolver ---
+    # Decrypt each media file on demand, caching in a temp dir.
+    # Only files actually referenced by the (possibly filtered) query are touched.
     tmp_media_dir = tempfile.mkdtemp(prefix='wa_ios_media_')
     atexit.register(shutil.rmtree, tmp_media_dir, ignore_errors=True)
+    cache: dict[str, str] = {}
 
-    n = backup.extract_files(
-        relative_paths_like='Message/Media/%',
-        domain_like=domain_like,
-        output_folder=tmp_media_dir,
-        preserve_folders=True,
-    )
-    logger.info(f"Decrypted {n} media file(s).")
+    def _media_resolver(relative_path: str) -> str | None:
+        if relative_path in cache:
+            return cache[relative_path]
+        # Mirror the output path that extract_files(preserve_folders=True) would produce
+        dest = os.path.join(tmp_media_dir, *relative_path.split('/'))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        try:
+            backup.extract_file(relative_path=relative_path,
+                                domain_like=domain_like,
+                                output_filename=dest)
+        except FileNotFoundError:
+            return None
+        cache[relative_path] = dest
+        return dest
 
-    # Build manifest map: {relativePath: abs_path_in_tmp_media_dir}
-    manifest_map = {}
-    for dirpath, _, filenames in os.walk(tmp_media_dir):
-        for fname in filenames:
-            abs_path = os.path.join(dirpath, fname)
-            rel = os.path.relpath(abs_path, tmp_media_dir).replace(os.sep, '/')
-            manifest_map[rel] = abs_path
-
-    if not manifest_map:
-        logger.warning("No WhatsApp media files found in the encrypted backup.")
-
-    return manifest_map, msgstore_path, ios_contacts_path
+    return msgstore_path, ios_contacts_path, _media_resolver
