@@ -251,6 +251,34 @@ def build_ios_number_map(cursor: sqlite3.Cursor,
     return consolidated
 
 
+def build_ios_pushname_map(cursor: sqlite3.Cursor,
+                           logger: logging.Logger) -> dict[str, str]:
+    """
+    Build a {jid_prefix: pushname} map from ZWAPROFILEPUSHNAME.
+    ZJID may be a phone-number JID (e.g. '491234@s.whatsapp.net') or a LID
+    (e.g. '120363318993@lid'). Stripping the '@...' suffix gives the same
+    prefix that the iOS query extracts from ZFROMJID, so this map resolves
+    group senders stored as LIDs that the address-book contacts dict can't.
+    """
+    try:
+        rows = cursor.execute(
+            "SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME "
+            "WHERE ZJID IS NOT NULL AND ZPUSHNAME IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError as e:
+        logger.debug(f"ZWAPROFILEPUSHNAME unavailable ({e}); skipping push names.")
+        return {}
+
+    result = {}
+    for jid, name in rows:
+        prefix = jid.split('@')[0] if '@' in jid else jid
+        if prefix:
+            result[prefix] = name
+    logger.debug(f"iOS push name map: {len(result)} entries.")
+    return result
+
+
+
 def load_ios_contacts(sqlite_path: str,
                       logger: logging.Logger) -> dict[str, str]:
     """

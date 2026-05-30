@@ -1103,6 +1103,11 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             if not contacts and ios_contacts_path:
                 contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
 
+            # Merge push names for keys not already in contacts (covers LID senders).
+            pushname_map = ios_handler.build_ios_pushname_map(cursor, logger)
+            for key, name in pushname_map.items():
+                contacts.setdefault(key, name)
+
             query = ios_handler.build_ios_query(args.limit, since_ms)
             group_subjects = dict(
                 cursor.execute(ios_handler.build_ios_group_subjects_query()).fetchall()
