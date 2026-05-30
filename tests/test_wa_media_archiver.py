@@ -437,6 +437,8 @@ def _make_ios_msgstore(missing_table=None, missing_col=None):
             'ZISFROMME INTEGER',
             'ZCHATSESSION INTEGER',
             'ZMEDIAITEM INTEGER',
+            'ZGROUPMEMBER INTEGER',
+            'ZPUSHNAME TEXT',
             'ZFROMJID TEXT',
         ],
         'ZWACHATSESSION': [
@@ -450,6 +452,10 @@ def _make_ios_msgstore(missing_table=None, missing_col=None):
             'ZMEDIALOCALPATH TEXT',
             'ZMEDIAURL TEXT',
             'ZTITLE TEXT',
+        ],
+        'ZWAGROUPMEMBER': [
+            'Z_PK INTEGER PRIMARY KEY',
+            'ZMEMBERJID TEXT',
         ],
     }
     for table, cols in schema.items():
@@ -560,13 +566,13 @@ class TestBuildIosQuery:
         assert 'ZMESSAGEDATE >=' not in query
 
     def test_group_sender_jid_without_at_uses_full_jid(self):
-        # SUBSTR(jid, 1, INSTR(jid,'@')-1) returns '' when '@' is absent.
-        # The CASE guard must fall back to the full JID instead.
+        # ZMEMBERJID with no '@' returns the full JID as sender.
         conn = _make_ios_msgstore()
         conn.executescript("""
             INSERT INTO ZWACHATSESSION VALUES (1, NULL, 1, 'Group A');
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
-            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 'nojid');
+            INSERT INTO ZWAGROUPMEMBER  VALUES (1, 'nojid');
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL, NULL);
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert len(rows) == 1
@@ -578,7 +584,7 @@ class TestBuildIosQuery:
         conn.executescript("""
             INSERT INTO ZWACHATSESSION VALUES (1, 'nojid', NULL, NULL);
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
-            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL, NULL);
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert len(rows) == 1
@@ -590,7 +596,8 @@ class TestBuildIosQuery:
         conn.executescript("""
             INSERT INTO ZWACHATSESSION VALUES (1, NULL, 1, 'Group A');
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
-            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, '447700900123@s.whatsapp.net');
+            INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL, NULL);
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert rows[0][6] == '447700900123'
@@ -600,7 +607,7 @@ class TestBuildIosQuery:
         conn.executescript("""
             INSERT INTO ZWACHATSESSION VALUES (1, '447700900456@s.whatsapp.net', NULL, NULL);
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
-            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL, NULL);
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert rows[0][6] == '447700900456'
