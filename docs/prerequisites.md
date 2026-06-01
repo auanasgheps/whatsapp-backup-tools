@@ -121,13 +121,11 @@ python3 wa_media_archiver.py \
 
 > ⚠️ If `--msgstore` points to a `.crypt15` file and `--e2e` is not provided, the script will exit with an error.
 
----
+#### Obtaining WhatsApp Contacts
 
-### Obtaining WhatsApp Contacts
+> This step is only required for manual pull - When using automatic retrieval (`--mode adb`), contacts are pulled automatically.
 
 Contacts are optional but strongly recommended — without them, folder names will show raw phone numbers instead of contact names.
-
-When using automatic retrieval (`--mode adb`), contacts are pulled automatically. No extra steps needed.
 
 For manual pull:
 
@@ -146,7 +144,7 @@ Pass the file to the script with `--contacts`.
 
 ### Your WhatsApp Media Folder
 
-The script needs a copy of your WhatsApp (Media) folder on disk — atcually, the folder that **contains** the `Media/` subfolder. 
+The script needs a copy of your WhatsApp (Media) folder on disk - actually, the folder that **contains** the `Media/` subfolder. 
 You need to copy this folder from your phone: you can use [Syncthing](https://syncthing.net/) to ease the process.
 
 ```
