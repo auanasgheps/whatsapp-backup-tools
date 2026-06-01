@@ -5,19 +5,22 @@
 
 Ensure Python 3.10+ is installed.
 
-For Android encrypted backup decryption, the script uses `wa-crypt-tools`:
+This script relies on some packages for Android and iOS.
+
+Install the relevant package before your first run.
+
+For Android encrypted backup decryption, the script uses `wa-crypt-tools`. You are going to use it if you don't have a rooted device.
 
 ```bash
 pip install wa-crypt-tools
 ```
 
-For iOS encrypted backup decryption, the script uses `iphone-backup-decrypt`:
+For iOS encrypted backup decryption, the script uses `iphone-backup-decrypt`. You are going to use it if you create password protected iOS backups.
 
 ```bash
 pip install iphone-backup-decrypt
 ```
 
-Install the relevant package before your first run.
 
 ---
 
@@ -28,10 +31,11 @@ Install the relevant package before your first run.
 On your phone, navigate to:
 
 ```
-Settings → Chats → Chat Backup → End-to-end Encrypted Backup
+Settings → Chats → Chat Backup → End-to-end Encrypted Backup → Turn On → Use 64-digit encryption key instead
 ```
 
-Enable it and note the **cryptographic key** — a long alphanumeric string. This is **not** a password. Store it somewhere safe; you will need it every time you pull a fresh backup.
+Enable it and note the **cryptographic key** — a long alphanumeric string. 
+**Store it somewhere safe**; you will need it every time you pull a fresh backup. If you lose this key, you will lose access to all your backups.
 
 > If this step is skipped, the `.crypt15` backup file cannot be decrypted and the script will not work on a non-rooted device.
 
@@ -61,6 +65,7 @@ python3 wa_media_archiver.py \
   --wa_root /path/to/WhatsApp \
   --output /path/to/output
 ```
+> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 
 The script pulls the encrypted backup and contacts directly from the device and decrypts on the fly. No separate steps needed.
 
@@ -139,9 +144,10 @@ Pass the file to the script with `--contacts`.
 
 ---
 
-### Locating Your WhatsApp Media Folder
+### Your WhatsApp Media Folder
 
-The script needs the root of your WhatsApp folder on disk — the folder that **contains** the `Media/` subfolder.
+The script needs a copy of your WhatsApp (Media) folder on disk — atcually, the folder that **contains** the `Media/` subfolder. 
+You need to copy this folder from your phone: you can use [Syncthing](https://syncthing.net/) to ease the process.
 
 ```
 /path/to/WhatsApp/
@@ -160,7 +166,7 @@ Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_r
 
 ## 4. iOS / iPadOS Setup
 
-WhatsApp on iOS stores its database and media inside an iPhone backup. The script reads the backup directly via `--ios_backup` — no third-party extraction tool required.
+WhatsApp on iOS stores its database and media inside an iPhone backup. The script reads the backup directly via `--ios_backup`.
 
 ### Encrypted vs. unencrypted backups
 
@@ -207,6 +213,7 @@ python3 wa_media_archiver.py \
   --output /path/to/output \
   --dry-run
 ```
+> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 
 Encrypted backup:
 
@@ -217,5 +224,6 @@ python3 wa_media_archiver.py \
   --output /path/to/output \
   --dry-run
 ```
+> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 
-Contacts are automatically extracted from the backup. No `--contacts` or `--wa_root` needed.
+Contacts are automatically extracted from the backup.
