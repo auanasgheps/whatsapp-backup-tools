@@ -21,7 +21,7 @@ For iOS encrypted backup decryption, the script uses `iphone-backup-decrypt`. Yo
 pip install iphone-backup-decrypt
 ```
 
-> 💡 Windows Users: you Python environment may not have pip in the PATH. If `pip install` doesn't work for you, `use py -m pip install`.
+> 💡 Windows Users: your Python environment may not have pip in the PATH. If `pip install` doesn't work for you, `use py -m pip install`.
 
 
 ---
