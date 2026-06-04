@@ -21,6 +21,8 @@ For iOS encrypted backup decryption, the script uses `iphone-backup-decrypt`. Yo
 pip install iphone-backup-decrypt
 ```
 
+> 💡 Windows Users: your Python environment may not have pip in the PATH. If `pip install` doesn't work for you, `use py -m pip install`.
+
 
 ---
 
@@ -37,6 +39,8 @@ Settings → Chats → Chat Backup → End-to-end Encrypted Backup → Turn On �
 Enable it and note the **cryptographic key** — a long alphanumeric string. 
 **Store it somewhere safe**; you will need it every time you pull a fresh backup. If you lose this key, you will lose access to all your backups.
 
+When asked, create the end-to-end ecrypted backup.
+
 > If this step is skipped, the `.crypt15` backup file cannot be decrypted and the script will not work on a non-rooted device.
 
 **iOS / iPadOS users** — End-to-end encrypted backup must be **disabled**. If it is enabled, the database inside the iPhone backup is encrypted in a way that cannot be read by this script. Disable it in WhatsApp before creating your device backup.
@@ -45,11 +49,30 @@ Enable it and note the **cryptographic key** — a long alphanumeric string.
 
 ## 3. Android Setup
 
+
+### Your WhatsApp Media Folder
+
+Before you run the script, you need your WhatsApp (Media) folder on disk - actually, the folder called `WhatsApp` that **contains** the `Media` subfolder. 
+You need to copy this folder from your phone: you can use [Syncthing](https://syncthing.net/) to ease the process.
+
+```
+/path/to/WhatsApp/
+├── Databases/
+└── Media/
+    ├── WhatsApp Images/
+    ├── WhatsApp Video/
+    └── WhatsApp Audio/
+```
+
+Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_root`.
+
+> ⚠️ **Run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower — the script hashes and copies every file in the archive. Running locally is strongly recommended.
+
 ### Obtaining the Database
 
 #### Recommended — Automatic Retrieval (`--mode adb`)
 
-The simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the script handle the pull and decryption automatically.
+This is the simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the script handle the pull and decryption automatically.
 
 > 💡 **ADB required.** Install it before running `--mode adb`:
 > - **Linux**: `sudo apt install adb` (Debian/Ubuntu) or `sudo dnf install android-tools` (Fedora)
@@ -62,12 +85,14 @@ Run the script with `--mode adb`:
 python3 wa_media_archiver.py \
   --mode adb \
   --e2e your_cryptographic_key \
-  --wa_root /path/to/WhatsApp \
+  --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output
 ```
 > 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 
 The script pulls the encrypted backup and contacts directly from the device and decrypts on the fly. No separate steps needed.
+
+> Please note that this is just a simple example: you can add many options to customize the run, please see [docs/running-the-script.md](docs/running-the-script.md).
 
 ---
 
@@ -115,7 +140,7 @@ Alternatively, skip the manual decrypt and let the script handle it by passing t
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db.crypt15 \
   --e2e your_cryptographic_key \
-  --wa_root /path/to/WhatsApp \
+  --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output
 ```
 
@@ -140,25 +165,6 @@ Pass the file to the script with `--contacts`.
 
 > 💡 You only need to repeat this if your contacts have changed significantly since the last run.
 
----
-
-### Your WhatsApp Media Folder
-
-The script needs a copy of your WhatsApp (Media) folder on disk - actually, the folder that **contains** the `Media/` subfolder. 
-You need to copy this folder from your phone: you can use [Syncthing](https://syncthing.net/) to ease the process.
-
-```
-/path/to/WhatsApp/
-├── Databases/
-└── Media/
-    ├── WhatsApp Images/
-    ├── WhatsApp Video/
-    └── WhatsApp Audio/
-```
-
-Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_root`.
-
-> ⚠️ **Run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower — the script hashes and copies every file in the archive. Running locally is strongly recommended.
 
 ---
 
