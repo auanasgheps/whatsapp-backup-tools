@@ -79,9 +79,8 @@ The script runs on **Linux, macOS, and Windows** (Python 3.10+).
 ## Prerequisites
 
 - **Python 3.10+** required
-- **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database
+- **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
 - **iOS/iPadOS**: End-to-end encrypted backup must be **disabled**
-- **ADB** required for automatic retrieval (`--mode adb`)
 
 See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: E2E backup configuration, database extraction (Android and iOS), contacts pull, and locating your media folder.
 
@@ -94,7 +93,7 @@ Always do a dry run first:
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp \
+  --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --contacts /path/to/wa_contacts \
   --dry-run

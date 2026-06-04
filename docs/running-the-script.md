@@ -26,7 +26,7 @@ usage: wa_media_archiver.py [-h]
 | `-msg` / `--msgstore` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Not needed with `--ios_backup`. Defaults to `msgstore.db` in the current folder |
 | `-e2e` / `--e2e_key` | If encrypted | Your cryptographic key for `.crypt15` decryption |
 | `-c` / `--contacts` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
-| `-wa` / `--wa_root` | Android / iOS pre-extracted | Root path of your WhatsApp folder. Android: folder containing `Media/`. iOS pre-extracted: `AppDomainGroup-group.net.whatsapp.WhatsApp.shared` folder. Not required with `--ios_backup` or `--mode restore` |
+| `-wa` / `--wa_root` | Android / iOS pre-extracted | Root path of your WhatsApp folder from mass storage. Android: this contains the `Media/` folder. iOS pre-extracted: `AppDomainGroup-group.net.whatsapp.WhatsApp.shared` folder. Not required with `--ios_backup` or `--mode restore` |
 | `--ios_backup` | iOS (recommended) | Path to the iPhone backup directory (the folder containing `Manifest.db`). Mutually exclusive with `--wa_root` |
 | `--ios_password` | No | Password for an encrypted iPhone backup. Only needed when the backup is encrypted |
 | `--ios_contacts` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios_backup` if omitted |
@@ -62,7 +62,7 @@ The examples below use `\` to split long commands across multiple lines. Replace
 python3 wa_media_archiver.py \
   --mode adb \
   --e2e your_cryptographic_key \
-  --wa_root /path/to/WhatsApp \
+  --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --dry-run
 ```
@@ -74,7 +74,7 @@ python3 wa_media_archiver.py \
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp \
+  --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --contacts /path/to/wa_contacts \
   --dry-run
@@ -86,7 +86,7 @@ python3 wa_media_archiver.py \
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db.crypt15 \
   --e2e your_cryptographic_key \
-  --wa_root /path/to/WhatsApp \
+  --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --dry-run
 ```
@@ -127,7 +127,7 @@ python3 wa_media_archiver.py \
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp \
+  --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --since 2025-01-01 \
   --limit 100 \
