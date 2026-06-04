@@ -72,7 +72,7 @@ After a successful run, the archive will be organized as follows:
 
 The script runs on **Linux, macOS, and Windows** (Python 3.10+).
 
-> ⚠️ **Run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower.
+> ⚠️ If you have WhatsApp on Android, **run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower.
 
 ---
 
