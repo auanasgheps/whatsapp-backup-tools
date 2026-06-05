@@ -1,3 +1,13 @@
+import sys
+if sys.version_info < (3, 10):
+    print(
+        f"ERROR: Python 3.10 or higher is required "
+        f"(you are running {sys.version.split()[0]}).\n"
+        "  Download the latest Python from https://www.python.org/downloads/",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 import atexit
 import argparse
 import contextlib
