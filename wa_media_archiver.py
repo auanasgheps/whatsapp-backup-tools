@@ -400,7 +400,6 @@ def sync_group_names(group_subjects: dict, output_root: str,
                     f"RENAME skipped — target already exists: "
                     f"{old_folder} -> {new_folder}"
                 )
-                continue
             else:
                 if dry_run:
                     logger.info(f"[DRY RUN] Would rename group folder: {old_folder} -> {new_folder}")
@@ -492,7 +491,6 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
                     f"RENAME skipped — target already exists: "
                     f"{old_folder} -> {new_folder}"
                 )
-                continue
             else:
                 if dry_run:
                     logger.info(f"[DRY RUN] Would rename contact folder: {old_folder} -> {new_folder}")
@@ -666,9 +664,14 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
             stats['missing'] += 1
             continue
 
-        if not timestamp:
+        if timestamp is None:
             logger.warning(f"SKIP (no timestamp): message_id={msg_id}, file={file_path}")
-            stats['warnings'] += 1
+            missing_rows.append(_build_missing_row(
+                msg_id, timestamp, file_path, mime_type, chat_subject, sender,
+                key_from_me, message_url, media_name, contacts, number_map,
+                filename=filename,
+            ))
+            stats['missing'] += 1
             continue
 
         year = get_year(timestamp)
@@ -932,6 +935,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--ios_backup and --wa_root are mutually exclusive.")
     if args.ios_backup and args.mode == 'adb':
         parser.error("--ios_backup and --mode adb are mutually exclusive.")
+    if args.ios_backup and args.contacts:
+        parser.error(
+            "--contacts is for Android ADB exports and cannot be used with --ios_backup. "
+            "iOS contacts are loaded automatically from the backup (ContactsV2.sqlite). "
+            "Use --ios_contacts to supply a pre-extracted ContactsV2.sqlite instead."
+        )
     if args.mode != 'restore' and not args.ios_backup and not args.wa_root:
         parser.error("--wa_root / -wa is required unless --ios_backup or --mode restore")
 
@@ -1011,12 +1020,6 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
     # --- Load contacts ---
     contacts = {}
     if args.contacts:
-        if args.ios_backup:
-            logger.warning(
-                "--contacts was provided alongside --ios_backup. "
-                "The supplied contacts file will be used; iOS auto-extracted contacts "
-                "will be ignored. Omit --contacts to use the backup's ContactsV2.sqlite."
-            )
         contacts = android_handler.load_contacts(args.contacts, logger)
 
     # --- Decrypt if needed ---
