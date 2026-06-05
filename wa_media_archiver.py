@@ -26,7 +26,7 @@ import ios_handler
 # Requires Python 3.10+.
 # ==============================================================================
 
-__version__ = '0.33'
+__version__ = '0.34'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -396,7 +396,6 @@ def sync_group_names(group_subjects: dict, output_root: str,
             else:
                 if dry_run:
                     logger.info(f"[DRY RUN] Would rename group folder: {old_folder} -> {new_folder}")
-                    # Don't update index in dry_run — on-disk folder is still the old name.
                     continue
                 else:
                     os.rename(old_path, new_path)
@@ -404,10 +403,6 @@ def sync_group_names(group_subjects: dict, output_root: str,
                     if conn is not None:
                         old_prefix = f"Groups/{old_folder}/"
                         new_prefix = f"Groups/{new_folder}/"
-                        # Known race: os.rename is immediate; this UPDATE is committed
-                        # later in main(). A crash between the two leaves archive_copies
-                        # with stale paths (restore mode will report those files as
-                        # unrestorable on the next run). Accepted — no mitigation.
                         conn.execute(
                             "UPDATE archive_copies "
                             "SET archive_path = ? || SUBSTR(archive_path, ?) "
@@ -493,8 +488,6 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
             else:
                 if dry_run:
                     logger.info(f"[DRY RUN] Would rename contact folder: {old_folder} -> {new_folder}")
-                    # Don't update index in dry_run — on-disk folder is still the old name,
-                    # so process_rows must route using it to avoid overcounting copies.
                     continue
                 else:
                     os.rename(old_path, new_path)
@@ -504,10 +497,6 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
                     if conn is not None:
                         old_prefix = f"Contacts/{old_folder}/"
                         new_prefix = f"Contacts/{new_folder}/"
-                        # Known race: os.rename is immediate; this UPDATE is committed
-                        # later in main(). A crash between the two leaves archive_copies
-                        # with stale paths (restore mode will report those files as
-                        # unrestorable on the next run). Accepted — no mitigation.
                         conn.execute(
                             "UPDATE archive_copies "
                             "SET archive_path = ? || SUBSTR(archive_path, ?) "
@@ -718,9 +707,8 @@ def run_restore_mode(args, logger):
         if file_count == 0:
             logger.error(
                 "No restore data found in the archive database.\n"
-                "  Either this archive was built before v0.12, or no files have "
-                "been archived yet. Re-run the archiver (forward mode) to build "
-                "the restore data, then run restore mode again."
+                "  No files have been archived yet. Re-run the archiver (forward mode) "
+                "to build the restore data, then run restore mode again."
             )
             raise SystemExit(1)
 
@@ -1103,7 +1091,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             if not contacts and ios_contacts_path:
                 contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
 
-            # Merge push names for keys not already in contacts (covers LID senders).
+            # Merge push names as fallback for contacts not in the address book.
             pushname_map = ios_handler.build_ios_pushname_map(cursor, logger)
             for key, name in pushname_map.items():
                 contacts.setdefault(key, name)

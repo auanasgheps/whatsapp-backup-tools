@@ -108,12 +108,13 @@ def build_number_map(cursor: sqlite3.Cursor,
         return {}
 
     direct = {old: new for old, new in raw_pairs}
+    cyclic: set[str] = set()
 
     def resolve(number, visited=None):
         if visited is None:
             visited = set()
         if number in visited:
-            logger.warning(f"Cycle detected in number change chain: {number}")
+            cyclic.add(number)
             return number
         visited.add(number)
         if number in direct:
@@ -121,6 +122,8 @@ def build_number_map(cursor: sqlite3.Cursor,
         return number
 
     consolidated = {old: resolve(old) for old in direct}
+    if cyclic:
+        logger.debug(f"Number change chains: {len(cyclic)} cycle(s) ignored.")
     logger.info(
         f"Number consolidation map built: {len(consolidated)} "
         f"old number(s) mapped to current numbers."
