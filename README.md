@@ -122,7 +122,6 @@ The script is **safe to re-run** on an existing archive:
 - Stickers are not archived in this version.
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared.
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `--mode restore` on an iOS archive exits with a clear error.
-- **iOS encrypted backups are not supported.** If your iPhone backup is encrypted, disable encryption in Finder (macOS) or Apple Devices (Windows), create a new backup, then re-run.
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book (`ZCONTACTABID = NULL`) appear as separate folders.
 
 ---
@@ -142,8 +141,6 @@ This tool was developed with the assistance of AI coding tools. Development was 
 - The AI received specific, detailed instructions at each step — it did not drive direction
 - All generated code was reviewed by the developer before being accepted
 - The tool was tested end-to-end by the developer
-
-AI was used as a productivity accelerator, not as a replacement for developer judgement.
 
 ## Disclaimer
 
