@@ -14,6 +14,14 @@ import tempfile
 import zlib
 from datetime import datetime
 
+_REQUIRED_MODULES = ['adb_extractor', 'android_handler', 'backup_reader', 'ios_handler']
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_missing = [m for m in _REQUIRED_MODULES if not os.path.isfile(os.path.join(_script_dir, m + '.py'))]
+if _missing:
+    print(f"ERROR: Missing required file(s): {', '.join(m + '.py' for m in _missing)}", file=sys.stderr)
+    print("  Download all .py files from the repository and place them in the same folder.", file=sys.stderr)
+    sys.exit(1)
+
 import adb_extractor
 import android_handler
 import backup_reader
