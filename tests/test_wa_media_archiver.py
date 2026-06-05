@@ -439,7 +439,6 @@ def _make_ios_msgstore(missing_table=None, missing_col=None):
             'ZMEDIAITEM INTEGER',
             'ZGROUPMEMBER INTEGER',
             'ZPUSHNAME TEXT',
-            'ZFROMJID TEXT',
         ],
         'ZWACHATSESSION': [
             'Z_PK INTEGER PRIMARY KEY',
@@ -574,7 +573,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, NULL, 1, 'Group A');
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, 'nojid');
-            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert len(rows) == 1
@@ -586,7 +585,7 @@ class TestBuildIosQuery:
         conn.executescript("""
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, 'nojid', NULL, NULL);
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
-            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert len(rows) == 1
@@ -599,7 +598,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, NULL, 1, 'Group A');
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
-            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert rows[0][6] == '447700900123'
@@ -609,7 +608,7 @@ class TestBuildIosQuery:
         conn.executescript("""
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '447700900456@s.whatsapp.net', NULL, NULL);
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
-            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert rows[0][6] == '447700900456'
