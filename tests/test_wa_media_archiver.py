@@ -1102,7 +1102,7 @@ class TestSyncFolderNames:
         assert not (contacts_root / 'OldName (00111)').exists()
         assert (contacts_root / 'NewName (00111)').exists()
 
-    def test_rename_skipped_when_target_exists_index_unchanged(self, tmp_path, logger):
+    def test_rename_skipped_when_target_exists_index_updated(self, tmp_path, logger):
         contacts_root = tmp_path / 'Contacts'
         contacts_root.mkdir()
         (contacts_root / 'OldName (00111)').mkdir()
@@ -1112,8 +1112,9 @@ class TestSyncFolderNames:
         result = wa.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
-        # Index must stay on old name — otherwise the next run routes media wrong
-        assert result['111'][0] == 'OldName (00111)'
+        # Index is updated to the new name even though the on-disk rename was skipped,
+        # so future runs don't re-detect the mismatch and re-fire the warning.
+        assert result['111'][0] == 'NewName (00111)'
 
     def test_name_changed_no_folder_on_disk_index_updated(self, tmp_path, logger):
         # Name changed but folder has never been created; index should update anyway
@@ -1166,7 +1167,7 @@ class TestSyncGroupNames:
         assert not (groups_root / 'OldName').exists()
         assert (groups_root / 'NewName').exists()
 
-    def test_rename_skipped_when_target_exists_index_unchanged(self, tmp_path, logger):
+    def test_rename_skipped_when_target_exists_index_updated(self, tmp_path, logger):
         groups_root = tmp_path / 'Groups'
         groups_root.mkdir()
         (groups_root / 'OldName').mkdir()
@@ -1175,8 +1176,9 @@ class TestSyncGroupNames:
         result = wa.sync_group_names(
             {'42': 'NewName'}, str(tmp_path), group_index, logger
         )
-        # Index unchanged when rename is skipped
-        assert result['42']['folder'] == 'OldName'
+        # Index is updated even when the on-disk rename is skipped,
+        # so future runs don't re-detect the mismatch and repeat the warning.
+        assert result['42']['folder'] == 'NewName'
 
     def test_new_group_not_in_index_is_skipped(self, tmp_path, logger):
         # New groups are not yet in group_index; sync_group_names skips them
@@ -1328,18 +1330,18 @@ class TestProcessRows:
         assert stats['missing'] == 1
         assert len(missing) == 1
 
-    def test_null_timestamp_counted_as_warning_not_copied(self, tmp_path, logger):
+    def test_null_timestamp_added_to_missing_rows(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
         out = str(tmp_path / 'out')
         os.makedirs(out)
-        # _row() cannot produce a None timestamp (it substitutes _TS), so build directly.
         row = (1, None, 'img.jpg', None, '42', 'Family', '111', 0, None, None)
-        stats, _, _, _ = wa.process_rows(
+        stats, _, _, missing = wa.process_rows(
             [row], 1, {}, {}, {}, {},
             self._resolver(src_dir), out, logger, dry_run=False,
         )
-        assert stats['warnings'] == 1
+        assert stats['missing'] == 1
         assert stats['copied'] == 0
+        assert len(missing) == 1
 
     # --- Dry run ---
 
