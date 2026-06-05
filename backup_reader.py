@@ -268,7 +268,6 @@ def extract_encrypted(backup_dir: str,
     def _media_resolver(relative_path: str) -> str | None:
         if relative_path in cache:
             return cache[relative_path]
-        # Mirror the output path that extract_files(preserve_folders=True) would produce
         dest = os.path.join(tmp_media_dir, *relative_path.split('/'))
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         try:
