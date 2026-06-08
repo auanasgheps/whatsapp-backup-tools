@@ -38,7 +38,7 @@ usage: wa_media_archiver.py [-h]
 | `--dry-run` | No | Simulate the run without copying any files |
 | `--limit N` | No | Cap rows returned per chat type (N/2 from groups, N/2 from 1-to-1). Total rows ≤ N. Useful for test runs |
 | `--since DATE` | No | Only include messages on or after this date (`YYYY-MM-DD`). Combines freely with `--limit` |
-| `--timezone TZ` | No | IANA timezone name for year folder assignment and report timestamps (e.g. `Europe/Rome`, `America/New_York`, `UTC`). Ensures files land in the correct `<YYYY>/` subfolder regardless of where or when the script is run. Also applied to `--since` date interpretation. Defaults to machine local time. **Windows users: requires `pip install tzdata`** |
+| `--timezone TZ` | No | [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones#List) for year folder assignment and report timestamps (e.g. `Europe/Rome`, `America/New_York`, `UTC`). Ensures files land in the correct `<YYYY>/` subfolder regardless of where or when the script is run. Also applied to `--since` date interpretation. Defaults to machine local time. **Windows users: requires `pip install tzdata`** |
 
 ---
 
@@ -175,7 +175,7 @@ python3 wa_media_archiver.py \
 
 Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly inside the archive folder, without needing the original device or database. This is useful when re-importing media into tools that expect the original WhatsApp layout.
 
-> ⚠️ **Android archives only.** iOS media is stored at `Message/Media/...` paths that have no equivalent reconstruction target outside the iPhone backup format. Running restore mode on an iOS archive exits with a clear error.
+> ⚠️ **Android archives only.** iOS media is stored at `Message/Media/...` paths that have no equivalent reconstruction target outside the iPhone backup format. Running restore mode on an iOS archive is disallowed.
 
 The reconstructed tree is written to `<output>/Media/`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
 
