@@ -619,18 +619,21 @@ def _copy_or_skip(src, dest_path, dest_dir, file_path, timestamp,
 
     os.makedirs(dest_dir, exist_ok=True)
     try:
-        shutil.copy2(src, resolved)
-        set_file_times(resolved, timestamp)
-        if src_hash is None:
-            src_hash = file_md5(resolved)
-        logger.debug(f"COPIED: {src} -> {resolved}")
-        if cursor is not None:
-            rel = os.path.relpath(resolved, output_root).replace(os.sep, '/')
-            record_file_archived(cursor, file_path, src_hash, rel)
-        return 1, 0, 0
+        shutil.copy(src, resolved)
     except Exception as e:
         logger.error(f"ERROR copying {src} -> {resolved}: {e}")
         return 0, 0, 1
+    try:
+        set_file_times(resolved, timestamp)
+    except OSError as e:
+        logger.debug(f"Could not set timestamps on {resolved}: {e}")
+    if src_hash is None:
+        src_hash = file_md5(resolved)
+    logger.debug(f"COPIED: {src} -> {resolved}")
+    if cursor is not None:
+        rel = os.path.relpath(resolved, output_root).replace(os.sep, '/')
+        record_file_archived(cursor, file_path, src_hash, rel)
+    return 1, 0, 0
 
 
 def process_rows(rows, total: int, contacts, number_map, folder_index, group_index,
