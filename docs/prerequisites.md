@@ -7,15 +7,21 @@ Ensure Python 3.10+ is installed.
 
 This script relies on some packages for Android and iOS.
 
-Install the relevant package before your first run.
+Install the relevant package before your first run. If you miss any of these, the script will notify you.
 
-For Android encrypted backup decryption, the script uses `wa-crypt-tools`. You are going to use it if you don't have a rooted device.
+
+
+**Android encrypted backup decryption** 
+
+The script uses `wa-crypt-tools`. You are going to use it if you don't have a rooted device.
 
 ```bash
 pip install wa-crypt-tools
 ```
 
-For iOS encrypted backup decryption, the script uses `iphone-backup-decrypt`. You are going to use it if you create password protected iOS backups.
+**iOS encrypted backup decryption** 
+
+The script uses `iphone-backup-decrypt`. You are going to use it if you create password protected iOS backups.
 
 ```bash
 pip install iphone-backup-decrypt
@@ -23,7 +29,10 @@ pip install iphone-backup-decrypt
 
 > 💡 Windows Users: your Python environment may not have pip in the PATH. If `pip install` doesn't work for you, `use py -m pip install`.
 
-> 💡 **Windows users — `--timezone`:** if you plan to use the `--timezone` argument, Windows requires one additional package. macOS and Linux ship the IANA timezone database as part of the OS; Windows does not.
+
+**Timezone feature for Windows**
+
+If you plan to use the `--timezone` argument, Windows requires one additional package. macOS and Linux ship the IANA timezone database as part of the OS; Windows does not.
 > ```
 > pip install tzdata
 > ```
@@ -59,7 +68,7 @@ When asked, create the end-to-end ecrypted backup.
 ### Your WhatsApp Media Folder
 
 Before you run the script, you need your WhatsApp (Media) folder on disk - actually, the folder called `WhatsApp` that **contains** the `Media` subfolder. 
-You need to copy this folder from your phone: you can use [Syncthing](https://syncthing.net/) to ease the process.
+You need to copy this folder from your phone: you can use [Syncthing](https://syncthing.net/) to smooth the process.
 
 ```
 /path/to/WhatsApp/
