@@ -1086,8 +1086,44 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
     return platform, media_resolver, ios_contacts_path, contacts
 
 
+def check_dependencies(args: argparse.Namespace, logger: logging.Logger):
+    """Check all required external dependencies upfront and report everything missing at once."""
+    import importlib.util
+    issues = []
+
+    if getattr(args, 'mode', None) == 'adb' and shutil.which('adb') is None:
+        issues.append(
+            "adb not found on PATH\n"
+            "      macOS/Linux: brew install android-platform-tools\n"
+            "      Windows:     download platform-tools from developer.android.com/tools/releases/platform-tools"
+        )
+    if getattr(args, 'e2e_key', None) and importlib.util.find_spec('wa_crypt_tools') is None:
+        issues.append(
+            "wa-crypt-tools is not installed\n"
+            "      Run: pip install wa-crypt-tools"
+        )
+    if getattr(args, 'ios_password', None) and importlib.util.find_spec('iphone_backup_decrypt') is None:
+        issues.append(
+            "iphone-backup-decrypt is not installed\n"
+            "      Run: pip install iphone-backup-decrypt"
+        )
+    if getattr(args, 'timezone', None) and sys.platform == 'win32' \
+            and importlib.util.find_spec('tzdata') is None:
+        issues.append(
+            "tzdata is not installed (required for --timezone on Windows)\n"
+            "      Run: pip install tzdata"
+        )
+
+    if issues:
+        msg = "Missing dependencies for the requested operation:\n\n"
+        msg += "\n\n".join(f"  • {i}" for i in issues)
+        logger.error(msg)
+        raise SystemExit(1)
+
+
 def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     """Execute a full forward archival run."""
+    check_dependencies(args, logger)
     platform, media_resolver, ios_contacts_path, contacts = _prepare_input(args, logger)
 
     # --- Validate DB exists ---
