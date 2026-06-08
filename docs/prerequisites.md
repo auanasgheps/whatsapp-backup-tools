@@ -23,6 +23,12 @@ pip install iphone-backup-decrypt
 
 > 💡 Windows Users: your Python environment may not have pip in the PATH. If `pip install` doesn't work for you, `use py -m pip install`.
 
+> 💡 **Windows users — `--timezone`:** if you plan to use the `--timezone` argument, Windows requires one additional package. macOS and Linux ship the IANA timezone database as part of the OS; Windows does not.
+> ```
+> pip install tzdata
+> ```
+> This is only needed when `--timezone` is used. Normal runs without `--timezone` work on Windows without it.
+
 
 ---
 

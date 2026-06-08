@@ -19,6 +19,7 @@ usage: wa_media_archiver.py [-h]
                       [--dry-run]
                       [--limit N]
                       [--since DATE]
+                      [--timezone TZ]
 ```
 
 | Argument | Required | Description |
@@ -37,6 +38,7 @@ usage: wa_media_archiver.py [-h]
 | `--dry-run` | No | Simulate the run without copying any files |
 | `--limit N` | No | Cap rows returned per chat type (N/2 from groups, N/2 from 1-to-1). Total rows ≤ N. Useful for test runs |
 | `--since DATE` | No | Only include messages on or after this date (`YYYY-MM-DD`). Combines freely with `--limit` |
+| `--timezone TZ` | No | IANA timezone name for year folder assignment and report timestamps (e.g. `Europe/Rome`, `America/New_York`, `UTC`). Ensures files land in the correct `<YYYY>/` subfolder regardless of where or when the script is run. Also applied to `--since` date interpretation. Defaults to machine local time. **Windows users: requires `pip install tzdata`** |
 
 ---
 
