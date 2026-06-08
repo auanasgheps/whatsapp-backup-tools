@@ -3,7 +3,8 @@
 
 ## Overview
 
-WhatsApp Media Archiver organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database (`msgstore.db`). Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
+WhatsApp Media Archiver organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. 
+Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
 
 > ⚠️ **This tool is designed to run on a backup copy of your WhatsApp data — never on live device files.** For safeguard reasons, this script will always make a copy of your data.
 
@@ -21,8 +22,10 @@ WhatsApp Media Archiver organises your WhatsApp media into a structured folder h
 - Duplicate media detection across runs — CSV report of files with identical content at multiple archive paths
 - Missing media CSV report for manual recovery of old or deleted files
 - Dry run mode for safe previewing before a full run
-- iOS support — reads directly from an iPhone backup (`--ios_backup`); no third-party extraction tool required
-- Encrypted backup support (`msgstore.db.crypt15`) via `wa-crypt-tools`
+- Windows, Linux and MacOS are supported to run the script.
+- WhatsApp platform: Android and iOS are both supported. No root or jailbreak are required.
+    - Android: requires a manual copy of your `/Whatsapp/Media/` folder
+    - iOS: reads directly from an iPhone backup, encrypted backups are supported via `wa-crypt-tools`
 - Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
 
 ### Supported Media Types
@@ -122,7 +125,7 @@ The script is **safe to re-run** on an existing archive:
 - Stickers are not archived in this version.
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared.
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `--mode restore` on an iOS archive exits with a clear error.
-- **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book (`ZCONTACTABID = NULL`) appear as separate folders.
+- **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders.
 
 ---
 
