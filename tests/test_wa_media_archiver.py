@@ -148,6 +148,36 @@ class TestGetYear:
         year = wa.get_year(ts_ms)
         assert year == "2024"
 
+    def test_utc_timezone(self):
+        pytest.importorskip('zoneinfo', reason="zoneinfo unavailable")
+        from zoneinfo import ZoneInfo
+        try:
+            tz = ZoneInfo('UTC')
+        except Exception:
+            pytest.skip("tzdata not installed")
+        # 2024-12-31 23:30:00 UTC → still 2024 in UTC
+        ts_ms = 1735688200000  # 2024-12-31 23:36:40 UTC
+        assert wa.get_year(ts_ms, tz=tz) == "2024"
+
+    def test_timezone_crosses_year_boundary(self):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            rome = ZoneInfo('Europe/Rome')
+            utc  = ZoneInfo('UTC')
+        except ZoneInfoNotFoundError:
+            pytest.skip("tzdata not installed (required on Windows)")
+        # 2024-12-31 23:30:00 UTC = 2025-01-01 00:30:00 in UTC+1 (Europe/Rome in winter)
+        ts_ms = 1735687800000  # 2024-12-31 23:30:00 UTC exactly
+        assert wa.get_year(ts_ms, tz=rome) == "2025"
+        assert wa.get_year(ts_ms, tz=utc)  == "2024"
+
+    def test_no_tz_returns_string(self):
+        # Without tz, returns a 4-digit year string (value depends on local time, just check format)
+        ts_ms = 1705276800000
+        year = wa.get_year(ts_ms)
+        assert len(year) == 4
+        assert year.isdigit()
+
 
 class TestAppendSenderToFilename:
     def test_normal_case(self):

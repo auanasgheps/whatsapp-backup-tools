@@ -96,14 +96,14 @@ def set_file_times(path: str, timestamp_ms: int):
     os.utime(path, (ts, ts))
 
 
-def get_year(timestamp_ms: int) -> str:
+def get_year(timestamp_ms: int, tz=None) -> str:
     """Extract year string from a WhatsApp timestamp (ms)."""
-    return datetime.fromtimestamp(timestamp_ms / 1000).strftime('%Y')
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=tz).strftime('%Y')
 
 
-def human_datetime(timestamp_ms: int) -> str:
+def human_datetime(timestamp_ms: int, tz=None) -> str:
     """Convert WhatsApp timestamp (ms) to a human-readable string."""
-    return datetime.fromtimestamp(timestamp_ms / 1000).strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=tz).strftime('%Y-%m-%d %H:%M:%S')
 
 
 def append_sender_to_filename(filename: str, sender: str) -> str:
@@ -537,7 +537,7 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
 
 def _build_missing_row(msg_id, timestamp, file_path, mime_type,
                        chat_subject, sender, key_from_me, message_url, media_name,
-                       contacts, number_map, filename='') -> dict:
+                       contacts, number_map, filename='', tz=None) -> dict:
     """Build a missing-media report row for either a null file_path or a missing source file."""
     canonical = number_map.get(sender, sender) if sender else None
     if chat_subject is not None:
@@ -550,7 +550,7 @@ def _build_missing_row(msg_id, timestamp, file_path, mime_type,
             else (contacts.get(canonical, canonical) if canonical else 'Unknown')
     return {
         'message_id':        msg_id,
-        'timestamp_human':   human_datetime(timestamp) if timestamp else '',
+        'timestamp_human':   human_datetime(timestamp, tz) if timestamp else '',
         'original_filename': filename,
         'mime_type':         mime_type or '',
         'sender':            sender_display,
@@ -637,7 +637,7 @@ def _copy_or_skip(src, dest_path, dest_dir, file_path, timestamp,
 
 
 def process_rows(rows, total: int, contacts, number_map, folder_index, group_index,
-                 media_resolver, output_root, logger, dry_run, conn=None):
+                 media_resolver, output_root, logger, dry_run, conn=None, tz=None):
     stats = {'copied': 0, 'skipped': 0, 'missing': 0, 'warnings': 0}
     updated_index = dict(folder_index)
     updated_group_index = dict(group_index)
@@ -660,7 +660,7 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
             missing_rows.append(_build_missing_row(
                 msg_id, timestamp, None, mime_type, chat_subject, sender,
                 key_from_me, message_url, media_name, contacts, number_map,
-                filename=filename,
+                filename=filename, tz=tz,
             ))
             stats['missing'] += 1
             continue
@@ -672,7 +672,7 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
             missing_rows.append(_build_missing_row(
                 msg_id, timestamp, file_path, mime_type, chat_subject, sender,
                 key_from_me, message_url, media_name, contacts, number_map,
-                filename=filename,
+                filename=filename, tz=tz,
             ))
             stats['missing'] += 1
             continue
@@ -682,12 +682,12 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
             missing_rows.append(_build_missing_row(
                 msg_id, timestamp, file_path, mime_type, chat_subject, sender,
                 key_from_me, message_url, media_name, contacts, number_map,
-                filename=filename,
+                filename=filename, tz=tz,
             ))
             stats['missing'] += 1
             continue
 
-        year = get_year(timestamp)
+        year = get_year(timestamp, tz)
 
         if is_group:
             dest_dir, dest_filename = _route_group(
@@ -942,6 +942,13 @@ def parse_args() -> argparse.Namespace:
                         metavar='DATE',
                         help='Only include messages on or after this date '
                              '(format: YYYY-MM-DD). Combines with --limit.')
+    parser.add_argument('--timezone',
+                        default=None,
+                        metavar='TZ',
+                        help='IANA timezone for year folders and report timestamps '
+                             '(e.g. Europe/Rome, America/New_York, UTC). '
+                             'Default: machine local time. '
+                             'Windows users: requires pip install tzdata.')
     args = parser.parse_args()
 
     if args.ios_backup and args.wa_root:
@@ -1137,11 +1144,29 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
         platform = detect_db_platform(args.msgstore)
         logger.info(f"Detected platform: {platform}")
 
+    # --- Resolve --timezone ---
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    tz = None
+    if args.timezone:
+        try:
+            tz = ZoneInfo(args.timezone)
+        except ZoneInfoNotFoundError:
+            msg = f"Unknown timezone: '{args.timezone}'."
+            if sys.platform == 'win32':
+                msg += "\n  On Windows, the IANA timezone database must be installed: pip install tzdata"
+            msg += "\n  Use an IANA name, e.g. Europe/Rome, America/New_York, UTC."
+            logger.error(msg)
+            raise SystemExit(1)
+        logger.info(f"Timezone: {args.timezone}")
+
     # --- Parse --since and --limit ---
     since_ms = None
     if args.since:
         try:
-            since_ms = int(datetime.strptime(args.since, '%Y-%m-%d').timestamp() * 1000)
+            since_dt = datetime.strptime(args.since, '%Y-%m-%d')
+            if tz:
+                since_dt = since_dt.replace(tzinfo=tz)
+            since_ms = int(since_dt.timestamp() * 1000)
         except ValueError:
             logger.error(f"Invalid --since date '{args.since}'. Expected format: YYYY-MM-DD")
             raise SystemExit(1)
@@ -1218,6 +1243,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 cursor, total_rows, contacts, number_map, folder_index, group_index,
                 media_resolver, args.output, logger, args.dry_run,
                 conn=archive_conn if not args.dry_run else None,
+                tz=tz,
             )
 
             if not args.dry_run:
