@@ -1869,3 +1869,56 @@ class TestPullContacts:
                    side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"fail")):
             with pytest.raises(subprocess.CalledProcessError):
                 adb.pull_contacts(str(tmp_path), logger=logger)
+
+
+# ---------------------------------------------------------------------------
+# TestCheckDependencies
+# ---------------------------------------------------------------------------
+
+class TestCheckDependencies:
+    def _args(self, **kwargs):
+        """Return a minimal namespace; only set the fields under test."""
+        defaults = dict(mode=None, e2e_key=None, ios_password=None)
+        defaults.update(kwargs)
+        import argparse
+        return argparse.Namespace(**defaults)
+
+    def test_no_issues_passes_silently(self, logger):
+        args = self._args()
+        wa.check_dependencies(args, logger)  # must not raise
+
+    def test_adb_missing_raises(self, logger):
+        args = self._args(mode='adb')
+        with patch("wa_media_archiver.shutil.which", return_value=None):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
+    def test_adb_present_passes(self, logger):
+        args = self._args(mode='adb')
+        with patch("wa_media_archiver.shutil.which", return_value="/usr/bin/adb"):
+            wa.check_dependencies(args, logger)  # must not raise
+
+    def test_wa_crypt_tools_missing_raises(self, logger):
+        args = self._args(e2e_key='key.bin')
+        with patch("importlib.util.find_spec", return_value=None):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
+    def test_iphone_backup_decrypt_missing_raises(self, logger):
+        args = self._args(ios_password='secret')
+        with patch("importlib.util.find_spec", return_value=None):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
+    def test_multiple_missing_reported_together(self, logger, caplog):
+        args = self._args(mode='adb', e2e_key='key.bin')
+        # Capture what logger.error receives by inspecting the call
+        errors = []
+        logger.error = lambda msg, *a, **kw: errors.append(msg)
+        with patch("wa_media_archiver.shutil.which", return_value=None), \
+             patch("importlib.util.find_spec", return_value=None), \
+             pytest.raises(SystemExit):
+            wa.check_dependencies(args, logger)
+        assert len(errors) == 1, "Expected a single combined error message"
+        assert "adb" in errors[0]
+        assert "wa-crypt-tools" in errors[0]
