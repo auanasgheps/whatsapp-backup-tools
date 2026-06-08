@@ -1058,7 +1058,20 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
             db = DatabaseFactory.from_file(msg)
             raw = msg.read()  # payload only — from_file already consumed the header
         key = KeyFactory.new(args.e2e_key)
-        decrypted = db.decrypt(key, raw)
+        if key is None:
+            logger.error(
+                f"Could not load decryption key from: {args.e2e_key}\n"
+                "  Make sure --e2e_key points to a valid WhatsApp key file."
+            )
+            raise SystemExit(1)
+        try:
+            decrypted = db.decrypt(key, raw)
+        except Exception as e:
+            logger.error(
+                f"Decryption failed: {e}\n"
+                "  The key file may not match this backup."
+            )
+            raise SystemExit(1)
         try:
             output_file = zlib.decompress(decrypted)
         except zlib.error:
