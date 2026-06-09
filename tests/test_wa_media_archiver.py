@@ -148,6 +148,36 @@ class TestGetYear:
         year = wa.get_year(ts_ms)
         assert year == "2024"
 
+    def test_utc_timezone(self):
+        pytest.importorskip('zoneinfo', reason="zoneinfo unavailable")
+        from zoneinfo import ZoneInfo
+        try:
+            tz = ZoneInfo('UTC')
+        except Exception:
+            pytest.skip("tzdata not installed")
+        # 2024-12-31 23:30:00 UTC → still 2024 in UTC
+        ts_ms = 1735688200000  # 2024-12-31 23:36:40 UTC
+        assert wa.get_year(ts_ms, tz=tz) == "2024"
+
+    def test_timezone_crosses_year_boundary(self):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            rome = ZoneInfo('Europe/Rome')
+            utc  = ZoneInfo('UTC')
+        except ZoneInfoNotFoundError:
+            pytest.skip("tzdata not installed (required on Windows)")
+        # 2024-12-31 23:30:00 UTC = 2025-01-01 00:30:00 in UTC+1 (Europe/Rome in winter)
+        ts_ms = 1735687800000  # 2024-12-31 23:30:00 UTC exactly
+        assert wa.get_year(ts_ms, tz=rome) == "2025"
+        assert wa.get_year(ts_ms, tz=utc)  == "2024"
+
+    def test_no_tz_returns_string(self):
+        # Without tz, returns a 4-digit year string (value depends on local time, just check format)
+        ts_ms = 1705276800000
+        year = wa.get_year(ts_ms)
+        assert len(year) == 4
+        assert year.isdigit()
+
 
 class TestAppendSenderToFilename:
     def test_normal_case(self):
@@ -1869,3 +1899,56 @@ class TestPullContacts:
                    side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"fail")):
             with pytest.raises(subprocess.CalledProcessError):
                 adb.pull_contacts(str(tmp_path), logger=logger)
+
+
+# ---------------------------------------------------------------------------
+# TestCheckDependencies
+# ---------------------------------------------------------------------------
+
+class TestCheckDependencies:
+    def _args(self, **kwargs):
+        """Return a minimal namespace; only set the fields under test."""
+        defaults = dict(mode=None, e2e_key=None, ios_password=None)
+        defaults.update(kwargs)
+        import argparse
+        return argparse.Namespace(**defaults)
+
+    def test_no_issues_passes_silently(self, logger):
+        args = self._args()
+        wa.check_dependencies(args, logger)  # must not raise
+
+    def test_adb_missing_raises(self, logger):
+        args = self._args(mode='adb')
+        with patch("wa_media_archiver.shutil.which", return_value=None):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
+    def test_adb_present_passes(self, logger):
+        args = self._args(mode='adb')
+        with patch("wa_media_archiver.shutil.which", return_value="/usr/bin/adb"):
+            wa.check_dependencies(args, logger)  # must not raise
+
+    def test_wa_crypt_tools_missing_raises(self, logger):
+        args = self._args(e2e_key='key.bin')
+        with patch("importlib.util.find_spec", return_value=None):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
+    def test_iphone_backup_decrypt_missing_raises(self, logger):
+        args = self._args(ios_password='secret')
+        with patch("importlib.util.find_spec", return_value=None):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
+    def test_multiple_missing_reported_together(self, logger, caplog):
+        args = self._args(mode='adb', e2e_key='key.bin')
+        # Capture what logger.error receives by inspecting the call
+        errors = []
+        logger.error = lambda msg, *a, **kw: errors.append(msg)
+        with patch("wa_media_archiver.shutil.which", return_value=None), \
+             patch("importlib.util.find_spec", return_value=None), \
+             pytest.raises(SystemExit):
+            wa.check_dependencies(args, logger)
+        assert len(errors) == 1, "Expected a single combined error message"
+        assert "adb" in errors[0]
+        assert "wa-crypt-tools" in errors[0]
