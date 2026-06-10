@@ -24,7 +24,7 @@ import tempfile
 import zlib
 from datetime import datetime
 
-_REQUIRED_MODULES = ['adb_extractor', 'android_handler', 'backup_reader', 'ios_handler']
+_REQUIRED_MODULES = ['adb_extractor', 'android_handler', 'archive_db', 'backup_reader', 'ios_handler']
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _missing = [m for m in _REQUIRED_MODULES if not os.path.isfile(os.path.join(_script_dir, m + '.py'))]
 if _missing:
@@ -34,6 +34,7 @@ if _missing:
 
 import adb_extractor
 import android_handler
+import archive_db
 import backup_reader
 import ios_handler
 
@@ -257,281 +258,6 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection,
 
 
 # ---------------------------------------------------------------------------
-# Archive DB
-# ---------------------------------------------------------------------------
-
-def open_archive_db(output_root: str) -> sqlite3.Connection:
-    """
-    Open (or create) the archive state database.
-    Returns an open connection with foreign keys enabled.
-    """
-    db_path = os.path.join(output_root, '.wa_media_archiver.db')
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS contacts (
-            number        TEXT PRIMARY KEY,
-            folder        TEXT NOT NULL,
-            display_name  TEXT NOT NULL DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS groups (
-            chat_row_id  TEXT PRIMARY KEY,
-            folder       TEXT NOT NULL,
-            subject      TEXT NOT NULL DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS files (
-            original_path  TEXT PRIMARY KEY,
-            md5            BLOB NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS archive_copies (
-            original_path  TEXT NOT NULL REFERENCES files(original_path),
-            archive_path   TEXT NOT NULL,
-            PRIMARY KEY (original_path, archive_path)
-        );
-        CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
-    """)
-    return conn
-
-
-def load_contacts_from_db(conn: sqlite3.Connection) -> dict:
-    """Load contact folder index: number -> (folder, display_name)."""
-    return {row[0]: (row[1], row[2])
-            for row in conn.execute("SELECT number, folder, display_name FROM contacts")}
-
-
-def save_contacts_to_db(conn: sqlite3.Connection, index: dict):
-    """Persist contact folder index to DB."""
-    conn.executemany(
-        "INSERT OR REPLACE INTO contacts (number, folder, display_name) VALUES (?, ?, ?)",
-        ((number, folder, display_name) for number, (folder, display_name) in index.items())
-    )
-
-
-def load_groups_from_db(conn: sqlite3.Connection) -> dict:
-    """Load group folder index: str(chat_row_id) -> {folder, subject}."""
-    return {
-        row[0]: {'folder': row[1], 'subject': row[2]}
-        for row in conn.execute(
-            "SELECT chat_row_id, folder, subject FROM groups"
-        )
-    }
-
-
-def save_groups_to_db(conn: sqlite3.Connection, index: dict):
-    """Persist group folder index to DB."""
-    conn.executemany(
-        "INSERT OR REPLACE INTO groups (chat_row_id, folder, subject) VALUES (?, ?, ?)",
-        ((key, val['folder'], val['subject']) for key, val in index.items())
-    )
-
-
-def record_file_archived(cursor: sqlite3.Cursor,
-                         original_path: str, md5: bytes, archive_path: str):
-    """Record that original_path was archived to archive_path with given md5."""
-    cursor.execute(
-        "INSERT INTO files (original_path, md5) VALUES (?, ?) "
-        "ON CONFLICT(original_path) DO UPDATE SET md5 = excluded.md5",
-        (original_path, md5)
-    )
-    cursor.execute(
-        "INSERT OR IGNORE INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
-        (original_path, archive_path)
-    )
-
-
-def check_db_health(conn: sqlite3.Connection, logger: logging.Logger):
-    """Run quick integrity and foreign key checks; abort on failure."""
-    results = conn.execute("PRAGMA quick_check").fetchall()
-    if results != [('ok',)]:
-        for row in results:
-            logger.error(f"Database integrity issue: {row[0]}")
-        raise SystemExit(1)
-
-    issues = conn.execute("PRAGMA foreign_key_check").fetchall()
-    if issues:
-        for table, rowid, parent, fkid in issues:
-            logger.error(
-                f"Foreign key violation in '{table}': rowid={rowid}, "
-                f"references '{parent}' (fk #{fkid})"
-            )
-        raise SystemExit(1)
-
-    logger.debug("Database health check passed.")
-
-
-def _unique_group_name(desired: str, existing: set) -> str:
-    """Return desired if unused, else append ' (2)', ' (3)', ... until unique."""
-    if desired not in existing:
-        return desired
-    counter = 2
-    while True:
-        candidate = f"{desired} ({counter})"
-        if candidate not in existing:
-            return candidate
-        counter += 1
-
-
-def sync_group_names(group_subjects: dict, output_root: str,
-                     group_index: dict, logger: logging.Logger,
-                     conn: sqlite3.Connection | None = None,
-                     dry_run: bool = False) -> dict:
-    """
-    Detect group renames since the last run and rename folders on disk.
-    group_subjects: {str(chat_row_id): current chat_subject} built from query rows.
-    Mirrors sync_folder_names behaviour for contacts.
-    """
-    groups_root = os.path.join(output_root, 'Groups')
-    updated = dict(group_index)
-
-    for key, current_subject in group_subjects.items():
-        if key not in updated:
-            continue  # new group — assigned later in resolve_group_folder
-
-        entry = updated[key]
-        old_folder = entry['folder']
-        old_subject = entry.get('subject', '')
-
-        if current_subject == old_subject:
-            continue
-
-        desired = sanitize_filename(current_subject) if current_subject \
-            else f"Unknown Group ({key})"
-        existing = {v['folder'] for k2, v in updated.items() if k2 != key}
-        new_folder = _unique_group_name(desired, existing)
-
-        old_path = os.path.join(groups_root, old_folder)
-        new_path = os.path.join(groups_root, new_folder)
-
-        if os.path.exists(old_path):
-            if os.path.exists(new_path):
-                logger.warning(
-                    f"RENAME skipped — target already exists: "
-                    f"{old_folder} -> {new_folder}"
-                )
-            else:
-                if dry_run:
-                    logger.info(f"[DRY RUN] Would rename group folder: {old_folder} -> {new_folder}")
-                    continue
-                else:
-                    os.rename(old_path, new_path)
-                    logger.info(f"RENAMED group folder: {old_folder} -> {new_folder}")
-                    if conn is not None:
-                        old_prefix = f"Groups/{old_folder}/"
-                        new_prefix = f"Groups/{new_folder}/"
-                        conn.execute(
-                            "UPDATE archive_copies "
-                            "SET archive_path = ? || SUBSTR(archive_path, ?) "
-                            "WHERE archive_path LIKE ? ESCAPE '\\'",
-                            (new_prefix, len(old_prefix) + 1,
-                             f"{escape_like(old_prefix)}%")
-                        )
-        else:
-            logger.debug(
-                f"Group folder name changed but no folder on disk yet: "
-                f"{old_folder} -> {new_folder}"
-            )
-
-        updated[key] = {'folder': new_folder, 'subject': current_subject}
-
-    return updated
-
-
-def resolve_group_folder(chat_row_id: int, chat_subject: str | None,
-                         group_index: dict) -> str:
-    """
-    Return the stable folder name for a group.
-    If the group is new, assign a unique name — disambiguating with a counter
-    suffix if another group already uses the same subject.
-    Mutates group_index in-place.
-    """
-    key = str(chat_row_id)
-    if key in group_index:
-        return group_index[key]['folder']
-
-    desired = sanitize_filename(chat_subject) if chat_subject \
-        else f"Unknown Group ({chat_row_id})"
-    existing = {v['folder'] for v in group_index.values()}
-    folder = _unique_group_name(desired, existing)
-    group_index[key] = {'folder': folder, 'subject': chat_subject or ''}
-    return folder
-
-
-def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
-                      folder_index: dict, logger: logging.Logger,
-                      conn: sqlite3.Connection | None = None,
-                      dry_run: bool = False) -> dict:
-    """
-    Compare current contact names against the persisted folder index.
-    If a contact name has changed since the last run, rename the folder
-    on disk so existing files are not re-copied and the archive stays
-    consolidated.
-
-    Returns an updated copy of the index.
-    """
-    contacts_root = os.path.join(output_root, 'Contacts')
-    updated_index = dict(folder_index)
-
-    for number, display_name in contacts.items():
-        # Resolve to canonical number in case of number change
-        canonical = number_map.get(number, number)
-        new_folder = build_contact_folder_name(display_name, canonical)
-        entry = folder_index.get(canonical)
-        old_folder = entry[0] if entry is not None else None
-
-        if old_folder is None:
-            # First time we have seen this contact — just register it
-            updated_index[canonical] = (new_folder, display_name)
-            continue
-
-        if old_folder == new_folder:
-            # Name unchanged — update display_name in case it changed subtly
-            updated_index[canonical] = (new_folder, display_name)
-            continue
-
-        # Name has changed — rename folder on disk if it exists
-        old_path = os.path.join(contacts_root, old_folder)
-        new_path = os.path.join(contacts_root, new_folder)
-
-        if os.path.exists(old_path):
-            if os.path.exists(new_path):
-                # Edge case: new folder name already exists (another contact?)
-                logger.warning(
-                    f"RENAME skipped — target already exists: "
-                    f"{old_folder} -> {new_folder}"
-                )
-            else:
-                if dry_run:
-                    logger.info(f"[DRY RUN] Would rename contact folder: {old_folder} -> {new_folder}")
-                    continue
-                else:
-                    os.rename(old_path, new_path)
-                    logger.info(
-                        f"RENAMED contact folder: {old_folder} -> {new_folder}"
-                    )
-                    if conn is not None:
-                        old_prefix = f"Contacts/{old_folder}/"
-                        new_prefix = f"Contacts/{new_folder}/"
-                        conn.execute(
-                            "UPDATE archive_copies "
-                            "SET archive_path = ? || SUBSTR(archive_path, ?) "
-                            "WHERE archive_path LIKE ? ESCAPE '\\'",
-                            (new_prefix, len(old_prefix) + 1,
-                             f"{escape_like(old_prefix)}%")
-                        )
-        else:
-            logger.debug(
-                f"Folder name changed but no folder on disk yet: "
-                f"{old_folder} -> {new_folder}"
-            )
-
-        updated_index[canonical] = (new_folder, display_name)
-
-    return updated_index
-
-
-# ---------------------------------------------------------------------------
 # Core processing
 # ---------------------------------------------------------------------------
 
@@ -566,7 +292,7 @@ def _route_group(chat_row_id, chat_subject, sender, key_from_me,
                  contacts, number_map, filename, year, output_root,
                  group_index) -> tuple[str, str]:
     """Resolve dest_dir and dest_filename for a group chat message. Mutates group_index."""
-    group_name = resolve_group_folder(chat_row_id, chat_subject, group_index)
+    group_name = archive_db.resolve_group_folder(chat_row_id, chat_subject, group_index)
     canonical = number_map.get(sender, sender)
     sender_display = 'Me' if (key_from_me == 1 or not sender) \
         else contacts.get(canonical, format_phone(canonical))
@@ -611,7 +337,7 @@ def _copy_or_skip(src, dest_path, dest_dir, file_path, timestamp,
         if resolved is None:
             if cursor is not None:
                 rel = os.path.relpath(dest_path, output_root).replace(os.sep, '/')
-                record_file_archived(cursor, file_path, src_hash, rel)
+                archive_db.record_file_archived(cursor, file_path, src_hash, rel)
             return 0, 1, 0
     else:
         src_hash = None
@@ -632,7 +358,7 @@ def _copy_or_skip(src, dest_path, dest_dir, file_path, timestamp,
     logger.debug(f"COPIED: {src} -> {resolved}")
     if cursor is not None:
         rel = os.path.relpath(resolved, output_root).replace(os.sep, '/')
-        record_file_archived(cursor, file_path, src_hash, rel)
+        archive_db.record_file_archived(cursor, file_path, src_hash, rel)
     return 1, 0, 0
 
 
@@ -722,9 +448,9 @@ def run_restore_mode(args, logger):
     Queries .wa_media_archiver.db to determine original file paths and their archive copies.
     The reconstructed tree is written to <output>/Media/.
     """
-    conn = open_archive_db(args.output)
+    conn = archive_db.open_archive_db(args.output)
     try:
-        check_db_health(conn, logger)
+        archive_db.check_db_health(conn, logger)
         file_count = conn.execute(
             "SELECT COUNT(DISTINCT original_path) FROM archive_copies"
         ).fetchone()[0]
@@ -1324,22 +1050,22 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
         ).fetchone()[0]
         logger.info(f"Query returned {total_rows} rows.")
 
-        archive_conn = open_archive_db(args.output)
+        archive_conn = archive_db.open_archive_db(args.output)
         try:
-            check_db_health(archive_conn, logger)
-            folder_index = load_contacts_from_db(archive_conn)
+            archive_db.check_db_health(archive_conn, logger)
+            folder_index = archive_db.load_contacts_from_db(archive_conn)
             logger.info(f"Contact index loaded: {len(folder_index)} known contact(s).")
 
-            group_index = load_groups_from_db(archive_conn)
+            group_index = archive_db.load_groups_from_db(archive_conn)
             logger.info(f"Group index loaded: {len(group_index)} known group(s).")
 
-            folder_index = sync_folder_names(
+            folder_index = archive_db.sync_folder_names(
                 contacts, number_map, args.output, folder_index, logger,
                 conn=archive_conn if not args.dry_run else None,
                 dry_run=args.dry_run,
             )
 
-            group_index = sync_group_names(
+            group_index = archive_db.sync_group_names(
                 group_subjects, args.output, group_index, logger,
                 conn=archive_conn if not args.dry_run else None,
                 dry_run=args.dry_run,
@@ -1358,8 +1084,8 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
             if not args.dry_run:
                 archive_conn.commit()
-                save_contacts_to_db(archive_conn, updated_index)
-                save_groups_to_db(archive_conn, updated_group_index)
+                archive_db.save_contacts_to_db(archive_conn, updated_index)
+                archive_db.save_groups_to_db(archive_conn, updated_group_index)
                 archive_conn.execute("ANALYZE")
                 archive_conn.commit()
                 logger.info(f"Archive DB saved: {len(updated_index)} contact(s), "

@@ -60,6 +60,12 @@ _adb_spec = _ilu.spec_from_file_location(
 adb = _ilu.module_from_spec(_adb_spec)
 _adb_spec.loader.exec_module(adb)
 
+_archive_db_spec = _ilu.spec_from_file_location(
+    "archive_db", os.path.join(_ROOT, "archive_db.py")
+)
+arc = _ilu.module_from_spec(_archive_db_spec)
+_archive_db_spec.loader.exec_module(arc)
+
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a silent logger so test output stays clean
@@ -195,15 +201,15 @@ class TestAppendSenderToFilename:
 
 class TestUniqueGroupName:
     def test_unused_name_returned_as_is(self):
-        assert wa._unique_group_name("Family", set()) == "Family"
-        assert wa._unique_group_name("Family", {"Other"}) == "Family"
+        assert arc._unique_group_name("Family", set()) == "Family"
+        assert arc._unique_group_name("Family", {"Other"}) == "Family"
 
     def test_collision_gets_counter_suffix(self):
-        assert wa._unique_group_name("Family", {"Family"}) == "Family (2)"
+        assert arc._unique_group_name("Family", {"Family"}) == "Family (2)"
 
     def test_multiple_collisions(self):
         existing = {"Family", "Family (2)", "Family (3)"}
-        assert wa._unique_group_name("Family", existing) == "Family (4)"
+        assert arc._unique_group_name("Family", existing) == "Family (4)"
 
 
 # ===========================================================================
@@ -956,30 +962,30 @@ class TestExtractEncrypted:
 class TestResolveGroupFolder:
     def test_new_group_assigned_sanitized_name(self):
         index = {}
-        folder = wa.resolve_group_folder('42', 'Family Chat', index)
+        folder = arc.resolve_group_folder('42', 'Family Chat', index)
         assert folder == 'Family Chat'
         assert index['42']['folder'] == 'Family Chat'
 
     def test_existing_group_returns_stable_name(self):
         # Even if subject has changed, the stable folder from the index is returned.
         index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
-        folder = wa.resolve_group_folder('42', 'NewName', index)
+        folder = arc.resolve_group_folder('42', 'NewName', index)
         assert folder == 'OldName'
 
     def test_none_subject_gets_unknown_fallback(self):
         index = {}
-        folder = wa.resolve_group_folder('99', None, index)
+        folder = arc.resolve_group_folder('99', None, index)
         assert 'Unknown Group' in folder
         assert '99' in folder
 
     def test_name_collision_with_existing_group_disambiguated(self):
         index = {'10': {'folder': 'Friends', 'subject': 'Friends'}}
-        folder = wa.resolve_group_folder('20', 'Friends', index)
+        folder = arc.resolve_group_folder('20', 'Friends', index)
         assert folder == 'Friends (2)'
 
     def test_special_chars_in_subject_sanitized(self):
         index = {}
-        folder = wa.resolve_group_folder('1', 'Chat: Family/Work', index)
+        folder = arc.resolve_group_folder('1', 'Chat: Family/Work', index)
         assert '/' not in folder
         assert ':' not in folder
 
@@ -990,10 +996,10 @@ class TestResolveGroupFolder:
 
 class TestRecordFileArchived:
     def test_creates_file_and_copy_records(self, tmp_path):
-        conn = wa.open_archive_db(str(tmp_path))
+        conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b'\x01' * 16
-        wa.record_file_archived(cursor, 'orig.jpg', md5,
+        arc.record_file_archived(cursor, 'orig.jpg', md5,
                                 'Contacts/Alice (00111)/2024/Received/orig.jpg')
         conn.commit()
         row = conn.execute(
@@ -1007,11 +1013,11 @@ class TestRecordFileArchived:
         conn.close()
 
     def test_duplicate_archive_path_silently_ignored(self, tmp_path):
-        conn = wa.open_archive_db(str(tmp_path))
+        conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b'\x01' * 16
-        wa.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
-        wa.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
+        arc.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
+        arc.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -1020,11 +1026,11 @@ class TestRecordFileArchived:
         conn.close()
 
     def test_multiple_archive_paths_for_same_original(self, tmp_path):
-        conn = wa.open_archive_db(str(tmp_path))
+        conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b'\x01' * 16
-        wa.record_file_archived(cursor, 'orig.jpg', md5, 'path1.jpg')
-        wa.record_file_archived(cursor, 'orig.jpg', md5, 'path2.jpg')
+        arc.record_file_archived(cursor, 'orig.jpg', md5, 'path1.jpg')
+        arc.record_file_archived(cursor, 'orig.jpg', md5, 'path2.jpg')
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -1035,8 +1041,8 @@ class TestRecordFileArchived:
 
 class TestCheckDbHealth:
     def test_healthy_db_passes(self, tmp_path, logger):
-        conn = wa.open_archive_db(str(tmp_path))
-        wa.check_db_health(conn, logger)  # should not raise
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.check_db_health(conn, logger)  # should not raise
         conn.close()
 
 
@@ -1075,7 +1081,7 @@ class TestWriteMissingReport:
 
 class TestWriteDuplicateReport:
     def test_no_duplicates_does_not_create_file(self, tmp_path, logger):
-        conn = wa.open_archive_db(str(tmp_path))
+        conn = arc.open_archive_db(str(tmp_path))
         path = str(tmp_path / 'dups.csv')
         wa.write_duplicate_report(path, conn, logger)
         conn.close()
@@ -1083,7 +1089,7 @@ class TestWriteDuplicateReport:
 
     def test_duplicates_written_to_csv(self, tmp_path, logger):
         import hashlib
-        conn = wa.open_archive_db(str(tmp_path))
+        conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = hashlib.md5(b'data').digest()
         cursor.execute("INSERT INTO files VALUES (?, ?)", ('orig.jpg', md5))
@@ -1113,7 +1119,7 @@ class TestSyncFolderNames:
         (contacts_root / 'Alice (00111)').mkdir()
         folder_index = {'111': ('Alice (00111)', 'Alice')}
         contacts = {'111': 'Alice'}
-        result = wa.sync_folder_names(
+        result = arc.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
         assert result['111'][0] == 'Alice (00111)'
@@ -1125,7 +1131,7 @@ class TestSyncFolderNames:
         (contacts_root / 'OldName (00111)').mkdir()
         folder_index = {'111': ('OldName (00111)', 'OldName')}
         contacts = {'111': 'NewName'}
-        result = wa.sync_folder_names(
+        result = arc.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
         assert result['111'][0] == 'NewName (00111)'
@@ -1139,7 +1145,7 @@ class TestSyncFolderNames:
         (contacts_root / 'NewName (00111)').mkdir()  # target already exists
         folder_index = {'111': ('OldName (00111)', 'OldName')}
         contacts = {'111': 'NewName'}
-        result = wa.sync_folder_names(
+        result = arc.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
         # Index is updated to the new name even though the on-disk rename was skipped,
@@ -1150,13 +1156,13 @@ class TestSyncFolderNames:
         # Name changed but folder has never been created; index should update anyway
         folder_index = {'111': ('OldName (00111)', 'OldName')}
         contacts = {'111': 'NewName'}
-        result = wa.sync_folder_names(
+        result = arc.sync_folder_names(
             contacts, {}, str(tmp_path), folder_index, logger
         )
         assert result['111'][0] == 'NewName (00111)'
 
     def test_new_contact_registered_in_index(self, tmp_path, logger):
-        result = wa.sync_folder_names(
+        result = arc.sync_folder_names(
             {'111': 'Alice'}, {}, str(tmp_path), {}, logger
         )
         assert '111' in result
@@ -1165,7 +1171,7 @@ class TestSyncFolderNames:
         # Contact is known by old number '111'; canonical is '222'
         contacts = {'111': 'Alice'}
         number_map = {'111': '222'}
-        result = wa.sync_folder_names(
+        result = arc.sync_folder_names(
             contacts, number_map, str(tmp_path), {}, logger
         )
         # Registered under canonical '222', folder uses canonical number
@@ -1179,7 +1185,7 @@ class TestSyncGroupNames:
         groups_root.mkdir()
         (groups_root / 'Family').mkdir()
         group_index = {'42': {'folder': 'Family', 'subject': 'Family'}}
-        result = wa.sync_group_names(
+        result = arc.sync_group_names(
             {'42': 'Family'}, str(tmp_path), group_index, logger
         )
         assert result['42']['folder'] == 'Family'
@@ -1190,7 +1196,7 @@ class TestSyncGroupNames:
         groups_root.mkdir()
         (groups_root / 'OldName').mkdir()
         group_index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
-        result = wa.sync_group_names(
+        result = arc.sync_group_names(
             {'42': 'NewName'}, str(tmp_path), group_index, logger
         )
         assert result['42']['folder'] == 'NewName'
@@ -1203,7 +1209,7 @@ class TestSyncGroupNames:
         (groups_root / 'OldName').mkdir()
         (groups_root / 'NewName').mkdir()  # target already exists
         group_index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
-        result = wa.sync_group_names(
+        result = arc.sync_group_names(
             {'42': 'NewName'}, str(tmp_path), group_index, logger
         )
         # Index is updated even when the on-disk rename is skipped,
@@ -1212,7 +1218,7 @@ class TestSyncGroupNames:
 
     def test_new_group_not_in_index_is_skipped(self, tmp_path, logger):
         # New groups are not yet in group_index; sync_group_names skips them
-        result = wa.sync_group_names(
+        result = arc.sync_group_names(
             {'99': 'Brand New Group'}, str(tmp_path), {}, logger
         )
         assert '99' not in result
@@ -1415,7 +1421,7 @@ class TestProcessRows:
         os.makedirs(out)
         rows = [self._row(chat_subject=None, sender='111', key_from_me=0,
                           file_path='img.jpg')]
-        archive_conn = wa.open_archive_db(out)
+        archive_conn = arc.open_archive_db(out)
         try:
             wa.process_rows(
                 rows, 1, {'111': 'Alice'}, {}, {}, {},
@@ -1518,31 +1524,31 @@ class TestValidateWaRoot:
 
 class TestContactPersistence:
     def test_save_and_load_round_trip(self, tmp_path):
-        conn = wa.open_archive_db(str(tmp_path))
+        conn = arc.open_archive_db(str(tmp_path))
         index = {"391234567890": ("Alice (00391234567890)", "Alice")}
-        wa.save_contacts_to_db(conn, index)
+        arc.save_contacts_to_db(conn, index)
         conn.commit()
-        loaded = wa.load_contacts_from_db(conn)
+        loaded = arc.load_contacts_from_db(conn)
         conn.close()
         assert loaded == index
 
     def test_update_existing_contact(self, tmp_path):
-        conn = wa.open_archive_db(str(tmp_path))
-        wa.save_contacts_to_db(conn, {"111": ("Old Name (00111)", "Old Name")})
-        wa.save_contacts_to_db(conn, {"111": ("New Name (00111)", "New Name")})
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.save_contacts_to_db(conn, {"111": ("Old Name (00111)", "Old Name")})
+        arc.save_contacts_to_db(conn, {"111": ("New Name (00111)", "New Name")})
         conn.commit()
-        loaded = wa.load_contacts_from_db(conn)
+        loaded = arc.load_contacts_from_db(conn)
         conn.close()
         assert loaded["111"] == ("New Name (00111)", "New Name")
 
 
 class TestGroupPersistence:
     def test_save_and_load_round_trip(self, tmp_path):
-        conn = wa.open_archive_db(str(tmp_path))
+        conn = arc.open_archive_db(str(tmp_path))
         index = {"42": {"folder": "Family Chat", "subject": "Family Chat"}}
-        wa.save_groups_to_db(conn, index)
+        arc.save_groups_to_db(conn, index)
         conn.commit()
-        loaded = wa.load_groups_from_db(conn)
+        loaded = arc.load_groups_from_db(conn)
         conn.close()
         assert loaded == index
 
