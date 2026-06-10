@@ -46,18 +46,6 @@ usage: wa_media_archiver.py [-h]
 
 ---
 
-## Line Continuation by Shell
-
-The examples below use `\` to split long commands across multiple lines. Replace it with the correct character for your shell:
-
-| Shell | Character |
-|---|---|
-| bash / zsh (Linux, macOS) | `\` |
-| PowerShell (Windows) | `` ` `` |
-| cmd.exe (Windows) | `^` |
-
----
-
 ## Config File
 
 If you always run the script with the same paths and settings, you can save them in a `config.toml` file instead of repeating them on the command line every time.
@@ -108,6 +96,17 @@ output     = "/path/to/archive"
 CLI arguments always win. A value set in `config.toml` acts as a default and is overridden by anything explicitly passed on the command line.
 
 `--dry-run` and `--limit` are intentionally excluded from the config file — they are one-off flags and can always be appended to the command line.
+
+---
+## Line Continuation by Shell
+
+The examples below use `\` to split long commands across multiple lines. Replace it with the correct character for your shell:
+
+| Shell | Character |
+|---|---|
+| bash / zsh (Linux, macOS) | `\` |
+| PowerShell (Windows) | `` ` `` |
+| cmd.exe (Windows) | `^` |
 
 ---
 
