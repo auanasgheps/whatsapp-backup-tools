@@ -607,6 +607,9 @@ _EXAMPLE_CONFIG = """\
 # wa_media_archiver config
 # All paths can be absolute or relative to where you run the script.
 # Remove the leading # to activate a setting.
+#
+# Windows tip: use forward slashes in paths to avoid TOML parse errors.
+#   output = "C:/Users/Oliver/Desktop/archive"  <- forward slashes work on Windows
 
 output     = "/path/to/archive"         # required
 # msgstore = "msgstore.db"
@@ -632,6 +635,13 @@ def _load_toml(path: str) -> dict:
             return tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         print(f"ERROR: Could not parse config file {path}:\n  {e}", file=sys.stderr)
+        print(
+            "  Tip: Windows paths must use forward slashes or double backslashes:\n"
+            '    output = "C:/Users/Name/Desktop/archive"     ← forward slashes (recommended)\n'
+            '    output = "C:\\\\Users\\\\Name\\\\Desktop\\\\archive"  ← double backslashes\n'
+            "  Single backslashes (\\) are not valid in TOML strings.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     except OSError as e:
         print(f"ERROR: Could not read config file {path}:\n  {e}", file=sys.stderr)

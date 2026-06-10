@@ -83,6 +83,12 @@ output     = "/path/to/archive"
 # ios_contacts = ""
 ```
 
+> ⚠️ **Windows users:** TOML does not allow single backslashes in strings — use forward slashes or double backslashes for paths:
+> ```toml
+> output = "C:/Users/Oliver/Desktop/archive"      # forward slashes — recommended
+> output = "C:\\Users\\Oliver\\Desktop\\archive"  # double backslashes also work
+> ```
+
 ### How the config file is found
 
 1. **Explicit path** — pass `--config /path/to/myconfig.toml`. No confirmation prompt.

@@ -1981,6 +1981,14 @@ class TestLoadToml:
         with pytest.raises(SystemExit):
             wa._load_toml(str(tmp_path / "nonexistent.toml"))
 
+    def test_windows_backslash_path_shows_hint(self, tmp_path, capsys):
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes(b'output = "C:\\Users\\Oliver\\Desktop\\archive"\n')
+        with pytest.raises(SystemExit):
+            wa._load_toml(str(cfg))
+        captured = capsys.readouterr()
+        assert "forward slashes" in captured.err
+
 
 class TestGenerateConfig:
     def test_writes_example_config(self, tmp_path):
