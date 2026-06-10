@@ -5,6 +5,8 @@
 
 ```
 usage: wa_media_archiver.py [-h]
+                      [--config PATH]
+                      [--generate-config]
                       [-msg MSGSTORE]
                       [-e2e E2E_KEY]
                       [-c CONTACTS]
@@ -24,6 +26,8 @@ usage: wa_media_archiver.py [-h]
 
 | Argument | Required | Description |
 |---|---|---|
+| `--config PATH` | No | Path to a TOML config file. If omitted, the script auto-detects `config.toml` in the script folder or current directory |
+| `--generate-config` | No | Write `example-config.toml` to the script folder and exit. Rename it to `config.toml` to activate it |
 | `-msg` / `--msgstore` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Not needed with `--ios_backup`. Defaults to `msgstore.db` in the current folder |
 | `-e2e` / `--e2e_key` | If encrypted | Your cryptographic key for `.crypt15` decryption |
 | `-c` / `--contacts` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
@@ -51,6 +55,59 @@ The examples below use `\` to split long commands across multiple lines. Replace
 | bash / zsh (Linux, macOS) | `\` |
 | PowerShell (Windows) | `` ` `` |
 | cmd.exe (Windows) | `^` |
+
+---
+
+## Config File
+
+If you always run the script with the same paths and settings, you can save them in a `config.toml` file instead of repeating them on the command line every time.
+
+### Generating the example file
+
+```bash
+python3 wa_media_archiver.py --generate-config
+```
+
+This writes `example-config.toml` next to the script. Open it, fill in your values, then rename it to `config.toml`.
+
+### Format
+
+```toml
+# wa_media_archiver config
+# All paths can be absolute or relative to where you run the script.
+
+output     = "/path/to/archive"
+
+# Optional settings — uncomment to activate:
+# msgstore  = "msgstore.db"
+# e2e_key   = ""
+# wa_root   = ""
+# contacts  = ""
+# log       = ""
+# mode      = ""          # "adb" or "restore"
+# business  = false
+# timezone  = ""          # e.g. Europe/Rome
+# since     = ""          # e.g. 2024-01-01
+
+# iOS
+# ios_backup   = ""
+# ios_password = ""
+# ios_contacts = ""
+```
+
+### How the config file is found
+
+1. **Explicit path** — pass `--config /path/to/myconfig.toml`. No confirmation prompt.
+2. **Auto-detection** — the script checks for `config.toml` in the script folder and the current directory:
+   - Exactly one found → confirmation prompt `Found config.toml at <path> — use it? [Y/n]`
+   - Two found → error; use `--config` to specify which one
+   - None found → config file ignored, CLI args only
+
+### Precedence
+
+CLI arguments always win. A value set in `config.toml` acts as a default and is overridden by anything explicitly passed on the command line.
+
+`--dry-run` and `--limit` are intentionally excluded from the config file — they are one-off flags and can always be appended to the command line.
 
 ---
 

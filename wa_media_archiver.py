@@ -1,7 +1,7 @@
 import sys
-if sys.version_info < (3, 10):
+if sys.version_info < (3, 11):
     print(
-        f"ERROR: Python 3.10 or higher is required "
+        f"ERROR: Python 3.11 or higher is required "
         f"(you are running {sys.version.split()[0]}).\n"
         "  Download the latest Python from https://www.python.org/downloads/",
         file=sys.stderr,
@@ -41,10 +41,10 @@ import ios_handler
 # WA Media Archiver
 # Archives WhatsApp media into a structured folder hierarchy using msgstore.db
 # (Android) or ChatStorage.sqlite (iOS). Run on a backup copy of your data.
-# Requires Python 3.10+.
+# Requires Python 3.11+.
 # ==============================================================================
 
-__version__ = '0.34'
+__version__ = '0.35'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -866,6 +866,61 @@ def run_restore_mode(args, logger):
 
 
 # ---------------------------------------------------------------------------
+# Config file
+# ---------------------------------------------------------------------------
+
+_VALID_CONFIG_KEYS = {
+    'output', 'msgstore', 'e2e_key', 'wa_root', 'contacts', 'log',
+    'mode', 'business', 'timezone', 'since', 'ios_backup', 'ios_password', 'ios_contacts',
+}
+
+_EXAMPLE_CONFIG = """\
+# This is an example config file. Rename it to config.toml to activate it.
+# wa_media_archiver config
+# All paths can be absolute or relative to where you run the script.
+# Remove the leading # to activate a setting.
+
+output     = "/path/to/archive"         # required
+# msgstore = "msgstore.db"
+# e2e_key  = ""
+# wa_root  = ""
+# contacts = ""
+# log      = ""
+# mode     = ""                         # "adb" or "restore"
+# business = false
+# timezone = ""                         # e.g. Europe/Rome
+# since    = ""                         # e.g. 2024-01-01
+
+# iOS
+# ios_backup   = ""
+# ios_password = ""
+# ios_contacts = ""
+"""
+
+
+def _load_toml(path: str) -> dict:
+    import tomllib
+    try:
+        with open(path, 'rb') as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        print(f"ERROR: Could not parse config file {path}:\n  {e}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"ERROR: Could not read config file {path}:\n  {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _generate_config(script_dir: str):
+    dest = os.path.join(script_dir, 'example-config.toml')
+    with open(dest, 'w', encoding='utf-8') as f:
+        f.write(_EXAMPLE_CONFIG)
+    print(f"Written: {dest}")
+    print("Rename it to config.toml and edit the values to activate it.")
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -881,6 +936,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--version', action='version',
                         version=f'WhatsApp Media Archiver v{__version__}')
+    parser.add_argument('--config',
+                        default=None,
+                        metavar='PATH',
+                        help='Path to a TOML config file. '
+                             'Auto-detected as config.toml in the script folder or cwd if present.')
+    parser.add_argument('--generate-config',
+                        action='store_true',
+                        help='Write example-config.toml to the script folder and exit.')
     parser.add_argument('-msg', '--msgstore',
                         default='msgstore.db',
                         help='Path to msgstore.db[.crypt15] or ChatStorage.sqlite '
@@ -917,7 +980,7 @@ def parse_args() -> argparse.Namespace:
                         help='Target WhatsApp Business instead of the regular WhatsApp app. '
                              'Affects the ADB pull path (Android) and the backup domain (iOS).')
     parser.add_argument('-o', '--output',
-                        required=True,
+                        default=None,
                         help='Output root folder for the archive')
     parser.add_argument('-l', '--log',
                         default=None,
@@ -949,9 +1012,56 @@ def parse_args() -> argparse.Namespace:
                              '(e.g. Europe/Rome, America/New_York, UTC). '
                              'Default: machine local time. '
                              'Windows users: requires pip install tzdata.')
+    # --- Config file detection (peek at sys.argv before argparse runs) ---
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _cwd = os.getcwd()
+
+    if '--generate-config' in sys.argv:
+        _generate_config(_script_dir)
+
+    _config_path = None
+    if '--config' in sys.argv:
+        _idx = sys.argv.index('--config')
+        if _idx + 1 < len(sys.argv):
+            _config_path = sys.argv[_idx + 1]
+    else:
+        _candidates = []
+        for d in dict.fromkeys([_script_dir, _cwd]):
+            p = os.path.join(d, 'config.toml')
+            if os.path.isfile(p):
+                _candidates.append(p)
+
+        if len(_candidates) == 1:
+            answer = input(
+                f"Found config.toml at {_candidates[0]} — use it? [Y/n] "
+            ).strip().lower()
+            if answer in ('', 'y', 'yes'):
+                _config_path = _candidates[0]
+        elif len(_candidates) > 1:
+            print("ERROR: Multiple config files found — specify one with --config:",
+                  file=sys.stderr)
+            for p in _candidates:
+                print(f"  {p}", file=sys.stderr)
+            sys.exit(1)
+
+    if _config_path:
+        _config = _load_toml(_config_path)
+        _unknown = set(_config) - _VALID_CONFIG_KEYS
+        if _unknown:
+            print(
+                f"ERROR: Unknown key(s) in config file {_config_path}:\n"
+                + "\n".join(f"  {k}" for k in sorted(_unknown))
+                + "\n  Check for typos. Valid keys: "
+                + ", ".join(sorted(_VALID_CONFIG_KEYS)),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        parser.set_defaults(**_config)
+
     args = parser.parse_args()
 
-    if args.ios_backup and args.wa_root:
+    if not args.output:
+        parser.error("the following arguments are required: -o/--output")
         parser.error("--ios_backup and --wa_root are mutually exclusive.")
     if args.ios_backup and args.mode == 'adb':
         parser.error("--ios_backup and --mode adb are mutually exclusive.")
