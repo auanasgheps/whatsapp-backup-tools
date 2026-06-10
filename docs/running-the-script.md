@@ -48,7 +48,7 @@ usage: wa_media_archiver.py [-h]
 
 ## Config File
 
-If you always run the script with the same paths and settings, you can save them in a `config.toml` file instead of repeating them on the command line every time.
+The config file is the easiest way to run (and re-run) your script: instead of repeating settings on the command line every time, they are saved in a `config.toml` file .
 
 ### Generating the example file
 
@@ -99,10 +99,14 @@ CLI arguments always win. A value set in `config.toml` acts as a default and is 
 
 `--dry-run` and `--limit` are intentionally excluded from the config file — they are one-off flags and can always be appended to the command line.
 
----
-## Line Continuation by Shell
 
-The examples below use `\` to split long commands across multiple lines. Replace it with the correct character for your shell:
+---
+
+## CLI Arguments
+
+If you prefer to run the script the traditional way, you can find some examples below. Please note they are not covering all possible cases.
+
+> 💡The examples below use `\` to split long commands across multiple lines. Replace it with the correct character for your shell:
 
 | Shell | Character |
 |---|---|
@@ -110,9 +114,6 @@ The examples below use `\` to split long commands across multiple lines. Replace
 | PowerShell (Windows) | `` ` `` |
 | cmd.exe (Windows) | `^` |
 
----
-
-## Usage Examples
 
 ### Android
 
@@ -157,7 +158,7 @@ python3 wa_media_archiver.py \
 
 ### iOS
 
-#### Standard flow — unencrypted backup (recommended)
+#### Standard flow — unencrypted backup
 
 ```bash
 python3 wa_media_archiver.py \
@@ -166,7 +167,7 @@ python3 wa_media_archiver.py \
   --dry-run
 ```
 
-#### Encrypted backup
+#### Standard flow - encrypted backup
 
 ```bash
 python3 wa_media_archiver.py \
@@ -195,6 +196,7 @@ python3 wa_media_archiver.py \
 ```
 
 #### iOS — pre-extracted mode
+Only use this mode with iOS if you know what you're doing.
 
 ```bash
 python3 wa_media_archiver.py \
@@ -203,17 +205,6 @@ python3 wa_media_archiver.py \
   --ios_contacts /path/to/ContactsV2.sqlite \
   --output /path/to/output
 ```
-
-#### Restore original Media/ folder structure
-
-```bash
-python3 wa_media_archiver.py \
-  --mode restore \
-  --output /path/to/output
-```
-
-> 💡 `--wa_root` is not required in restore mode. The script reads `.wa_media_archiver.db` from the archive and reconstructs `<output>/Media/` in place. Use `--dry-run` to preview what would be written.
-> ⚠️ Restore mode is supported for **Android archives only**. Running it against an iOS archive exits with a clear error.
 
 ---
 
@@ -234,6 +225,12 @@ python3 wa_media_archiver.py \
 Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly inside the archive folder, without needing the original device or database. This is useful when re-importing media into tools that expect the original WhatsApp layout.
 
 > ⚠️ **Android archives only.** iOS media is stored at `Message/Media/...` paths that have no equivalent reconstruction target outside the iPhone backup format. Running restore mode on an iOS archive is disallowed.
+
+```bash
+python3 wa_media_archiver.py \
+  --mode restore \
+  --output /path/to/output
+```
 
 The reconstructed tree is written to `<output>/Media/`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
 
