@@ -83,11 +83,7 @@ output     = "/path/to/archive"
 # ios_contacts = ""
 ```
 
-> ⚠️ **Windows users:** TOML does not allow single backslashes in strings — use forward slashes or double backslashes for paths:
-> ```toml
-> output = "C:/Users/Oliver/Desktop/archive"      # forward slashes — recommended
-> output = "C:\\Users\\Oliver\\Desktop\\archive"  # double backslashes also work
-> ```
+> 💡 **Windows users:** TOML does not allow single backslashes in strings. If you paste a Windows path like `C:\Users\...` the script will automatically convert the backslashes to forward slashes and continue, printing a warning. Update the file to use forward slashes (`C:/Users/...`) to suppress the warning.
 
 ### How the config file is found
 

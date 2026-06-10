@@ -608,8 +608,8 @@ _EXAMPLE_CONFIG = """\
 # All paths can be absolute or relative to where you run the script.
 # Remove the leading # to activate a setting.
 #
-# Windows tip: use forward slashes in paths to avoid TOML parse errors.
-#   output = "C:/Users/Oliver/Desktop/archive"  <- forward slashes work on Windows
+# Windows tip: backslashes in paths are auto-converted to forward slashes.
+#   You can paste paths as-is; the script handles it and prints a reminder.
 
 output     = "/path/to/archive"         # required
 # msgstore = "msgstore.db"
@@ -632,17 +632,24 @@ output     = "/path/to/archive"         # required
 def _load_toml(path: str) -> dict:
     try:
         with open(path, 'rb') as f:
-            return tomllib.load(f)
-    except tomllib.TOMLDecodeError as e:
-        print(f"ERROR: Could not parse config file {path}:\n  {e}", file=sys.stderr)
-        print(
-            "  Tip: Windows paths must use forward slashes or double backslashes:\n"
-            '    output = "C:/Users/Name/Desktop/archive"     ← forward slashes (recommended)\n'
-            '    output = "C:\\\\Users\\\\Name\\\\Desktop\\\\archive"  ← double backslashes\n'
-            "  Single backslashes (\\) are not valid in TOML strings.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+            raw = f.read()
+        return tomllib.loads(raw.decode('utf-8'))
+    except tomllib.TOMLDecodeError:
+        # Retry with backslashes in quoted string values replaced by forward slashes.
+        # Handles Windows paths like C:\Users\... pasted directly into the config file.
+        fixed = re.sub(r'"([^"]*)"', lambda m: '"' + m.group(1).replace('\\', '/') + '"', raw.decode('utf-8'))
+        try:
+            result = tomllib.loads(fixed)
+            print(
+                f"WARNING: Config file {path} contains backslashes in paths. "
+                "These were automatically converted to forward slashes for this run.\n"
+                "  Update the file to use forward slashes (C:/Users/...) to suppress this warning.",
+                file=sys.stderr,
+            )
+            return result
+        except tomllib.TOMLDecodeError as e:
+            print(f"ERROR: Could not parse config file {path}:\n  {e}", file=sys.stderr)
+            sys.exit(1)
     except OSError as e:
         print(f"ERROR: Could not read config file {path}:\n  {e}", file=sys.stderr)
         sys.exit(1)
