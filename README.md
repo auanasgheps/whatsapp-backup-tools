@@ -73,7 +73,7 @@ After a successful run, the archive will be organized as follows:
 
 ### Platform
 
-The script runs on **Linux, macOS, and Windows** (Python 3.10+).
+The script runs on **Linux, macOS, and Windows** (Python 3.11 required).
 
 > ⚠️ If you have WhatsApp on Android, **run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower.
 
@@ -81,7 +81,7 @@ The script runs on **Linux, macOS, and Windows** (Python 3.10+).
 
 ## Prerequisites
 
-- **Python 3.10+** required
+- **Python 3.11** or later is required
 - **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
 - **iOS/iPadOS**: End-to-end encrypted backup must be **disabled**
 
