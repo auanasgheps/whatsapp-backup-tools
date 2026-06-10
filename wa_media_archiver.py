@@ -21,8 +21,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import tomllib
 import zlib
-from datetime import datetime
+from datetime import date, datetime
 
 _REQUIRED_MODULES = ['adb_extractor', 'android_handler', 'archive_db', 'backup_reader', 'ios_handler']
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -625,7 +626,6 @@ output     = "/path/to/archive"         # required
 
 
 def _load_toml(path: str) -> dict:
-    import tomllib
     try:
         with open(path, 'rb') as f:
             return tomllib.load(f)
@@ -746,11 +746,14 @@ def parse_args() -> argparse.Namespace:
         _generate_config(_script_dir)
 
     _config_path = None
-    if '--config' in sys.argv:
-        _idx = sys.argv.index('--config')
-        if _idx + 1 < len(sys.argv):
-            _config_path = sys.argv[_idx + 1]
-    else:
+    for _i, _arg in enumerate(sys.argv[1:], 1):
+        if _arg.startswith('--config='):
+            _config_path = _arg[len('--config='):]
+            break
+        if _arg == '--config' and _i < len(sys.argv) - 1:
+            _config_path = sys.argv[_i + 1]
+            break
+    if _config_path is None:
         _candidates = []
         for d in dict.fromkeys([_script_dir, _cwd]):
             p = os.path.join(d, 'config.toml')
@@ -782,12 +785,24 @@ def parse_args() -> argparse.Namespace:
                 file=sys.stderr,
             )
             sys.exit(1)
+        if 'since' in _config:
+            _since_val = _config['since']
+            if isinstance(_since_val, date):
+                _config['since'] = _since_val.isoformat()
+            elif not isinstance(_since_val, str):
+                print(
+                    f"ERROR: 'since' in config must be a quoted date string "
+                    f"(e.g. since = \"2024-01-01\"), got {type(_since_val).__name__}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
         parser.set_defaults(**_config)
 
     args = parser.parse_args()
 
     if not args.output:
         parser.error("the following arguments are required: -o/--output")
+    if args.ios_backup and args.wa_root:
         parser.error("--ios_backup and --wa_root are mutually exclusive.")
     if args.ios_backup and args.mode == 'adb':
         parser.error("--ios_backup and --mode adb are mutually exclusive.")
