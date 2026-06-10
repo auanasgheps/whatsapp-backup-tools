@@ -93,7 +93,7 @@ This is the simplest approach for most users. Connect your phone via USB with US
 - **macOS**: `brew install android-platform-tools` (requires [Homebrew](https://brew.sh))
 - **Windows**: Install it using either:
     - Winget (`winget install Google.PlatformTools`)
-    - Scoop (`scoop install main/adb`).
+    - Scoop (`scoop install main/adb`)
     - Manual install [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools), then add the folder to your PATH
 
 Run the script with `--mode adb`:
