@@ -1971,23 +1971,24 @@ class TestLoadToml:
         result = wa._load_toml(str(cfg))
         assert result == {"output": "/tmp/archive"}
 
-    def test_syntax_error_exits(self, tmp_path):
-        cfg = tmp_path / "config.toml"
-        cfg.write_text('output = [unclosed\n', encoding='utf-8')
-        with pytest.raises(SystemExit):
-            wa._load_toml(str(cfg))
-
     def test_missing_file_exits(self, tmp_path):
         with pytest.raises(SystemExit):
             wa._load_toml(str(tmp_path / "nonexistent.toml"))
 
-    def test_windows_backslash_path_shows_hint(self, tmp_path, capsys):
+    def test_windows_backslash_path_auto_corrected(self, tmp_path, capsys):
         cfg = tmp_path / "config.toml"
         cfg.write_bytes(b'output = "C:\\Users\\Oliver\\Desktop\\archive"\n')
+        result = wa._load_toml(str(cfg))
+        assert result["output"] == "C:/Users/Oliver/Desktop/archive"
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "forward slashes" in captured.err
+
+    def test_genuinely_invalid_toml_exits(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('output = [unclosed\n', encoding='utf-8')
         with pytest.raises(SystemExit):
             wa._load_toml(str(cfg))
-        captured = capsys.readouterr()
-        assert "forward slashes" in captured.err
 
 
 class TestGenerateConfig:
