@@ -1980,9 +1980,9 @@ class TestLoadToml:
         cfg.write_bytes(b'output = "C:\\Users\\Oliver\\Desktop\\archive"\n')
         result = wa._load_toml(str(cfg))
         assert result["output"] == "C:/Users/Oliver/Desktop/archive"
+        assert 'output = "C:/Users/Oliver/Desktop/archive"' in cfg.read_text(encoding='utf-8')
         captured = capsys.readouterr()
-        assert "WARNING" in captured.err
-        assert "forward slashes" in captured.err
+        assert "NOTE" in captured.err
 
     def test_genuinely_invalid_toml_exits(self, tmp_path):
         cfg = tmp_path / "config.toml"
