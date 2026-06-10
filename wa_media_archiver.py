@@ -44,6 +44,7 @@ import ios_handler
 # Archives WhatsApp media into a structured folder hierarchy using msgstore.db
 # (Android) or ChatStorage.sqlite (iOS). Run on a backup copy of your data.
 # Requires Python 3.11+.
+# https://github.com/auanasgheps/whatsapp-media-archiver
 # ==============================================================================
 
 __version__ = '0.35'

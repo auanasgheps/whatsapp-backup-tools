@@ -119,7 +119,7 @@ The examples below use `\` to split long commands across multiple lines. Replace
 ```bash
 python3 wa_media_archiver.py \
   --mode adb \
-  --e2e your_cryptographic_key \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --dry-run
@@ -143,7 +143,7 @@ python3 wa_media_archiver.py \
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db.crypt15 \
-  --e2e your_cryptographic_key \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --dry-run
