@@ -649,6 +649,27 @@ class TestBuildIosQuery:
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert rows[0][6] == '447700900456'
 
+    def test_status_media_excluded_from_group_query(self):
+        conn = _make_ios_msgstore()
+        conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, NULL, 1, 'Group A');
+            INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Media/393384259462@status/6/d/photo.jpg', NULL, NULL);
+            INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
+        """)
+        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        assert len(rows) == 0
+
+    def test_status_media_excluded_from_1to1_query(self):
+        conn = _make_ios_msgstore()
+        conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '447700900456@s.whatsapp.net', NULL, NULL);
+            INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Media/393384259462@status/6/d/photo.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
+        """)
+        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        assert len(rows) == 0
+
 
 # ===========================================================================
 # iOS: build_ios_group_subjects_query structural checks
@@ -666,6 +687,10 @@ class TestBuildIosGroupSubjectsQuery:
     def test_no_date_filter(self):
         query = ios.build_ios_group_subjects_query()
         assert 'ZMESSAGEDATE >=' not in query
+
+    def test_status_media_excluded(self):
+        query = ios.build_ios_group_subjects_query()
+        assert "@status%" in query
 
 
 # ===========================================================================
