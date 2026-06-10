@@ -1952,3 +1952,125 @@ class TestCheckDependencies:
         assert len(errors) == 1, "Expected a single combined error message"
         assert "adb" in errors[0]
         assert "wa-crypt-tools" in errors[0]
+
+
+# ===========================================================================
+# Config file
+# ===========================================================================
+
+class TestLoadToml:
+    def test_valid_toml_returns_dict(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('output = "/tmp/archive"\n', encoding='utf-8')
+        result = wa._load_toml(str(cfg))
+        assert result == {"output": "/tmp/archive"}
+
+    def test_syntax_error_exits(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('output = [unclosed\n', encoding='utf-8')
+        with pytest.raises(SystemExit):
+            wa._load_toml(str(cfg))
+
+    def test_missing_file_exits(self, tmp_path):
+        with pytest.raises(SystemExit):
+            wa._load_toml(str(tmp_path / "nonexistent.toml"))
+
+
+class TestGenerateConfig:
+    def test_writes_example_config(self, tmp_path):
+        with pytest.raises(SystemExit):
+            wa._generate_config(str(tmp_path))
+        dest = tmp_path / "example-config.toml"
+        assert dest.exists()
+        content = dest.read_text(encoding='utf-8')
+        assert "config.toml" in content
+        assert "output" in content
+
+    def test_overwrites_existing_file(self, tmp_path):
+        dest = tmp_path / "example-config.toml"
+        dest.write_text("old content", encoding='utf-8')
+        with pytest.raises(SystemExit):
+            wa._generate_config(str(tmp_path))
+        assert "old content" not in dest.read_text(encoding='utf-8')
+
+
+class TestConfigInParseArgs:
+    """Integration tests that exercise config loading through parse_args()."""
+
+    def _write_config(self, path, content):
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+    @staticmethod
+    def _toml_path(p):
+        """Convert a path to forward-slash form for safe TOML string literals."""
+        return str(p).replace('\\', '/')
+
+    def test_config_values_used_as_defaults(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.wa_root == "/wa"
+
+    def test_cli_overrides_config(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        self._write_config(cfg, 'output = "/from/config"\n')
+        out = self._toml_path(tmp_path)
+        with patch("sys.argv", ["wa", "--config", str(cfg),
+                                 "-o", str(tmp_path), "--wa_root", "/cli"]):
+            args = wa.parse_args()
+        assert args.output == str(tmp_path)
+
+    def test_unknown_key_exits(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\ntypo_key = "bad"\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_since_accepted_in_config(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\nsince = "2024-01-01"\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.since == "2024-01-01"
+
+    def test_autodetect_single_config_yes(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\n')
+        with patch("sys.argv", ["wa"]), \
+             patch("os.path.dirname", return_value=str(tmp_path)), \
+             patch("os.getcwd", return_value=str(tmp_path)), \
+             patch("builtins.input", return_value="y"):
+            args = wa.parse_args()
+        assert args.wa_root == "/wa"
+
+    def test_autodetect_single_config_no(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        self._write_config(cfg, 'output = "/from/config"\nwa_root = "/wa"\n')
+        out = self._toml_path(tmp_path)
+        with patch("sys.argv", ["wa", "-o", str(tmp_path), "--wa_root", "/cli"]), \
+             patch("os.path.dirname", return_value=str(tmp_path)), \
+             patch("os.getcwd", return_value="/different/dir"), \
+             patch("builtins.input", return_value="n"):
+            args = wa.parse_args()
+        # Config was declined; output comes from CLI
+        assert args.output == str(tmp_path)
+
+    def test_autodetect_two_configs_exits(self, tmp_path):
+        dir1 = tmp_path / "dir1"
+        dir2 = tmp_path / "dir2"
+        dir1.mkdir()
+        dir2.mkdir()
+        self._write_config(dir1 / "config.toml", 'output = "/a"\n')
+        self._write_config(dir2 / "config.toml", 'output = "/b"\n')
+        with patch("sys.argv", ["wa"]), \
+             patch("os.path.dirname", return_value=str(dir1)), \
+             patch("os.getcwd", return_value=str(dir2)):
+            with pytest.raises(SystemExit):
+                wa.parse_args()

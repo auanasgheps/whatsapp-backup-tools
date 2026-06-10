@@ -3,7 +3,7 @@
 
 ## 1. Python Environment
 
-Ensure Python 3.10+ is installed.
+Ensure Python 3.11+ is installed.
 
 This script relies on some packages for Android and iOS.
 
