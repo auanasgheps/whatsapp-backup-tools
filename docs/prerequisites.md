@@ -88,10 +88,13 @@ Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_r
 
 This is the simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the script handle the pull and decryption automatically.
 
-> 💡 **ADB required.** Install it before running `--mode adb`:
-> - **Linux**: `sudo apt install adb` (Debian/Ubuntu) or `sudo dnf install android-tools` (Fedora)
-> - **macOS**: `brew install android-platform-tools` (requires [Homebrew](https://brew.sh))
-> - **Windows**: Download [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) and add the folder to your PATH
+ **ADB is required.** Install it before running this mode:
+- **Linux**: `sudo apt install adb` (Debian/Ubuntu) or `sudo dnf install android-tools` (Fedora)
+- **macOS**: `brew install android-platform-tools` (requires [Homebrew](https://brew.sh))
+- **Windows**: Install it using either:
+    - Winget (`winget install Google.PlatformTools`)
+    - Scoop (`scoop install main/adb`).
+    - Manual install [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools), then add the folder to your PATH
 
 Run the script with `--mode adb`:
 
