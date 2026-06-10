@@ -93,6 +93,7 @@ def build_ios_group_subjects_query() -> str:
         WHERE cs.ZGROUPINFO IS NOT NULL
           AND cs.ZPARTNERNAME IS NOT NULL
           AND mi.ZMEDIALOCALPATH IS NOT NULL
+          AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
     """
 
 
@@ -147,6 +148,7 @@ SELECT * FROM (
         LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
         WHERE cs.ZGROUPINFO IS NOT NULL
           AND mi.ZMEDIALOCALPATH IS NOT NULL
+          AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
           AND cs.ZPARTNERNAME IS NOT NULL
           {since_clause}
         {block_limit_clause}
@@ -175,6 +177,7 @@ SELECT * FROM (
         JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
         WHERE cs.ZGROUPINFO IS NULL
           AND mi.ZMEDIALOCALPATH IS NOT NULL
+          AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
           {since_clause}
         {block_limit_clause}
     )
