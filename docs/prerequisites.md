@@ -9,8 +9,6 @@ This script relies on some packages for Android and iOS.
 
 Install the relevant package before your first run. If you miss any of these, the script will notify you.
 
-
-
 **Android encrypted backup decryption** 
 
 The script uses `wa-crypt-tools`. You are going to use it if you don't have a rooted device.
@@ -64,7 +62,6 @@ When asked, create the end-to-end ecrypted backup.
 
 ## 3. Android Setup
 
-
 ### Your WhatsApp Media Folder
 
 Before you run the script, you need your WhatsApp (Media) folder on disk - actually, the folder called `WhatsApp` that **contains** the `Media` subfolder. 
@@ -83,7 +80,9 @@ Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_r
 
 > ⚠️ **Run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower — the script hashes and copies every file in the archive. Running locally is strongly recommended.
 
-### Obtaining the Database
+### Obtaining the Database and running the Script
+
+> 💡 If you always run with the same settings, you can save them in a config.toml file instead — see docs/running-the-script.md.
 
 #### Recommended — Automatic Retrieval (`--mode adb`)
 
@@ -223,6 +222,8 @@ C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>\
 The backup directory is the folder that contains `Manifest.db`. Pass it to `--ios_backup`.
 
 ### Step 3 — Run the script
+
+> 💡 If you always run with the same settings, you can save them in a config.toml file instead — see docs/running-the-script.md.
 
 Unencrypted backup:
 

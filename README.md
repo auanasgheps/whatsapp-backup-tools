@@ -115,6 +115,7 @@ The script is **safe to re-run** on an existing archive:
 - Files with the same name but different content will be **renamed with a numeric suffix** and logged as a warning
 - New media not yet in the archive will be **copied normally**
 - If a contact has been **renamed** since the last run, their folder on disk will be **automatically renamed** to match, keeping the archive consolidated
+- Recommended: use the script config file to keep settings for easier re-runs.
 
 ---
 
