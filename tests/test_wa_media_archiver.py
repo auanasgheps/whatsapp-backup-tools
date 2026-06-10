@@ -1977,10 +1977,10 @@ class TestLoadToml:
 
     def test_windows_backslash_path_auto_corrected(self, tmp_path, capsys):
         cfg = tmp_path / "config.toml"
-        cfg.write_bytes(b'output = "C:\\Users\\Oliver\\Desktop\\archive"\n')
+        cfg.write_bytes(b'output = "C:\\Users\\User\\Desktop\\archive"\n')
         result = wa._load_toml(str(cfg))
-        assert result["output"] == "C:/Users/Oliver/Desktop/archive"
-        assert 'output = "C:/Users/Oliver/Desktop/archive"' in cfg.read_text(encoding='utf-8')
+        assert result["output"] == "C:/Users/User/Desktop/archive"
+        assert 'output = "C:/Users/User/Desktop/archive"' in cfg.read_text(encoding='utf-8')
         captured = capsys.readouterr()
         assert "NOTE" in captured.err
 
