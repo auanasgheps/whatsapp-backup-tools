@@ -608,8 +608,7 @@ _EXAMPLE_CONFIG = """\
 # All paths can be absolute or relative to where you run the script.
 # Remove the leading # to activate a setting.
 #
-# Windows tip: backslashes in paths are auto-converted to forward slashes.
-#   You can paste paths as-is; the script handles it and prints a reminder.
+# Windows tip: you can paste Windows paths as-is; backslashes are auto-corrected.
 
 output     = "/path/to/archive"         # required
 # msgstore = "msgstore.db"
@@ -640,10 +639,11 @@ def _load_toml(path: str) -> dict:
         fixed = re.sub(r'"([^"]*)"', lambda m: '"' + m.group(1).replace('\\', '/') + '"', raw.decode('utf-8'))
         try:
             result = tomllib.loads(fixed)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(fixed)
             print(
-                f"WARNING: Config file {path} contains backslashes in paths. "
-                "These were automatically converted to forward slashes for this run.\n"
-                "  Update the file to use forward slashes (C:/Users/...) to suppress this warning.",
+                f"NOTE: Backslashes in paths in {path} were automatically converted "
+                "to forward slashes and the file was updated.",
                 file=sys.stderr,
             )
             return result

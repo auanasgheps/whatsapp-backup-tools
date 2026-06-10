@@ -83,7 +83,7 @@ output     = "/path/to/archive"
 # ios_contacts = ""
 ```
 
-> 💡 **Windows users:** TOML does not allow single backslashes in strings. If you paste a Windows path like `C:\Users\...` the script will automatically convert the backslashes to forward slashes and continue, printing a warning. Update the file to use forward slashes (`C:/Users/...`) to suppress the warning.
+> 💡 **Windows users:** You can paste Windows paths directly (e.g. `C:\Users\...`). If the path contains backslashes the script will automatically convert them to forward slashes and update the config file in place — no manual editing needed.
 
 ### How the config file is found
 
