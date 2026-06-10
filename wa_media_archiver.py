@@ -639,8 +639,8 @@ def _load_toml(path: str) -> dict:
         fixed = re.sub(r'"([^"]*)"', lambda m: '"' + m.group(1).replace('\\', '/') + '"', raw.decode('utf-8'))
         try:
             result = tomllib.loads(fixed)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(fixed)
+            with open(path, 'wb') as f:
+                f.write(fixed.encode('utf-8'))
             print(
                 f"NOTE: Backslashes in paths in {path} were automatically converted "
                 "to forward slashes and the file was updated.",

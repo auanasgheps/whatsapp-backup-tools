@@ -1983,6 +1983,9 @@ class TestLoadToml:
         assert 'output = "C:/Users/User/Desktop/archive"' in cfg.read_text(encoding='utf-8')
         captured = capsys.readouterr()
         assert "NOTE" in captured.err
+        # File must parse cleanly on a second load (no double line endings introduced)
+        result2 = wa._load_toml(str(cfg))
+        assert result2["output"] == "C:/Users/User/Desktop/archive"
 
     def test_genuinely_invalid_toml_exits(self, tmp_path):
         cfg = tmp_path / "config.toml"
