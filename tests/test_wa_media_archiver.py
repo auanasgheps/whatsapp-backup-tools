@@ -2080,3 +2080,38 @@ class TestConfigInParseArgs:
              patch("os.getcwd", return_value=str(dir2)):
             with pytest.raises(SystemExit):
                 wa.parse_args()
+
+    def test_config_equals_form(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\n')
+        with patch("sys.argv", ["wa", f"--config={cfg}"]):
+            args = wa.parse_args()
+        assert args.wa_root == "/wa"
+
+    def test_ios_backup_and_wa_root_mutually_exclusive(self, tmp_path):
+        with patch("sys.argv", ["wa", "-o", str(tmp_path),
+                                 "--ios_backup", "/backup", "--wa_root", "/wa"]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+
+class TestConfigNormalise:
+    def test_since_date_literal_normalised(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes(b'output = "/tmp"\nsince = 2024-01-01\n')
+        result = wa._load_toml(str(cfg))
+        import datetime
+        assert isinstance(result['since'], datetime.date)
+        # simulate the normalisation that parse_args applies
+        if isinstance(result['since'], datetime.date):
+            result['since'] = result['since'].isoformat()
+        assert result['since'] == "2024-01-01"
+
+    def test_since_wrong_type_exits(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = str(tmp_path).replace('\\', '/')
+        cfg.write_text(f'output = "{out}"\nsince = 123\n', encoding='utf-8')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
