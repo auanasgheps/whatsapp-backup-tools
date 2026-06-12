@@ -134,7 +134,8 @@ def extract_to_temp(manifest_map: dict[str, str],
     if src is None:
         logger.error(
             f"'{relative_path}' not found in backup manifest.\n"
-            f"  This file may not exist in the WhatsApp domain of this backup."
+            f"  This file may not exist in the WhatsApp domain of this backup.\n"
+            f"  If you use WhatsApp Business, add --business to your command."
         )
         raise SystemExit(1)
 
@@ -258,7 +259,10 @@ def extract_encrypted(backup_dir: str,
                             domain_like=domain_like,
                             output_filename=tmp_db.name)
     except FileNotFoundError:
-        logger.error("ChatStorage.sqlite not found in encrypted backup.")
+        logger.error(
+            "ChatStorage.sqlite not found in encrypted backup.\n"
+            "  If you use WhatsApp Business, add --business to your command."
+        )
         os.unlink(tmp_db.name)
         raise SystemExit(1)
     msgstore_path = _save_db_to_output(tmp_db.name, output_dir, 'ChatStorage.sqlite', logger)
