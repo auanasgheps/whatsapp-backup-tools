@@ -1,10 +1,8 @@
+# WhatsApp Media Archiver
 
 <p align="center">
   <img src="icon.svg" alt="WhatsApp Media Archiver" width="120"/>
 </p>
-
-# WhatsApp Media Archiver
-
 ## Overview
 
 WhatsApp Media Archiver organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. 
