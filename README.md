@@ -1,4 +1,8 @@
 
+<p align="center">
+  <img src="icon.svg" alt="WhatsApp Media Archiver" width="120"/>
+</p>
+
 # WhatsApp Media Archiver
 
 ## Overview
