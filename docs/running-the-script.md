@@ -5,6 +5,8 @@
 
 ```
 usage: wa_media_archiver.py [-h]
+                      [--config PATH]
+                      [--generate-config]
                       [-msg MSGSTORE]
                       [-e2e E2E_KEY]
                       [-c CONTACTS]
@@ -24,6 +26,8 @@ usage: wa_media_archiver.py [-h]
 
 | Argument | Required | Description |
 |---|---|---|
+| `--config PATH` | No | Path to a TOML config file. If omitted, the script auto-detects `config.toml` in the script folder or current directory |
+| `--generate-config` | No | Write `example-config.toml` to the script folder and exit. Rename it to `config.toml` to activate it |
 | `-msg` / `--msgstore` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Not needed with `--ios_backup`. Defaults to `msgstore.db` in the current folder |
 | `-e2e` / `--e2e_key` | If encrypted | Your cryptographic key for `.crypt15` decryption |
 | `-c` / `--contacts` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
@@ -42,9 +46,67 @@ usage: wa_media_archiver.py [-h]
 
 ---
 
-## Line Continuation by Shell
+## Config File
 
-The examples below use `\` to split long commands across multiple lines. Replace it with the correct character for your shell:
+The config file is the easiest way to run (and re-run) your script: instead of repeating settings on the command line every time, they are saved in a `config.toml` file .
+
+### Generating the example file
+
+```bash
+python3 wa_media_archiver.py --generate-config
+```
+
+This writes `example-config.toml` next to the script. Open it, fill in your values, then rename it to `config.toml`.
+
+### Format
+
+```toml
+# wa_media_archiver config
+# All paths can be absolute or relative to where you run the script.
+
+output     = "/path/to/archive"
+
+# Optional settings — uncomment to activate:
+# msgstore  = "msgstore.db"
+# e2e_key   = ""
+# wa_root   = ""
+# contacts  = ""
+# log       = ""
+# mode      = ""          # "adb" or "restore"
+# business  = false
+# timezone  = ""          # e.g. Europe/Rome
+# since     = ""          # e.g. 2024-01-01
+
+# iOS
+# ios_backup   = ""
+# ios_password = ""
+# ios_contacts = ""
+```
+
+> 💡 **Windows users:** You can paste Windows paths directly (e.g. `C:\Users\...`). If the path contains backslashes the script will automatically convert them to forward slashes and update the config file in place — no manual editing needed.
+
+### How the config file is found
+
+1. **Explicit path** — pass `--config /path/to/myconfig.toml`. No confirmation prompt.
+2. **Auto-detection** — the script checks for `config.toml` in the script folder and the current directory:
+   - Exactly one found → confirmation prompt `Found config.toml at <path> — use it? [Y/n]`
+   - Two found → error; use `--config` to specify which one
+   - None found → config file ignored, CLI args only
+
+### Precedence
+
+CLI arguments always win. A value set in `config.toml` acts as a default and is overridden by anything explicitly passed on the command line.
+
+`--dry-run` and `--limit` are intentionally excluded from the config file — they are one-off flags and can always be appended to the command line.
+
+
+---
+
+## CLI Arguments
+
+If you prefer to run the script the traditional way, you can find some examples below. Please note they are not covering all possible cases.
+
+> 💡The examples below use `\` to split long commands across multiple lines. Replace it with the correct character for your shell:
 
 | Shell | Character |
 |---|---|
@@ -52,9 +114,6 @@ The examples below use `\` to split long commands across multiple lines. Replace
 | PowerShell (Windows) | `` ` `` |
 | cmd.exe (Windows) | `^` |
 
----
-
-## Usage Examples
 
 ### Android
 
@@ -63,7 +122,7 @@ The examples below use `\` to split long commands across multiple lines. Replace
 ```bash
 python3 wa_media_archiver.py \
   --mode adb \
-  --e2e your_cryptographic_key \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --dry-run
@@ -87,7 +146,7 @@ python3 wa_media_archiver.py \
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db.crypt15 \
-  --e2e your_cryptographic_key \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --dry-run
@@ -99,7 +158,7 @@ python3 wa_media_archiver.py \
 
 ### iOS
 
-#### Standard flow — unencrypted backup (recommended)
+#### Standard flow — unencrypted backup
 
 ```bash
 python3 wa_media_archiver.py \
@@ -108,7 +167,7 @@ python3 wa_media_archiver.py \
   --dry-run
 ```
 
-#### Encrypted backup
+#### Standard flow - encrypted backup
 
 ```bash
 python3 wa_media_archiver.py \
@@ -137,6 +196,7 @@ python3 wa_media_archiver.py \
 ```
 
 #### iOS — pre-extracted mode
+Only use this mode with iOS if you know what you're doing.
 
 ```bash
 python3 wa_media_archiver.py \
@@ -145,17 +205,6 @@ python3 wa_media_archiver.py \
   --ios_contacts /path/to/ContactsV2.sqlite \
   --output /path/to/output
 ```
-
-#### Restore original Media/ folder structure
-
-```bash
-python3 wa_media_archiver.py \
-  --mode restore \
-  --output /path/to/output
-```
-
-> 💡 `--wa_root` is not required in restore mode. The script reads `.wa_media_archiver.db` from the archive and reconstructs `<output>/Media/` in place. Use `--dry-run` to preview what would be written.
-> ⚠️ Restore mode is supported for **Android archives only**. Running it against an iOS archive exits with a clear error.
 
 ---
 
@@ -176,6 +225,12 @@ python3 wa_media_archiver.py \
 Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly inside the archive folder, without needing the original device or database. This is useful when re-importing media into tools that expect the original WhatsApp layout.
 
 > ⚠️ **Android archives only.** iOS media is stored at `Message/Media/...` paths that have no equivalent reconstruction target outside the iPhone backup format. Running restore mode on an iOS archive is disallowed.
+
+```bash
+python3 wa_media_archiver.py \
+  --mode restore \
+  --output /path/to/output
+```
 
 The reconstructed tree is written to `<output>/Media/`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
 

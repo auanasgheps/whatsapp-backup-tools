@@ -16,6 +16,17 @@ _WA_DOMAIN          = 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared'
 _WA_BUSINESS_DOMAIN = 'AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared'
 
 
+def _raise_macos_fda_error(path: str, logger: logging.Logger) -> None:
+    logger.error(
+        f"Permission denied reading backup file — macOS blocked access to:\n"
+        f"  {path}\n"
+        f"Grant Full Disk Access to Terminal (or whichever app runs this script):\n"
+        f"  System Settings → Privacy & Security → Full Disk Access → enable Terminal\n"
+        f"Then re-run the command."
+    )
+    raise SystemExit(1)
+
+
 def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
     """
     Return True if the iPhone backup is encrypted.
@@ -41,8 +52,11 @@ def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
     else:
         plist_path = info_path
 
-    with open(plist_path, 'rb') as f:
-        data = plistlib.load(f)
+    try:
+        with open(plist_path, 'rb') as f:
+            data = plistlib.load(f)
+    except PermissionError:
+        _raise_macos_fda_error(plist_path, logger)
 
     # Manifest.plist uses 'IsEncrypted'; Info.plist does not carry this flag.
     # If we only have Info.plist, fall back to checking Manifest.plist if present.
@@ -50,8 +64,11 @@ def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
     if not is_encrypted and plist_path == info_path:
         manifest_path = os.path.join(backup_dir, 'Manifest.plist')
         if os.path.isfile(manifest_path):
-            with open(manifest_path, 'rb') as f:
-                manifest_data = plistlib.load(f)
+            try:
+                with open(manifest_path, 'rb') as f:
+                    manifest_data = plistlib.load(f)
+            except PermissionError:
+                _raise_macos_fda_error(manifest_path, logger)
             is_encrypted = manifest_data.get('IsEncrypted', False)
 
     return bool(is_encrypted)
@@ -81,6 +98,11 @@ def build_manifest_map(backup_dir: str,
         )
         raise SystemExit(1)
 
+    try:
+        with open(manifest_db, 'rb'):
+            pass
+    except PermissionError:
+        _raise_macos_fda_error(manifest_db, logger)
     with contextlib.closing(sqlite3.connect(manifest_db)) as conn:
         rows = conn.execute(
             "SELECT fileID, relativePath "
@@ -112,7 +134,8 @@ def extract_to_temp(manifest_map: dict[str, str],
     if src is None:
         logger.error(
             f"'{relative_path}' not found in backup manifest.\n"
-            f"  This file may not exist in the WhatsApp domain of this backup."
+            f"  This file may not exist in the WhatsApp domain of this backup.\n"
+            f"  If you use WhatsApp Business, add --business to your command."
         )
         raise SystemExit(1)
 
@@ -236,7 +259,10 @@ def extract_encrypted(backup_dir: str,
                             domain_like=domain_like,
                             output_filename=tmp_db.name)
     except FileNotFoundError:
-        logger.error("ChatStorage.sqlite not found in encrypted backup.")
+        logger.error(
+            "ChatStorage.sqlite not found in encrypted backup.\n"
+            "  If you use WhatsApp Business, add --business to your command."
+        )
         os.unlink(tmp_db.name)
         raise SystemExit(1)
     msgstore_path = _save_db_to_output(tmp_db.name, output_dir, 'ChatStorage.sqlite', logger)

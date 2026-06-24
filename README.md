@@ -1,6 +1,8 @@
-
 # WhatsApp Media Archiver
 
+<p align="center">
+  <img src="icon.svg" alt="WhatsApp Media Archiver" width="120"/>
+</p>
 ## Overview
 
 WhatsApp Media Archiver organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. 
@@ -73,7 +75,7 @@ After a successful run, the archive will be organized as follows:
 
 ### Platform
 
-The script runs on **Linux, macOS, and Windows** (Python 3.10+).
+The script runs on **Linux, macOS, and Windows** (Python 3.11 required).
 
 > ⚠️ If you have WhatsApp on Android, **run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower.
 
@@ -81,7 +83,7 @@ The script runs on **Linux, macOS, and Windows** (Python 3.10+).
 
 ## Prerequisites
 
-- **Python 3.10+** required
+- **Python 3.11** or later is required
 - **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
 - **iOS/iPadOS**: End-to-end encrypted backup must be **disabled**
 
@@ -115,6 +117,7 @@ The script is **safe to re-run** on an existing archive:
 - Files with the same name but different content will be **renamed with a numeric suffix** and logged as a warning
 - New media not yet in the archive will be **copied normally**
 - If a contact has been **renamed** since the last run, their folder on disk will be **automatically renamed** to match, keeping the archive consolidated
+- Recommended: use the script config file to keep settings for easier re-runs.
 
 ---
 

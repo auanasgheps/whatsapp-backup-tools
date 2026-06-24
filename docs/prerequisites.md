@@ -3,13 +3,11 @@
 
 ## 1. Python Environment
 
-Ensure Python 3.10+ is installed.
+Ensure Python 3.11+ is installed.
 
 This script relies on some packages for Android and iOS.
 
 Install the relevant package before your first run. If you miss any of these, the script will notify you.
-
-
 
 **Android encrypted backup decryption** 
 
@@ -64,7 +62,6 @@ When asked, create the end-to-end ecrypted backup.
 
 ## 3. Android Setup
 
-
 ### Your WhatsApp Media Folder
 
 Before you run the script, you need your WhatsApp (Media) folder on disk - actually, the folder called `WhatsApp` that **contains** the `Media` subfolder. 
@@ -83,23 +80,28 @@ Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_r
 
 > ⚠️ **Run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower — the script hashes and copies every file in the archive. Running locally is strongly recommended.
 
-### Obtaining the Database
+### Obtaining the Database and running the Script
+
+> 💡 If you always run with the same settings, you can save them in a config.toml file instead — see docs/running-the-script.md.
 
 #### Recommended — Automatic Retrieval (`--mode adb`)
 
 This is the simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the script handle the pull and decryption automatically.
 
-> 💡 **ADB required.** Install it before running `--mode adb`:
-> - **Linux**: `sudo apt install adb` (Debian/Ubuntu) or `sudo dnf install android-tools` (Fedora)
-> - **macOS**: `brew install android-platform-tools` (requires [Homebrew](https://brew.sh))
-> - **Windows**: Download [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) and add the folder to your PATH
+ **ADB is required.** Install it before running this mode:
+- **Linux**: `sudo apt install adb` (Debian/Ubuntu) or `sudo dnf install android-tools` (Fedora)
+- **macOS**: `brew install android-platform-tools` (requires [Homebrew](https://brew.sh))
+- **Windows**: Install it using either:
+    - Winget (`winget install Google.PlatformTools`)
+    - Scoop (`scoop install main/adb`)
+    - Manual install [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools), then add the folder to your PATH
 
 Run the script with `--mode adb`:
 
 ```bash
 python3 wa_media_archiver.py \
   --mode adb \
-  --e2e your_cryptographic_key \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output
 ```
@@ -154,7 +156,7 @@ Alternatively, skip the manual decrypt and let the script handle it by passing t
 ```bash
 python3 wa_media_archiver.py \
   --msgstore /path/to/msgstore.db.crypt15 \
-  --e2e your_cryptographic_key \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --wa_root /path/to/WhatsApp/storage \
   --output /path/to/output
 ```
@@ -223,6 +225,8 @@ C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>\
 The backup directory is the folder that contains `Manifest.db`. Pass it to `--ios_backup`.
 
 ### Step 3 — Run the script
+
+> 💡 If you always run with the same settings, you can save them in a config.toml file instead — see docs/running-the-script.md.
 
 Unencrypted backup:
 
