@@ -104,10 +104,12 @@ def _media_type_from_path(path: str) -> str:
 
 def _chat_display_name(chat_id: str, chat_type: str, cursor: sqlite3.Cursor) -> str:
     if chat_type == "contact":
-        cursor.execute("SELECT display_name FROM contacts WHERE number = ?", (chat_id,))
+        cursor.execute(
+            "SELECT display_name, folder FROM contacts WHERE number = ?", (chat_id,)
+        )
         row = cursor.fetchone()
-        if row and row[0]:
-            return row[0]
+        if row:
+            return row["display_name"] if row["display_name"] else row["folder"]
         return chat_id
     else:
         cursor.execute("SELECT subject FROM groups WHERE chat_row_id = ?", (chat_id,))
