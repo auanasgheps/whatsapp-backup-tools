@@ -1056,11 +1056,10 @@ HTML_TEMPLATE = r"""
   function pruneDom(keepEnd) {
     const scroll = document.getElementById('message-scroll');
     while (domNodes > MAX_DOM && scroll.children.length > 0) {
-      if (keepEnd === 'bottom') {
-        scroll.removeChild(scroll.firstChild);
-      } else {
-        scroll.removeChild(scroll.lastChild);
-      }
+      // Skip sentinel elements — they must always stay in the DOM
+      const child = keepEnd === 'bottom' ? scroll.firstChild : scroll.lastChild;
+      if (!child || child.classList.contains('sentinel')) break;
+      scroll.removeChild(child);
       domNodes--;
     }
   }
