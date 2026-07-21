@@ -1045,7 +1045,7 @@ HTML_TEMPLATE = r"""
       scroll.insertBefore(frag, scroll.firstChild);
     }
     domNodes += msgs.length;
-    pruneDom();
+    pruneDom(where === 'top' ? 'bottom' : 'top');
     setupObservers();
   }
 
@@ -1053,14 +1053,14 @@ HTML_TEMPLATE = r"""
     appendMessages(msgs, 'top');
   }
 
-  function pruneDom() {
+  function pruneDom(keepEnd) {
     const scroll = document.getElementById('message-scroll');
     while (domNodes > MAX_DOM && scroll.children.length > 0) {
-      scroll.removeChild(scroll.firstChild);
-      domNodes--;
-    }
-    while (domNodes > MAX_DOM && scroll.children.length > 0) {
-      scroll.removeChild(scroll.lastChild);
+      if (keepEnd === 'bottom') {
+        scroll.removeChild(scroll.firstChild);
+      } else {
+        scroll.removeChild(scroll.lastChild);
+      }
       domNodes--;
     }
   }
