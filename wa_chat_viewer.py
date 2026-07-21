@@ -110,6 +110,14 @@ def _chat_display_name(chat_id: str, chat_type: str, cursor: sqlite3.Cursor) -> 
         row = cursor.fetchone()
         if row:
             return row["display_name"] if row["display_name"] else row["folder"]
+        # Fallback: number may not have a contacts entry — the folder name
+        # is "Display Name (number)" so search for it inside folder
+        cursor.execute(
+            "SELECT folder FROM contacts WHERE folder LIKE ?", (f"%{chat_id}%",)
+        )
+        row = cursor.fetchone()
+        if row:
+            return row["folder"]
         return chat_id
     else:
         cursor.execute("SELECT subject FROM groups WHERE chat_row_id = ?", (chat_id,))
@@ -188,10 +196,13 @@ def _build_android(wa_conn: sqlite3.Connection, archive_conn: sqlite3.Connection
                    cache_conn: sqlite3.Connection):
     rows = wa_conn.execute("""
         SELECT
-            CAST(m.chat_row_id AS TEXT)                      AS chat_id,
+            CASE
+                WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
+                ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
+            END                                                  AS chat_id,
             CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
             COALESCE(m.timestamp, 0)                            AS timestamp,
-            COALESCE(j2.user, j.user, '')                    AS sender,
+            COALESCE(j2.user, j.user, '')                      AS sender,
             m.from_me,
             mm.file_path,
             m.text_data,
@@ -200,6 +211,7 @@ def _build_android(wa_conn: sqlite3.Connection, archive_conn: sqlite3.Connection
         FROM message m
         LEFT JOIN message_media mm ON mm.message_row_id = m._id
         LEFT JOIN chat c ON c._id = m.chat_row_id
+        LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
         LEFT JOIN jid j ON j._id = m.sender_jid_row_id
         LEFT JOIN (
             SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
