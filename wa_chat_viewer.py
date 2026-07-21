@@ -152,19 +152,7 @@ def _detect_source_db(output_root: Path):
 
 def _build_cache(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
                  output_root: Path, rescan: bool):
-    if rescan:
-        cache_conn.execute("DELETE FROM messages")
-        cache_conn.execute("DELETE FROM messages_fts")
-        cache_conn.execute("DELETE FROM sync_meta")
-
     source_type, wa_db_path = _detect_source_db(output_root)
-    archive_count = archive_conn.execute(
-        "SELECT COUNT(*) FROM archive_copies"
-    ).fetchone()[0]
-    cache_count = cache_conn.execute(
-        "SELECT COUNT(*) FROM messages"
-    ).fetchone()[0]
-
     if source_type is None:
         print("[wa_chat_viewer] Warning: No source WA DB found (msgstore.db / ChatStorage.sqlite). "
               "Media-only mode — timestamps from file mtime, no text messages.")
@@ -174,6 +162,10 @@ def _build_cache(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Connectio
     print(f"[wa_chat_viewer] Source DB: {source_type} at {wa_db_path}")
     wa_conn = sqlite3.connect(wa_db_path)
     wa_conn.row_factory = sqlite3.Row
+
+    cache_conn.execute("DELETE FROM messages")
+    cache_conn.execute("DELETE FROM messages_fts")
+    cache_conn.execute("DELETE FROM sync_meta")
 
     if source_type == "android":
         _build_android(wa_conn, archive_conn, cache_conn)
