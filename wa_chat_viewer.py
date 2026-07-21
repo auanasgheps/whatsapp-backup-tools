@@ -196,7 +196,7 @@ def _build_android(wa_conn: sqlite3.Connection, archive_conn: sqlite3.Connection
         SELECT
             CAST(m.chat_row_id AS TEXT)                      AS chat_id,
             CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
-            m.timestamp,
+            COALESCE(m.timestamp, 0)                            AS timestamp,
             COALESCE(j2.user, j.user, '')                    AS sender,
             m.from_me,
             mm.file_path,
