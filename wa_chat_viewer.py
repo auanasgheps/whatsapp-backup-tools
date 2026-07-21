@@ -121,14 +121,14 @@ def _open_archive_db(output_root: Path) -> sqlite3.Connection:
     db_path = get_archive_db_path(output_root)
     if not db_path.exists():
         raise FileNotFoundError(f"Archive DB not found: {db_path}")
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def _open_cache_db(output_root: Path) -> sqlite3.Connection:
     cache_path = get_cache_db_path(output_root)
-    conn = sqlite3.connect(str(cache_path))
+    conn = sqlite3.connect(str(cache_path), check_same_thread=False)
     conn.executescript(CACHE_SCHEMA)
     conn.row_factory = sqlite3.Row
     return conn
