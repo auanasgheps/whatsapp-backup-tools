@@ -888,7 +888,8 @@ HTML_TEMPLATE = r"""
     document.getElementById('search-results').classList.remove('has-results');
     document.getElementById('search-results').innerHTML = '';
 
-    await loadMessages('down');
+    await loadMessages('older');
+    scroll.scrollTop = scroll.scrollHeight;
   }
 
   // ---- load messages -------------------------------------------------------
@@ -899,52 +900,79 @@ HTML_TEMPLATE = r"""
     if (loading) return;
     loading = true;
 
-    const scroll = document.getElementById('message-scroll');
-    const sentinel = document.createElement('div');
-    sentinel.className = 'sentinel spinner';
-    sentinel.id = 'sentinel-' + direction;
-    sentinel.textContent = 'Loading…';
-    if (direction === 'down') {
-      scroll.appendChild(sentinel);
-    } else {
-      scroll.insertBefore(sentinel, scroll.firstChild);
-    }
-
     const params = new URLSearchParams({
       chat_id: currentChat.id,
       chat_type: currentChat.type,
       limit: 50
     });
 
-    if (direction === 'down' && msgList.length > 0) {
-      params.set('before', msgList[msgList.length - 1].timestamp_ms);
-    } else if (direction === 'up' && msgList.length > 0) {
-      params.set('after', msgList[0].timestamp_ms);
+    // 'older' = load messages before the oldest we have (scroll up)
+    // 'newer' = load messages after the newest we have (scroll down)
+    if (direction === 'older' && msgList.length > 0) {
+      params.set('before', msgList[0].timestamp_ms);
+    } else if (direction === 'newer' && msgList.length > 0) {
+      params.set('after', msgList[msgList.length - 1].timestamp_ms);
     }
 
     try {
       const res = await fetch('/api/messages?' + params);
       const msgs = await res.json();
-      sentinel.remove();
       loading = false;
 
       if (!msgs.length) return;
 
-      if (direction === 'down') {
-        msgs.forEach(m => msgList.push(m));
-        appendMessages(msgs, 'bottom');
+      const scroll = document.getElementById('message-scroll');
+
+      if (direction === 'older') {
+        // API returns DESC (newest first), reverse to get chronological order
+        const ordered = msgs.slice().reverse();
+        ordered.forEach(m => msgList.unshift(m));
+        const prevHeight = scroll.scrollHeight;
+        const prevTop = scroll.scrollTop;
+        ordered.forEach(m => scroll.insertBefore(renderBubble(m), scroll.firstChild));
+        domNodes += ordered.length;
+        // preserve scroll position so the view doesn't jump
+        scroll.scrollTop = prevTop + (scroll.scrollHeight - prevHeight);
+        pruneDom('top');
       } else {
-        msgs.reverse().forEach(m => msgList.unshift(m));
-        prependMessages(msgs);
+        // 'newer' — API returns ASC when using after=
+        msgs.forEach(m => msgList.push(m));
+        msgs.forEach(m => scroll.appendChild(renderBubble(m)));
+        domNodes += msgs.length;
+        pruneDom('bottom');
       }
 
     } catch (e) {
-      sentinel.textContent = 'Error loading messages';
       loading = false;
     }
   }
 
-  // ---- render message ------------------------------------------------------
+  // ---- append / prepend with pruning ---------------------------------------
+
+  function pruneDom(keepEnd) {
+    const scroll = document.getElementById('message-scroll');
+    while (domNodes > MAX_DOM && scroll.children.length > 0) {
+      const child = keepEnd === 'top' ? scroll.lastChild : scroll.firstChild;
+      if (!child) break;
+      scroll.removeChild(child);
+      domNodes--;
+    }
+  }
+
+  // ---- scroll trigger -------------------------------------------------------
+
+  function setupScrollTrigger() {
+    const scroll = document.getElementById('message-scroll');
+    scroll.addEventListener('scroll', function () {
+      if (loading) return;
+      if (scroll.scrollTop < 100) {
+        loadMessages('older');
+      } else if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100) {
+        loadMessages('newer');
+      }
+    });
+  }
+  setupScrollTrigger();
 
   function renderBubble(msg) {
     const row = document.createElement('div');
@@ -1031,62 +1059,6 @@ HTML_TEMPLATE = r"""
     lb.appendChild(img);
     lb.addEventListener('click', () => lb.remove());
     document.body.appendChild(lb);
-  }
-
-  // ---- append / prepend with pruning ---------------------------------------
-
-  function appendMessages(msgs, where) {
-    const scroll = document.getElementById('message-scroll');
-    const frag = document.createDocumentFragment();
-    msgs.forEach(m => frag.appendChild(renderBubble(m)));
-    if (where === 'bottom') {
-      scroll.appendChild(frag);
-    } else {
-      scroll.insertBefore(frag, scroll.firstChild);
-    }
-    domNodes += msgs.length;
-    pruneDom(where === 'top' ? 'bottom' : 'top');
-    setupObservers();
-  }
-
-  function prependMessages(msgs) {
-    appendMessages(msgs, 'top');
-  }
-
-  function pruneDom(keepEnd) {
-    const scroll = document.getElementById('message-scroll');
-    while (domNodes > MAX_DOM && scroll.children.length > 0) {
-      // Skip sentinel elements — they must always stay in the DOM
-      const child = keepEnd === 'bottom' ? scroll.firstChild : scroll.lastChild;
-      if (!child || child.classList.contains('sentinel')) break;
-      scroll.removeChild(child);
-      domNodes--;
-    }
-  }
-
-  // ---- IntersectionObserver ------------------------------------------------
-
-  let botObserver = null, topObserver = null;
-
-  function setupObservers() {
-    const scroll = document.getElementById('message-scroll');
-
-    if (botObserver) botObserver.disconnect();
-    if (topObserver) topObserver.disconnect();
-
-    const sentinels = scroll.querySelectorAll('.sentinel');
-    const topSentinel = sentinels[0];
-    const botSentinel = sentinels[sentinels.length - 1];
-
-    botObserver = new IntersectionObserver(entries => {
-      if (entries[0].isIntersecting && !loading) loadMessages('down');
-    }, { root: scroll, threshold: 0 });
-    if (botSentinel) botObserver.observe(botSentinel);
-
-    topObserver = new IntersectionObserver(entries => {
-      if (entries[0].isIntersecting && !loading) loadMessages('up');
-    }, { root: scroll, threshold: 0 });
-    if (topSentinel) topObserver.observe(topSentinel);
   }
 
   // ---- search --------------------------------------------------------------
