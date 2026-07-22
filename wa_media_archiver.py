@@ -47,7 +47,7 @@ import ios_handler
 # https://github.com/auanasgheps/whatsapp-media-archiver
 # ==============================================================================
 
-__version__ = '0.35'
+__version__ = '0.37'
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -792,6 +792,12 @@ def parse_args() -> argparse.Namespace:
             sys.exit(1)
 
     if _config_path:
+        if not _config_path.endswith('.toml'):
+            print(
+                f"ERROR: Config file must be a .toml file, got: {_config_path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         _config = _load_toml(_config_path)
         _unknown = set(_config) - _VALID_CONFIG_KEYS
         if _unknown:
