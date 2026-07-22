@@ -12,9 +12,7 @@ import os
 import sqlite3
 import sys
 import tempfile
-import shutil
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,37 +32,96 @@ _spec.loader.exec_module(viewer)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_archive_db(path: Path):
+def make_archive_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
-    conn.execute("""
+    conn.executescript("""
         CREATE TABLE contacts (
-            _id INTEGER PRIMARY KEY,
-            folder TEXT UNIQUE,
-            number TEXT,
-            display_name TEXT
-        )
-    """)
-    conn.execute("""
+            number       TEXT PRIMARY KEY,
+            folder       TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT ''
+        );
         CREATE TABLE groups (
-            _id INTEGER PRIMARY KEY,
-            folder TEXT UNIQUE,
-            chat_row_id INTEGER,
-            subject TEXT
-        )
-    """)
-    conn.execute("""
+            chat_row_id  TEXT PRIMARY KEY,
+            folder       TEXT NOT NULL,
+            subject      TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE files (
+            original_path TEXT PRIMARY KEY,
+            md5           BLOB NOT NULL
+        );
         CREATE TABLE archive_copies (
-            id INTEGER PRIMARY KEY,
-            original_path TEXT UNIQUE,
-            archive_path TEXT
-        )
+            original_path TEXT NOT NULL REFERENCES files(original_path),
+            archive_path  TEXT NOT NULL,
+            PRIMARY KEY (original_path, archive_path)
+        );
     """)
     conn.commit()
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def make_cache_db(path: Path):
+def make_android_db(path: Path) -> sqlite3.Connection:
+    """Minimal msgstore.db with the tables the viewer joins against."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE jid (
+            _id   INTEGER PRIMARY KEY,
+            user  TEXT
+        );
+        CREATE TABLE chat (
+            _id         INTEGER PRIMARY KEY,
+            jid_row_id  INTEGER,
+            subject     TEXT
+        );
+        CREATE TABLE message (
+            _id          INTEGER PRIMARY KEY,
+            chat_row_id  INTEGER NOT NULL,
+            from_me      INTEGER NOT NULL DEFAULT 0,
+            sender_jid_row_id INTEGER,
+            timestamp    INTEGER,
+            text_data    TEXT,
+            message_type INTEGER DEFAULT 0
+        );
+        CREATE TABLE message_media (
+            _id             INTEGER PRIMARY KEY,
+            message_row_id  INTEGER,
+            file_path       TEXT,
+            media_name      TEXT
+        );
+        CREATE TABLE message_quoted (
+            message_row_id  INTEGER PRIMARY KEY,
+            text_data       TEXT,
+            from_me         INTEGER DEFAULT 0,
+            sender_jid_row_id INTEGER,
+            timestamp       INTEGER DEFAULT 0
+        );
+        CREATE TABLE jid_map (
+            lid_row_id  INTEGER,
+            jid_row_id  INTEGER
+        );
+    """)
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def seed_android_db(wa_conn, archive_conn):
+    """Insert one contact chat with one text message."""
+    wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '123456789')")
+    wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (10, 1, NULL)")
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+        "VALUES (1, 10, 0, 1, 1700000000000, 'Hello world', 0)"
+    )
+    wa_conn.commit()
+
+    archive_conn.execute(
+        "INSERT INTO contacts (number, folder, display_name) VALUES ('123456789', 'Alice (00123456789)', 'Alice')"
+    )
+    archive_conn.commit()
+
+
+def make_cache_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.executescript(viewer.CACHE_SCHEMA)
     conn.row_factory = sqlite3.Row
@@ -131,52 +188,7 @@ class TestDetectSourceDb:
 
 
 # ---------------------------------------------------------------------------
-# Tests: _chat_display_name
-# ---------------------------------------------------------------------------
-
-class TestChatDisplayName:
-    def test_contact_with_display_name(self, tmp_path):
-        archive_db = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        cur = archive_db.cursor()
-        cur.execute(
-            "INSERT INTO contacts (folder, number, display_name) VALUES (?, ?, ?)",
-            ("123456789", "123456789", "Alice")
-        )
-        archive_db.commit()
-        name = viewer._chat_display_name("123456789", "contact", cur)
-        assert name == "Alice"
-
-    def test_contact_fallback_to_folder(self, tmp_path):
-        archive_db = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        cur = archive_db.cursor()
-        cur.execute(
-            "INSERT INTO contacts (folder, number, display_name) VALUES (?, ?, ?)",
-            ("987654321", "987654321", "")
-        )
-        archive_db.commit()
-        name = viewer._chat_display_name("987654321", "contact", cur)
-        assert name == "987654321"
-
-    def test_group_with_subject(self, tmp_path):
-        archive_db = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        cur = archive_db.cursor()
-        cur.execute(
-            "INSERT INTO groups (folder, chat_row_id, subject) VALUES (?, ?, ?)",
-            ("Family", 1, "Family Group")
-        )
-        archive_db.commit()
-        name = viewer._chat_display_name("1", "group", cur)
-        assert name == "Family Group"
-
-    def test_group_fallback_to_id(self, tmp_path):
-        archive_db = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        cur = archive_db.cursor()
-        name = viewer._chat_display_name("99", "group", cur)
-        assert name == "99"
-
-
-# ---------------------------------------------------------------------------
-# Tests: Cache DB schema
+# Tests: cache schema
 # ---------------------------------------------------------------------------
 
 class TestCacheSchema:
@@ -185,59 +197,114 @@ class TestCacheSchema:
         conn = sqlite3.connect(str(cache_path))
         conn.executescript(viewer.CACHE_SCHEMA)
 
-        tables = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
-        table_names = [t[0] for t in tables]
-        assert "messages" in table_names
-        assert "sync_meta" in table_names
+        tables = {t[0] for t in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        assert "message_index" in tables
+        assert "sync_meta" in tables
 
-        indexes = conn.execute(
+        indexes = {i[0] for i in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-        index_names = [i[0] for i in indexes]
-        assert "idx_messages_chat_ts" in index_names
+        ).fetchall()}
+        assert "idx_midx_chat_ts" in indexes
 
-        virtuals = conn.execute(
+        virtuals = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%fts5%'"
-        ).fetchall()
-        assert ("messages_fts",) in virtuals
+        ).fetchall()]
+        assert "message_index_fts" in virtuals
 
 
 # ---------------------------------------------------------------------------
-# Tests: _build_cache media-only mode
+# Tests: freshness check
 # ---------------------------------------------------------------------------
 
-class TestBuildCacheMediaOnly:
-    def test_build_media_only(self, tmp_path):
-        archive_db = make_archive_db(tmp_path / ".wa_media_archiver.db")
+class TestFreshnessCheck:
+    def test_changed_when_no_stamp(self, tmp_path):
+        db_path = tmp_path / "msgstore.db"
+        db_path.write_text("x")
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        assert viewer._source_changed(cache_conn, str(db_path)) is True
 
-        archive_db.execute(
-            "INSERT INTO contacts (folder, number, display_name) VALUES (?, ?, ?)",
-            ("Contacts", "555", "Bob")
-        )
-        archive_db.execute(
-            "INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
-            ("Media/WhatsApp Images/IMG-001.jpg", "555/IMG-001.jpg")
-        )
-        archive_db.commit()
+    def test_unchanged_after_stamp_saved(self, tmp_path):
+        db_path = tmp_path / "msgstore.db"
+        db_path.write_text("x")
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        viewer._save_source_stamp(cache_conn, str(db_path))
+        assert viewer._source_changed(cache_conn, str(db_path)) is False
 
-        # create a real file so mtime is available
-        media_file = tmp_path / "555" / "IMG-001.jpg"
-        media_file.parent.mkdir(parents=True)
-        media_file.write_text("fake image content")
+    def test_changed_after_file_grows(self, tmp_path):
+        db_path = tmp_path / "msgstore.db"
+        db_path.write_text("x")
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        viewer._save_source_stamp(cache_conn, str(db_path))
+        db_path.write_text("xxxx")  # size changed
+        assert viewer._source_changed(cache_conn, str(db_path)) is True
 
-        cache_path = tmp_path / ".wa_chat_viewer_cache.db"
-        cache_conn = make_cache_db(cache_path)
 
-        viewer._build_cache(archive_db, cache_conn, tmp_path, rescan=False)
+# ---------------------------------------------------------------------------
+# Tests: FTS index build (Android)
+# ---------------------------------------------------------------------------
 
-        rows = cache_conn.execute("SELECT * FROM messages").fetchall()
+class TestFtsBuildAndroid:
+    def test_fts_index_populated(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        viewer._build_fts_index(cache_conn, "android", str(wa_path))
+
+        rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
         assert len(rows) == 1
-        assert rows[0]["chat_id"] == "555"
         assert rows[0]["chat_type"] == "contact"
-        assert rows[0]["media_type"] == "image"
-        assert rows[0]["archive_path"] == "555/IMG-001.jpg"
+
+    def test_fts_search_works(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        viewer._build_fts_index(cache_conn, "android", str(wa_path))
+
+        results = cache_conn.execute("""
+            SELECT mi.rowid, mi.chat_id FROM message_index mi
+            JOIN message_index_fts fts ON fts.rowid = mi.rowid
+            WHERE message_index_fts MATCH 'Hello'
+        """).fetchall()
+        assert len(results) == 1
+        assert results[0]["chat_id"] == "123456789"
+
+    def test_system_messages_excluded(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        # add a system message: no text, no media
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (99, 10, 0, 1700000001000, NULL, 0)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        viewer._build_fts_index(cache_conn, "android", str(wa_path))
+
+        rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
+        assert len(rows) == 1  # system message excluded
 
 
 # ---------------------------------------------------------------------------
@@ -247,32 +314,14 @@ class TestBuildCacheMediaOnly:
 class TestFlaskRoutes:
     @pytest.fixture
     def app_and_tmp(self, tmp_path):
-        archive_db = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        archive_db.execute(
-            "INSERT INTO contacts (folder, number, display_name) VALUES (?, ?, ?)",
-            ("111", "111", "Test Contact")
-        )
-        archive_db.execute(
-            "INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
-            ("Media/IMG.jpg", "Contacts/IMG.jpg")
-        )
-        archive_db.commit()
-        archive_db.close()
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
 
-        cache_path = tmp_path / ".wa_chat_viewer_cache.db"
-        cache_conn = make_cache_db(cache_path)
-        cache_conn.execute(
-            "INSERT INTO messages (chat_id, chat_type, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("111", "contact", 1700000000000, "111", 0, "Contacts/IMG.jpg", "image", "IMG.jpg", "Hello")
-        )
-        cache_conn.execute(
-            "INSERT INTO messages_fts (rowid, chat_id, sender, text_body, media_name, archive_path) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (1, "111", "111", "Hello", "IMG.jpg", "Contacts/IMG.jpg")
-        )
-        cache_conn.commit()
-        cache_conn.close()
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
 
         app = viewer.create_app(tmp_path, rescan=False)
         app.config["TESTING"] = True
@@ -292,36 +341,53 @@ class TestFlaskRoutes:
         data = resp.get_json()
         assert isinstance(data, list)
         assert len(data) == 1
-        assert data[0]["id"] == "111"
-        assert data[0]["display_name"] == "Test Contact"
+        assert data[0]["id"] == "123456789"
+        assert data[0]["display_name"] == "Alice"
 
     def test_api_messages_returns_messages(self, app_and_tmp):
         client, tmp = app_and_tmp
-        resp = client.get("/api/messages?chat_id=111&chat_type=contact")
+        resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
         assert resp.status_code == 200
         data = resp.get_json()
         assert len(data) == 1
-        assert data[0]["text_body"] == "Hello"
+        assert data[0]["text_body"] == "Hello world"
 
     def test_api_messages_cursor_before(self, app_and_tmp):
         client, tmp = app_and_tmp
-        resp = client.get("/api/messages?chat_id=111&chat_type=contact&before=1800000000000&limit=10")
+        resp = client.get("/api/messages?chat_id=123456789&chat_type=contact&before=1800000000000&limit=10")
         assert resp.status_code == 200
         assert isinstance(resp.get_json(), list)
 
+    def test_api_messages_at(self, app_and_tmp):
+        client, tmp = app_and_tmp
+        resp = client.get("/api/messages/at?chat_id=123456789&chat_type=contact&ts=1700000000000")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+
+    def test_api_messages_at_missing_ts(self, app_and_tmp):
+        client, tmp = app_and_tmp
+        resp = client.get("/api/messages/at?chat_id=123456789&chat_type=contact")
+        assert resp.status_code == 400
+
     def test_api_search_finds_message(self, app_and_tmp):
         client, tmp = app_and_tmp
-        resp = client.get("/api/search?q=Hello")
+        resp = client.get("/api/search?q=Hello&chat_id=123456789&chat_type=contact")
         assert resp.status_code == 200
         data = resp.get_json()
         assert len(data) == 1
-        assert data[0]["text_body"] == "Hello"
+        assert data[0]["text_body"] == "Hello world"
 
     def test_api_search_empty_query(self, app_and_tmp):
         client, tmp = app_and_tmp
         resp = client.get("/api/search?q=")
         assert resp.status_code == 200
         assert resp.get_json() == []
+
+    def test_api_search_bad_fts_query(self, app_and_tmp):
+        client, tmp = app_and_tmp
+        resp = client.get("/api/search?q=AND")
+        assert resp.status_code == 400
 
     def test_media_404_for_missing_file(self, app_and_tmp):
         client, tmp = app_and_tmp
@@ -332,3 +398,23 @@ class TestFlaskRoutes:
         client, tmp = app_and_tmp
         resp = client.get("/media/../wa_media_archiver.py")
         assert resp.status_code == 403
+
+    def test_second_start_skips_fts_rebuild(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        # first start builds the index
+        app1 = viewer.create_app(tmp_path, rescan=False)
+
+        # second start with same file should skip rebuild
+        # (no exception = success; we just verify it completes)
+        app2 = viewer.create_app(tmp_path, rescan=False)
+        with app2.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200

@@ -12,17 +12,18 @@ Dependencies:
 from __future__ import annotations
 
 import argparse
-import json
 import mimetypes
 import os
 import sqlite3
 import sys
 import time
 import webbrowser
-from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, redirect, render_template_string, request
+try:
+    from flask import Flask, Response, jsonify, render_template_string, request
+except ImportError:
+    sys.exit("Flask is not installed. Run: pip install flask")
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -33,7 +34,7 @@ def parse_args():
     p.add_argument("output_root", help="Path to the archive output directory")
     p.add_argument("--port", type=int, default=5000, help="Port to listen on (default: 5000)")
     p.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
-    p.add_argument("--rescan", action="store_true", help="Force rebuild of the viewer cache DB")
+    p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
     return p.parse_args()
 
 
@@ -50,33 +51,48 @@ def get_archive_db_path(output_root: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Schema
+# Cache schema  (FTS index only — no full message copy)
 # ---------------------------------------------------------------------------
 
 CACHE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS messages (
-    rowid         INTEGER PRIMARY KEY,
-    chat_id       TEXT NOT NULL,
-    chat_type     TEXT NOT NULL,
-    timestamp_ms  INTEGER NOT NULL,
-    sender        TEXT NOT NULL DEFAULT '',
-    from_me       INTEGER NOT NULL DEFAULT 0,
-    archive_path  TEXT,
-    media_type    TEXT NOT NULL DEFAULT 'text',
-    media_name    TEXT NOT NULL DEFAULT '',
-    text_body     TEXT NOT NULL DEFAULT ''
+CREATE TABLE IF NOT EXISTS message_index (
+    rowid        INTEGER PRIMARY KEY,
+    chat_id      TEXT NOT NULL,
+    chat_type    TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, timestamp_ms);
+CREATE INDEX IF NOT EXISTS idx_midx_chat_ts ON message_index(chat_id, timestamp_ms);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    chat_id, sender, text_body, media_name, archive_path,
-    content='messages', content_rowid='rowid'
+CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(
+    text_body,
+    content='',
+    contentless_delete=1
 );
 
 CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+"""
+
+# SQL expression that maps a file path (or NULL) to a media_type string.
+# Used in live queries so Python's _media_type_from_path is not needed at serve time.
+_MEDIA_TYPE_EXPR = """
+    CASE
+        WHEN {col} IS NULL THEN 'text'
+        WHEN LOWER({col}) LIKE '%sticker%' THEN 'sticker'
+        WHEN LOWER({col}) LIKE '%.jpg'  OR LOWER({col}) LIKE '%.jpeg'
+          OR LOWER({col}) LIKE '%.png'  OR LOWER({col}) LIKE '%.webp'
+          OR LOWER({col}) LIKE '%.heic' OR LOWER({col}) LIKE '%.heif' THEN 'image'
+        WHEN LOWER({col}) LIKE '%.mp4' OR LOWER({col}) LIKE '%.mov'
+          OR LOWER({col}) LIKE '%.avi' OR LOWER({col}) LIKE '%.mkv'
+          OR LOWER({col}) LIKE '%.3gp' THEN 'video'
+        WHEN LOWER({col}) LIKE '%.mp3'  OR LOWER({col}) LIKE '%.ogg'
+          OR LOWER({col}) LIKE '%.aac'  OR LOWER({col}) LIKE '%.opus'
+          OR LOWER({col}) LIKE '%.m4a' THEN 'audio'
+        WHEN LOWER({col}) LIKE '%.gif' THEN 'gif'
+        ELSE 'document'
+    END
 """
 
 
@@ -102,40 +118,6 @@ def _media_type_from_path(path: str) -> str:
     return "document"
 
 
-def _chat_display_name(chat_id: str, chat_type: str, cursor: sqlite3.Cursor) -> str:
-    if chat_type == "contact":
-        cursor.execute(
-            "SELECT display_name, folder FROM contacts WHERE number = ?", (chat_id,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return row["display_name"] if row["display_name"] else row["folder"]
-        # Fallback: number may not have a contacts entry — the folder name
-        # is "Display Name (number)" so search for it inside folder
-        cursor.execute(
-            "SELECT folder FROM contacts WHERE folder LIKE ?", (f"%{chat_id}%",)
-        )
-        row = cursor.fetchone()
-        if row:
-            return row["folder"]
-        return chat_id
-    else:
-        cursor.execute("SELECT subject FROM groups WHERE chat_row_id = ?", (chat_id,))
-        row = cursor.fetchone()
-        if row and row[0]:
-            return row[0]
-        return chat_id
-
-
-def _open_archive_db(output_root: Path) -> sqlite3.Connection:
-    db_path = get_archive_db_path(output_root)
-    if not db_path.exists():
-        raise FileNotFoundError(f"Archive DB not found: {db_path}")
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def _open_cache_db(output_root: Path) -> sqlite3.Connection:
     cache_path = get_cache_db_path(output_root)
     conn = sqlite3.connect(str(cache_path), check_same_thread=False)
@@ -155,83 +137,149 @@ def _detect_source_db(output_root: Path):
 
 
 # ---------------------------------------------------------------------------
-# Cache build
+# Freshness check
 # ---------------------------------------------------------------------------
 
-def _build_cache(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
-                 output_root: Path, rescan: bool):
-    source_type, wa_db_path = _detect_source_db(output_root)
-    if source_type is None:
-        print("[wa_chat_viewer] Warning: No source WA DB found (msgstore.db / ChatStorage.sqlite). "
-              "Media-only mode — timestamps from file mtime, no text messages.")
-        _build_media_only(archive_conn, cache_conn, output_root)
-        return
+def _source_changed(cache_conn: sqlite3.Connection, source_path: str) -> bool:
+    try:
+        st = os.stat(source_path)
+        current_mtime = str(st.st_mtime)
+        current_size = str(st.st_size)
+    except OSError:
+        return True
 
-    print(f"[wa_chat_viewer] Source DB: {source_type} at {wa_db_path}")
-    wa_conn = sqlite3.connect(wa_db_path)
-    wa_conn.row_factory = sqlite3.Row
+    rows = {
+        r["key"]: r["value"]
+        for r in cache_conn.execute(
+            "SELECT key, value FROM sync_meta WHERE key IN ('source_mtime', 'source_size')"
+        ).fetchall()
+    }
+    return (
+        rows.get("source_mtime") != current_mtime
+        or rows.get("source_size") != current_size
+    )
 
-    cache_conn.execute("DELETE FROM messages")
-    cache_conn.execute("DELETE FROM messages_fts")
-    cache_conn.execute("DELETE FROM sync_meta")
 
-    if source_type == "android":
-        _build_android(wa_conn, archive_conn, cache_conn)
-    else:
-        _build_ios(wa_conn, archive_conn, cache_conn)
-
-    wa_conn.close()
-
+def _save_source_stamp(cache_conn: sqlite3.Connection, source_path: str):
+    st = os.stat(source_path)
+    cache_conn.execute(
+        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('source_mtime', ?)",
+        (str(st.st_mtime),)
+    )
+    cache_conn.execute(
+        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('source_size', ?)",
+        (str(st.st_size),)
+    )
     cache_conn.execute(
         "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_scanned_at', ?)",
         (str(int(time.time())),)
     )
     cache_conn.commit()
 
-    new_count = cache_conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-    print(f"[wa_chat_viewer] Cache built: {new_count} messages")
+
+# ---------------------------------------------------------------------------
+# FTS index build
+# ---------------------------------------------------------------------------
+
+def _build_fts_index(cache_conn: sqlite3.Connection, source_type: str, wa_db_path: str):
+    wa_conn = sqlite3.connect(wa_db_path)
+    wa_conn.row_factory = sqlite3.Row
+
+    cache_conn.execute("DELETE FROM message_index")
+    cache_conn.execute("DELETE FROM message_index_fts")
+    cache_conn.commit()
+
+    if source_type == "android":
+        _fts_android(wa_conn, cache_conn)
+    else:
+        _fts_ios(wa_conn, cache_conn)
+
+    wa_conn.close()
+    cache_conn.commit()
+    cache_conn.execute("VACUUM")
+    cache_conn.commit()
+
+    count = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
+    print(f"[wa_chat_viewer] FTS index built: {count} messages")
 
 
-def _build_android(wa_conn: sqlite3.Connection, archive_conn: sqlite3.Connection,
-                   cache_conn: sqlite3.Connection):
-    archive_map = {
-        row["original_path"]: row["archive_path"]
-        for row in archive_conn.execute(
-            "SELECT original_path, archive_path FROM archive_copies"
-        ).fetchall()
-    }
-
+def _fts_android(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection):
     cursor = wa_conn.execute("""
         SELECT
+            m._id                                                    AS rowid,
             CASE
                 WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
                 ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
-            END                                                  AS chat_id,
+            END                                                      AS chat_id,
             CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
-            COALESCE(m.timestamp, 0)                            AS timestamp,
-            COALESCE(j2.user, j.user, '')                      AS sender,
-            m.from_me,
-            mm.file_path,
-            m.text_data,
-            mm.media_name,
+            COALESCE(m.timestamp, 0)                                AS timestamp_ms,
+            COALESCE(m.text_data, '')                               AS text_body,
             m.message_type
         FROM message m
-        LEFT JOIN message_media mm ON mm.message_row_id = m._id
         LEFT JOIN chat c ON c._id = m.chat_row_id
         LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
-        LEFT JOIN jid j ON j._id = m.sender_jid_row_id
-        LEFT JOIN (
-            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-            FROM jid_map GROUP BY lid_row_id
-        ) jm ON jm.lid_row_id = m.sender_jid_row_id
-        LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
         ORDER BY m.timestamp ASC
     """)
-    _stream_insert_rows(cursor, archive_map, cache_conn, "android")
+    _stream_fts_rows(cursor, cache_conn)
 
 
-def _build_ios(wa_conn: sqlite3.Connection, archive_conn: sqlite3.Connection,
-               cache_conn: sqlite3.Connection):
+def _fts_ios(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection):
+    cursor = wa_conn.execute("""
+        SELECT
+            m.Z_PK                                                      AS rowid,
+            CAST(m.ZCHATSESSION AS TEXT)                               AS chat_id,
+            CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
+                 ELSE 'contact' END                                     AS chat_type,
+            CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
+            COALESCE(m.ZTEXT, '')                                       AS text_body,
+            m.ZMESSAGETYPE                                              AS message_type
+        FROM ZWAMESSAGE m
+        LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+        ORDER BY m.ZMESSAGEDATE ASC
+    """)
+    _stream_fts_rows(cursor, cache_conn)
+
+
+def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2000):
+    idx_sql = """
+        INSERT INTO message_index (rowid, chat_id, chat_type, timestamp_ms)
+        VALUES (?, ?, ?, ?)
+    """
+    fts_sql = """
+        INSERT INTO message_index_fts (rowid, text_body)
+        VALUES (?, ?)
+    """
+    idx_batch = []
+    fts_batch = []
+    for row in cursor:
+        text_body = row["text_body"] or ""
+        is_media = row["message_type"] is not None and row["message_type"] != 0
+        if not text_body and not is_media:
+            continue
+        idx_batch.append((row["rowid"], row["chat_id"], row["chat_type"], row["timestamp_ms"]))
+        if text_body:
+            fts_batch.append((row["rowid"], text_body))
+        if len(idx_batch) >= chunk_size:
+            cache_conn.executemany(idx_sql, idx_batch)
+            if fts_batch:
+                cache_conn.executemany(fts_sql, fts_batch)
+            cache_conn.commit()
+            idx_batch.clear()
+            fts_batch.clear()
+    if idx_batch:
+        cache_conn.executemany(idx_sql, idx_batch)
+        if fts_batch:
+            cache_conn.executemany(fts_sql, fts_batch)
+        cache_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Media-only mode  (no source WA DB)
+# ---------------------------------------------------------------------------
+
+def _build_media_only(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
+                      output_root: Path):
+    """Populate message_index from archive_copies file mtimes when no WA DB is present."""
     archive_map = {
         row["original_path"]: row["archive_path"]
         for row in archive_conn.execute(
@@ -239,157 +287,145 @@ def _build_ios(wa_conn: sqlite3.Connection, archive_conn: sqlite3.Connection,
         ).fetchall()
     }
 
-    cursor = wa_conn.execute("""
-        SELECT
-            CAST(m.ZCHATSESSION AS TEXT)                            AS chat_id,
-            CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
-                 ELSE 'contact' END                                  AS chat_type,
-            CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)    AS timestamp_ms,
-            SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID || '@', '@') - 1) AS sender,
-            m.ZISFROMME,
-            mi.ZMEDIALOCALPATH,
-            m.ZTEXT,
-            mi.ZTITLE,
-            m.ZMESSAGETYPE
-        FROM ZWAMESSAGE m
-        LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
-        LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
-        ORDER BY m.ZMESSAGEDATE ASC
-    """)
-    _stream_insert_rows(cursor, archive_map, cache_conn, "ios")
+    group_folders = {
+        r["folder"]: ("group", str(r["chat_row_id"]))
+        for r in archive_conn.execute(
+            "SELECT folder, chat_row_id FROM groups"
+        ).fetchall()
+    }
+    folder_map = {**{r["folder"]: ("contact", str(r["number"]))
+                     for r in archive_conn.execute(
+                         "SELECT folder, number FROM contacts"
+                     ).fetchall()},
+                  **group_folders}
 
-
-def _stream_insert_rows(cursor, archive_map, cache_conn, source_type, chunk_size=1000):
-    insert_sql = """
-        INSERT INTO messages
-            (chat_id, chat_type, timestamp_ms, sender, from_me, archive_path,
-             media_type, media_name, text_body)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
-
-    batch = []
-    for row in cursor:
-        if source_type == "android":
-            chat_id = row["chat_id"]
-            chat_type = row["chat_type"]
-            timestamp_ms = row["timestamp"]
-            sender = row["sender"]
-            from_me = row["from_me"]
-            file_path = row["file_path"]
-            text_body = row["text_data"] or ""
-            media_name = row["media_name"] or ""
-            message_type = row["message_type"]
-        else:
-            chat_id = row["chat_id"]
-            chat_type = row["chat_type"]
-            timestamp_ms = row["timestamp_ms"]
-            sender = row["sender"]
-            from_me = row["ZISFROMME"]
-            raw_path = row["ZMEDIALOCALPATH"]
-            file_path = f"Message/{raw_path}" if raw_path else None
-            text_body = row["ZTEXT"] or ""
-            media_name = row["ZTITLE"] or ""
-            message_type = row["ZMESSAGETYPE"]
-
-        is_media = (message_type is not None and message_type != 0)
-        media_type = "text"
-        archive_path = None
-
-        if is_media:
-            media_type = _media_type_from_path(file_path)
-            if file_path:
-                archive_path = archive_map.get(file_path)
-            if not archive_path and media_name:
-                for op, ap in archive_map.items():
-                    if media_name in op:
-                        archive_path = ap
-                        break
-
-        # skip system/control entries that have nothing displayable
-        if not text_body and not is_media:
-            continue
-
-        batch.append((
-            chat_id, chat_type, timestamp_ms, sender, from_me,
-            archive_path, media_type, media_name, text_body
-        ))
-
-        if len(batch) >= chunk_size:
-            cache_conn.executemany(insert_sql, batch)
-            cache_conn.commit()
-            batch.clear()
-
-    if batch:
-        cache_conn.executemany(insert_sql, batch)
-        cache_conn.commit()
-
-    # rebuild FTS index from the content table in one pass
-    cache_conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+    cache_conn.execute("DELETE FROM message_index")
+    cache_conn.execute("DELETE FROM message_index_fts")
     cache_conn.commit()
 
-
-def _build_media_only(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
-                      output_root: Path):
-    archive_map = {}
-    for row in archive_conn.execute(
-        "SELECT original_path, archive_path FROM archive_copies"
-    ).fetchall():
-        archive_map[row["original_path"]] = row["archive_path"]
-
-    contacts = {
-        str(r["number"]): ("contact", _contact_display_name(r))
-        for r in archive_conn.execute("SELECT folder, number, display_name FROM contacts").fetchall()
-    }
-    groups = {
-        str(r["folder"]): ("group", r["subject"])
-        for r in archive_conn.execute("SELECT folder, subject FROM groups").fetchall()
-    }
-    folder_map = {**contacts, **groups}
-
-    rows_by_chat: dict[tuple, list] = {}
+    insert_sql = """
+        INSERT INTO message_index (chat_id, chat_type, timestamp_ms)
+        VALUES (?, ?, ?)
+    """
+    batch = []
     for original_path, archive_path in archive_map.items():
-        if archive_path is None:
+        if not archive_path:
             continue
         parts = archive_path.split("/")
         if len(parts) < 2:
             continue
         folder = parts[1]
-        chat_key = folder_map.get(folder)
+        chat_key = folder_map.get(folder) or folder_map.get(parts[0])
         if chat_key is None:
-            # parts[1] is not a known chat subfolder; check if parts[0] is a contact folder name
-            contact_row = archive_conn.execute(
-                "SELECT number FROM contacts WHERE number = ?", (parts[0],)
-            ).fetchone()
-            if contact_row:
-                chat_key = ("contact", str(contact_row["number"]))
-            else:
-                chat_key = ("contact", parts[1] if len(parts) > 1 else folder)
+            chat_key = ("contact", parts[1] if len(parts) > 1 else folder)
         chat_type, chat_id = chat_key
 
         full_path = output_root / archive_path
         if not full_path.exists():
             continue
         mtime_ms = int(os.path.getmtime(full_path) * 1000)
-        media_type = _media_type_from_path(archive_path)
-        rows_by_chat.setdefault((chat_id, chat_type), []).append((
-            chat_id, chat_type, mtime_ms, "", 0,
-            archive_path, media_type, os.path.basename(archive_path), ""
-        ))
+        batch.append((chat_id, chat_type, mtime_ms))
 
-    insert_sql = """
-        INSERT INTO messages
-            (chat_id, chat_type, timestamp_ms, sender, from_me, archive_path,
-             media_type, media_name, text_body)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
-    for msgs in rows_by_chat.values():
-        cache_conn.executemany(insert_sql, msgs)
+    cache_conn.executemany(insert_sql, batch)
     cache_conn.commit()
 
 
-def _contact_display_name(row) -> str:
-    dn = row["display_name"]
-    return dn if dn else row["folder"]
+# ---------------------------------------------------------------------------
+# Live query helpers (Android + iOS)
+# ---------------------------------------------------------------------------
+
+# Shared JID subquery for Android sender resolution via jid_map
+_ANDROID_JID_MAP = """
+    LEFT JOIN (
+        SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+        FROM jid_map GROUP BY lid_row_id
+    ) jm ON jm.lid_row_id = m.sender_jid_row_id
+    LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
+"""
+
+_ANDROID_CHAT_ID = """
+    CASE
+        WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
+        ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
+    END
+"""
+
+_ANDROID_CHAT_TYPE = "CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END"
+
+_ANDROID_SELECT = f"""
+    SELECT
+        {_ANDROID_CHAT_ID}                                           AS chat_id,
+        {_ANDROID_CHAT_TYPE}                                         AS chat_type,
+        COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
+        COALESCE(j2.user, j.user, '')                               AS sender,
+        m.from_me,
+        ac.archive_path,
+        CASE
+            WHEN m.message_type IS NULL OR m.message_type = 0 THEN 'text'
+            ELSE {_MEDIA_TYPE_EXPR.format(col='mm.file_path')}
+        END                                                          AS media_type,
+        COALESCE(mm.media_name, '')                                 AS media_name,
+        COALESCE(m.text_data, '')                                   AS text_body,
+        COALESCE(mq.text_data, '')                                  AS quoted_text,
+        CASE WHEN mq.from_me = 1 THEN 'You'
+             ELSE COALESCE(jq.user, '') END                         AS quoted_sender,
+        COALESCE(mq.timestamp, 0)                                   AS quoted_ts
+    FROM message m
+    LEFT JOIN message_media mm ON mm.message_row_id = m._id
+    LEFT JOIN chat c ON c._id = m.chat_row_id
+    LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+    LEFT JOIN jid j ON j._id = m.sender_jid_row_id
+    {_ANDROID_JID_MAP}
+    LEFT JOIN message_quoted mq ON mq.message_row_id = m._id
+    LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id
+    LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+"""
+
+_ANDROID_FILTER = """
+    AND (
+        (m.text_data IS NOT NULL AND m.text_data != '')
+        OR (m.message_type IS NOT NULL AND m.message_type != 0)
+    )
+"""
+
+_IOS_CHAT_ID = "CAST(m.ZCHATSESSION AS TEXT)"
+_IOS_CHAT_TYPE = "CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END"
+
+_IOS_SELECT = f"""
+    SELECT
+        {_IOS_CHAT_ID}                                               AS chat_id,
+        {_IOS_CHAT_TYPE}                                             AS chat_type,
+        CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)         AS timestamp_ms,
+        SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+               INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)      AS sender,
+        m.ZISFROMME                                                  AS from_me,
+        ac.archive_path,
+        CASE
+            WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN 'text'
+            ELSE {_MEDIA_TYPE_EXPR.format(col="('Message/' || COALESCE(mi.ZMEDIALOCALPATH,''))")}
+        END                                                          AS media_type,
+        COALESCE(mi.ZTITLE, '')                                     AS media_name,
+        COALESCE(m.ZTEXT, '')                                       AS text_body,
+        COALESCE(qm.ZTEXT, '')                                      AS quoted_text,
+        CASE WHEN qm.ZISFROMME = 1 THEN 'You'
+             ELSE SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
+                  INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
+        END                                                         AS quoted_sender,
+        COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts
+    FROM ZWAMESSAGE m
+    LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+    LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+    LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
+    LEFT JOIN arch.archive_copies ac
+          ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
+"""
+
+_IOS_FILTER = """
+    AND (
+        (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0)
+    )
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -398,52 +434,114 @@ def _contact_display_name(row) -> str:
 
 def create_app(output_root: Path, rescan: bool = False):
     app = Flask(__name__)
-    app.config["output_root"] = str(output_root)
 
-    archive_conn = _open_archive_db(output_root)
+    archive_db_path = get_archive_db_path(output_root)
+    source_type, wa_db_path = _detect_source_db(output_root)
     cache_conn = _open_cache_db(output_root)
-    _build_cache(archive_conn, cache_conn, output_root, rescan)
-    archive_conn.close()
+
+    if source_type is None:
+        print("[wa_chat_viewer] Warning: No source WA DB found. Media-only mode.")
+        archive_conn_tmp = sqlite3.connect(str(archive_db_path), check_same_thread=False)
+        archive_conn_tmp.row_factory = sqlite3.Row
+        _build_media_only(archive_conn_tmp, cache_conn, output_root)
+        archive_conn_tmp.close()
+        wa_conn = None
+    else:
+        print(f"[wa_chat_viewer] Source DB: {source_type} at {wa_db_path}")
+        if rescan or _source_changed(cache_conn, wa_db_path):
+            _build_fts_index(cache_conn, source_type, wa_db_path)
+            _save_source_stamp(cache_conn, wa_db_path)
+        else:
+            count = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
+            print(f"[wa_chat_viewer] FTS index up to date ({count} messages), skipping rebuild")
+
+        wa_conn = sqlite3.connect(wa_db_path, check_same_thread=False)
+        wa_conn.row_factory = sqlite3.Row
+        wa_conn.execute("ATTACH DATABASE ? AS arch", (str(archive_db_path),))
+
+    def get_wa():
+        return wa_conn
 
     def get_cache():
         return cache_conn
-
-    def get_output_root():
-        return output_root
 
     # ---- API: list chats ---------------------------------------------------
 
     @app.route("/api/chats")
     def api_chats():
-        conn = get_cache()
-        rows = conn.execute("""
-            SELECT
-                m.chat_id,
-                m.chat_type,
-                COUNT(*) AS msg_count,
-                MIN(NULLIF(m.timestamp_ms, 0)) AS oldest_ts,
-                MAX(NULLIF(m.timestamp_ms, 0)) AS newest_ts
-            FROM messages m
-            GROUP BY m.chat_id, m.chat_type
-            ORDER BY m.chat_type, newest_ts DESC
-        """).fetchall()
+        conn = get_wa()
+        if conn is None:
+            # media-only: derive from message_index
+            rows = get_cache().execute("""
+                SELECT chat_id AS id, chat_type AS type,
+                       COUNT(*) AS msg_count,
+                       MAX(NULLIF(timestamp_ms, 0)) AS newest_ts,
+                       MIN(NULLIF(timestamp_ms, 0)) AS oldest_ts
+                FROM message_index
+                GROUP BY chat_id, chat_type
+                ORDER BY type, newest_ts DESC
+            """).fetchall()
+            return jsonify([{
+                "id": r["id"], "type": r["type"],
+                "display_name": r["id"],
+                "msg_count": r["msg_count"],
+                "oldest_ts": r["oldest_ts"], "newest_ts": r["newest_ts"],
+            } for r in rows])
 
-        archive_conn2 = _open_archive_db(output_root)
-        result = []
-        for row in rows:
-            chat_id = row["chat_id"]
-            chat_type = row["chat_type"]
-            display_name = _chat_display_name(chat_id, chat_type, archive_conn2.cursor())
-            result.append({
-                "id": chat_id,
-                "type": chat_type,
-                "display_name": display_name,
-                "msg_count": row["msg_count"],
-                "oldest_ts": row["oldest_ts"],
-                "newest_ts": row["newest_ts"],
-            })
-        archive_conn2.close()
-        return jsonify(result)
+        if source_type == "android":
+            rows = conn.execute(f"""
+                SELECT
+                    {_ANDROID_CHAT_ID}                                  AS id,
+                    {_ANDROID_CHAT_TYPE}                                AS type,
+                    COALESCE(
+                        NULLIF(con.display_name, ''),
+                        con.folder,
+                        grp.subject,
+                        COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
+                    )                                                   AS display_name,
+                    COUNT(*)                                            AS msg_count,
+                    MAX(NULLIF(COALESCE(m.timestamp, 0), 0))           AS newest_ts,
+                    MIN(NULLIF(COALESCE(m.timestamp, 0), 0))           AS oldest_ts
+                FROM message m
+                LEFT JOIN chat c ON c._id = m.chat_row_id
+                LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                LEFT JOIN arch.contacts con ON con.number = j_chat.user
+                LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(m.chat_row_id AS TEXT)
+                WHERE (
+                    (m.text_data IS NOT NULL AND m.text_data != '')
+                    OR (m.message_type IS NOT NULL AND m.message_type != 0)
+                )
+                GROUP BY {_ANDROID_CHAT_ID}, {_ANDROID_CHAT_TYPE}
+                ORDER BY {_ANDROID_CHAT_TYPE}, newest_ts DESC
+            """).fetchall()
+        else:
+            rows = conn.execute(f"""
+                SELECT
+                    {_IOS_CHAT_ID}                                      AS id,
+                    {_IOS_CHAT_TYPE}                                    AS type,
+                    COALESCE(
+                        NULLIF(con.display_name, ''),
+                        con.folder,
+                        cs.ZGROUPINFO,
+                        CAST(m.ZCHATSESSION AS TEXT)
+                    )                                                   AS display_name,
+                    COUNT(*)                                            AS msg_count,
+                    MAX(NULLIF(CAST((m.ZMESSAGEDATE+978307200)*1000 AS INTEGER), 0)) AS newest_ts,
+                    MIN(NULLIF(CAST((m.ZMESSAGEDATE+978307200)*1000 AS INTEGER), 0)) AS oldest_ts
+                FROM ZWAMESSAGE m
+                LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+                LEFT JOIN arch.contacts con ON con.number =
+                    SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+                           INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+                WHERE (
+                    (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
+                    OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0)
+                )
+                GROUP BY {_IOS_CHAT_ID}, {_IOS_CHAT_TYPE}
+                ORDER BY {_IOS_CHAT_TYPE}, newest_ts DESC
+            """).fetchall()
+
+        return jsonify([dict(r) for r in rows])
 
     # ---- API: paginated messages -------------------------------------------
 
@@ -455,63 +553,22 @@ def create_app(output_root: Path, rescan: bool = False):
         after = request.args.get("after")
         limit = min(int(request.args.get("limit", 50)), 200)
 
-        conn = get_cache()
-        if before:
-            rows = conn.execute("""
-                SELECT * FROM messages
-                WHERE chat_id = ? AND chat_type = ? AND timestamp_ms < ?
-                ORDER BY timestamp_ms DESC LIMIT ?
-            """, (chat_id, chat_type, int(before), limit)).fetchall()
-        elif after:
-            rows = conn.execute("""
-                SELECT * FROM messages
-                WHERE chat_id = ? AND chat_type = ? AND timestamp_ms > ?
-                ORDER BY timestamp_ms ASC LIMIT ?
-            """, (chat_id, chat_type, int(after), limit)).fetchall()
-        else:
-            rows = conn.execute("""
-                SELECT * FROM messages
-                WHERE chat_id = ? AND chat_type = ?
-                ORDER BY timestamp_ms DESC LIMIT ?
-            """, (chat_id, chat_type, limit)).fetchall()
-
-        return jsonify([dict(r) for r in rows])
-
-    # ---- API: search -------------------------------------------------------
-
-    @app.route("/api/search")
-    def api_search():
-        q = request.args.get("q", "").strip()
-        chat_id = request.args.get("chat_id")
-        chat_type = request.args.get("chat_type")
-        if not q:
+        conn = get_wa()
+        if conn is None:
             return jsonify([])
 
-        conn = get_cache()
-        try:
-            if chat_id and chat_type:
-                rows = conn.execute("""
-                    SELECT m.* FROM messages m
-                    JOIN messages_fts fts ON fts.rowid = m.rowid
-                    WHERE messages_fts MATCH ? AND m.chat_id = ? AND m.chat_type = ?
-                    ORDER BY m.timestamp_ms ASC LIMIT 500
-                """, (q, chat_id, chat_type)).fetchall()
-            elif chat_id:
-                rows = conn.execute("""
-                    SELECT m.* FROM messages m
-                    JOIN messages_fts fts ON fts.rowid = m.rowid
-                    WHERE messages_fts MATCH ? AND m.chat_id = ?
-                    ORDER BY m.timestamp_ms ASC LIMIT 500
-                """, (q, chat_id)).fetchall()
-            else:
-                rows = conn.execute("""
-                    SELECT m.* FROM messages m
-                    JOIN messages_fts fts ON fts.rowid = m.rowid
-                    WHERE messages_fts MATCH ?
-                    ORDER BY rank LIMIT 100
-                """, (q,)).fetchall()
-        except sqlite3.OperationalError as e:
-            return jsonify({"error": f"Invalid search query: {e}"}), 400
+        select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
+        extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
+
+        if before:
+            sql = f"{select} WHERE chat_id = ? AND chat_type = ? AND timestamp_ms < ? {extra} ORDER BY timestamp_ms DESC LIMIT ?"
+            rows = conn.execute(sql, (chat_id, chat_type, int(before), limit)).fetchall()
+        elif after:
+            sql = f"{select} WHERE chat_id = ? AND chat_type = ? AND timestamp_ms > ? {extra} ORDER BY timestamp_ms ASC LIMIT ?"
+            rows = conn.execute(sql, (chat_id, chat_type, int(after), limit)).fetchall()
+        else:
+            sql = f"{select} WHERE chat_id = ? AND chat_type = ? {extra} ORDER BY timestamp_ms DESC LIMIT ?"
+            rows = conn.execute(sql, (chat_id, chat_type, limit)).fetchall()
 
         return jsonify([dict(r) for r in rows])
 
@@ -530,21 +587,88 @@ def create_app(output_root: Path, rescan: bool = False):
         except ValueError:
             return jsonify({"error": "ts must be an integer"}), 400
 
-        conn = get_cache()
+        conn = get_wa()
+        if conn is None:
+            return jsonify([])
+
+        select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
+        extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
         half = limit // 2
-        before_rows = conn.execute("""
-            SELECT * FROM messages
-            WHERE chat_id = ? AND chat_type = ? AND timestamp_ms <= ?
-            ORDER BY timestamp_ms DESC LIMIT ?
-        """, (chat_id, chat_type, ts, half)).fetchall()
-        after_rows = conn.execute("""
-            SELECT * FROM messages
-            WHERE chat_id = ? AND chat_type = ? AND timestamp_ms > ?
-            ORDER BY timestamp_ms ASC LIMIT ?
-        """, (chat_id, chat_type, ts, half)).fetchall()
+
+        before_rows = conn.execute(
+            f"{select} WHERE chat_id = ? AND chat_type = ? AND timestamp_ms <= ? {extra} ORDER BY timestamp_ms DESC LIMIT ?",
+            (chat_id, chat_type, ts, half)
+        ).fetchall()
+        after_rows = conn.execute(
+            f"{select} WHERE chat_id = ? AND chat_type = ? AND timestamp_ms > ? {extra} ORDER BY timestamp_ms ASC LIMIT ?",
+            (chat_id, chat_type, ts, half)
+        ).fetchall()
 
         combined = list(reversed(before_rows)) + list(after_rows)
         return jsonify([dict(r) for r in combined])
+
+    # ---- API: search -------------------------------------------------------
+
+    @app.route("/api/search")
+    def api_search():
+        q = request.args.get("q", "").strip()
+        chat_id = request.args.get("chat_id")
+        chat_type = request.args.get("chat_type")
+        if not q:
+            return jsonify([])
+
+        fts_conn = get_cache()
+        wa = get_wa()
+
+        try:
+            if chat_id and chat_type:
+                idx_rows = fts_conn.execute("""
+                    SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
+                    FROM message_index mi
+                    JOIN message_index_fts fts ON fts.rowid = mi.rowid
+                    WHERE message_index_fts MATCH ?
+                      AND mi.chat_id = ? AND mi.chat_type = ?
+                    ORDER BY mi.timestamp_ms ASC LIMIT 500
+                """, (q, chat_id, chat_type)).fetchall()
+            elif chat_id:
+                idx_rows = fts_conn.execute("""
+                    SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
+                    FROM message_index mi
+                    JOIN message_index_fts fts ON fts.rowid = mi.rowid
+                    WHERE message_index_fts MATCH ? AND mi.chat_id = ?
+                    ORDER BY mi.timestamp_ms ASC LIMIT 500
+                """, (q, chat_id)).fetchall()
+            else:
+                idx_rows = fts_conn.execute("""
+                    SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
+                    FROM message_index mi
+                    JOIN message_index_fts fts ON fts.rowid = mi.rowid
+                    WHERE message_index_fts MATCH ?
+                    ORDER BY mi.timestamp_ms ASC LIMIT 100
+                """, (q,)).fetchall()
+        except sqlite3.OperationalError as e:
+            return jsonify({"error": f"Invalid search query: {e}"}), 400
+
+        if not idx_rows:
+            return jsonify([])
+
+        if wa is None:
+            # media-only: return index rows directly (no full content)
+            return jsonify([dict(r) for r in idx_rows])
+
+        # fetch full message rows from live source DB by rowid
+        rowids = [r["rowid"] for r in idx_rows]
+        placeholders = ",".join("?" * len(rowids))
+        id_col = "m._id" if source_type == "android" else "m.Z_PK"
+        select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
+        extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
+
+        rows = wa.execute(
+            f"{select} WHERE {id_col} IN ({placeholders}) {extra} ORDER BY timestamp_ms ASC",
+            rowids
+        ).fetchall()
+
+        return jsonify([dict(r) for r in rows])
 
     # ---- API: media file serving -------------------------------------------
 
@@ -593,6 +717,9 @@ def create_app(output_root: Path, rescan: bool = False):
             return resp
 
     # ---- UI ----------------------------------------------------------------
+
+    def get_output_root():
+        return output_root
 
     @app.route("/")
     def index():
@@ -725,6 +852,25 @@ HTML_TEMPLATE = r"""
       flex-shrink: 0;
     }
 
+    #toolbar-toggle {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 18px;
+      padding: 4px 6px;
+      border-radius: 4px;
+      line-height: 1;
+    }
+    #toolbar-toggle:hover { background: var(--surface2); color: var(--text); }
+
+    #toolbar-expanded {
+      display: none;
+      align-items: center;
+      gap: 8px;
+    }
+    #toolbar-expanded.open { display: flex; }
+
     #chat-search-input {
       background: var(--surface2);
       border: none;
@@ -764,8 +910,6 @@ HTML_TEMPLATE = r"""
     }
     #date-picker-input:focus { box-shadow: 0 0 0 2px var(--accent); }
 
-    .msg-bubble.search-highlight { outline: 2px solid var(--accent); }
-
     #message-scroll {
       flex: 1;
       overflow-y: auto;
@@ -774,8 +918,6 @@ HTML_TEMPLATE = r"""
       flex-direction: column;
       gap: 4px;
     }
-
-    .sentinel { height: 1px; width: 100%; }
 
     .msg-row {
       display: flex;
@@ -804,6 +946,7 @@ HTML_TEMPLATE = r"""
 
     .msg-sender { font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 2px; }
     .msg-text { font-size: 14px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+    .msg-unavailable { color: var(--text-muted); font-style: italic; }
     .msg-caption { font-size: 14px; line-height: 1.4; margin-top: 4px; }
     .msg-meta { font-size: 10px; color: var(--text-muted); text-align: right; margin-top: 2px; }
 
@@ -851,6 +994,17 @@ HTML_TEMPLATE = r"""
     .search-result-item .sr-time { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
     mark { background: #ffe082; color: #111; border-radius: 2px; padding: 0 1px; }
 
+    .sr-section-label {
+      padding: 6px 16px 4px;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      border-top: 1px solid var(--border);
+    }
+    .sr-section-label:first-child { border-top: none; }
+
     .direction-badge {
       display: inline-block;
       font-size: 10px;
@@ -860,7 +1014,44 @@ HTML_TEMPLATE = r"""
       vertical-align: middle;
     }
     .direction-badge.sent { background: var(--accent); color: #fff; }
-    .direction-badge.recv { background: var(--text-muted); color: #fff; }
+
+    .date-separator {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 8px 0;
+    }
+    .date-separator span {
+      background: var(--surface2);
+      color: var(--text-muted);
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 8px;
+    }
+
+    .load-spinner {
+      display: flex;
+      justify-content: center;
+      padding: 10px;
+      color: var(--text-muted);
+      font-size: 20px;
+    }
+
+    .msg-quote {
+      background: rgba(0,0,0,0.08);
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      padding: 4px 8px;
+      margin-bottom: 4px;
+      max-width: 100%;
+      overflow: hidden;
+    }
+    .msg-row.sent .msg-quote { background: rgba(0,0,0,0.1); }
+    .msg-quote-sender { font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 1px; }
+    .msg-quote-text { font-size: 12px; color: rgba(17,27,33,0.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .msg-quote[style*="cursor: pointer"]:hover { background: rgba(0,0,0,0.15); }
+
+    .msg-bubble.search-highlight { outline: 2px solid var(--accent); }
   </style>
 </head>
 <body>
@@ -883,13 +1074,16 @@ HTML_TEMPLATE = r"""
       <div id="chat-header" style="display:none;">
         <h2 id="chat-title"></h2>
         <div id="chat-toolbar">
-          <input id="chat-search-input" type="search" placeholder="Find in chat…" autocomplete="off">
-          <div id="chat-search-nav" style="display:none;">
-            <button class="nav-btn" id="search-prev" title="Previous">&#8679;</button>
-            <span id="chat-search-count"></span>
-            <button class="nav-btn" id="search-next" title="Next">&#8681;</button>
+          <button id="toolbar-toggle" title="Search &amp; date">&#128269;</button>
+          <div id="toolbar-expanded">
+            <input id="chat-search-input" type="search" placeholder="Find in chat…" autocomplete="off">
+            <div id="chat-search-nav" style="display:none;">
+              <button class="nav-btn" id="search-prev" title="Previous">&#8679;</button>
+              <span id="chat-search-count"></span>
+              <button class="nav-btn" id="search-next" title="Next">&#8681;</button>
+            </div>
+            <input id="date-picker-input" type="date" title="Jump to date">
           </div>
-          <input id="date-picker-input" type="date" title="Jump to date">
         </div>
       </div>
       <div id="message-scroll"></div>
@@ -917,6 +1111,16 @@ HTML_TEMPLATE = r"""
     return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
+  function fmtDateSep(ts) {
+    const d = new Date(ts);
+    return d.toLocaleDateString(undefined, { day: '2-digit', month: '2-digit', year: 'numeric' });
+  }
+
+  function dayKey(ts) {
+    const d = new Date(ts);
+    return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+  }
+
   function esc(s) {
     if (s == null) return '';
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -931,6 +1135,14 @@ HTML_TEMPLATE = r"""
       result = result.replace(re, m => '<mark>' + m + '</mark>');
     }
     return result;
+  }
+
+  function makeDateSeparator(ts) {
+    const el = document.createElement('div');
+    el.className = 'date-separator';
+    el.dataset.dayKey = dayKey(ts);
+    el.innerHTML = `<span>${fmtDateSep(ts)}</span>`;
+    return el;
   }
 
   // ---- load chats ----------------------------------------------------------
@@ -998,6 +1210,22 @@ HTML_TEMPLATE = r"""
 
   let loading = false;
 
+  function showSpinner(position) {
+    const el = document.createElement('div');
+    el.className = 'load-spinner';
+    el.id = 'load-spinner-' + position;
+    el.textContent = '⟳';
+    const scroll = document.getElementById('message-scroll');
+    if (position === 'top') scroll.insertBefore(el, scroll.firstChild);
+    else scroll.appendChild(el);
+    return el;
+  }
+
+  function removeSpinner(position) {
+    const el = document.getElementById('load-spinner-' + position);
+    if (el) el.remove();
+  }
+
   async function loadMessages(direction) {
     if (loading) return;
     loading = true;
@@ -1008,45 +1236,76 @@ HTML_TEMPLATE = r"""
       limit: 50
     });
 
-    // 'older' = load messages before the oldest we have (scroll up)
-    // 'newer' = load messages after the newest we have (scroll down)
     if (direction === 'older' && msgList.length > 0) {
       params.set('before', msgList[0].timestamp_ms);
     } else if (direction === 'newer' && msgList.length > 0) {
       params.set('after', msgList[msgList.length - 1].timestamp_ms);
     }
 
+    const spinner = showSpinner(direction === 'older' ? 'top' : 'bottom');
+
     try {
       const res = await fetch('/api/messages?' + params);
       const msgs = await res.json();
-      loading = false;
+      removeSpinner(direction === 'older' ? 'top' : 'bottom');
 
-      if (!msgs.length) return;
+      if (!msgs.length) { loading = false; return; }
 
       const scroll = document.getElementById('message-scroll');
 
       if (direction === 'older') {
-        // API returns DESC (newest first), reverse to get chronological order
+        // API returns DESC; reverse to get chronological order for prepending
         const ordered = msgs.slice().reverse();
-        ordered.forEach(m => msgList.unshift(m));
+        // The message currently at the top of our list is the boundary for date seps
+        const firstExistingTs = msgList.length > 0 ? msgList[0].timestamp_ms : null;
+
+        // Prepend into msgList
+        for (let i = ordered.length - 1; i >= 0; i--) {
+          msgList.unshift(ordered[i]);
+        }
+
         const prevHeight = scroll.scrollHeight;
         const prevTop = scroll.scrollTop;
-        ordered.forEach(m => scroll.insertBefore(renderBubble(m), scroll.firstChild));
+
+        // Insert into DOM oldest-first (each goes before the current firstChild)
+        // so final order is oldest-at-top. For date sep: compare each msg with
+        // the one that comes after it in the DOM (i.e. ordered[i+1] or firstExistingTs).
+        for (let i = ordered.length - 1; i >= 0; i--) {
+          const m = ordered[i];
+          const nextTs = i < ordered.length - 1 ? ordered[i + 1].timestamp_ms : firstExistingTs;
+          const nodes = renderBubbleWithSep(m, nextTs, 'before');
+          nodes.forEach(node => scroll.insertBefore(node, scroll.firstChild));
+        }
+
         domNodes += ordered.length;
-        // preserve scroll position so the view doesn't jump
         scroll.scrollTop = prevTop + (scroll.scrollHeight - prevHeight);
         pruneDom('top');
       } else {
-        // 'newer' — API returns ASC when using after=
+        const prevLastTs = msgList.length > 0 ? msgList[msgList.length - 1].timestamp_ms : null;
         msgs.forEach(m => msgList.push(m));
-        msgs.forEach(m => scroll.appendChild(renderBubble(m)));
+        msgs.forEach((m, i) => {
+          const prevTs = i === 0 ? prevLastTs : msgs[i - 1].timestamp_ms;
+          renderBubbleWithSep(m, prevTs, 'after').forEach(node => scroll.appendChild(node));
+        });
         domNodes += msgs.length;
         pruneDom('bottom');
       }
 
     } catch (e) {
-      loading = false;
+      removeSpinner(direction === 'older' ? 'top' : 'bottom');
     }
+    loading = false;
+  }
+
+  function renderBubbleWithSep(msg, prevTs, direction) {
+    const nodes = [];
+    const needsSep = prevTs === null || dayKey(msg.timestamp_ms) !== dayKey(prevTs);
+    if (needsSep && direction === 'after') nodes.push(makeDateSeparator(msg.timestamp_ms));
+    nodes.push(renderBubble(msg));
+    // 'before': separator goes after the bubble so insertBefore puts it above the next row;
+    // label uses prevTs (= the chronologically newer neighbour, start of that day)
+    if (needsSep && direction === 'before' && prevTs !== null) nodes.push(makeDateSeparator(prevTs));
+    return nodes;
   }
 
   // ---- append / prepend with pruning ---------------------------------------
@@ -1057,8 +1316,14 @@ HTML_TEMPLATE = r"""
       const child = keepEnd === 'top' ? scroll.lastChild : scroll.firstChild;
       if (!child) break;
       scroll.removeChild(child);
-      domNodes--;
+      if (child.classList && child.classList.contains('msg-row')) domNodes--;
     }
+    // Re-sync msgList boundaries from surviving DOM rows
+    const rows = scroll.querySelectorAll('.msg-row[data-ts]');
+    if (rows.length === 0) { msgList = []; return; }
+    const minTs = parseInt(rows[0].dataset.ts);
+    const maxTs = parseInt(rows[rows.length - 1].dataset.ts);
+    msgList = msgList.filter(m => m.timestamp_ms >= minTs && m.timestamp_ms <= maxTs);
   }
 
   // ---- scroll trigger -------------------------------------------------------
@@ -1089,19 +1354,51 @@ HTML_TEMPLATE = r"""
     senderEl.textContent = msg.sender || '';
     if (msg.sender) bubble.appendChild(senderEl);
 
-    const badge = document.createElement('span');
-    badge.className = 'direction-badge ' + (msg.from_me ? 'sent' : 'recv');
-    badge.textContent = msg.from_me ? 'You' : 'Them';
+    if (msg.quoted_text) {
+      const quote = document.createElement('div');
+      quote.className = 'msg-quote';
+      const qSender = document.createElement('div');
+      qSender.className = 'msg-quote-sender';
+      const qs = msg.quoted_sender;
+      qSender.textContent = qs || (currentChat && currentChat.type === 'contact' ? currentChat.display_name : '');
+      const qText = document.createElement('div');
+      qText.className = 'msg-quote-text';
+      qText.textContent = msg.quoted_text;
+      quote.appendChild(qSender);
+      quote.appendChild(qText);
+      if (msg.quoted_ts) {
+        quote.style.cursor = 'pointer';
+        quote.title = 'Jump to original message';
+        quote.addEventListener('click', () => jumpToTimestamp(msg.quoted_ts));
+      }
+      bubble.appendChild(quote);
+    }
+
     const meta = document.createElement('div');
     meta.className = 'msg-meta';
-    meta.appendChild(badge);
+    if (msg.from_me) {
+      const badge = document.createElement('span');
+      badge.className = 'direction-badge sent';
+      badge.textContent = 'You';
+      meta.appendChild(badge);
+    }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
 
     if (msg.media_type === 'text' || !msg.archive_path) {
-      const txt = document.createElement('div');
-      txt.className = 'msg-text';
-      txt.innerHTML = highlight(msg.text_body, '');
-      bubble.appendChild(txt);
+      if (!msg.archive_path && msg.media_type !== 'text') {
+        const txt = document.createElement('div');
+        txt.className = 'msg-text msg-unavailable';
+        const icon = msg.media_type === 'image' ? '🖼️' : msg.media_type === 'video' ? '🎥' :
+                     msg.media_type === 'audio' ? '🎵' : msg.media_type === 'sticker' ? '🩹' :
+                     msg.media_type === 'gif' ? '🎞️' : '📄';
+        txt.textContent = icon + ' ' + (msg.text_body || 'Media not available');
+        bubble.appendChild(txt);
+      } else {
+        const txt = document.createElement('div');
+        txt.className = 'msg-text';
+        txt.innerHTML = highlight(msg.text_body, '');
+        bubble.appendChild(txt);
+      }
     } else {
       const mediaEl = renderMedia(msg);
       bubble.appendChild(mediaEl);
@@ -1164,7 +1461,7 @@ HTML_TEMPLATE = r"""
     document.body.appendChild(lb);
   }
 
-  // ---- search --------------------------------------------------------------
+  // ---- sidebar search ------------------------------------------------------
 
   let searchTimer = null;
 
@@ -1172,52 +1469,91 @@ HTML_TEMPLATE = r"""
     clearTimeout(searchTimer);
     const q = this.value.trim();
     if (!q) {
-      document.getElementById('search-results').classList.remove('has-results');
-      document.getElementById('search-results').innerHTML = '';
+      clearSearchResults();
       return;
     }
     searchTimer = setTimeout(() => doSearch(q), 300);
   });
 
   async function doSearch(q) {
-    const params = new URLSearchParams({ q });
-    if (currentChat) params.set('chat_id', currentChat.id);
-    const res = await fetch('/api/search?' + params);
-    const results = await res.json();
-    renderSearchResults(results, q);
+    // Contact name matches — client-side, instant
+    const ql = q.toLowerCase();
+    const contactMatches = allChats.filter(c =>
+      c.display_name.toLowerCase().includes(ql) || c.id.toLowerCase().includes(ql)
+    );
+
+    // Full-text search across all chats
+    const res = await fetch('/api/search?' + new URLSearchParams({ q }));
+    const textResults = await res.json();
+
+    renderSearchResults(q, contactMatches, textResults);
   }
 
-  function renderSearchResults(results, q) {
+  function clearSearchResults() {
+    document.getElementById('search-results').classList.remove('has-results');
+    document.getElementById('search-results').innerHTML = '';
+  }
+
+  function makeSectionLabel(text) {
+    const el = document.createElement('div');
+    el.className = 'sr-section-label';
+    el.textContent = text;
+    return el;
+  }
+
+  function makeContactResultItem(chat, q) {
+    const el = document.createElement('div');
+    el.className = 'search-result-item';
+    el.innerHTML = `<div class="sr-chat">${highlight(chat.display_name, q)}</div><div class="sr-text">${esc(chat.id)}</div>`;
+    el.addEventListener('click', () => {
+      document.getElementById('search-input').value = '';
+      clearSearchResults();
+      const el2 = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+      if (el2) selectChat(chat, el2);
+    });
+    return el;
+  }
+
+  function makeTextResultItem(r, q) {
+    const el = document.createElement('div');
+    el.className = 'search-result-item';
+    const chatName = allChats.find(c => c.id === r.chat_id && c.type === r.chat_type)?.display_name || r.chat_id;
+    const snippet = r.text_body || (r.media_name ? '[📎 ' + r.media_name + ']' : '');
+    el.innerHTML = `
+      <div class="sr-chat">${esc(chatName)}</div>
+      <div class="sr-text">${highlight(snippet, q)}</div>
+      <div class="sr-time">${fmtTime(r.timestamp_ms)}</div>
+    `;
+    el.addEventListener('click', () => {
+      document.getElementById('search-input').value = '';
+      clearSearchResults();
+      const chat = allChats.find(c => c.id === r.chat_id && c.type === r.chat_type);
+      if (chat) {
+        const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
+        if (el2) selectChat(chat, el2);
+      }
+    });
+    return el;
+  }
+
+  function renderSearchResults(q, contactMatches, textResults) {
     const container = document.getElementById('search-results');
-    if (!results.length) {
-      container.classList.remove('has-results');
-      container.innerHTML = '';
+    if (!contactMatches.length && !textResults.length) {
+      clearSearchResults();
       return;
     }
     container.classList.add('has-results');
-    container.innerHTML = '<div class="search-result-header">Search results</div>';
-    results.slice(0, 50).forEach(r => {
-      const el = document.createElement('div');
-      el.className = 'search-result-item';
-      const chatName = allChats.find(c => c.id === r.chat_id && c.type === r.chat_type)?.display_name || r.chat_id;
-      const snippet = r.text_body || (r.media_name ? '[📎 ' + r.media_name + ']' : '');
-      el.innerHTML = `
-        <div class="sr-chat">${esc(chatName)}</div>
-        <div class="sr-text">${highlight(snippet, q)}</div>
-        <div class="sr-time">${fmtTime(r.timestamp_ms)}</div>
-      `;
-      el.addEventListener('click', () => {
-        document.getElementById('search-input').value = '';
-        document.getElementById('search-results').classList.remove('has-results');
-        document.getElementById('search-results').innerHTML = '';
-        const chat = allChats.find(c => c.id === r.chat_id && c.type === r.chat_type);
-        if (chat) {
-          const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
-          if (el2) selectChat(chat, el2);
-        }
-      });
-      container.appendChild(el);
-    });
+    container.innerHTML = '';
+
+    if (contactMatches.length) {
+      container.appendChild(makeSectionLabel('Contacts'));
+      contactMatches.forEach(chat => container.appendChild(makeContactResultItem(chat, q)));
+    }
+
+    if (textResults.length) {
+      container.appendChild(makeSectionLabel('Messages'));
+      textResults.slice(0, 50).forEach(r => container.appendChild(makeTextResultItem(r, q)));
+    }
   }
 
   // ---- in-chat search -------------------------------------------------------
@@ -1293,17 +1629,13 @@ HTML_TEMPLATE = r"""
   async function jumpToChatSearchResult(idx) {
     const result = chatSearchResults[idx];
     if (!result) return;
-    // remove previous highlight
     document.querySelectorAll('.search-highlight').forEach(el => el.classList.remove('search-highlight'));
-    // check if the message is already in the DOM
     const existing = document.querySelector(`.msg-row[data-ts="${result.timestamp_ms}"]`);
     if (existing) {
       highlightMessageRow(existing);
       return;
     }
-    // not in DOM — jump to that timestamp
     await jumpToTimestamp(result.timestamp_ms);
-    // after load, find and highlight
     const loaded = document.querySelector(`.msg-row[data-ts="${result.timestamp_ms}"]`);
     if (loaded) highlightMessageRow(loaded);
   }
@@ -1317,9 +1649,9 @@ HTML_TEMPLATE = r"""
   // ---- date picker ----------------------------------------------------------
 
   document.getElementById('date-picker-input').addEventListener('change', function () {
-    const val = this.value; // "YYYY-MM-DD"
+    const val = this.value;
     if (!val || !currentChat) return;
-    const ts = new Date(val).getTime(); // midnight local time in ms
+    const ts = new Date(val).getTime();
     jumpToTimestamp(ts);
   });
 
@@ -1339,19 +1671,31 @@ HTML_TEMPLATE = r"""
     msgList = [];
     domNodes = 0;
 
-    msgs.forEach(m => {
+    msgs.forEach((m, i) => {
       msgList.push(m);
-      scroll.appendChild(renderBubble(m));
+      const prevTs = i === 0 ? null : msgs[i - 1].timestamp_ms;
+      renderBubbleWithSep(m, prevTs, 'after').forEach(node => scroll.appendChild(node));
       domNodes++;
     });
 
-    // scroll to the message closest to the requested timestamp
     const target = msgs.reduce((best, m) =>
       Math.abs(m.timestamp_ms - ts) < Math.abs(best.timestamp_ms - ts) ? m : best
     );
     const targetEl = document.querySelector(`.msg-row[data-ts="${target.timestamp_ms}"]`);
     if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
+
+  // ---- toolbar toggle -------------------------------------------------------
+
+  document.getElementById('toolbar-toggle').addEventListener('click', function () {
+    const exp = document.getElementById('toolbar-expanded');
+    const open = exp.classList.toggle('open');
+    if (open) document.getElementById('chat-search-input').focus();
+    else {
+      clearChatSearch();
+      document.getElementById('chat-search-input').value = '';
+    }
+  });
 
   // ---- init ----------------------------------------------------------------
 
