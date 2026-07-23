@@ -836,6 +836,14 @@ def create_app(output_root: Path, rescan: bool = False):
         indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
         return jsonify({"results": [dict(r) for r in rows], "indexed_count": indexed_count})
 
+    # ---- API: index status -------------------------------------------------
+
+    @app.route("/api/index-status")
+    def api_index_status():
+        cache = get_cache()
+        indexed = cache.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
+        return jsonify({"indexed": indexed})
+
     # ---- API: media file serving -------------------------------------------
 
     @app.route("/media/<path:p>")
@@ -1155,6 +1163,26 @@ HTML_TEMPLATE = r"""
       font-size: 15px;
     }
 
+    #chat-loading {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+    #chat-loading .loading-spinner {
+      width: 28px; height: 28px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #chat-loading-count { font-size: 12px; color: var(--text-muted); }
+
     .spinner {
       display: flex; justify-content: center; padding: 16px;
       color: var(--text-muted); font-size: 13px;
@@ -1355,6 +1383,11 @@ HTML_TEMPLATE = r"""
       </div>
       <div id="message-scroll"></div>
       <div id="empty-pane">Select a chat to browse messages</div>
+      <div id="chat-loading">
+        <div class="loading-spinner"></div>
+        <span>Loading chat…</span>
+        <span id="chat-loading-count"></span>
+      </div>
     </div>
   </div>
 </div>
@@ -1477,7 +1510,23 @@ HTML_TEMPLATE = r"""
     document.getElementById('chat-search-input').value = '';
     clearChatSearch();
 
+    const loadingEl = document.getElementById('chat-loading');
+    const countEl = document.getElementById('chat-loading-count');
+    loadingEl.style.display = 'flex';
+    countEl.textContent = '';
+    let pollTimer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/index-status');
+        const d = await r.json();
+        if (d.indexed > 0) countEl.textContent = d.indexed.toLocaleString() + ' messages indexed';
+      } catch (_) {}
+    }, 500);
+
     await loadMessages('older');
+
+    clearInterval(pollTimer);
+    loadingEl.style.display = 'none';
+
     scroll.scrollTop = scroll.scrollHeight;
   }
 
@@ -1867,6 +1916,11 @@ HTML_TEMPLATE = r"""
       c.display_name.toLowerCase().includes(ql) || c.id.toLowerCase().includes(ql)
     );
 
+    // Show loading state while FTS fetch is in flight
+    const container = document.getElementById('search-results');
+    container.classList.add('has-results');
+    container.innerHTML = '<div class="sr-section-label">Searching…</div>';
+
     // Full-text search across indexed chats
     const res = await fetch('/api/search?' + new URLSearchParams({ q }));
     const data = await res.json();
@@ -1980,6 +2034,12 @@ HTML_TEMPLATE = r"""
 
   async function doChatSearch(q) {
     if (!currentChat) return;
+    const nav = document.getElementById('chat-search-nav');
+    const count = document.getElementById('chat-search-count');
+    nav.style.display = 'flex';
+    count.textContent = 'Searching…';
+    document.getElementById('search-prev').disabled = true;
+    document.getElementById('search-next').disabled = true;
     const params = new URLSearchParams({ q, chat_id: currentChat.id, chat_type: currentChat.type });
     const res = await fetch('/api/search?' + params);
     const data = await res.json();
