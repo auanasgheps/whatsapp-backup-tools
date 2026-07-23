@@ -486,6 +486,26 @@ class TestLazyIndexing:
         rows = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
         assert rows == 1
 
+    def test_ensure_chat_indexed_with_system_event(self, tmp_path):
+        """_ensure_chat_indexed must not crash when the chat contains a system
+        event (non-zero message_type, no message_media row).  Regression for
+        IndexError: No item with that key on 'media_file'."""
+        wa_path = self._setup(tmp_path)
+        # add a system event to the existing chat (type=12, no media row)
+        wa_conn = sqlite3.connect(str(wa_path))
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (50, 10, 0, 1700000009000, NULL, 12)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        # must not raise
+        viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
+        rows = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
+        assert rows == 1  # system event excluded, only the text message indexed
+
     def test_source_change_clears_indexed_chats(self, tmp_path):
         wa_path = self._setup(tmp_path)
         app = viewer.create_app(tmp_path, rescan=False)

@@ -312,10 +312,12 @@ def _fts_android_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connectio
             CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
             COALESCE(m.timestamp, 0)                                AS timestamp_ms,
             COALESCE(m.text_data, '')                               AS text_body,
-            m.message_type
+            m.message_type,
+            mm.file_path                                            AS media_file
         FROM message m
         LEFT JOIN chat c ON c._id = m.chat_row_id
         LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+        LEFT JOIN message_media mm ON mm.message_row_id = m._id
         {where}
         ORDER BY m.timestamp ASC
     """, params)
@@ -331,9 +333,11 @@ def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection, c
                  ELSE 'contact' END                                     AS chat_type,
             CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
             COALESCE(m.ZTEXT, '')                                       AS text_body,
-            m.ZMESSAGETYPE                                              AS message_type
+            m.ZMESSAGETYPE                                              AS message_type,
+            mi.ZMEDIALOCALPATH                                          AS media_file
         FROM ZWAMESSAGE m
         LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+        LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
         WHERE CAST(m.ZCHATSESSION AS TEXT) = ?
         ORDER BY m.ZMESSAGEDATE ASC
     """, (chat_id,))
