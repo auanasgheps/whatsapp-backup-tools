@@ -624,7 +624,8 @@ def create_app(output_root: Path, rescan: bool = False):
                         NULLIF(con.display_name, ''),
                         con.folder,
                         grp.subject,
-                        CASE WHEN j_chat.user IS NOT NULL THEN '+' || j_chat.user
+                        CASE WHEN COALESCE(j_chat_real.user, j_chat.user) IS NOT NULL
+                             THEN '+' || COALESCE(j_chat_real.user, j_chat.user)
                              ELSE CAST(m.chat_row_id AS TEXT) END
                     )                                                   AS display_name,
                     COUNT(*)                                            AS msg_count,
@@ -633,7 +634,12 @@ def create_app(output_root: Path, rescan: bool = False):
                 FROM message m
                 LEFT JOIN chat c ON c._id = m.chat_row_id
                 LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
-                LEFT JOIN arch.contacts con ON con.number = j_chat.user
+                LEFT JOIN (
+                    SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                    FROM jid_map GROUP BY lid_row_id
+                ) jm_chat ON jm_chat.lid_row_id = c.jid_row_id
+                LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
+                LEFT JOIN arch.contacts con ON con.number = COALESCE(j_chat_real.user, j_chat.user)
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(m.chat_row_id AS TEXT)
                 LEFT JOIN message_media mm ON mm.message_row_id = m._id
                 WHERE (
