@@ -293,10 +293,15 @@ class TestFtsBuildAndroid:
         wa_conn = make_android_db(wa_path)
         archive_conn = make_archive_db(archive_path)
         seed_android_db(wa_conn, archive_conn)
-        # add a system message: no text, no media
+        # system message: no text, no media (message_type=0)
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
             "VALUES (99, 10, 0, 1700000001000, NULL, 0)"
+        )
+        # system event: non-zero message_type but no media file (e.g. encryption notice, business account change)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (100, 10, 0, 1700000002000, NULL, 12)"
         )
         wa_conn.commit()
         wa_conn.close()
@@ -306,7 +311,7 @@ class TestFtsBuildAndroid:
         viewer._build_fts_index(cache_conn, "android", str(wa_path))
 
         rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
-        assert len(rows) == 1  # system message excluded
+        assert len(rows) == 1  # both system events excluded
 
 
 # ---------------------------------------------------------------------------

@@ -220,10 +220,12 @@ def _fts_android(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection):
             CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
             COALESCE(m.timestamp, 0)                                AS timestamp_ms,
             COALESCE(m.text_data, '')                               AS text_body,
-            m.message_type
+            m.message_type,
+            mm.file_path                                            AS media_file
         FROM message m
         LEFT JOIN chat c ON c._id = m.chat_row_id
         LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+        LEFT JOIN message_media mm ON mm.message_row_id = m._id
         ORDER BY m.timestamp ASC
     """)
     _stream_fts_rows(cursor, cache_conn)
@@ -238,9 +240,11 @@ def _fts_ios(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection):
                  ELSE 'contact' END                                     AS chat_type,
             CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
             COALESCE(m.ZTEXT, '')                                       AS text_body,
-            m.ZMESSAGETYPE                                              AS message_type
+            m.ZMESSAGETYPE                                              AS message_type,
+            mi.ZMEDIALOCALPATH                                          AS media_file
         FROM ZWAMESSAGE m
         LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+        LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
         ORDER BY m.ZMESSAGEDATE ASC
     """)
     _stream_fts_rows(cursor, cache_conn)
@@ -259,7 +263,7 @@ def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2
     fts_batch = []
     for row in cursor:
         text_body = row["text_body"] or ""
-        is_media = row["message_type"] is not None and row["message_type"] != 0
+        is_media = row["message_type"] is not None and row["message_type"] != 0 and row["media_file"] is not None
         if not text_body and not is_media:
             continue
         idx_batch.append((row["rowid"], row["chat_id"], row["chat_type"], row["timestamp_ms"]))
@@ -473,7 +477,7 @@ _ANDROID_SELECT = f"""
 _ANDROID_FILTER = """
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '')
-        OR (m.message_type IS NOT NULL AND m.message_type != 0)
+        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND mm.file_path IS NOT NULL)
     )
 """
 
@@ -512,7 +516,7 @@ _IOS_SELECT = f"""
 _IOS_FILTER = """
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0)
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
     )
 """
 
