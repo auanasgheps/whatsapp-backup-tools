@@ -595,7 +595,8 @@ def create_app(output_root: Path, rescan: bool = False):
                         NULLIF(con.display_name, ''),
                         con.folder,
                         grp.subject,
-                        COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
+                        CASE WHEN j_chat.user IS NOT NULL THEN '+' || j_chat.user
+                             ELSE CAST(m.chat_row_id AS TEXT) END
                     )                                                   AS display_name,
                     COUNT(*)                                            AS msg_count,
                     MAX(NULLIF(COALESCE(m.timestamp, 0), 0))           AS newest_ts,
