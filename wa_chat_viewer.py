@@ -606,7 +606,7 @@ def create_app(output_root: Path, rescan: bool = False):
                        MIN(NULLIF(timestamp_ms, 0)) AS oldest_ts
                 FROM message_index
                 GROUP BY chat_id, chat_type
-                ORDER BY type, newest_ts DESC
+                ORDER BY newest_ts DESC
             """).fetchall()
             return jsonify([{
                 "id": r["id"], "type": r["type"],
@@ -641,7 +641,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     OR (m.message_type IS NOT NULL AND m.message_type != 0 AND mm.file_path IS NOT NULL)
                 )
                 GROUP BY {_ANDROID_CHAT_ID}, {_ANDROID_CHAT_TYPE}
-                ORDER BY {_ANDROID_CHAT_TYPE}, newest_ts DESC
+                ORDER BY newest_ts DESC
             """).fetchall()
         else:
             rows = conn.execute(f"""
@@ -670,7 +670,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
                 )
                 GROUP BY {_IOS_CHAT_ID}, {_IOS_CHAT_TYPE}
-                ORDER BY {_IOS_CHAT_TYPE}, newest_ts DESC
+                ORDER BY newest_ts DESC
             """).fetchall()
 
         return jsonify([dict(r) for r in rows])
@@ -942,6 +942,25 @@ HTML_TEMPLATE = r"""
       flex-shrink: 0;
       overflow: hidden;
     }
+
+    #sidebar-filters {
+      display: flex;
+      gap: 4px;
+      padding: 8px 10px 4px;
+      flex-shrink: 0;
+    }
+    .filter-btn {
+      flex: 1;
+      background: var(--surface2);
+      border: none;
+      border-radius: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 4px 0;
+    }
+    .filter-btn.active { background: var(--accent); color: #fff; }
+    .filter-btn:hover:not(.active) { background: var(--border); color: var(--text); }
 
     #search-box { padding: 10px; border-bottom: 1px solid var(--border); }
     #search-input {
@@ -1296,6 +1315,11 @@ HTML_TEMPLATE = r"""
 
   <div id="body">
     <div id="sidebar">
+      <div id="sidebar-filters">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn" data-filter="contact">Chats</button>
+        <button class="filter-btn" data-filter="group">Groups</button>
+      </div>
       <div id="search-box">
         <input id="search-input" type="search" placeholder="Search messages…" autocomplete="off">
       </div>
@@ -1396,31 +1420,30 @@ HTML_TEMPLATE = r"""
     renderChatList();
   }
 
+  let currentFilter = 'all';
+
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentFilter = btn.dataset.filter;
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderChatList();
+    });
+  });
+
   function renderChatList() {
     const list = document.getElementById('chat-list');
     list.innerHTML = '';
-    const contacts = allChats.filter(c => c.type === 'contact');
-    const groups = allChats.filter(c => c.type === 'group');
-
-    function addSection(label, items) {
-      if (!items.length) return;
-      const sec = document.createElement('div');
-      sec.className = 'section-label';
-      sec.textContent = label;
-      list.appendChild(sec);
-      items.forEach(chat => {
-        const el = document.createElement('div');
-        el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
-        el.dataset.id = chat.id;
-        el.dataset.type = chat.type;
-        el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}</div><div class="chat-meta">${chat.msg_count} messages · ${fmtTime(chat.newest_ts)}</div>`;
-        el.addEventListener('click', () => selectChat(chat, el));
-        list.appendChild(el);
-      });
-    }
-
-    addSection('Contacts', contacts);
-    addSection('Groups', groups);
+    const visible = currentFilter === 'all' ? allChats : allChats.filter(c => c.type === currentFilter);
+    visible.forEach(chat => {
+      const el = document.createElement('div');
+      el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
+      el.dataset.id = chat.id;
+      el.dataset.type = chat.type;
+      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}</div><div class="chat-meta">${chat.msg_count} messages · ${fmtTime(chat.newest_ts)}</div>`;
+      el.addEventListener('click', () => selectChat(chat, el));
+      list.appendChild(el);
+    });
   }
 
   // ---- select chat ---------------------------------------------------------
