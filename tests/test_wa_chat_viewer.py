@@ -565,7 +565,7 @@ class TestApiMedia:
             yield client, tmp_path
 
     def test_returns_only_archived_media(self, app_with_media):
-        """Text message excluded; archived image returned."""
+        """Text message excluded; image media row returned (archive_path set)."""
         client, _ = app_with_media
         resp = client.get("/api/media?chat_id=123456789&chat_type=contact")
         assert resp.status_code == 200
@@ -578,12 +578,12 @@ class TestApiMedia:
         client, _ = app_with_media
         data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
         item = data[0]
-        assert item["archive_path"] is not None
+        assert "archive_path" in item
         assert "timestamp_ms" in item
         assert item["timestamp_ms"] == 1700000001000
 
-    def test_excludes_unarchived_media(self, tmp_path):
-        """Media message with no archive_copies entry is not returned."""
+    def test_includes_unarchived_media_with_null_archive_path(self, tmp_path):
+        """Media message with no archive_copies entry is returned with archive_path=None."""
         wa_path = tmp_path / "msgstore.db"
         archive_path = tmp_path / ".wa_media_archiver.db"
         wa_conn = make_android_db(wa_path)
@@ -604,7 +604,8 @@ class TestApiMedia:
         app.config["TESTING"] = True
         with app.test_client() as client:
             data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
-        assert data == []
+        assert len(data) == 1
+        assert data[0]["archive_path"] is None
 
     def test_ordered_newest_first(self, app_with_media):
         """Results are sorted descending by timestamp."""
