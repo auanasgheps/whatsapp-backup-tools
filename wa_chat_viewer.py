@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS indexed_chats (
+    chat_id   TEXT NOT NULL,
+    chat_type TEXT NOT NULL,
+    PRIMARY KEY (chat_id, chat_type)
+);
 """
 
 # SQL expression that maps a file path (or NULL) to a media_type string.
@@ -274,6 +280,89 @@ def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2
 
 
 # ---------------------------------------------------------------------------
+# Lazy per-chat FTS indexing
+# ---------------------------------------------------------------------------
+
+def _clear_fts_index(cache_conn: sqlite3.Connection):
+    cache_conn.execute("DELETE FROM message_index")
+    cache_conn.execute("DELETE FROM message_index_fts")
+    cache_conn.execute("DELETE FROM indexed_chats")
+    cache_conn.commit()
+
+
+def _fts_android_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
+                      chat_id: str, chat_type: str):
+    if chat_type == "group":
+        where = "WHERE CAST(m.chat_row_id AS TEXT) = ?"
+        params = (chat_id,)
+    else:
+        where = "WHERE c.subject IS NULL AND COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT)) = ?"
+        params = (chat_id,)
+    cursor = wa_conn.execute(f"""
+        SELECT
+            m._id                                                    AS rowid,
+            CASE
+                WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
+                ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
+            END                                                      AS chat_id,
+            CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
+            COALESCE(m.timestamp, 0)                                AS timestamp_ms,
+            COALESCE(m.text_data, '')                               AS text_body,
+            m.message_type
+        FROM message m
+        LEFT JOIN chat c ON c._id = m.chat_row_id
+        LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+        {where}
+        ORDER BY m.timestamp ASC
+    """, params)
+    _stream_fts_rows(cursor, cache_conn)
+
+
+def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection, chat_id: str):
+    cursor = wa_conn.execute("""
+        SELECT
+            m.Z_PK                                                      AS rowid,
+            CAST(m.ZCHATSESSION AS TEXT)                               AS chat_id,
+            CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
+                 ELSE 'contact' END                                     AS chat_type,
+            CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
+            COALESCE(m.ZTEXT, '')                                       AS text_body,
+            m.ZMESSAGETYPE                                              AS message_type
+        FROM ZWAMESSAGE m
+        LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+        WHERE CAST(m.ZCHATSESSION AS TEXT) = ?
+        ORDER BY m.ZMESSAGEDATE ASC
+    """, (chat_id,))
+    _stream_fts_rows(cursor, cache_conn)
+
+
+def _build_fts_chat(cache_conn: sqlite3.Connection, source_type: str, wa_db_path: str,
+                    chat_id: str, chat_type: str):
+    wa_conn = sqlite3.connect(wa_db_path)
+    wa_conn.row_factory = sqlite3.Row
+    if source_type == "android":
+        _fts_android_chat(wa_conn, cache_conn, chat_id, chat_type)
+    else:
+        _fts_ios_chat(wa_conn, cache_conn, chat_id)
+    wa_conn.close()
+    cache_conn.execute(
+        "INSERT OR IGNORE INTO indexed_chats (chat_id, chat_type) VALUES (?, ?)",
+        (chat_id, chat_type),
+    )
+    cache_conn.commit()
+
+
+def _ensure_chat_indexed(cache_conn: sqlite3.Connection, source_type: str, wa_db_path: str,
+                         chat_id: str, chat_type: str):
+    row = cache_conn.execute(
+        "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?",
+        (chat_id, chat_type),
+    ).fetchone()
+    if row is None:
+        _build_fts_chat(cache_conn, source_type, wa_db_path, chat_id, chat_type)
+
+
+# ---------------------------------------------------------------------------
 # Media-only mode  (no source WA DB)
 # ---------------------------------------------------------------------------
 
@@ -449,11 +538,12 @@ def create_app(output_root: Path, rescan: bool = False):
     else:
         print(f"[wa_chat_viewer] Source DB: {source_type} at {wa_db_path}")
         if rescan or _source_changed(cache_conn, wa_db_path):
-            _build_fts_index(cache_conn, source_type, wa_db_path)
+            _clear_fts_index(cache_conn)
             _save_source_stamp(cache_conn, wa_db_path)
+            print("[wa_chat_viewer] FTS cache cleared — chats will be indexed on first open")
         else:
-            count = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
-            print(f"[wa_chat_viewer] FTS index up to date ({count} messages), skipping rebuild")
+            count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            print(f"[wa_chat_viewer] {count} chat(s) already indexed")
 
         wa_conn = sqlite3.connect(wa_db_path, check_same_thread=False)
         wa_conn.row_factory = sqlite3.Row
@@ -557,6 +647,9 @@ def create_app(output_root: Path, rescan: bool = False):
         if conn is None:
             return jsonify([])
 
+        if not before and not after:
+            _ensure_chat_indexed(get_cache(), source_type, wa_db_path, chat_id, chat_type)
+
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
 
@@ -615,7 +708,7 @@ def create_app(output_root: Path, rescan: bool = False):
         chat_id = request.args.get("chat_id")
         chat_type = request.args.get("chat_type")
         if not q:
-            return jsonify([])
+            return jsonify({"results": [], "indexed_count": 0})
 
         fts_conn = get_cache()
         wa = get_wa()
@@ -650,11 +743,13 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify({"error": f"Invalid search query: {e}"}), 400
 
         if not idx_rows:
-            return jsonify([])
+            indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            return jsonify({"results": [], "indexed_count": indexed_count})
 
         if wa is None:
             # media-only: return index rows directly (no full content)
-            return jsonify([dict(r) for r in idx_rows])
+            indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            return jsonify({"results": [dict(r) for r in idx_rows], "indexed_count": indexed_count})
 
         # fetch full message rows from live source DB by rowid
         rowids = [r["rowid"] for r in idx_rows]
@@ -668,7 +763,8 @@ def create_app(output_root: Path, rescan: bool = False):
             rowids
         ).fetchall()
 
-        return jsonify([dict(r) for r in rows])
+        indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+        return jsonify({"results": [dict(r) for r in rows], "indexed_count": indexed_count})
 
     # ---- API: media file serving -------------------------------------------
 
@@ -1004,6 +1100,14 @@ HTML_TEMPLATE = r"""
       border-top: 1px solid var(--border);
     }
     .sr-section-label:first-child { border-top: none; }
+
+    .search-index-notice {
+      padding: 8px 16px;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+      font-style: italic;
+    }
 
     .direction-badge {
       display: inline-block;
@@ -1482,11 +1586,11 @@ HTML_TEMPLATE = r"""
       c.display_name.toLowerCase().includes(ql) || c.id.toLowerCase().includes(ql)
     );
 
-    // Full-text search across all chats
+    // Full-text search across indexed chats
     const res = await fetch('/api/search?' + new URLSearchParams({ q }));
-    const textResults = await res.json();
+    const data = await res.json();
 
-    renderSearchResults(q, contactMatches, textResults);
+    renderSearchResults(q, contactMatches, data.results, data.indexed_count);
   }
 
   function clearSearchResults() {
@@ -1536,7 +1640,7 @@ HTML_TEMPLATE = r"""
     return el;
   }
 
-  function renderSearchResults(q, contactMatches, textResults) {
+  function renderSearchResults(q, contactMatches, textResults, indexedCount) {
     const container = document.getElementById('search-results');
     if (!contactMatches.length && !textResults.length) {
       clearSearchResults();
@@ -1553,6 +1657,13 @@ HTML_TEMPLATE = r"""
     if (textResults.length) {
       container.appendChild(makeSectionLabel('Messages'));
       textResults.slice(0, 50).forEach(r => container.appendChild(makeTextResultItem(r, q)));
+    }
+
+    if (indexedCount != null && indexedCount < allChats.length) {
+      const notice = document.createElement('div');
+      notice.className = 'search-index-notice';
+      notice.textContent = `Searched ${indexedCount} of ${allChats.length} chats. Open more chats to index them.`;
+      container.appendChild(notice);
     }
   }
 
@@ -1590,7 +1701,8 @@ HTML_TEMPLATE = r"""
     if (!currentChat) return;
     const params = new URLSearchParams({ q, chat_id: currentChat.id, chat_type: currentChat.type });
     const res = await fetch('/api/search?' + params);
-    chatSearchResults = await res.json();
+    const data = await res.json();
+    chatSearchResults = data.results;
     chatSearchIdx = chatSearchResults.length > 0 ? 0 : -1;
     updateChatSearchNav();
     if (chatSearchIdx >= 0) jumpToChatSearchResult(chatSearchIdx);
