@@ -454,7 +454,12 @@ _ANDROID_SELECT = f"""
         {_ANDROID_CHAT_ID}                                           AS chat_id,
         {_ANDROID_CHAT_TYPE}                                         AS chat_type,
         COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
-        COALESCE(j2.user, j.user, '')                               AS sender,
+        COALESCE(
+            NULLIF(con_s.display_name, ''),
+            CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
+                 THEN '+' || COALESCE(j2.user, j.user) END,
+            ''
+        )                                                            AS sender,
         m.from_me,
         ac.archive_path,
         CASE
@@ -465,7 +470,10 @@ _ANDROID_SELECT = f"""
         COALESCE(m.text_data, '')                                   AS text_body,
         COALESCE(mq.text_data, '')                                  AS quoted_text,
         CASE WHEN mq.from_me = 1 THEN 'You'
-             ELSE COALESCE(jq.user, '') END                         AS quoted_sender,
+             ELSE COALESCE(
+                 NULLIF(con_sq.display_name, ''),
+                 CASE WHEN jq.user IS NOT NULL THEN '+' || jq.user END,
+                 '') END                                             AS quoted_sender,
         COALESCE(mq.timestamp, 0)                                   AS quoted_ts
     FROM message m
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
@@ -475,6 +483,8 @@ _ANDROID_SELECT = f"""
     {_ANDROID_JID_MAP}
     LEFT JOIN message_quoted mq ON mq.message_row_id = m._id
     LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id
+    LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
+    LEFT JOIN arch.contacts con_sq ON con_sq.number = jq.user
     LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
 """
 
@@ -493,8 +503,15 @@ _IOS_SELECT = f"""
         {_IOS_CHAT_ID}                                               AS chat_id,
         {_IOS_CHAT_TYPE}                                             AS chat_type,
         CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)         AS timestamp_ms,
-        SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-               INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)      AS sender,
+        COALESCE(
+            NULLIF(con_s.display_name, ''),
+            CASE WHEN SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+                              INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1) != ''
+                 THEN '+' || SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+                                    INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+            END,
+            ''
+        )                                                            AS sender,
         m.ZISFROMME                                                  AS from_me,
         ac.archive_path,
         CASE
@@ -505,14 +522,26 @@ _IOS_SELECT = f"""
         COALESCE(m.ZTEXT, '')                                       AS text_body,
         COALESCE(qm.ZTEXT, '')                                      AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
-             ELSE SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
-                  INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
+             ELSE COALESCE(
+                 NULLIF(con_sq.display_name, ''),
+                 CASE WHEN SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
+                                   INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1) != ''
+                      THEN '+' || SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
+                                         INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
+                 END,
+                 '')
         END                                                         AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
     LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
+    LEFT JOIN arch.contacts con_s
+          ON con_s.number = SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+                                   INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+    LEFT JOIN arch.contacts con_sq
+          ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
+                                    INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
     LEFT JOIN arch.archive_copies ac
           ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
 """
@@ -622,6 +651,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     COALESCE(
                         NULLIF(con.display_name, ''),
                         con.folder,
+                        grp.subject,
                         cs.ZGROUPINFO,
                         CAST(m.ZCHATSESSION AS TEXT)
                     )                                                   AS display_name,
@@ -633,6 +663,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN arch.contacts con ON con.number =
                     SUBSTR(COALESCE(m.ZFROMJID,''), 1,
                            INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+                LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(m.ZCHATSESSION AS TEXT)
                 LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
                 WHERE (
                     (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
@@ -1564,7 +1595,7 @@ HTML_TEMPLATE = r"""
     const senderEl = document.createElement('div');
     senderEl.className = 'msg-sender';
     senderEl.textContent = msg.sender || '';
-    if (msg.sender) bubble.appendChild(senderEl);
+    if (msg.sender && !msg.from_me && currentChat && currentChat.type === 'group') bubble.appendChild(senderEl);
 
     if (msg.quoted_text) {
       const quote = document.createElement('div');
