@@ -127,6 +127,9 @@ def _media_type_from_path(path: str) -> str:
 def _open_cache_db(output_root: Path) -> sqlite3.Connection:
     cache_path = get_cache_db_path(output_root)
     conn = sqlite3.connect(str(cache_path), check_same_thread=False)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -8000")
     conn.executescript(CACHE_SCHEMA)
     conn.row_factory = sqlite3.Row
     return conn
