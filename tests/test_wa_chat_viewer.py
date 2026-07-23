@@ -202,6 +202,7 @@ class TestCacheSchema:
         ).fetchall()}
         assert "message_index" in tables
         assert "sync_meta" in tables
+        assert "indexed_chats" in tables
 
         indexes = {i[0] for i in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
@@ -372,17 +373,21 @@ class TestFlaskRoutes:
 
     def test_api_search_finds_message(self, app_and_tmp):
         client, tmp = app_and_tmp
+        # Open the chat first so it gets indexed
+        client.get("/api/messages?chat_id=123456789&chat_type=contact")
         resp = client.get("/api/search?q=Hello&chat_id=123456789&chat_type=contact")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert len(data) == 1
-        assert data[0]["text_body"] == "Hello world"
+        assert "results" in data
+        assert len(data["results"]) == 1
+        assert data["results"][0]["text_body"] == "Hello world"
 
     def test_api_search_empty_query(self, app_and_tmp):
         client, tmp = app_and_tmp
         resp = client.get("/api/search?q=")
         assert resp.status_code == 200
-        assert resp.get_json() == []
+        data = resp.get_json()
+        assert data["results"] == []
 
     def test_api_search_bad_fts_query(self, app_and_tmp):
         client, tmp = app_and_tmp
@@ -409,12 +414,98 @@ class TestFlaskRoutes:
         wa_conn.close()
         archive_conn.close()
 
-        # first start builds the index
+        # first start — no chats indexed yet
         app1 = viewer.create_app(tmp_path, rescan=False)
+        with app1.test_client() as client:
+            client.get("/api/messages?chat_id=123456789&chat_type=contact")
 
-        # second start with same file should skip rebuild
-        # (no exception = success; we just verify it completes)
+        # second start with same file — indexed_chats should persist
         app2 = viewer.create_app(tmp_path, rescan=False)
         with app2.test_client() as client:
             resp = client.get("/api/chats")
             assert resp.status_code == 200
+            cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+            count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: lazy per-chat indexing
+# ---------------------------------------------------------------------------
+
+class TestLazyIndexing:
+    def _setup(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+        return wa_path
+
+    def test_initial_state_has_no_indexed_chats(self, tmp_path):
+        self._setup(tmp_path)
+        app = viewer.create_app(tmp_path, rescan=False)
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+        assert count == 0
+
+    def test_ensure_chat_indexed_builds_fts(self, tmp_path):
+        wa_path = self._setup(tmp_path)
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
+
+        row = cache_conn.execute(
+            "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?",
+            ("123456789", "contact"),
+        ).fetchone()
+        assert row is not None
+
+        results = cache_conn.execute("""
+            SELECT mi.rowid FROM message_index mi
+            JOIN message_index_fts fts ON fts.rowid = mi.rowid
+            WHERE message_index_fts MATCH 'Hello'
+        """).fetchall()
+        assert len(results) == 1
+
+    def test_ensure_chat_indexed_is_idempotent(self, tmp_path):
+        wa_path = self._setup(tmp_path)
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
+        viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
+
+        count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+        assert count == 1
+        rows = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
+        assert rows == 1
+
+    def test_source_change_clears_indexed_chats(self, tmp_path):
+        wa_path = self._setup(tmp_path)
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            client.get("/api/messages?chat_id=123456789&chat_type=contact")
+
+        # simulate source DB change by growing the file
+        wa_path.write_bytes(wa_path.read_bytes() + b"\x00" * 100)
+
+        app2 = viewer.create_app(tmp_path, rescan=False)
+        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+        assert count == 0
+
+    def test_messages_route_triggers_indexing(self, tmp_path):
+        self._setup(tmp_path)
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            count_before = sqlite3.connect(
+                str(tmp_path / ".wa_chat_viewer_cache.db")
+            ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            assert count_before == 0
+
+            client.get("/api/messages?chat_id=123456789&chat_type=contact")
+
+            count_after = sqlite3.connect(
+                str(tmp_path / ".wa_chat_viewer_cache.db")
+            ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            assert count_after == 1

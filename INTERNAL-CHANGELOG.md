@@ -2,6 +2,15 @@
 
 ---
 
+## [Unreleased] — 2026-07-23
+
+### Changed
+
+- **`wa_chat_viewer.py` — Lazy per-chat FTS indexing**: the FTS5 index is no longer built for all messages at startup. Instead, messages are indexed per-chat the first time that chat is opened. A new `indexed_chats` table tracks which chats have been indexed. On source-DB change or `--rescan`, the index is cleared and chats are re-indexed on next open. Startup is now instant and the cache file starts near-zero in size regardless of the source DB size. In-chat search remains fully complete for any opened chat. Global sidebar search covers only previously-opened chats, with a notice showing how many chats have been indexed.
+- **`wa_chat_viewer.py` — `/api/search` response shape**: changed from a plain array to `{results: [...], indexed_count: N}` to surface the number of indexed chats to the UI.
+
+---
+
 ## [Unreleased] — 2026-07-22
 
 ### Changed
