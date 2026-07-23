@@ -4,6 +4,13 @@
 
 ## [Unreleased] — 2026-07-23
 
+### Added
+
+- **`wa_chat_viewer.py` — Media gallery**: clicking the 📷 button in the chat header opens a fullscreen grid of all archived media for that chat. Clicking an image or GIF opens the existing lightbox; clicking a video opens a video lightbox with controls. Audio and document items open in a new tab. Each grid cell has a "→ in chat" hover button that closes the gallery and jumps to the message where the item was sent.
+- **`wa_chat_viewer.py` — `GET /api/media`**: new route returning all archived media for a chat (media_type != 'text' AND archive_path IS NOT NULL), ordered newest-first.
+- **`wa_chat_viewer.py` — Video lightbox**: `showLightbox` now accepts a `media_type` second argument and renders a `<video controls autoplay>` element instead of `<img>` for video files. Clicking the backdrop closes it.
+- **`tests/test_wa_chat_viewer.py` — `TestApiMedia`**: 4 tests covering the new route (text excluded, correct fields, unarchived media excluded, newest-first ordering).
+
 ### Changed
 
 - **`wa_chat_viewer.py` — Lazy per-chat FTS indexing**: the FTS5 index is no longer built for all messages at startup. Instead, messages are indexed per-chat the first time that chat is opened. A new `indexed_chats` table tracks which chats have been indexed. On source-DB change or `--rescan`, the index is cleared and chats are re-indexed on next open. Startup is now instant and the cache file starts near-zero in size regardless of the source DB size. In-chat search remains fully complete for any opened chat. Global sidebar search covers only previously-opened chats, with a notice showing how many chats have been indexed.
