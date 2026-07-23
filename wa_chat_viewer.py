@@ -713,7 +713,7 @@ def create_app(output_root: Path, rescan: bool = False):
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
         sql = (
             f"{select} WHERE chat_id = ? AND chat_type = ? {extra}"
-            " AND media_type != 'text' AND archive_path IS NOT NULL"
+            " AND media_type != 'text'"
             " ORDER BY timestamp_ms DESC"
         )
         rows = conn.execute(sql, (chat_id, chat_type)).fetchall()
@@ -1126,6 +1126,19 @@ HTML_TEMPLATE = r"""
       font-size: 18px; cursor: pointer; padding: 4px 6px; border-radius: 4px;
     }
     #media-gallery-close:hover { background: var(--surface2); }
+    #media-gallery-stats {
+      padding: 8px 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 16px;
+      flex-shrink: 0;
+    }
+    .gallery-stat { white-space: nowrap; }
+    .gallery-stat-missing { color: var(--text-muted); font-style: italic; }
     #media-gallery-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
@@ -1276,6 +1289,7 @@ HTML_TEMPLATE = r"""
     <span id="media-gallery-title">Media</span>
     <button id="media-gallery-close" title="Close">&#10005;</button>
   </div>
+  <div id="media-gallery-stats"></div>
   <div id="media-gallery-grid"></div>
 </div>
 
@@ -1711,7 +1725,9 @@ HTML_TEMPLATE = r"""
   async function openMediaGallery() {
     if (!currentChat) return;
     const grid = document.getElementById('media-gallery-grid');
+    const stats = document.getElementById('media-gallery-stats');
     grid.innerHTML = '<div style="color:var(--text-secondary);padding:16px">Loading…</div>';
+    stats.innerHTML = '';
     document.getElementById('media-gallery').classList.add('open');
 
     const r = await fetch(
@@ -1720,11 +1736,34 @@ HTML_TEMPLATE = r"""
     );
     const items = await r.json();
     grid.innerHTML = '';
+
     if (!items.length) {
-      grid.innerHTML = '<div style="color:var(--text-secondary);padding:16px">No archived media in this chat.</div>';
+      grid.innerHTML = '<div style="color:var(--text-secondary);padding:16px">No media in this chat.</div>';
       return;
     }
-    items.forEach(msg => grid.appendChild(renderGalleryItem(msg)));
+
+    // compute stats
+    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document'];
+    const total = items.length;
+    const totalMissing = items.filter(m => !m.archive_path).length;
+    const byType = {};
+    for (const m of items) {
+      byType[m.media_type] = byType[m.media_type] || {count: 0, missing: 0};
+      byType[m.media_type].count++;
+      if (!m.archive_path) byType[m.media_type].missing++;
+    }
+
+    const totalMissingStr = totalMissing ? ` <span class="gallery-stat-missing">(${totalMissing} missing)</span>` : '';
+    let html = `<span class="gallery-stat"><strong>${total}</strong> total${totalMissingStr}</span>`;
+    for (const t of typeOrder) {
+      if (!byType[t]) continue;
+      const {count, missing} = byType[t];
+      const missingStr = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
+      html += `<span class="gallery-stat"><strong>${count}</strong> ${t}${missingStr}</span>`;
+    }
+    stats.innerHTML = html;
+
+    items.filter(m => m.archive_path).forEach(msg => grid.appendChild(renderGalleryItem(msg)));
   }
 
   document.getElementById('media-btn').addEventListener('click', openMediaGallery);
