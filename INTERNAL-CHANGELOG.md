@@ -6,7 +6,15 @@
 
 ### Added
 
-- **`wa_chat_viewer.py` — Media gallery**: clicking the 📷 button in the chat header opens a fullscreen grid of all archived media for that chat. Clicking an image or GIF opens the existing lightbox; clicking a video opens a video lightbox with controls. Audio and document items open in a new tab. Each grid cell has a "→ in chat" hover button that closes the gallery and jumps to the message where the item was sent.
+- **`wa_chat_viewer.py` — Group chat sender names**: inbound group messages now show the sender's display name (from `arch.contacts`) instead of the raw phone number. Both Android (`_ANDROID_SELECT` → `arch.contacts con_s`) and iOS (`_IOS_SELECT` → `arch.contacts con_s`) are covered. Quoted-message sender labels are resolved the same way via a second join (`con_sq`). Fallback for unknown contacts is `+<number>` (consistent with the chat list).
+- **`wa_chat_viewer.py` — iOS group display names**: the iOS `/api/chats` query now joins `arch.groups` so group chats show their human-readable subject instead of the internal `ZGROUPINFO` JID string.
+- **`tests/test_wa_chat_viewer.py`** — 2 new tests in `TestFlaskRoutes`: `test_group_message_sender_resolved_to_name` and `test_1on1_received_sender_not_raw_number`.
+
+### Fixed
+
+- **`wa_chat_viewer.py` — Sender label in 1-on-1 chats**: `renderBubble` was showing the raw phone number for all received messages, including private chats. The sender label is now restricted to received messages in group chats only (`!msg.from_me && currentChat.type === 'group'`).
+
+
 - **`wa_chat_viewer.py` — `GET /api/media`**: new route returning all archived media for a chat (media_type != 'text' AND archive_path IS NOT NULL), ordered newest-first.
 - **`wa_chat_viewer.py` — Video lightbox**: `showLightbox` now accepts a `media_type` second argument and renders a `<video controls autoplay>` element instead of `<img>` for video files. Clicking the backdrop closes it.
 - **`tests/test_wa_chat_viewer.py` — `TestApiMedia`**: 4 tests covering the new route (text excluded, correct fields, unarchived media excluded, newest-first ordering).

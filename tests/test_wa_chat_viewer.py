@@ -435,6 +435,65 @@ class TestFlaskRoutes:
         resp = client.get("/media/../wa_media_archiver.py")
         assert resp.status_code == 403
 
+    def test_group_message_sender_resolved_to_name(self, tmp_path):
+        """Inbound group message sender should be resolved to the contact display name."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Add a group chat: jid 2 (group JID), chat 20 with subject
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (20, 2, 'Test Group')")
+        # Group member JID
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
+        # Inbound message from group member jid 3
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (10, 20, 0, 3, 1700000000001, 'Hi group', 0)"
+        )
+        wa_conn.commit()
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('987654321', 'Bob (00987654321)', 'Bob')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/messages?chat_id=20&chat_type=group").get_json()
+
+        assert len(data) == 1
+        assert data[0]["sender"] == "Bob"
+
+    def test_1on1_received_sender_not_raw_number(self, tmp_path):
+        """Inbound 1-on-1 message: sender must be the contact name (or +number),
+        never the raw phone number without a + prefix."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        # seed_android_db creates jid 1 (user='123456789'), chat 10, message 1 (sender_jid_row_id=1)
+        # arch.contacts has number='123456789', display_name='Alice'
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/messages?chat_id=123456789&chat_type=contact").get_json()
+
+        assert len(data) == 1
+        sender = data[0]["sender"]
+        # Resolved to display name; raw number without + is never acceptable
+        assert sender != "123456789", "sender must not be raw phone number without + prefix"
+        # With arch.contacts entry present, should resolve to the display name
+        assert sender == "Alice"
+
     def test_second_start_skips_fts_rebuild(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
         archive_path = tmp_path / ".wa_media_archiver.db"
