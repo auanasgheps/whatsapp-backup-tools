@@ -1271,6 +1271,14 @@ HTML_TEMPLATE = r"""
   </div>
 </div>
 
+<div id="media-gallery">
+  <div id="media-gallery-header">
+    <span id="media-gallery-title">Media</span>
+    <button id="media-gallery-close" title="Close">&#10005;</button>
+  </div>
+  <div id="media-gallery-grid"></div>
+</div>
+
 <script>
 (function () {
   'use strict';
@@ -1974,14 +1982,6 @@ HTML_TEMPLATE = r"""
   loadChats();
 })();
 </script>
-
-<div id="media-gallery">
-  <div id="media-gallery-header">
-    <span id="media-gallery-title">Media</span>
-    <button id="media-gallery-close" title="Close">&#10005;</button>
-  </div>
-  <div id="media-gallery-grid"></div>
-</div>
 
 </body>
 </html>
