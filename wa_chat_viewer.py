@@ -700,6 +700,25 @@ def create_app(output_root: Path, rescan: bool = False):
         combined = list(reversed(before_rows)) + list(after_rows)
         return jsonify([dict(r) for r in combined])
 
+    # ---- API: media gallery ------------------------------------------------
+
+    @app.route("/api/media")
+    def api_media():
+        chat_id = request.args.get("chat_id", "")
+        chat_type = request.args.get("chat_type", "")
+        conn = get_wa()
+        if conn is None:
+            return jsonify([])
+        select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
+        extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
+        sql = (
+            f"{select} WHERE chat_id = ? AND chat_type = ? {extra}"
+            " AND media_type != 'text' AND archive_path IS NOT NULL"
+            " ORDER BY timestamp_ms DESC"
+        )
+        rows = conn.execute(sql, (chat_id, chat_type)).fetchall()
+        return jsonify([dict(r) for r in rows])
+
     # ---- API: search -------------------------------------------------------
 
     @app.route("/api/search")
@@ -1077,6 +1096,61 @@ HTML_TEMPLATE = r"""
       z-index: 1000; cursor: zoom-out;
     }
     .img-lightbox img { max-width: 90vw; max-height: 90vh; object-fit: contain; }
+    .img-lightbox video { max-width: 90vw; max-height: 90vh; }
+
+    #media-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 16px;
+      padding: 4px 6px;
+      border-radius: 4px;
+      line-height: 1;
+    }
+    #media-btn:hover { background: var(--surface2); color: var(--text); }
+
+    #media-gallery {
+      position: fixed; inset: 0; background: var(--bg); z-index: 900;
+      display: none; flex-direction: column;
+    }
+    #media-gallery.open { display: flex; }
+    #media-gallery-header {
+      display: flex; align-items: center; padding: 10px 16px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    #media-gallery-title { flex: 1; font-weight: 600; font-size: 15px; }
+    #media-gallery-close {
+      background: none; border: none; color: var(--text-secondary);
+      font-size: 18px; cursor: pointer; padding: 4px 6px; border-radius: 4px;
+    }
+    #media-gallery-close:hover { background: var(--surface2); }
+    #media-gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      gap: 4px; overflow-y: auto; padding: 8px;
+    }
+    .gallery-item {
+      position: relative; aspect-ratio: 1/1; cursor: pointer;
+      background: var(--surface); overflow: hidden; border-radius: 4px;
+    }
+    .gallery-item img, .gallery-item video {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+    }
+    .gallery-item .gallery-doc {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; height: 100%; font-size: 12px;
+      color: var(--text-secondary); padding: 4px; text-align: center;
+      word-break: break-all;
+    }
+    .gallery-goto {
+      position: absolute; bottom: 4px; right: 4px;
+      background: rgba(0,0,0,0.6); color: #fff; border: none;
+      border-radius: 4px; font-size: 11px; padding: 2px 5px; cursor: pointer;
+      opacity: 0; transition: opacity 0.15s;
+    }
+    .gallery-item:hover .gallery-goto { opacity: 1; }
 
     .search-result-item {
       padding: 10px 16px;
@@ -1178,6 +1252,7 @@ HTML_TEMPLATE = r"""
       <div id="chat-header" style="display:none;">
         <h2 id="chat-title"></h2>
         <div id="chat-toolbar">
+          <button id="media-btn" title="Media">&#128247;</button>
           <button id="toolbar-toggle" title="Search &amp; date">&#128269;</button>
           <div id="toolbar-expanded">
             <input id="chat-search-input" type="search" placeholder="Find in chat…" autocomplete="off">
@@ -1531,7 +1606,7 @@ HTML_TEMPLATE = r"""
       img.src = src;
       img.loading = 'lazy';
       img.alt = msg.media_name || 'image';
-      img.addEventListener('click', () => showLightbox(src));
+      img.addEventListener('click', () => showLightbox(src, mt));
       wrap.appendChild(img);
     } else if (mt === 'video') {
       const vid = document.createElement('video');
@@ -1555,17 +1630,102 @@ HTML_TEMPLATE = r"""
     return wrap;
   }
 
-  function showLightbox(src) {
+  function showLightbox(src, mt) {
     const lb = document.createElement('div');
     lb.className = 'img-lightbox';
-    const img = document.createElement('img');
-    img.src = src;
-    lb.appendChild(img);
-    lb.addEventListener('click', () => lb.remove());
+    let media;
+    if (mt === 'video') {
+      media = document.createElement('video');
+      media.controls = true;
+      media.autoplay = true;
+      media.src = src;
+    } else {
+      media = document.createElement('img');
+      media.src = src;
+    }
+    lb.appendChild(media);
+    lb.addEventListener('click', e => { if (e.target === lb) lb.remove(); });
     document.body.appendChild(lb);
   }
 
-  // ---- sidebar search ------------------------------------------------------
+  // ---- media gallery -------------------------------------------------------
+
+  function closeMediaGallery() {
+    document.getElementById('media-gallery').classList.remove('open');
+  }
+
+  function renderGalleryItem(msg) {
+    const cell = document.createElement('div');
+    cell.className = 'gallery-item';
+    const src = '/media/' + msg.archive_path;
+    const mt = msg.media_type;
+
+    if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
+      const img = document.createElement('img');
+      img.src = src;
+      img.loading = 'lazy';
+      img.alt = msg.media_name || '';
+      img.addEventListener('click', () => showLightbox(src, mt));
+      cell.appendChild(img);
+    } else if (mt === 'video') {
+      const vid = document.createElement('video');
+      vid.src = src;
+      vid.preload = 'none';
+      vid.addEventListener('click', () => showLightbox(src, mt));
+      cell.appendChild(vid);
+    } else if (mt === 'audio') {
+      const d = document.createElement('div');
+      d.className = 'gallery-doc';
+      d.innerHTML = '<span style="font-size:28px">🎵</span><span>' + esc(msg.media_name || 'audio') + '</span>';
+      d.addEventListener('click', () => window.open(src, '_blank'));
+      cell.appendChild(d);
+    } else {
+      const d = document.createElement('div');
+      d.className = 'gallery-doc';
+      d.innerHTML = '<span style="font-size:28px">📄</span><span>' + esc(msg.media_name || 'file') + '</span>';
+      d.addEventListener('click', () => window.open(src, '_blank'));
+      cell.appendChild(d);
+    }
+
+    const btn = document.createElement('button');
+    btn.className = 'gallery-goto';
+    btn.title = 'Go to message';
+    btn.textContent = '→ in chat';
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      closeMediaGallery();
+      jumpToTimestamp(msg.timestamp_ms);
+    });
+    cell.appendChild(btn);
+    return cell;
+  }
+
+  async function openMediaGallery() {
+    if (!currentChat) return;
+    const grid = document.getElementById('media-gallery-grid');
+    grid.innerHTML = '<div style="color:var(--text-secondary);padding:16px">Loading…</div>';
+    document.getElementById('media-gallery').classList.add('open');
+
+    const r = await fetch(
+      '/api/media?chat_id=' + encodeURIComponent(currentChat.id) +
+      '&chat_type=' + encodeURIComponent(currentChat.type)
+    );
+    const items = await r.json();
+    grid.innerHTML = '';
+    if (!items.length) {
+      grid.innerHTML = '<div style="color:var(--text-secondary);padding:16px">No archived media in this chat.</div>';
+      return;
+    }
+    items.forEach(msg => grid.appendChild(renderGalleryItem(msg)));
+  }
+
+  document.getElementById('media-btn').addEventListener('click', openMediaGallery);
+  document.getElementById('media-gallery-close').addEventListener('click', closeMediaGallery);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeMediaGallery();
+  });
+
+  // ---- sidebar search -------------------------------------------------------
 
   let searchTimer = null;
 
@@ -1814,6 +1974,15 @@ HTML_TEMPLATE = r"""
   loadChats();
 })();
 </script>
+
+<div id="media-gallery">
+  <div id="media-gallery-header">
+    <span id="media-gallery-title">Media</span>
+    <button id="media-gallery-close" title="Close">&#10005;</button>
+  </div>
+  <div id="media-gallery-grid"></div>
+</div>
+
 </body>
 </html>
 """

@@ -509,3 +509,105 @@ class TestLazyIndexing:
                 str(tmp_path / ".wa_chat_viewer_cache.db")
             ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             assert count_after == 1
+
+
+# ---------------------------------------------------------------------------
+# Helper: seed a media message with an archive_copies entry
+# ---------------------------------------------------------------------------
+
+def seed_android_db_with_media(wa_conn, archive_conn, tmp_path):
+    """Add one archived image message to the seeded chat (jid 1, chat 10)."""
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+        "VALUES (2, 10, 1, NULL, 1700000001000, NULL, 3)"
+    )
+    wa_conn.execute(
+        "INSERT INTO message_media (message_row_id, file_path, media_name) "
+        "VALUES (2, 'Media/Images/photo.jpg', 'photo.jpg')"
+    )
+    wa_conn.commit()
+
+    media_file = tmp_path / "Alice (00123456789)" / "photo.jpg"
+    media_file.parent.mkdir(parents=True, exist_ok=True)
+    media_file.write_bytes(b"\xff\xd8\xff")  # minimal JPEG header
+
+    archive_path = "Alice (00123456789)/photo.jpg"
+    archive_conn.execute(
+        "INSERT INTO files (original_path, md5) VALUES ('Media/Images/photo.jpg', x'deadbeef')"
+    )
+    archive_conn.execute(
+        "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Images/photo.jpg', ?)",
+        (archive_path,),
+    )
+    archive_conn.commit()
+    return archive_path
+
+
+# ---------------------------------------------------------------------------
+# Tests: /api/media
+# ---------------------------------------------------------------------------
+
+class TestApiMedia:
+    @pytest.fixture
+    def app_with_media(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client, tmp_path
+
+    def test_returns_only_archived_media(self, app_with_media):
+        """Text message excluded; archived image returned."""
+        client, _ = app_with_media
+        resp = client.get("/api/media?chat_id=123456789&chat_type=contact")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["media_type"] == "image"
+
+    def test_returns_correct_fields(self, app_with_media):
+        """Response includes archive_path, media_type, timestamp_ms."""
+        client, _ = app_with_media
+        data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
+        item = data[0]
+        assert item["archive_path"] is not None
+        assert "timestamp_ms" in item
+        assert item["timestamp_ms"] == 1700000001000
+
+    def test_excludes_unarchived_media(self, tmp_path):
+        """Media message with no archive_copies entry is not returned."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type) "
+            "VALUES (3, 10, 0, 1700000002000, 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (3, 'Media/Images/missing.jpg', 'missing.jpg')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
+        assert data == []
+
+    def test_ordered_newest_first(self, app_with_media):
+        """Results are sorted descending by timestamp."""
+        client, _ = app_with_media
+        data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
+        timestamps = [r["timestamp_ms"] for r in data]
+        assert timestamps == sorted(timestamps, reverse=True)
