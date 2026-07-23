@@ -9,6 +9,7 @@ Requires:
 """
 
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -611,3 +612,30 @@ class TestApiMedia:
         data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
         timestamps = [r["timestamp_ms"] for r in data]
         assert timestamps == sorted(timestamps, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Tests: HTML template integrity
+# ---------------------------------------------------------------------------
+
+class TestHtmlTemplate:
+    def test_all_getElementById_targets_exist_before_script(self):
+        """Every getElementById('id') in the <script> block must refer to an
+        element defined in the HTML *before* the script tag.  A missing or
+        late-placed element causes a TypeError that silently kills the entire
+        IIFE, preventing chats from loading."""
+        template = viewer.HTML_TEMPLATE
+
+        script_start = template.index("<script>")
+        html_before_script = template[:script_start]
+        script_body = template[script_start:]
+
+        ids_in_html = set(re.findall(r'\bid=["\']([^"\']+)["\']', html_before_script))
+        ids_accessed = set(re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)", script_body))
+
+        # ids created dynamically at runtime (not in static HTML) are expected
+        dynamic_ids = set()
+        missing = ids_accessed - ids_in_html - dynamic_ids
+        assert not missing, (
+            f"getElementById called for IDs not present in HTML before <script>: {sorted(missing)}"
+        )
