@@ -605,9 +605,10 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
                 LEFT JOIN arch.contacts con ON con.number = j_chat.user
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(m.chat_row_id AS TEXT)
+                LEFT JOIN message_media mm ON mm.message_row_id = m._id
                 WHERE (
                     (m.text_data IS NOT NULL AND m.text_data != '')
-                    OR (m.message_type IS NOT NULL AND m.message_type != 0)
+                    OR (m.message_type IS NOT NULL AND m.message_type != 0 AND mm.file_path IS NOT NULL)
                 )
                 GROUP BY {_ANDROID_CHAT_ID}, {_ANDROID_CHAT_TYPE}
                 ORDER BY {_ANDROID_CHAT_TYPE}, newest_ts DESC
@@ -631,9 +632,10 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN arch.contacts con ON con.number =
                     SUBSTR(COALESCE(m.ZFROMJID,''), 1,
                            INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+                LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
                 WHERE (
                     (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
-                    OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0)
+                    OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
                 )
                 GROUP BY {_IOS_CHAT_ID}, {_IOS_CHAT_TYPE}
                 ORDER BY {_IOS_CHAT_TYPE}, newest_ts DESC

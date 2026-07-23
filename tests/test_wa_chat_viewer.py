@@ -351,6 +351,31 @@ class TestFlaskRoutes:
         assert data[0]["id"] == "123456789"
         assert data[0]["display_name"] == "Alice"
 
+    def test_api_chats_excludes_system_events_from_sort(self, tmp_path):
+        """msg_count and newest_ts must not include system events (non-zero
+        message_type with no media row).  Regression: chats were sorted by
+        the timestamp of a later system event instead of the last real message."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)  # real message at ts=1700000000000
+        # system event at a later timestamp — must not affect sort/count
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (99, 10, 0, 1800000000000, NULL, 12)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chats").get_json()
+        assert len(data) == 1
+        assert data[0]["msg_count"] == 1
+        assert data[0]["newest_ts"] == 1700000000000
+
     def test_api_messages_returns_messages(self, app_and_tmp):
         client, tmp = app_and_tmp
         resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
