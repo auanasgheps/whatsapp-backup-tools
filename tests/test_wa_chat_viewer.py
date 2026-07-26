@@ -194,7 +194,7 @@ class TestDetectSourceDb:
 
 class TestCacheSchema:
     def test_schema_creates_tables(self, tmp_path):
-        cache_path = tmp_path / ".wa_chat_viewer_cache.db"
+        cache_path = tmp_path / ".wa_viewer.db"
         conn = sqlite3.connect(str(cache_path))
         conn.executescript(viewer.CACHE_SCHEMA)
 
@@ -204,6 +204,7 @@ class TestCacheSchema:
         assert "message_index" in tables
         assert "sync_meta" in tables
         assert "indexed_chats" in tables
+        assert "user_preferences" in tables
 
         indexes = {i[0] for i in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
@@ -224,20 +225,20 @@ class TestFreshnessCheck:
     def test_changed_when_no_stamp(self, tmp_path):
         db_path = tmp_path / "msgstore.db"
         db_path.write_text("x")
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         assert viewer._source_changed(cache_conn, str(db_path)) is True
 
     def test_unchanged_after_stamp_saved(self, tmp_path):
         db_path = tmp_path / "msgstore.db"
         db_path.write_text("x")
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         viewer._save_source_stamp(cache_conn, str(db_path))
         assert viewer._source_changed(cache_conn, str(db_path)) is False
 
     def test_changed_after_file_grows(self, tmp_path):
         db_path = tmp_path / "msgstore.db"
         db_path.write_text("x")
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         viewer._save_source_stamp(cache_conn, str(db_path))
         db_path.write_text("xxxx")  # size changed
         assert viewer._source_changed(cache_conn, str(db_path)) is True
@@ -258,7 +259,7 @@ class TestFtsBuildAndroid:
         wa_conn.close()
         archive_conn.close()
 
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         viewer._build_fts_index(cache_conn, "android", str(wa_path))
 
         rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
@@ -275,7 +276,7 @@ class TestFtsBuildAndroid:
         wa_conn.close()
         archive_conn.close()
 
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         viewer._build_fts_index(cache_conn, "android", str(wa_path))
 
         results = cache_conn.execute("""
@@ -307,7 +308,7 @@ class TestFtsBuildAndroid:
         wa_conn.close()
         archive_conn.close()
 
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         viewer._build_fts_index(cache_conn, "android", str(wa_path))
 
         rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
@@ -514,9 +515,70 @@ class TestFlaskRoutes:
         with app2.test_client() as client:
             resp = client.get("/api/chats")
             assert resp.status_code == 200
-            cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+            cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
             count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: user preferences
+# ---------------------------------------------------------------------------
+
+class TestPreferences:
+    def _make_app(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        return app
+
+    def test_get_returns_defaults(self, tmp_path):
+        app = self._make_app(tmp_path)
+        with app.test_client() as client:
+            data = client.get("/api/preferences").get_json()
+        assert data["theme"] == "dark"
+        assert data["date_format"] == "DD/MM/YYYY"
+        assert data["font_size"] == "medium"
+
+    def test_post_persists_value(self, tmp_path):
+        app = self._make_app(tmp_path)
+        with app.test_client() as client:
+            resp = client.post("/api/preferences",
+                               json={"key": "theme", "value": "light"})
+            assert resp.get_json()["ok"] is True
+            data = client.get("/api/preferences").get_json()
+        assert data["theme"] == "light"
+
+    def test_post_persists_across_restarts(self, tmp_path):
+        app1 = self._make_app(tmp_path)
+        with app1.test_client() as client:
+            client.post("/api/preferences",
+                        json={"key": "date_format", "value": "MM/DD/YYYY"})
+
+        app2 = viewer.create_app(tmp_path, rescan=False)
+        app2.config["TESTING"] = True
+        with app2.test_client() as client:
+            data = client.get("/api/preferences").get_json()
+        assert data["date_format"] == "MM/DD/YYYY"
+
+    def test_post_invalid_key_returns_400(self, tmp_path):
+        app = self._make_app(tmp_path)
+        with app.test_client() as client:
+            resp = client.post("/api/preferences",
+                               json={"key": "unknown_key", "value": "x"})
+        assert resp.status_code == 400
+
+    def test_cache_db_filename(self, tmp_path):
+        app = self._make_app(tmp_path)
+        with app.test_client() as client:
+            client.get("/api/chats")
+        assert (tmp_path / ".wa_viewer.db").exists()
+        assert not (tmp_path / ".wa_chat_viewer_cache.db").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -537,13 +599,13 @@ class TestLazyIndexing:
     def test_initial_state_has_no_indexed_chats(self, tmp_path):
         self._setup(tmp_path)
         app = viewer.create_app(tmp_path, rescan=False)
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
         assert count == 0
 
     def test_ensure_chat_indexed_builds_fts(self, tmp_path):
         wa_path = self._setup(tmp_path)
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         row = cache_conn.execute(
@@ -561,7 +623,7 @@ class TestLazyIndexing:
 
     def test_ensure_chat_indexed_is_idempotent(self, tmp_path):
         wa_path = self._setup(tmp_path)
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
         viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
 
@@ -584,7 +646,7 @@ class TestLazyIndexing:
         wa_conn.commit()
         wa_conn.close()
 
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         # must not raise
         viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
         rows = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
@@ -600,7 +662,7 @@ class TestLazyIndexing:
         wa_path.write_bytes(wa_path.read_bytes() + b"\x00" * 100)
 
         app2 = viewer.create_app(tmp_path, rescan=False)
-        cache_conn = make_cache_db(tmp_path / ".wa_chat_viewer_cache.db")
+        cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
         assert count == 0
 
@@ -609,14 +671,14 @@ class TestLazyIndexing:
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
             count_before = sqlite3.connect(
-                str(tmp_path / ".wa_chat_viewer_cache.db")
+                str(tmp_path / ".wa_viewer.db")
             ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             assert count_before == 0
 
             client.get("/api/messages?chat_id=123456789&chat_type=contact")
 
             count_after = sqlite3.connect(
-                str(tmp_path / ".wa_chat_viewer_cache.db")
+                str(tmp_path / ".wa_viewer.db")
             ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             assert count_after == 1
 

@@ -2,7 +2,15 @@
 
 ---
 
-## [Unreleased] — 2026-07-23
+## [Unreleased] — 2026-07-26
+
+### Changed
+
+- **Refactor: `chat_viewer/` package** — extracted `HTML_TEMPLATE` from `wa_chat_viewer.py` into `chat_viewer/template.py`. Created `chat_viewer/__init__.py`. `wa_chat_viewer.py` now imports the template via `from chat_viewer.template import HTML_TEMPLATE` and shrinks from 2367 to 967 lines. No behaviour change; all 50 tests pass.
+
+---
+
+## [Unreleased] — 2026-07-21
 
 ### Added
 
