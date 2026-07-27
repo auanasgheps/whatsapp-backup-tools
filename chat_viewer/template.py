@@ -408,8 +408,9 @@ HTML_TEMPLATE = r"""
       font-size: 18px; line-height: 34px; text-align: center;
       cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.3);
       display: none; z-index: 10;
+      opacity: 0.55; transition: opacity 0.15s;
     }
-    #scroll-to-bottom:hover { background: linear-gradient(135deg, #00c864, #008f6f); }
+    #scroll-to-bottom:hover { opacity: 1; }
     .lb-close {
       position: absolute; top: 16px; right: 20px;
       background: none; border: none; color: #fff; font-size: 28px;
