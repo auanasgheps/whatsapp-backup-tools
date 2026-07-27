@@ -8,6 +8,12 @@
 
 - **`wa_chat_viewer.py` — Media gallery archive view**: toggle button (⊞) in the gallery header switches between the classic grid and an archive view. The archive view (contacts only) mirrors the on-disk folder structure as an expandable year tree split into Received / Sent tabs. Each year node is collapsible with a single click; Expand all / Collapse all buttons control all nodes at once. The toggle is hidden for group chats.
 
+### Fixed
+
+- **`wa_chat_viewer.py` — iOS chat sorting / empty chats**: `/api/chats` now finds the newest *real* message per session via a subquery (`MAX(Z_PK)` where text or media exists — same condition as `_IOS_FILTER`) instead of following `cs.ZLASTMESSAGE` directly. `cs.ZLASTMESSAGE` can point to system events (calls, encryption notices) with no text/media, causing sessions to appear in the list but open empty. Sessions with only system messages now produce no row in the subquery and are excluded via `JOIN`. `newest_ts` and `ORDER BY` are driven by the real message's `ZMESSAGEDATE`.
+
+- **`wa_chat_viewer.py` — iOS group sender**: `_IOS_SELECT` now joins `ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER` and uses `gm.ZMEMBERJID` (phone number, stripped of `@` suffix) as the sender for group messages, falling back to `m.ZPUSHNAME` and then to `m.ZFROMJID`. Previously group messages showed the raw WhatsApp JID string (e.g. `12345678901234567890@lid`) instead of a phone number or name.
+
 ### Changed
 
 - **`wa_chat_viewer.py` — Persistent per-thread WA connection**: `get_wa()` now stores the connection in `threading.local()` instead of Flask's per-request `g`. The connection (and its ATTACH to the archive DB) is opened once per worker thread and reused across all requests on that thread, keeping SQLite's page cache warm. `PRAGMA cache_size = -32000` (32 MB) set on first open. Previously a cold open + ATTACH was paid on every request, causing 1–2 s latency even for chats already indexed.
