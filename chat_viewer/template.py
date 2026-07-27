@@ -188,6 +188,7 @@ HTML_TEMPLATE = r"""
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      position: relative;
     }
 
     #chat-header {
@@ -388,11 +389,26 @@ HTML_TEMPLATE = r"""
 
     .img-lightbox {
       position: fixed; inset: 0; background: rgba(0,0,0,0.9);
-      display: flex; align-items: center; justify-content: center;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
       z-index: 1000;
     }
-    .img-lightbox img { max-width: 90vw; max-height: 90vh; object-fit: contain; }
-    .img-lightbox video { max-width: 90vw; max-height: 90vh; }
+    .img-lightbox img { max-width: 90vw; max-height: 85vh; object-fit: contain; }
+    .img-lightbox video { max-width: 90vw; max-height: 85vh; }
+    .lb-timestamp {
+      color: rgba(255,255,255,0.7); font-size: 12px; margin-bottom: 10px;
+      letter-spacing: 0.02em;
+    }
+
+    #scroll-to-bottom {
+      position: absolute; bottom: 18px; right: 18px;
+      width: 34px; height: 34px;
+      background: var(--bubble-sent); color: var(--text-main);
+      border: none; border-radius: 6px;
+      font-size: 18px; line-height: 34px; text-align: center;
+      cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      display: none; z-index: 10;
+    }
+    #scroll-to-bottom:hover { background: var(--accent); color: #fff; }
     .lb-close {
       position: absolute; top: 16px; right: 20px;
       background: none; border: none; color: #fff; font-size: 28px;
@@ -668,6 +684,7 @@ HTML_TEMPLATE = r"""
         </div>
       </div>
       <div id="message-scroll"></div>
+      <button id="scroll-to-bottom" title="Jump to latest">&#8627;</button>
       <div id="empty-pane">Select a chat to browse messages</div>
       <div id="chat-loading">
         <div class="loading-spinner"></div>
@@ -964,6 +981,7 @@ HTML_TEMPLATE = r"""
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
     domNodes = 0;
+    document.getElementById('scroll-to-bottom').style.display = 'none';
 
     document.getElementById('chat-header').style.display = '';
     document.getElementById('chat-title').textContent = chat.display_name;
@@ -1114,13 +1132,19 @@ HTML_TEMPLATE = r"""
 
   function setupScrollTrigger() {
     const scroll = document.getElementById('message-scroll');
+    const btn = document.getElementById('scroll-to-bottom');
     scroll.addEventListener('scroll', function () {
+      const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
+      btn.style.display = atBottom ? 'none' : 'block';
       if (loading) return;
       if (scroll.scrollTop < 100) {
         loadMessages('older');
-      } else if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100) {
+      } else if (atBottom) {
         loadMessages('newer');
       }
+    });
+    btn.addEventListener('click', () => {
+      scroll.scrollTop = scroll.scrollHeight;
     });
   }
   setupScrollTrigger();
@@ -1271,6 +1295,11 @@ HTML_TEMPLATE = r"""
     nextBtn.disabled = index === lightboxItems.length - 1;
     nextBtn.addEventListener('click', e => { e.stopPropagation(); lightboxIndex++; openLightboxAt(lightboxIndex); });
     lb.appendChild(nextBtn);
+
+    const tsEl = document.createElement('div');
+    tsEl.className = 'lb-timestamp';
+    tsEl.textContent = fmtTime(msg.timestamp_ms);
+    lb.appendChild(tsEl);
 
     let media;
     if (mt === 'video') {
