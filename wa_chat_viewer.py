@@ -4,6 +4,7 @@ wa_chat_viewer.py — Browse archived WhatsApp chats via a local Flask web UI.
 
 Usage:
     python wa_chat_viewer.py <output_root> [--port PORT] [--host HOST] [--rescan]
+    python wa_chat_viewer.py --output_root <PATH> [--port PORT] [--host HOST] [--rescan]
 
 Dependencies:
     pip install flask
@@ -16,12 +17,13 @@ import mimetypes
 import os
 import sqlite3
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
 
 try:
-    from flask import Flask, Response, jsonify, render_template_string, request
+    from flask import Flask, Response, g, jsonify, render_template_string, request
 except ImportError:
     sys.exit("Flask is not installed. Run: pip install flask")
 
@@ -33,11 +35,17 @@ from chat_viewer.template import HTML_TEMPLATE
 
 def parse_args():
     p = argparse.ArgumentParser(description="Browse archived WhatsApp chats")
-    p.add_argument("output_root", help="Path to the archive output directory")
+    p.add_argument("output_root", nargs="?", default=None,
+                   help="Path to the archive output directory")
+    p.add_argument("--output_root", dest="output_root_flag", default=None, metavar="PATH",
+                   help="Path to the archive output directory (alternative to positional argument)")
     p.add_argument("--port", type=int, default=5000, help="Port to listen on (default: 5000)")
     p.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
-    return p.parse_args()
+    args = p.parse_args()
+    if not args.output_root_flag and not args.output_root:
+        p.error("output_root is required (positional or --output_root)")
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -445,12 +453,10 @@ def _build_media_only(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Conn
 # Live query helpers (Android + iOS)
 # ---------------------------------------------------------------------------
 
-# Shared JID subquery for Android sender resolution via jid_map
+# Shared JID subquery for Android sender resolution via jid_map.
+# At query time this references the _jid_map_resolved TEMP TABLE created in get_wa().
 _ANDROID_JID_MAP = """
-    LEFT JOIN (
-        SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-        FROM jid_map GROUP BY lid_row_id
-    ) jm ON jm.lid_row_id = m.sender_jid_row_id
+    LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = m.sender_jid_row_id
     LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
 """
 
@@ -567,6 +573,38 @@ _IOS_FILTER = """
     )
 """
 
+_ANDROID_TS = "COALESCE(m.timestamp, 0)"
+_IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
+_ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type = 0)"
+_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+
+
+def _android_chat_filter(chat_id: str, chat_type: str) -> tuple:
+    if chat_type == "group":
+        return "m.chat_row_id = CAST(? AS INTEGER)", [chat_id]
+    return "j_chat.user = ?", [chat_id]
+
+
+def _ios_chat_filter(chat_id: str) -> tuple:
+    return "m.ZCHATSESSION = CAST(? AS INTEGER)", [chat_id]
+
+
+def _bg_index_chat(cache_db_path: str, source_type: str, wa_db_path: str,
+                   chat_id: str, chat_type: str,
+                   state: dict, lock: threading.Lock):
+    try:
+        cache_conn = sqlite3.connect(cache_db_path)
+        cache_conn.execute("PRAGMA journal_mode = WAL")
+        cache_conn.execute("PRAGMA synchronous = NORMAL")
+        cache_conn.row_factory = sqlite3.Row
+        _build_fts_chat(cache_conn, source_type, wa_db_path, chat_id, chat_type)
+        cache_conn.close()
+    except Exception as e:
+        print(f"[wa_chat_viewer] Background indexing error for {chat_id}: {e}")
+    finally:
+        with lock:
+            state[(chat_id, chat_type)] = "done"
+
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -578,6 +616,8 @@ def create_app(output_root: Path, rescan: bool = False):
     archive_db_path = get_archive_db_path(output_root)
     source_type, wa_db_path = _detect_source_db(output_root)
     cache_conn = _open_cache_db(output_root)
+    _indexing_state: dict = {}
+    _indexing_lock = threading.Lock()
 
     if source_type is None:
         print("[wa_chat_viewer] Warning: No source WA DB found. Media-only mode.")
@@ -596,12 +636,34 @@ def create_app(output_root: Path, rescan: bool = False):
             count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             print(f"[wa_chat_viewer] {count} chat(s) already indexed")
 
-        wa_conn = sqlite3.connect(wa_db_path, check_same_thread=False)
-        wa_conn.row_factory = sqlite3.Row
-        wa_conn.execute("ATTACH DATABASE ? AS arch", (str(archive_db_path),))
+        wa_conn = None  # kept alive per-thread via _wa_local
+
+        _wa_local = threading.local()
 
     def get_wa():
-        return wa_conn
+        if source_type is None:
+            return None
+        conn = getattr(_wa_local, 'conn', None)
+        if conn is None:
+            conn = sqlite3.connect(wa_db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA cache_size = -32000")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            conn.execute("ATTACH DATABASE ? AS arch", (str(archive_db_path),))
+            if source_type == "android":
+                conn.execute("""
+                    CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved AS
+                    SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                    FROM jid_map GROUP BY lid_row_id
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS _jid_map_resolved_lid ON _jid_map_resolved(lid_row_id)")
+            _wa_local.conn = conn
+        return conn
+
+    @app.teardown_appcontext
+    def _close_wa_conn(exc):
+        # Per-request g cleanup no longer needed; connections persist per thread.
+        pass
 
     def get_cache():
         return cache_conn
@@ -615,9 +677,7 @@ def create_app(output_root: Path, rescan: bool = False):
             # media-only: derive from message_index
             rows = get_cache().execute("""
                 SELECT chat_id AS id, chat_type AS type,
-                       COUNT(*) AS msg_count,
-                       MAX(NULLIF(timestamp_ms, 0)) AS newest_ts,
-                       MIN(NULLIF(timestamp_ms, 0)) AS oldest_ts
+                       MAX(NULLIF(timestamp_ms, 0)) AS newest_ts
                 FROM message_index
                 GROUP BY chat_id, chat_type
                 ORDER BY newest_ts DESC
@@ -625,28 +685,34 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify([{
                 "id": r["id"], "type": r["type"],
                 "display_name": r["id"],
-                "msg_count": r["msg_count"],
-                "oldest_ts": r["oldest_ts"], "newest_ts": r["newest_ts"],
+                "newest_ts": r["newest_ts"],
+                "last_msg_preview": "",
+                "last_msg_type": "text",
+                "last_msg_from_me": 0,
             } for r in rows])
 
         if source_type == "android":
-            rows = conn.execute(f"""
+            rows = conn.execute("""
                 SELECT
-                    {_ANDROID_CHAT_ID}                                  AS id,
-                    {_ANDROID_CHAT_TYPE}                                AS type,
+                    CASE WHEN c.subject IS NOT NULL THEN CAST(c._id AS TEXT)
+                         ELSE COALESCE(j_chat_real.user, j_chat.user, CAST(c._id AS TEXT))
+                    END                                                 AS id,
+                    CASE WHEN c.subject IS NOT NULL THEN 'group'
+                         ELSE 'contact' END                            AS type,
                     COALESCE(
                         NULLIF(con.display_name, ''),
                         con.folder,
                         grp.subject,
                         CASE WHEN COALESCE(j_chat_real.user, j_chat.user) IS NOT NULL
                              THEN '+' || COALESCE(j_chat_real.user, j_chat.user)
-                             ELSE CAST(m.chat_row_id AS TEXT) END
+                             ELSE CAST(c._id AS TEXT) END
                     )                                                   AS display_name,
-                    COUNT(*)                                            AS msg_count,
-                    MAX(NULLIF(COALESCE(m.timestamp, 0), 0))           AS newest_ts,
-                    MIN(NULLIF(COALESCE(m.timestamp, 0), 0))           AS oldest_ts
-                FROM message m
-                LEFT JOIN chat c ON c._id = m.chat_row_id
+                    c.sort_timestamp                                    AS newest_ts,
+                    COALESCE(m.text_data, '')                          AS last_msg_preview,
+                    COALESCE(m.message_type, 0)                        AS last_msg_type,
+                    COALESCE(m.from_me, 0)                             AS last_msg_from_me,
+                    mm.file_path                                        AS last_msg_media_path
+                FROM chat c
                 LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
                 LEFT JOIN (
                     SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
@@ -654,46 +720,58 @@ def create_app(output_root: Path, rescan: bool = False):
                 ) jm_chat ON jm_chat.lid_row_id = c.jid_row_id
                 LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
                 LEFT JOIN arch.contacts con ON con.number = COALESCE(j_chat_real.user, j_chat.user)
-                LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(m.chat_row_id AS TEXT)
+                LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(c._id AS TEXT)
+                LEFT JOIN message m ON m._id = c.display_message_row_id
                 LEFT JOIN message_media mm ON mm.message_row_id = m._id
-                WHERE (
-                    (m.text_data IS NOT NULL AND m.text_data != '')
-                    OR (m.message_type IS NOT NULL AND m.message_type != 0 AND mm.file_path IS NOT NULL)
-                )
-                GROUP BY {_ANDROID_CHAT_ID}, {_ANDROID_CHAT_TYPE}
-                ORDER BY newest_ts DESC
+                WHERE c.hidden = 0
+                ORDER BY c.sort_timestamp DESC
             """).fetchall()
         else:
-            rows = conn.execute(f"""
+            rows = conn.execute("""
                 SELECT
-                    {_IOS_CHAT_ID}                                      AS id,
-                    {_IOS_CHAT_TYPE}                                    AS type,
+                    CAST(cs.Z_PK AS TEXT)                               AS id,
+                    CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
+                         ELSE 'contact' END                            AS type,
                     COALESCE(
                         NULLIF(con.display_name, ''),
                         con.folder,
                         grp.subject,
-                        cs.ZGROUPINFO,
-                        CAST(m.ZCHATSESSION AS TEXT)
+                        cs.ZPARTNERNAME,
+                        CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                         INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) != ''
+                             THEN '+' || SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                                INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1)
+                        END,
+                        CAST(cs.Z_PK AS TEXT)
                     )                                                   AS display_name,
-                    COUNT(*)                                            AS msg_count,
-                    MAX(NULLIF(CAST((m.ZMESSAGEDATE+978307200)*1000 AS INTEGER), 0)) AS newest_ts,
-                    MIN(NULLIF(CAST((m.ZMESSAGEDATE+978307200)*1000 AS INTEGER), 0)) AS oldest_ts
-                FROM ZWAMESSAGE m
-                LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
-                LEFT JOIN arch.contacts con ON con.number =
-                    SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                           INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
-                LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(m.ZCHATSESSION AS TEXT)
+                    CAST((cs.ZLASTMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS newest_ts,
+                    COALESCE(m.ZTEXT, '')                              AS last_msg_preview,
+                    COALESCE(m.ZMESSAGETYPE, 0)                        AS last_msg_type,
+                    COALESCE(m.ZISFROMME, 0)                           AS last_msg_from_me,
+                    mi.ZMEDIALOCALPATH                                  AS last_msg_media_path
+                FROM ZWACHATSESSION cs
+                LEFT JOIN arch.contacts con
+                      ON con.number = SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                             INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1)
+                LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(cs.Z_PK AS TEXT)
+                LEFT JOIN ZWAMESSAGE m ON m.Z_PK = cs.ZLASTMESSAGE
                 LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
-                WHERE (
-                    (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
-                    OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
-                )
-                GROUP BY {_IOS_CHAT_ID}, {_IOS_CHAT_TYPE}
-                ORDER BY newest_ts DESC
+                WHERE cs.ZHIDDEN = 0
+                ORDER BY cs.ZLASTMESSAGEDATE DESC
             """).fetchall()
 
-        return jsonify([dict(r) for r in rows])
+        result = []
+        for r in rows:
+            d = dict(r)
+            raw_type = d.pop("last_msg_type", 0)
+            media_path = d.pop("last_msg_media_path", None)
+            if raw_type != 0 and media_path:
+                path = media_path if source_type == "android" else f"Message/{media_path}"
+                d["last_msg_type"] = _media_type_from_path(path)
+            else:
+                d["last_msg_type"] = "text"
+            result.append(d)
+        return jsonify(result)
 
     # ---- API: paginated messages -------------------------------------------
 
@@ -710,20 +788,41 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify([])
 
         if not before and not after:
-            _ensure_chat_indexed(get_cache(), source_type, wa_db_path, chat_id, chat_type)
+            key = (chat_id, chat_type)
+            already = get_cache().execute(
+                "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key
+            ).fetchone()
+            if not already:
+                with _indexing_lock:
+                    if key not in _indexing_state:
+                        _indexing_state[key] = "indexing"
+                        threading.Thread(
+                            target=_bg_index_chat,
+                            args=(str(get_cache_db_path(output_root)), source_type,
+                                  wa_db_path, chat_id, chat_type,
+                                  _indexing_state, _indexing_lock),
+                            daemon=True,
+                        ).start()
 
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
 
-        if before:
-            sql = f"{select} WHERE chat_id = ? AND chat_type = ? AND timestamp_ms < ? {extra} ORDER BY timestamp_ms DESC LIMIT ?"
-            rows = conn.execute(sql, (chat_id, chat_type, int(before), limit)).fetchall()
-        elif after:
-            sql = f"{select} WHERE chat_id = ? AND chat_type = ? AND timestamp_ms > ? {extra} ORDER BY timestamp_ms ASC LIMIT ?"
-            rows = conn.execute(sql, (chat_id, chat_type, int(after), limit)).fetchall()
+        if source_type == "android":
+            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            ts_col = _ANDROID_TS
         else:
-            sql = f"{select} WHERE chat_id = ? AND chat_type = ? {extra} ORDER BY timestamp_ms DESC LIMIT ?"
-            rows = conn.execute(sql, (chat_id, chat_type, limit)).fetchall()
+            chat_pred, chat_params = _ios_chat_filter(chat_id)
+            ts_col = _IOS_TS
+
+        if before:
+            sql = f"{select} WHERE {chat_pred} AND {ts_col} < ? {extra} ORDER BY {ts_col} DESC LIMIT ?"
+            rows = conn.execute(sql, chat_params + [int(before), limit]).fetchall()
+        elif after:
+            sql = f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC LIMIT ?"
+            rows = conn.execute(sql, chat_params + [int(after), limit]).fetchall()
+        else:
+            sql = f"{select} WHERE {chat_pred} {extra} ORDER BY {ts_col} DESC LIMIT ?"
+            rows = conn.execute(sql, chat_params + [limit]).fetchall()
 
         return jsonify([dict(r) for r in rows])
 
@@ -750,13 +849,20 @@ def create_app(output_root: Path, rescan: bool = False):
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
         half = limit // 2
 
+        if source_type == "android":
+            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            ts_col = _ANDROID_TS
+        else:
+            chat_pred, chat_params = _ios_chat_filter(chat_id)
+            ts_col = _IOS_TS
+
         before_rows = conn.execute(
-            f"{select} WHERE chat_id = ? AND chat_type = ? AND timestamp_ms <= ? {extra} ORDER BY timestamp_ms DESC LIMIT ?",
-            (chat_id, chat_type, ts, half)
+            f"{select} WHERE {chat_pred} AND {ts_col} <= ? {extra} ORDER BY {ts_col} DESC LIMIT ?",
+            chat_params + [ts, half]
         ).fetchall()
         after_rows = conn.execute(
-            f"{select} WHERE chat_id = ? AND chat_type = ? AND timestamp_ms > ? {extra} ORDER BY timestamp_ms ASC LIMIT ?",
-            (chat_id, chat_type, ts, half)
+            f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC LIMIT ?",
+            chat_params + [ts, half]
         ).fetchall()
 
         combined = list(reversed(before_rows)) + list(after_rows)
@@ -773,12 +879,14 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify([])
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
-        sql = (
-            f"{select} WHERE chat_id = ? AND chat_type = ? {extra}"
-            " AND media_type != 'text'"
-            " ORDER BY timestamp_ms DESC"
-        )
-        rows = conn.execute(sql, (chat_id, chat_type)).fetchall()
+        if source_type == "android":
+            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            is_media, ts_col = _ANDROID_IS_MEDIA, _ANDROID_TS
+        else:
+            chat_pred, chat_params = _ios_chat_filter(chat_id)
+            is_media, ts_col = _IOS_IS_MEDIA, _IOS_TS
+        sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} ORDER BY {ts_col} DESC"
+        rows = conn.execute(sql, chat_params).fetchall()
         return jsonify([dict(r) for r in rows])
 
     # ---- API: search -------------------------------------------------------
@@ -854,6 +962,19 @@ def create_app(output_root: Path, rescan: bool = False):
         cache = get_cache()
         indexed = cache.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
         return jsonify({"indexed": indexed})
+
+    @app.route("/api/chat-index-status")
+    def api_chat_index_status():
+        chat_id = request.args.get("chat_id", "")
+        chat_type = request.args.get("chat_type", "")
+        key = (chat_id, chat_type)
+        if get_cache().execute(
+            "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key
+        ).fetchone():
+            return jsonify({"status": "done"})
+        with _indexing_lock:
+            status = _indexing_state.get(key, "idle")
+        return jsonify({"status": status})
 
     # ---- API: preferences --------------------------------------------------
 
@@ -938,18 +1059,36 @@ def create_app(output_root: Path, rescan: bool = False):
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main():
-    args = parse_args()
-    output_root = Path(args.output_root).expanduser().resolve()
+def validate_output_root(output_root: Path) -> None:
+    """Raise SystemExit with a clear message if output_root is not a valid archive folder."""
+    hint = (
+        "Run 'python wa_media_archiver.py' first to create an archive, "
+        "or choose a different folder with --output_root."
+    )
 
     if not output_root.exists():
-        print(f"Error: output_root does not exist: {output_root}", file=sys.stderr)
+        print(f"Error: folder does not exist: {output_root}", file=sys.stderr)
+        print(f"Hint:  {hint}", file=sys.stderr)
+        sys.exit(1)
+
+    if not output_root.is_dir():
+        print(f"Error: path is not a directory: {output_root}", file=sys.stderr)
+        print(f"Hint:  {hint}", file=sys.stderr)
         sys.exit(1)
 
     archive_db = get_archive_db_path(output_root)
     if not archive_db.exists():
-        print(f"Error: archive DB not found: {archive_db}", file=sys.stderr)
+        print(f"Error: archive database not found: {archive_db}", file=sys.stderr)
+        print(f"Hint:  {hint}", file=sys.stderr)
         sys.exit(1)
+
+
+def main():
+    args = parse_args()
+    raw_path = args.output_root_flag or args.output_root
+    output_root = Path(raw_path).expanduser().resolve()
+
+    validate_output_root(output_root)
 
     print(f"[wa_chat_viewer] Opening archive: {output_root}")
 

@@ -70,9 +70,12 @@ def make_android_db(path: Path) -> sqlite3.Connection:
             user  TEXT
         );
         CREATE TABLE chat (
-            _id         INTEGER PRIMARY KEY,
-            jid_row_id  INTEGER,
-            subject     TEXT
+            _id                     INTEGER PRIMARY KEY,
+            jid_row_id              INTEGER,
+            subject                 TEXT,
+            hidden                  INTEGER DEFAULT 0,
+            sort_timestamp          INTEGER,
+            display_message_row_id  INTEGER
         );
         CREATE TABLE message (
             _id          INTEGER PRIMARY KEY,
@@ -109,7 +112,10 @@ def make_android_db(path: Path) -> sqlite3.Connection:
 def seed_android_db(wa_conn, archive_conn):
     """Insert one contact chat with one text message."""
     wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '123456789')")
-    wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (10, 1, NULL)")
+    wa_conn.execute(
+        "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+        "VALUES (10, 1, NULL, 0, 1700000000000, 1)"
+    )
     wa_conn.execute(
         "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
         "VALUES (1, 10, 0, 1, 1700000000000, 'Hello world', 0)"
@@ -351,17 +357,21 @@ class TestFlaskRoutes:
         assert len(data) == 1
         assert data[0]["id"] == "123456789"
         assert data[0]["display_name"] == "Alice"
+        assert data[0]["last_msg_preview"] == "Hello world"
+        assert data[0]["last_msg_type"] == "text"
+        assert "msg_count" not in data[0]
 
-    def test_api_chats_excludes_system_events_from_sort(self, tmp_path):
-        """msg_count and newest_ts must not include system events (non-zero
-        message_type with no media row).  Regression: chats were sorted by
-        the timestamp of a later system event instead of the last real message."""
+    def test_api_chats_display_message_row_id_resolves_preview(self, tmp_path):
+        """display_message_row_id points to the specific message shown as preview.
+        A system event inserted after the real message must not change the preview
+        or the sort order — sort_timestamp and display_message_row_id are managed
+        by WhatsApp and already reflect this."""
         wa_path = tmp_path / "msgstore.db"
         archive_path = tmp_path / ".wa_media_archiver.db"
         wa_conn = make_android_db(wa_path)
         archive_conn = make_archive_db(archive_path)
-        seed_android_db(wa_conn, archive_conn)  # real message at ts=1700000000000
-        # system event at a later timestamp — must not affect sort/count
+        seed_android_db(wa_conn, archive_conn)  # real message id=1 at ts=1700000000000
+        # system event inserted after; display_message_row_id still points to message 1
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
             "VALUES (99, 10, 0, 1800000000000, NULL, 12)"
@@ -374,7 +384,9 @@ class TestFlaskRoutes:
         with app.test_client() as client:
             data = client.get("/api/chats").get_json()
         assert len(data) == 1
-        assert data[0]["msg_count"] == 1
+        # preview comes from display_message_row_id=1 ('Hello world'), not the system event
+        assert data[0]["last_msg_preview"] == "Hello world"
+        # sort uses sort_timestamp=1700000000000 set by seed_android_db
         assert data[0]["newest_ts"] == 1700000000000
 
     def test_api_messages_returns_messages(self, app_and_tmp):
@@ -404,9 +416,16 @@ class TestFlaskRoutes:
         assert resp.status_code == 400
 
     def test_api_search_finds_message(self, app_and_tmp):
+        import time
         client, tmp = app_and_tmp
-        # Open the chat first so it gets indexed
+        # Open the chat; wait for background indexing to complete
         client.get("/api/messages?chat_id=123456789&chat_type=contact")
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if client.get("/api/chat-index-status?chat_id=123456789&chat_type=contact"
+                          ).get_json()["status"] == "done":
+                break
+            time.sleep(0.05)
         resp = client.get("/api/search?q=Hello&chat_id=123456789&chat_type=contact")
         assert resp.status_code == 200
         data = resp.get_json()
@@ -653,10 +672,18 @@ class TestLazyIndexing:
         assert rows == 1  # system event excluded, only the text message indexed
 
     def test_source_change_clears_indexed_chats(self, tmp_path):
+        import time
         wa_path = self._setup(tmp_path)
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
             client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            # Wait for background thread to finish before simulating source change
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if client.get("/api/chat-index-status?chat_id=123456789&chat_type=contact"
+                              ).get_json()["status"] == "done":
+                    break
+                time.sleep(0.05)
 
         # simulate source DB change by growing the file
         wa_path.write_bytes(wa_path.read_bytes() + b"\x00" * 100)
@@ -677,10 +704,38 @@ class TestLazyIndexing:
 
             client.get("/api/messages?chat_id=123456789&chat_type=contact")
 
-            count_after = sqlite3.connect(
-                str(tmp_path / ".wa_viewer.db")
-            ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            # Background thread — poll until done (max 5 s)
+            import time
+            deadline = time.time() + 5
+            count_after = 0
+            while time.time() < deadline:
+                count_after = sqlite3.connect(
+                    str(tmp_path / ".wa_viewer.db")
+                ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+                if count_after == 1:
+                    break
+                time.sleep(0.05)
             assert count_after == 1
+
+    def test_chat_index_status_idle_then_done(self, tmp_path):
+        self._setup(tmp_path)
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            r = client.get("/api/chat-index-status?chat_id=123456789&chat_type=contact")
+            assert r.get_json()["status"] == "idle"
+
+            client.get("/api/messages?chat_id=123456789&chat_type=contact")
+
+            import time
+            deadline = time.time() + 5
+            status = "indexing"
+            while time.time() < deadline and status != "done":
+                status = client.get(
+                    "/api/chat-index-status?chat_id=123456789&chat_type=contact"
+                ).get_json()["status"]
+                time.sleep(0.05)
+            assert status == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -806,7 +861,7 @@ class TestHtmlTemplate:
         ids_accessed = set(re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)", script_body))
 
         # ids created dynamically at runtime (not in static HTML) are expected
-        dynamic_ids = set()
+        dynamic_ids = {'img-lightbox'}
         missing = ids_accessed - ids_in_html - dynamic_ids
         assert not missing, (
             f"getElementById called for IDs not present in HTML before <script>: {sorted(missing)}"

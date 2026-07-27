@@ -6,11 +6,13 @@ HTML_TEMPLATE = r"""
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta id="meta-color-scheme" name="color-scheme" content="dark">
   <title>WA Chat Viewer</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
+      color-scheme: dark;
       --bg: #111b21;
       --surface: #1f2c33;
       --surface2: #2a3942;
@@ -27,6 +29,7 @@ HTML_TEMPLATE = r"""
     }
 
     body[data-theme="light"] {
+      color-scheme: light;
       --bg: #f0f2f5;
       --surface: #ffffff;
       --surface2: #e9edef;
@@ -225,17 +228,37 @@ HTML_TEMPLATE = r"""
     }
     #toolbar-expanded.open { display: flex; }
 
+    #chat-search-wrap { position: relative; display: flex; align-items: center; }
     #chat-search-input {
       background: var(--surface2);
       border: none;
       border-radius: 6px;
-      padding: 5px 10px;
+      padding: 5px 28px 5px 10px;
       color: var(--text);
       font-size: 13px;
       outline: none;
       width: 180px;
     }
     #chat-search-input:focus { box-shadow: 0 0 0 2px var(--accent); }
+    #chat-search-clear {
+      position: absolute; right: 6px;
+      background: none; border: none; cursor: pointer;
+      color: var(--text-muted); font-size: 14px; line-height: 1;
+      padding: 0; display: none;
+    }
+    #chat-search-clear:hover { color: var(--text); }
+    #date-go-btn {
+      background: var(--accent); border: none; border-radius: 6px;
+      color: #fff; font-size: 12px; padding: 5px 10px; cursor: pointer;
+      display: none;
+    }
+    #date-go-btn:hover { opacity: 0.85; }
+    #date-clear-btn {
+      background: var(--surface2); border: none; border-radius: 6px;
+      color: var(--text-secondary); font-size: 12px; padding: 5px 10px;
+      cursor: pointer; display: none;
+    }
+    #date-clear-btn:hover { background: var(--surface); color: var(--text); }
 
     #chat-search-nav { display: flex; gap: 2px; align-items: center; }
     #chat-search-count { font-size: 12px; color: var(--text-muted); min-width: 50px; text-align: center; }
@@ -253,6 +276,7 @@ HTML_TEMPLATE = r"""
     .nav-btn:disabled { opacity: 0.3; cursor: default; }
 
     #date-picker-input {
+      appearance: none; -moz-appearance: none; -webkit-appearance: none;
       background: var(--surface2);
       border: none;
       border-radius: 6px;
@@ -263,6 +287,8 @@ HTML_TEMPLATE = r"""
       color-scheme: dark;
     }
     #date-picker-input:focus { box-shadow: 0 0 0 2px var(--accent); }
+    #date-picker-input::-webkit-calendar-picker-indicator { cursor: pointer; filter: invert(0.6); }
+    #date-picker-input::-webkit-clear-button { display: none; }
 
     #message-scroll {
       flex: 1;
@@ -343,6 +369,17 @@ HTML_TEMPLATE = r"""
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     #chat-loading-count { font-size: 12px; color: var(--text-muted); }
+    .index-spinner {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border: 2px solid var(--text-muted);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-left: 6px;
+      vertical-align: middle;
+      flex-shrink: 0;
+    }
 
     .spinner {
       display: flex; justify-content: center; padding: 16px;
@@ -352,10 +389,27 @@ HTML_TEMPLATE = r"""
     .img-lightbox {
       position: fixed; inset: 0; background: rgba(0,0,0,0.9);
       display: flex; align-items: center; justify-content: center;
-      z-index: 1000; cursor: zoom-out;
+      z-index: 1000;
     }
     .img-lightbox img { max-width: 90vw; max-height: 90vh; object-fit: contain; }
     .img-lightbox video { max-width: 90vw; max-height: 90vh; }
+    .lb-close {
+      position: absolute; top: 16px; right: 20px;
+      background: none; border: none; color: #fff; font-size: 28px;
+      cursor: pointer; line-height: 1; opacity: 0.8; z-index: 1;
+    }
+    .lb-close:hover { opacity: 1; }
+    .lb-arrow {
+      position: absolute; top: 50%; transform: translateY(-50%);
+      background: rgba(255,255,255,0.12); border: none; color: #fff;
+      font-size: 32px; cursor: pointer; padding: 12px 16px;
+      border-radius: 6px; line-height: 1; opacity: 0.7; z-index: 1;
+      transition: opacity 0.15s, background 0.15s;
+    }
+    .lb-arrow:hover { opacity: 1; background: rgba(255,255,255,0.22); }
+    .lb-arrow:disabled { opacity: 0.15; cursor: default; }
+    .lb-arrow.prev { left: 16px; }
+    .lb-arrow.next { right: 16px; }
 
     #media-btn {
       background: none;
@@ -385,6 +439,62 @@ HTML_TEMPLATE = r"""
       font-size: 18px; cursor: pointer; padding: 4px 6px; border-radius: 4px;
     }
     #media-gallery-close:hover { background: var(--surface2); }
+    #media-view-switcher {
+      display: flex; gap: 4px; margin-right: 4px;
+      background: var(--surface2); border-radius: 8px; padding: 3px;
+    }
+    .media-view-btn {
+      background: none; border: none; cursor: pointer;
+      color: var(--text-secondary); border-radius: 6px;
+      padding: 5px 8px; font-size: 18px; line-height: 1;
+      transition: background 0.15s, color 0.15s;
+    }
+    .media-view-btn:hover { background: var(--surface); color: var(--text); }
+    .media-view-btn.active {
+      background: var(--accent); color: #fff;
+    }
+    #media-archive-view {
+      display: none; flex-direction: column; flex: 1; overflow: hidden;
+    }
+    #media-archive-view.active { display: flex; }
+    #media-archive-toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 12px; background: var(--surface);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    #media-archive-tabs { display: flex; gap: 4px; }
+    .archive-tab {
+      background: none; border: none; padding: 4px 12px; cursor: pointer;
+      color: var(--text-secondary); border-radius: 4px; font-size: 13px;
+    }
+    .archive-tab.active {
+      background: var(--surface2); color: var(--text); font-weight: 600;
+    }
+    #media-archive-actions { display: flex; gap: 6px; }
+    #media-archive-actions button {
+      font-size: 12px; background: none; border: 1px solid var(--border);
+      color: var(--text-secondary); border-radius: 4px; padding: 2px 8px; cursor: pointer;
+    }
+    #media-archive-tree { overflow-y: auto; padding: 8px; flex: 1; }
+    .archive-year {
+      margin-bottom: 8px; border: 1px solid var(--border); border-radius: 6px;
+      overflow: hidden;
+    }
+    .archive-year-header {
+      display: flex; align-items: center; padding: 8px 12px;
+      background: var(--surface); cursor: pointer; user-select: none;
+      font-weight: 600; font-size: 13px; gap: 6px;
+    }
+    .archive-year-header:hover { background: var(--surface2); }
+    .archive-year-chevron { font-size: 10px; transition: transform 0.15s; }
+    .archive-year.open .archive-year-chevron { transform: rotate(90deg); }
+    .archive-year-grid {
+      display: none;
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      gap: 4px; padding: 8px; background: var(--bg);
+      align-items: start;
+    }
+    .archive-year.open .archive-year-grid { display: grid; }
     #media-gallery-stats {
       padding: 8px 16px;
       background: var(--surface);
@@ -403,8 +513,17 @@ HTML_TEMPLATE = r"""
       grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
       gap: 4px; overflow-y: auto; padding: 8px;
     }
+    .gallery-month-header {
+      grid-column: 1 / -1;
+      padding: 8px 4px 4px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 2px;
+    }
     .gallery-item {
-      position: relative; aspect-ratio: 1/1; cursor: pointer;
+      position: relative; height: 120px; cursor: pointer;
       background: var(--surface); overflow: hidden; border-radius: 4px;
     }
     .gallery-item img, .gallery-item video {
@@ -533,13 +652,18 @@ HTML_TEMPLATE = r"""
           <button id="media-btn" title="Media">&#128247;</button>
           <button id="toolbar-toggle" title="Search &amp; date">&#128269;</button>
           <div id="toolbar-expanded">
-            <input id="chat-search-input" type="search" placeholder="Find in chat…" autocomplete="off">
+            <div id="chat-search-wrap">
+              <input id="chat-search-input" type="search" placeholder="Find in chat…" autocomplete="off">
+              <button id="chat-search-clear" title="Clear search">&#10005;</button>
+            </div>
             <div id="chat-search-nav" style="display:none;">
               <button class="nav-btn" id="search-prev" title="Previous">&#8679;</button>
               <span id="chat-search-count"></span>
               <button class="nav-btn" id="search-next" title="Next">&#8681;</button>
             </div>
             <input id="date-picker-input" type="date" title="Jump to date">
+            <button id="date-go-btn">Go</button>
+            <button id="date-clear-btn">Clear</button>
           </div>
         </div>
       </div>
@@ -557,10 +681,27 @@ HTML_TEMPLATE = r"""
 <div id="media-gallery">
   <div id="media-gallery-header">
     <span id="media-gallery-title">Media</span>
+    <div id="media-view-switcher" style="display:none">
+      <button class="media-view-btn active" data-view="grid" title="Grid view">&#8862;</button>
+      <button class="media-view-btn" data-view="archive" title="Archive view">&#128193;</button>
+    </div>
     <button id="media-gallery-close" title="Close">&#10005;</button>
   </div>
   <div id="media-gallery-stats"></div>
   <div id="media-gallery-grid"></div>
+  <div id="media-archive-view">
+    <div id="media-archive-toolbar">
+      <div id="media-archive-tabs">
+        <button class="archive-tab active" data-dir="Received">Received</button>
+        <button class="archive-tab" data-dir="Sent">Sent</button>
+      </div>
+      <div id="media-archive-actions">
+        <button id="archive-expand-all">Expand all</button>
+        <button id="archive-collapse-all">Collapse all</button>
+      </div>
+    </div>
+    <div id="media-archive-tree"></div>
+  </div>
 </div>
 
 <div id="settings-modal">
@@ -614,6 +755,10 @@ HTML_TEMPLATE = r"""
 
   function applyPrefs() {
     document.body.dataset.theme = prefs.theme;
+    const scheme = prefs.theme === 'light' ? 'light' : 'dark';
+    document.documentElement.style.colorScheme = scheme;
+    document.getElementById('meta-color-scheme').content = scheme;
+    document.getElementById('date-picker-input').style.colorScheme = scheme;
     const sizeMap = { small: '13px', medium: '15px', large: '17px' };
     document.documentElement.style.setProperty('--font-size', sizeMap[prefs.font_size] || '15px');
     document.querySelectorAll('.pref-btn').forEach(btn => {
@@ -643,6 +788,76 @@ HTML_TEMPLATE = r"""
   function dayKey(ts) {
     const d = new Date(ts);
     return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+  }
+
+  function monthKey(ts) {
+    const d = new Date(ts);
+    return d.getFullYear() * 100 + (d.getMonth() + 1);
+  }
+
+  function fmtMonthHeader(ts) {
+    const d = new Date(ts);
+    if (d.getFullYear() === new Date().getFullYear()) {
+      return d.toLocaleString('default', { month: 'long' });
+    }
+    return d.toLocaleString('default', { month: 'long', year: 'numeric' });
+  }
+
+  function archiveSegments(archivePath) {
+    const parts = archivePath.split('/');
+    return { year: parts[2], direction: parts[3] };
+  }
+
+  function buildArchiveView(items, direction) {
+    const tree = document.getElementById('media-archive-tree');
+    tree.innerHTML = '';
+
+    const filtered = items.filter(m => m.archive_path &&
+      archiveSegments(m.archive_path).direction === direction);
+
+    if (!filtered.length) {
+      tree.innerHTML = '<div style="color:var(--text-secondary);padding:16px">No media.</div>';
+      return;
+    }
+
+    const byYear = {};
+    for (const msg of filtered) {
+      const { year } = archiveSegments(msg.archive_path);
+      (byYear[year] = byYear[year] || []).push(msg);
+    }
+
+    for (const year of Object.keys(byYear).sort((a, b) => b - a)) {
+      const block = document.createElement('div');
+      block.className = 'archive-year open';
+
+      const hdr = document.createElement('div');
+      hdr.className = 'archive-year-header';
+      hdr.innerHTML =
+        `<span class="archive-year-chevron">&#9658;</span><span>${year}</span>` +
+        `<span style="margin-left:auto;font-weight:400;color:var(--text-secondary);font-size:12px">` +
+        `${byYear[year].length}</span>`;
+      hdr.addEventListener('click', () => block.classList.toggle('open'));
+
+      const grid = document.createElement('div');
+      grid.className = 'archive-year-grid';
+
+      let lastMonth = null;
+      for (const msg of byYear[year]) {
+        const mk = monthKey(msg.timestamp_ms);
+        if (mk !== lastMonth) {
+          const mhdr = document.createElement('div');
+          mhdr.className = 'gallery-month-header';
+          mhdr.textContent = new Date(msg.timestamp_ms).toLocaleString('default', { month: 'long' });
+          grid.appendChild(mhdr);
+          lastMonth = mk;
+        }
+        grid.appendChild(renderGalleryItem(msg));
+      }
+
+      block.appendChild(hdr);
+      block.appendChild(grid);
+      tree.appendChild(block);
+    }
   }
 
   function esc(s) {
@@ -689,6 +904,40 @@ HTML_TEMPLATE = r"""
     });
   });
 
+  function _startIndexPoll(chat, sidebarEl) {
+    const params = new URLSearchParams({chat_id: chat.id, chat_type: chat.type});
+    async function poll() {
+      try {
+        const r = await fetch('/api/chat-index-status?' + params);
+        const d = await r.json();
+        if (d.status === 'done') {
+          sidebarEl.querySelector('.index-spinner')?.remove();
+          return;
+        }
+        if (!sidebarEl.querySelector('.index-spinner')) {
+          const sp = document.createElement('span');
+          sp.className = 'index-spinner';
+          sidebarEl.querySelector('.chat-name').appendChild(sp);
+        }
+        setTimeout(poll, 500);
+      } catch (_) {
+        setTimeout(poll, 1000);
+      }
+    }
+    poll();
+  }
+
+  const MEDIA_LABELS = {image:'📷 Photo', video:'🎥 Video', audio:'🎵 Voice message',
+                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document'};
+  function chatPreview(chat) {
+    const prefix = chat.last_msg_from_me ? 'You: ' : '';
+    if (chat.last_msg_type !== 'text') {
+      return prefix + (MEDIA_LABELS[chat.last_msg_type] || '📎 Media');
+    }
+    const text = chat.last_msg_preview || '';
+    return (prefix + esc(text.slice(0, 60))) || '…';
+  }
+
   function renderChatList() {
     const list = document.getElementById('chat-list');
     list.innerHTML = '';
@@ -698,7 +947,7 @@ HTML_TEMPLATE = r"""
       el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
       el.dataset.id = chat.id;
       el.dataset.type = chat.type;
-      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}</div><div class="chat-meta">${chat.msg_count} messages · ${fmtTime(chat.newest_ts)}</div>`;
+      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
       el.addEventListener('click', () => selectChat(chat, el));
       list.appendChild(el);
     });
@@ -722,28 +971,23 @@ HTML_TEMPLATE = r"""
     document.getElementById('search-results').classList.remove('has-results');
     document.getElementById('search-results').innerHTML = '';
 
-    // reset in-chat search when switching chats
+    // reset in-chat search and date picker when switching chats
     document.getElementById('chat-search-input').value = '';
+    document.getElementById('chat-search-clear').style.display = 'none';
     clearChatSearch();
+    document.getElementById('date-picker-input').value = '';
+    document.getElementById('date-go-btn').style.display = 'none';
+    document.getElementById('date-clear-btn').style.display = 'none';
 
     const loadingEl = document.getElementById('chat-loading');
-    const countEl = document.getElementById('chat-loading-count');
     loadingEl.style.display = 'flex';
-    countEl.textContent = '';
-    let pollTimer = setInterval(async () => {
-      try {
-        const r = await fetch('/api/index-status');
-        const d = await r.json();
-        if (d.indexed > 0) countEl.textContent = d.indexed.toLocaleString() + ' messages indexed';
-      } catch (_) {}
-    }, 500);
 
     await loadMessages('older');
 
-    clearInterval(pollTimer);
     loadingEl.style.display = 'none';
-
     scroll.scrollTop = scroll.scrollHeight;
+
+    _startIndexPoll(chat, el);
   }
 
   // ---- load messages -------------------------------------------------------
@@ -991,9 +1235,72 @@ HTML_TEMPLATE = r"""
     return wrap;
   }
 
-  function showLightbox(src, mt) {
+  let lightboxItems = [];
+  let lightboxIndex = 0;
+
+  function openLightboxAt(index) {
+    document.getElementById('img-lightbox')?.remove();
+
+    const msg = lightboxItems[index];
+    const src = '/media/' + msg.archive_path;
+    const mt = msg.media_type;
+
     const lb = document.createElement('div');
+    lb.id = 'img-lightbox';
     lb.className = 'img-lightbox';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'lb-close';
+    closeBtn.innerHTML = '&#10005;';
+    closeBtn.title = 'Close';
+    closeBtn.addEventListener('click', () => lb.remove());
+    lb.appendChild(closeBtn);
+
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'lb-arrow prev';
+    prevBtn.innerHTML = '&#10094;';
+    prevBtn.title = 'Previous';
+    prevBtn.disabled = index === 0;
+    prevBtn.addEventListener('click', e => { e.stopPropagation(); lightboxIndex--; openLightboxAt(lightboxIndex); });
+    lb.appendChild(prevBtn);
+
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'lb-arrow next';
+    nextBtn.innerHTML = '&#10095;';
+    nextBtn.title = 'Next';
+    nextBtn.disabled = index === lightboxItems.length - 1;
+    nextBtn.addEventListener('click', e => { e.stopPropagation(); lightboxIndex++; openLightboxAt(lightboxIndex); });
+    lb.appendChild(nextBtn);
+
+    let media;
+    if (mt === 'video') {
+      media = document.createElement('video');
+      media.controls = true;
+      media.autoplay = true;
+      media.src = src;
+    } else {
+      media = document.createElement('img');
+      media.src = src;
+    }
+    lb.appendChild(media);
+
+    lb.addEventListener('click', e => { if (e.target === lb) lb.remove(); });
+    document.body.appendChild(lb);
+  }
+
+  function showLightbox(src, mt) {
+    document.getElementById('img-lightbox')?.remove();
+    const lb = document.createElement('div');
+    lb.id = 'img-lightbox';
+    lb.className = 'img-lightbox';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'lb-close';
+    closeBtn.innerHTML = '&#10005;';
+    closeBtn.title = 'Close';
+    closeBtn.addEventListener('click', () => lb.remove());
+    lb.appendChild(closeBtn);
+
     let media;
     if (mt === 'video') {
       media = document.createElement('video');
@@ -1026,13 +1333,17 @@ HTML_TEMPLATE = r"""
       img.src = src;
       img.loading = 'lazy';
       img.alt = msg.media_name || '';
-      img.addEventListener('click', () => showLightbox(src, mt));
+      const idx = lightboxItems.length;
+      lightboxItems.push(msg);
+      img.addEventListener('click', () => { lightboxIndex = idx; openLightboxAt(idx); });
       cell.appendChild(img);
     } else if (mt === 'video') {
       const vid = document.createElement('video');
       vid.src = src;
       vid.preload = 'none';
-      vid.addEventListener('click', () => showLightbox(src, mt));
+      const idx = lightboxItems.length;
+      lightboxItems.push(msg);
+      vid.addEventListener('click', () => { lightboxIndex = idx; openLightboxAt(idx); });
       cell.appendChild(vid);
     } else if (mt === 'audio') {
       const d = document.createElement('div');
@@ -1065,6 +1376,18 @@ HTML_TEMPLATE = r"""
     if (!currentChat) return;
     const grid = document.getElementById('media-gallery-grid');
     const stats = document.getElementById('media-gallery-stats');
+    const switcher = document.getElementById('media-view-switcher');
+
+    // reset to classic view each time
+    archiveViewActive = false;
+    switcher.style.display = currentChat.type === 'contact' ? '' : 'none';
+    document.querySelectorAll('.media-view-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
+    grid.style.display = '';
+    document.getElementById('media-archive-view').classList.remove('active');
+
+    document.getElementById('media-gallery-title').textContent =
+      currentChat.display_name ? `Media — ${currentChat.display_name}` : 'Media';
+
     grid.innerHTML = '<div style="color:var(--text-secondary);padding:16px">Loading…</div>';
     stats.innerHTML = '';
     document.getElementById('media-gallery').classList.add('open');
@@ -1074,6 +1397,7 @@ HTML_TEMPLATE = r"""
       '&chat_type=' + encodeURIComponent(currentChat.type)
     );
     const items = await r.json();
+    currentGalleryItems = items;
     grid.innerHTML = '';
 
     if (!items.length) {
@@ -1102,13 +1426,62 @@ HTML_TEMPLATE = r"""
     }
     stats.innerHTML = html;
 
-    items.filter(m => m.archive_path).forEach(msg => grid.appendChild(renderGalleryItem(msg)));
+    lightboxItems = [];
+    let lastMonthKey = null;
+    for (const msg of items.filter(m => m.archive_path)) {
+      const mk = monthKey(msg.timestamp_ms);
+      if (mk !== lastMonthKey) {
+        const hdr = document.createElement('div');
+        hdr.className = 'gallery-month-header';
+        hdr.textContent = fmtMonthHeader(msg.timestamp_ms);
+        grid.appendChild(hdr);
+        lastMonthKey = mk;
+      }
+      grid.appendChild(renderGalleryItem(msg));
+    }
   }
 
   document.getElementById('media-btn').addEventListener('click', openMediaGallery);
   document.getElementById('media-gallery-close').addEventListener('click', closeMediaGallery);
   document.addEventListener('keydown', e => {
+    if (document.getElementById('img-lightbox')) {
+      if (e.key === 'Escape') { document.getElementById('img-lightbox').remove(); return; }
+      if (e.key === 'ArrowLeft'  && lightboxIndex > 0) { lightboxIndex--; openLightboxAt(lightboxIndex); return; }
+      if (e.key === 'ArrowRight' && lightboxIndex < lightboxItems.length - 1) { lightboxIndex++; openLightboxAt(lightboxIndex); return; }
+    }
     if (e.key === 'Escape') closeMediaGallery();
+  });
+
+  let archiveViewActive = false;
+  let currentGalleryItems = [];
+
+  document.querySelectorAll('.media-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.media-view-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      archiveViewActive = btn.dataset.view === 'archive';
+      document.getElementById('media-gallery-grid').style.display = archiveViewActive ? 'none' : '';
+      document.getElementById('media-archive-view').classList.toggle('active', archiveViewActive);
+      if (archiveViewActive) {
+        const activeDir = document.querySelector('.archive-tab.active').dataset.dir;
+        buildArchiveView(currentGalleryItems, activeDir);
+      }
+    });
+  });
+
+  document.querySelectorAll('.archive-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.archive-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      buildArchiveView(currentGalleryItems, btn.dataset.dir);
+    });
+  });
+
+  document.getElementById('archive-expand-all').addEventListener('click', () => {
+    document.querySelectorAll('.archive-year').forEach(el => el.classList.add('open'));
+  });
+  document.getElementById('archive-collapse-all').addEventListener('click', () => {
+    document.querySelectorAll('.archive-year').forEach(el => el.classList.remove('open'));
   });
 
   // ---- sidebar search -------------------------------------------------------
@@ -1225,6 +1598,7 @@ HTML_TEMPLATE = r"""
   let chatSearchTimer = null;
 
   document.getElementById('chat-search-input').addEventListener('input', function () {
+    document.getElementById('chat-search-clear').style.display = this.value ? 'block' : 'none';
     clearTimeout(chatSearchTimer);
     const q = this.value.trim();
     if (!q) {
@@ -1232,6 +1606,14 @@ HTML_TEMPLATE = r"""
       return;
     }
     chatSearchTimer = setTimeout(() => doChatSearch(q), 300);
+  });
+
+  document.getElementById('chat-search-clear').addEventListener('click', () => {
+    const inp = document.getElementById('chat-search-input');
+    inp.value = '';
+    document.getElementById('chat-search-clear').style.display = 'none';
+    clearChatSearch();
+    inp.focus();
   });
 
   document.getElementById('chat-search-input').addEventListener('keydown', function (e) {
@@ -1252,6 +1634,16 @@ HTML_TEMPLATE = r"""
     if (!currentChat) return;
     const nav = document.getElementById('chat-search-nav');
     const count = document.getElementById('chat-search-count');
+    const statusRes = await fetch('/api/chat-index-status?chat_id=' +
+      encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type));
+    const statusData = await statusRes.json();
+    if (statusData.status !== 'done') {
+      nav.style.display = 'flex';
+      count.textContent = 'Search not ready yet…';
+      document.getElementById('search-prev').disabled = true;
+      document.getElementById('search-next').disabled = true;
+      return;
+    }
     nav.style.display = 'flex';
     count.textContent = 'Searching…';
     document.getElementById('search-prev').disabled = true;
@@ -1317,11 +1709,24 @@ HTML_TEMPLATE = r"""
 
   // ---- date picker ----------------------------------------------------------
 
+  document.getElementById('date-picker-input').max = new Date().toISOString().slice(0, 10);
+
   document.getElementById('date-picker-input').addEventListener('change', function () {
-    const val = this.value;
+    const hasVal = !!this.value;
+    document.getElementById('date-go-btn').style.display = hasVal ? 'inline-block' : 'none';
+    document.getElementById('date-clear-btn').style.display = hasVal ? 'inline-block' : 'none';
+  });
+
+  document.getElementById('date-go-btn').addEventListener('click', () => {
+    const val = document.getElementById('date-picker-input').value;
     if (!val || !currentChat) return;
-    const ts = new Date(val).getTime();
-    jumpToTimestamp(ts);
+    jumpToTimestamp(new Date(val).getTime());
+  });
+
+  document.getElementById('date-clear-btn').addEventListener('click', () => {
+    document.getElementById('date-picker-input').value = '';
+    document.getElementById('date-go-btn').style.display = 'none';
+    document.getElementById('date-clear-btn').style.display = 'none';
   });
 
   async function jumpToTimestamp(ts) {
