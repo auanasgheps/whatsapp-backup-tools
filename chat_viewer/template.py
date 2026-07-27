@@ -402,13 +402,14 @@ HTML_TEMPLATE = r"""
     #scroll-to-bottom {
       position: absolute; bottom: 18px; right: 18px;
       width: 34px; height: 34px;
-      background: var(--bubble-sent); color: var(--text-main);
+      background: linear-gradient(135deg, #00e676, #00a884);
+      color: #fff;
       border: none; border-radius: 6px;
       font-size: 18px; line-height: 34px; text-align: center;
       cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.3);
       display: none; z-index: 10;
     }
-    #scroll-to-bottom:hover { background: var(--accent); color: #fff; }
+    #scroll-to-bottom:hover { background: linear-gradient(135deg, #00c864, #008f6f); }
     .lb-close {
       position: absolute; top: 16px; right: 20px;
       background: none; border: none; color: #fff; font-size: 28px;
