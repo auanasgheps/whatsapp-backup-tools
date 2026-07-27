@@ -2,75 +2,63 @@
 
 ---
 
-## [Unreleased] — 2026-07-26
-
-### Changed
-
-- **Refactor: `chat_viewer/` package** — extracted `HTML_TEMPLATE` from `wa_chat_viewer.py` into `chat_viewer/template.py`. Created `chat_viewer/__init__.py`. `wa_chat_viewer.py` now imports the template via `from chat_viewer.template import HTML_TEMPLATE` and shrinks from 2367 to 967 lines. No behaviour change; all 50 tests pass.
-
----
-
-## [Unreleased] — 2026-07-21
+## [Unreleased]
 
 ### Added
 
-- **`wa_chat_viewer.py` — Group chat sender names**: inbound group messages now show the sender's display name (from `arch.contacts`) instead of the raw phone number. Both Android (`_ANDROID_SELECT` → `arch.contacts con_s`) and iOS (`_IOS_SELECT` → `arch.contacts con_s`) are covered. Quoted-message sender labels are resolved the same way via a second join (`con_sq`). Fallback for unknown contacts is `+<number>` (consistent with the chat list).
-- **`wa_chat_viewer.py` — iOS group display names**: the iOS `/api/chats` query now joins `arch.groups` so group chats show their human-readable subject instead of the internal `ZGROUPINFO` JID string.
-- **`tests/test_wa_chat_viewer.py`** — 2 new tests in `TestFlaskRoutes`: `test_group_message_sender_resolved_to_name` and `test_1on1_received_sender_not_raw_number`.
+- **`wa_chat_viewer.py` — Media gallery archive view**: toggle button (⊞) in the gallery header switches between the classic grid and an archive view. The archive view (contacts only) mirrors the on-disk folder structure as an expandable year tree split into Received / Sent tabs. Each year node is collapsible with a single click; Expand all / Collapse all buttons control all nodes at once. The toggle is hidden for group chats.
+
+### Changed
+
+- **`wa_chat_viewer.py` — Persistent per-thread WA connection**: `get_wa()` now stores the connection in `threading.local()` instead of Flask's per-request `g`. The connection (and its ATTACH to the archive DB) is opened once per worker thread and reused across all requests on that thread, keeping SQLite's page cache warm. `PRAGMA cache_size = -32000` (32 MB) set on first open. Previously a cold open + ATTACH was paid on every request, causing 1–2 s latency even for chats already indexed.
+
+- **`wa_chat_viewer.py` — Raw-column WHERE for message routes**: `/api/messages`, `/api/messages/at`, and `/api/media` now filter on physical columns (`m.chat_row_id`, `j_chat.user`, `m.ZCHATSESSION`) instead of SELECT aliases (`chat_id`, `chat_type`, `timestamp_ms`, `media_type`). SQLite cannot index computed aliases, causing a full table scan even for 50-row LIMIT queries. The fix allows SQLite to use existing indexes on raw columns and avoid evaluating JOINs on irrelevant rows. New helpers `_android_chat_filter` / `_ios_chat_filter` and constants `_ANDROID_TS`, `_IOS_TS`, `_ANDROID_IS_MEDIA`, `_IOS_IS_MEDIA` replace the inline alias references.
+
+- **`wa_chat_viewer.py` — Background FTS indexing**: opening a chat no longer blocks on FTS index building. `/api/messages` returns the first 50 messages immediately and spawns a `daemon=True` background thread that runs `_build_fts_chat` in parallel. New `/api/chat-index-status?chat_id&chat_type` endpoint returns `"idle"` / `"indexing"` / `"done"`. In-session state is tracked in a per-app `_indexing_state` dict with a `threading.Lock`; `indexed_chats` table is the persistent authoritative state that survives restarts.
+
+- **`chat_viewer/template.py` — Sidebar indexing indicator**: `_startIndexPoll()` polls `/api/chat-index-status` every 500ms after a chat is opened; adds a small `.index-spinner` to the sidebar chat name while indexing is in progress, removes it when done. `doChatSearch()` now checks index status first and shows "Search not ready yet…" if indexing is still in progress.
+
+- **`chat_viewer/template.py` — Sidebar preview**: the chat list subtitle now shows the last message preview (e.g. "You: See you tomorrow" or "📷 Photo") instead of a message count. Media items show an emoji label; text messages are truncated to 60 characters. `oldest_ts` and `msg_count` removed from the API response.
+
+- **`wa_chat_viewer.py` — Media gallery month headers**: the gallery grid now groups media by month, with a full-width section header between each group. Current-year headers show only the month name ("July"); older headers include the year ("March 2024").
+
+---
+
+## [0.37] — 2026-07-26
+
+### Added
+
+- **`wa_chat_viewer.py` — In-chat search**: search box in the chat header with match count and ↑/↓ navigation; matched bubble gets an accent outline; jumping to a result not currently in the DOM loads the surrounding window automatically.
+- **`wa_chat_viewer.py` — Date picker**: date input in the chat header; selecting a date jumps the viewport to messages around that date.
+- **`wa_chat_viewer.py` — Group chat sender names**: inbound group messages now show the sender's display name instead of the raw phone number. Quoted-message sender labels resolved the same way; fallback is `+<number>` for unknown contacts.
+- **`wa_chat_viewer.py` — iOS group display names**: group chats now show the group subject instead of the internal JID string.
+- **`wa_chat_viewer.py` — Media gallery**: new `/api/media` route powers a fullscreen media grid per chat, with a stats bar (total count + per-type breakdown, missing noted). Clicking an item opens a lightbox or new tab; "→ in chat" button jumps to the message.
+- **`wa_chat_viewer.py` — Video lightbox**: clicking a video opens it in a fullscreen player instead of an image viewer.
+- **`wa_chat_viewer.py` — Day-separator pills**: a date pill is injected between messages on different calendar days in all render paths.
+- **`wa_chat_viewer.py` — Toolbar toggle**: search and date picker hidden behind a 🔍 icon to keep the header compact.
+- **`wa_chat_viewer.py` — Loading spinners**: spinner at the relevant end of the chat while older/newer messages load.
+- **`wa_chat_viewer.py` — Media unavailable placeholder**: media with no archived file shows a greyed italic placeholder with an icon matching the media type.
+- **`wa_chat_viewer.py` — Sidebar two-section search**: sidebar search shows contact name matches first, then FTS message results below a separator.
+- **`wa_media_archiver.py` — Enforce `.toml` config extension**: passing a non-`.toml` file via `--config` now exits with a clear error.
 
 ### Fixed
 
-- **`wa_chat_viewer.py` — Sender label in 1-on-1 chats**: `renderBubble` was showing the raw phone number for all received messages, including private chats. The sender label is now restricted to received messages in group chats only (`!msg.from_me && currentChat.type === 'group'`).
-
-
-- **`wa_chat_viewer.py` — `GET /api/media`**: new route returning all archived media for a chat (media_type != 'text' AND archive_path IS NOT NULL), ordered newest-first.
-- **`wa_chat_viewer.py` — Video lightbox**: `showLightbox` now accepts a `media_type` second argument and renders a `<video controls autoplay>` element instead of `<img>` for video files. Clicking the backdrop closes it.
-- **`tests/test_wa_chat_viewer.py` — `TestApiMedia`**: 4 tests covering the new route (text excluded, correct fields, unarchived media excluded, newest-first ordering).
+- **`wa_chat_viewer.py` — Sender label in 1-on-1 chats**: sender name badge was shown for all received messages; now restricted to group chats only.
+- **`wa_chat_viewer.py` — Pagination duplicates**: fixed three root causes of cursor drift and duplicate messages on scroll.
+- **`wa_chat_viewer.py` — Quoted sender fallback**: quoted sender falls back to the chat display name in 1-to-1 chats when the field is empty.
+- **`wa_chat_viewer.py` — Chat list 500 error**: column alias collision in `GROUP BY`/`ORDER BY` caused a server error on some databases.
 
 ### Changed
 
-- **`wa_chat_viewer.py` — Lazy per-chat FTS indexing**: the FTS5 index is no longer built for all messages at startup. Instead, messages are indexed per-chat the first time that chat is opened. A new `indexed_chats` table tracks which chats have been indexed. On source-DB change or `--rescan`, the index is cleared and chats are re-indexed on next open. Startup is now instant and the cache file starts near-zero in size regardless of the source DB size. In-chat search remains fully complete for any opened chat. Global sidebar search covers only previously-opened chats, with a notice showing how many chats have been indexed.
-- **`wa_chat_viewer.py` — `/api/search` response shape**: changed from a plain array to `{results: [...], indexed_count: N}` to surface the number of indexed chats to the UI.
+- **Refactor: `chat_viewer/` package**: extracted `HTML_TEMPLATE` into `chat_viewer/template.py`; `wa_chat_viewer.py` shrinks from 2367 to 967 lines.
+- **`wa_chat_viewer.py` — Lazy per-chat FTS indexing**: messages are now indexed per chat on first open instead of all at startup. Startup is instant; the cache file starts near-zero in size.
+- **`wa_chat_viewer.py` — Contentless FTS cache**: cache stores only the FTS inverted index — no text or sender copy. Cache file is a fraction of the source DB size.
+- **`wa_chat_viewer.py` — Live queries**: all message and chat data is queried live from the source DB with the archive DB attached; no full message cache.
+- **`wa_chat_viewer.py` — Unsaved contact display**: unsaved contacts show their phone number instead of an internal ID.
 
 ---
 
-## [Unreleased] — 2026-07-22
-
-### Changed
-
-- **`wa_chat_viewer.py` — Contentless FTS cache**: replaced the full denormalized message copy with a minimal FTS5 contentless index (`content=''`). `message_index` stores only `rowid`, `chat_id`, `chat_type`, `timestamp_ms` — no sender, no text copy. `message_index_fts` indexes `text_body` only. VACUUM runs after every build. Cache file is now a fraction of source DB size.
-- **`wa_chat_viewer.py` — Live queries via ATTACH**: all message/chat data now fetched directly from `msgstore.db`/`ChatStorage.sqlite` with `.wa_media_archiver.db` attached as `arch`. No full message cache; routes join `archive_copies`, `contacts`, `groups` in the same SQL statement.
-- **`wa_chat_viewer.py` — Fix `/api/chats` 500 error**: `GROUP BY` and `ORDER BY` used short aliases that collided with the `jid.type` column. Both clauses now use full CASE expressions.
-- **`wa_chat_viewer.py` — Android display_name fallback**: unsaved contacts now display their phone number (`jid.user`) instead of a raw internal ID.
-
-### Added
-
-- **`wa_chat_viewer.py` — Day-separator pills**: a `DD/MM/YYYY` pill is injected between consecutive messages on different calendar days in all render paths (initial load, paginate older/newer, jump-to-timestamp).
-- **`wa_chat_viewer.py` — Toolbar toggle**: search box and date picker are hidden behind a 🔍 icon; clicking the icon expands/collapses the toolbar.
-- **`wa_chat_viewer.py` — Loading spinners**: a spinner appears at the top or bottom of the chat while older/newer messages are being fetched.
-- **`wa_chat_viewer.py` — Media unavailable placeholder**: media messages with no `archive_path` (view-once, lost, or never-archived) now show a greyed italic `🖼️ Media not available` placeholder instead of an empty bubble. Icon adapts to `media_type`.
-- **`wa_chat_viewer.py` — Sidebar two-section search**: searching the sidebar first shows contact name matches (client-side), then FTS message-text results below a separator.
-- **`wa_chat_viewer.py` — Flask dependency check**: missing Flask now exits with `Flask is not installed. Run: pip install flask` instead of a raw `ImportError` traceback.
-
-### Fixed
-
-- **`wa_chat_viewer.py` — Pagination looping/duplicates**: three root causes fixed — wrong `prevTs` for prepend direction, `pruneDom` not re-syncing `msgList` after DOM removal (cursor drift), and `loading` flag cleared before DOM mutations. `pruneDom` now re-queries `.msg-row[data-ts]` to rebuild `msgList` from surviving DOM nodes.
-- **`wa_chat_viewer.py` — Quoted sender shown as 'Unknown'**: quoted sender now falls back to the chat's `display_name` for 1-to-1 chats when the `quoted_sender` field is empty.
-- **`wa_chat_viewer.py` — Drop 'Them' direction badge**: received messages no longer show a 'Them' badge; only sent messages show 'You'.
-
----
-
-## [0.37] — 2026-07-22
-
-### Added
-
-- **`wa_chat_viewer.py` — In-chat search**: search box in the chat header that queries the current chat's FTS index, shows match count, and lets you navigate results with ↑/↓ buttons or Enter/Shift+Enter; matched bubble gets an accent outline; jumping to a result not in the DOM fetches the surrounding window automatically.
-- **`wa_chat_viewer.py` — Date picker**: date input in the chat header; selecting a date calls the new `/api/messages/at` endpoint and replaces the viewport with messages centred around midnight of that date, then scrolls to the closest message.
-- **`/api/messages/at` endpoint**: returns up to N messages centred on a given `timestamp_ms` (half before, half after) for use by both the date picker and in-chat search jump.
-
-- **`wa_media_archiver.py` — Enforce `.toml` config extension**: passing a non-`.toml` file via `--config` (e.g. a `.py` file) now exits immediately with a clear error instead of producing a confusing TOML parse failure.
-
---- — 2026-07-21
+## [0.36] — 2026-07-21
 
 ### Added
 
