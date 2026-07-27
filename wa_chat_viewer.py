@@ -525,10 +525,21 @@ _IOS_SELECT = f"""
         CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)         AS timestamp_ms,
         COALESCE(
             NULLIF(con_s.display_name, ''),
-            CASE WHEN SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                              INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1) != ''
-                 THEN '+' || SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                                    INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+            NULLIF(m.ZPUSHNAME, ''),
+            CASE WHEN SUBSTR(COALESCE(
+                         CASE WHEN cs.ZGROUPINFO IS NOT NULL
+                              THEN NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID,''), 1,
+                                         INSTR(COALESCE(gm.ZMEMBERJID,'') || '@', '@') - 1), '')
+                              ELSE NULLIF(SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+                                         INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1), '')
+                         END, ''), 1, 1) != ''
+                 THEN '+' || COALESCE(
+                         CASE WHEN cs.ZGROUPINFO IS NOT NULL
+                              THEN NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID,''), 1,
+                                         INSTR(COALESCE(gm.ZMEMBERJID,'') || '@', '@') - 1), '')
+                              ELSE NULLIF(SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+                                         INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1), '')
+                         END, '')
             END,
             ''
         )                                                            AS sender,
@@ -544,6 +555,7 @@ _IOS_SELECT = f"""
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
+                 NULLIF(qm.ZPUSHNAME, ''),
                  CASE WHEN SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                    INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1) != ''
                       THEN '+' || SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
@@ -555,10 +567,16 @@ _IOS_SELECT = f"""
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+    LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
     LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
     LEFT JOIN arch.contacts con_s
-          ON con_s.number = SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                                   INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+          ON con_s.number = CASE
+              WHEN cs.ZGROUPINFO IS NOT NULL
+              THEN NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID,''), 1,
+                                 INSTR(COALESCE(gm.ZMEMBERJID,'') || '@', '@') - 1), '')
+              ELSE NULLIF(SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+                                 INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1), '')
+          END
     LEFT JOIN arch.contacts con_sq
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
@@ -744,7 +762,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         END,
                         CAST(cs.Z_PK AS TEXT)
                     )                                                   AS display_name,
-                    CAST((cs.ZLASTMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS newest_ts,
+                    CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS newest_ts,
                     COALESCE(m.ZTEXT, '')                              AS last_msg_preview,
                     COALESCE(m.ZMESSAGETYPE, 0)                        AS last_msg_type,
                     COALESCE(m.ZISFROMME, 0)                           AS last_msg_from_me,
@@ -754,10 +772,23 @@ def create_app(output_root: Path, rescan: bool = False):
                       ON con.number = SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                              INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1)
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(cs.Z_PK AS TEXT)
-                LEFT JOIN ZWAMESSAGE m ON m.Z_PK = cs.ZLASTMESSAGE
+                -- Find the newest message per session that survives _IOS_FILTER
+                -- (has actual text or a media attachment). cs.ZLASTMESSAGE can point
+                -- to system events (calls, encryption notices) which have no text/media
+                -- and open as empty chats.
+                JOIN (
+                    SELECT msg.ZCHATSESSION, MAX(msg.Z_PK) AS last_pk
+                    FROM ZWAMESSAGE msg
+                    LEFT JOIN ZWAMEDIAITEM mi2 ON mi2.Z_PK = msg.ZMEDIAITEM
+                    WHERE (msg.ZTEXT IS NOT NULL AND msg.ZTEXT != '')
+                       OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE != 0
+                           AND mi2.ZMEDIALOCALPATH IS NOT NULL)
+                    GROUP BY msg.ZCHATSESSION
+                ) last_real ON last_real.ZCHATSESSION = cs.Z_PK
+                JOIN ZWAMESSAGE m ON m.Z_PK = last_real.last_pk
                 LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
                 WHERE cs.ZHIDDEN = 0
-                ORDER BY cs.ZLASTMESSAGEDATE DESC
+                ORDER BY m.ZMESSAGEDATE DESC
             """).fetchall()
 
         result = []
