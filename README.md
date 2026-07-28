@@ -23,6 +23,7 @@ Instead of an unstructured dump, you get a browsable archive sorted by contact o
 - Safe re-runs: identical files skipped, collisions renamed, never overwritten
 - Duplicate media detection across runs — CSV report of files with identical content at multiple archive paths
 - Missing media CSV report for manual recovery of old or deleted files
+- Multiple Android media source roots — repeat `-wa` to search across several WhatsApp folders (e.g. old archive + current phone). Best copy selected automatically; content conflicts reported separately
 - Dry run mode for safe previewing before a full run
 - Windows, Linux and MacOS are supported to run the script.
 - WhatsApp platform: Android and iOS are both supported. No root or jailbreak are required.
@@ -62,7 +63,8 @@ After a successful run, the archive will be organized as follows:
 ├── .wa_media_archiver.db
 ├── wa_media_archiver.log
 ├── missing_media_report.csv
-└── duplicate_media_report.csv
+├── duplicate_media_report.csv
+└── source_conflicts_report.csv  ← only when multiple -wa roots produce conflicting copies
 ```
 
 - Files in **Contacts** folders retain their original filename
@@ -105,6 +107,8 @@ python3 wa_media_archiver.py \
 ```
 
 > 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
+
+> 💡 Repeat `--wa_root` to search multiple media folders and automatically select the best copy of each file — useful when you have an old archive alongside your current phone's folder.
 
 See [docs/running-the-script.md](docs/running-the-script.md) for the full command reference, all usage examples, output files description, and restore mode.
 

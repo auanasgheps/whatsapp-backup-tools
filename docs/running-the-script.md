@@ -31,7 +31,7 @@ usage: wa_media_archiver.py [-h]
 | `-msg` / `--msgstore` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Not needed with `--ios_backup`. Defaults to `msgstore.db` in the current folder |
 | `-e2e` / `--e2e_key` | If encrypted | Your cryptographic key for `.crypt15` decryption |
 | `-c` / `--contacts` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
-| `-wa` / `--wa_root` | Android / iOS pre-extracted | Root path of your WhatsApp folder from mass storage. Android: this contains the `Media/` folder. iOS pre-extracted: `AppDomainGroup-group.net.whatsapp.WhatsApp.shared` folder. Not required with `--ios_backup` or `--mode restore` |
+| `-wa` / `--wa_root` | Android / iOS pre-extracted | Root path of your WhatsApp folder from mass storage. Android: this contains the `Media/` folder. iOS pre-extracted: `AppDomainGroup-group.net.whatsapp.WhatsApp.shared` folder. Not required with `--ios_backup` or `--mode restore`. **Repeat the flag** to specify multiple source folders — the script searches all roots and selects the best available copy of each file |
 | `--ios_backup` | iOS (recommended) | Path to the iPhone backup directory (the folder containing `Manifest.db`). Mutually exclusive with `--wa_root` |
 | `--ios_password` | No | Password for an encrypted iPhone backup. Only needed when the backup is encrypted |
 | `--ios_contacts` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios_backup` if omitted |
@@ -69,7 +69,8 @@ output     = "/path/to/archive"
 # Optional settings — uncomment to activate:
 # msgstore  = "msgstore.db"
 # e2e_key   = ""
-# wa_root   = ""
+# wa_root   = ""              # single source folder
+# wa_root   = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]  # multiple source folders
 # contacts  = ""
 # log       = ""
 # mode      = ""          # "adb" or "restore"
@@ -140,6 +141,21 @@ python3 wa_media_archiver.py \
   --contacts /path/to/wa_contacts \
   --dry-run
 ```
+
+#### Manual — multiple source folders
+
+Use this when media is split across several locations (e.g. an old archive folder and your current phone's WhatsApp folder). Repeat `--wa_root` for each source. The archiver searches all roots and selects the best copy of each file automatically.
+
+```bash
+python3 wa_media_archiver.py \
+  --msgstore /path/to/msgstore.db \
+  --wa_root /path/to/old-archive/WhatsApp \
+  --wa_root /path/to/current-phone/WhatsApp \
+  --output /path/to/output \
+  --dry-run
+```
+
+> 💡 When the same file exists in multiple roots, the largest copy is used (higher quality heuristic). If sizes match but content differs, the first root takes priority and the conflict is written to `source_conflicts_report.csv` for review.
 
 #### Manual — encrypted database (script decrypts)
 
@@ -215,6 +231,7 @@ python3 wa_media_archiver.py \
 | `wa_media_archiver.log` | Full run log including all copied, skipped, and missing files |
 | `missing_media_report.csv` | Structured report of all media referenced in the DB but not found on disk. Useful for manual recovery from old backups |
 | `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths (e.g. the same meme copied across multiple group chats). One row per path, sortable by `file_count` to find the most-shared content. Only written when duplicates exist |
+| `source_conflicts_report.csv` | Written when multiple `-wa` roots contain different versions of the same file. Each row lists the chosen source (largest/first), the rejected source(s), their sizes, and the reason. Only written when conflicts exist |
 | `.wa_media_archiver.db` | Single SQLite database storing all persistent state: contact folder index, group folder index, and the file archive map (original WhatsApp paths, content hashes as BLOB, and archive locations). Health checks (quick integrity scan, foreign key verification) run automatically on every open. Query-planner statistics refreshed with `ANALYZE` after each forward run. Do not delete unless you want to reset all tracking |
 | `restore_report.csv` | Written by restore mode when issues are encountered. One row per problem: original path, which archive copy was used as source, and status (`unrestorable`, `collision_skipped`, `error`). Successfully restored and already-present identical files are not included. Not written if there are no issues |
 
