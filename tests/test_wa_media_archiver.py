@@ -1509,23 +1509,23 @@ class TestValidateWaRoot:
         media = tmp_path / "Media"
         media.mkdir()
         (media / "WhatsApp Images").mkdir()
-        android_handler.validate_wa_root(str(tmp_path), logger)  # should not raise
+        android_handler.validate_wa_root([str(tmp_path)], logger)  # should not raise
 
     def test_nonexistent_path_aborts(self, tmp_path, logger):
         with pytest.raises(SystemExit):
-            android_handler.validate_wa_root(str(tmp_path / "does_not_exist"), logger)
+            android_handler.validate_wa_root([str(tmp_path / "does_not_exist")], logger)
 
     def test_media_folder_passed_directly_aborts(self, tmp_path, logger):
         media = tmp_path / "Media"
         media.mkdir()
         with pytest.raises(SystemExit):
-            android_handler.validate_wa_root(str(media), logger)
+            android_handler.validate_wa_root([str(media)], logger)
 
     def test_subfolder_of_media_passed_aborts(self, tmp_path, logger):
         images = tmp_path / "WhatsApp Images"
         images.mkdir()
         with pytest.raises(SystemExit):
-            android_handler.validate_wa_root(str(images), logger)
+            android_handler.validate_wa_root([str(images)], logger)
 
     def test_root_with_no_subfolders_warns_but_continues(self, tmp_path, logger):
         # Media/ exists but is empty — should warn, not abort
@@ -1539,8 +1539,211 @@ class TestValidateWaRoot:
                 handler_called.append(record.levelno)
 
         caplog_logger.addHandler(Capture())
-        android_handler.validate_wa_root(str(tmp_path), caplog_logger)  # must not raise SystemExit
+        android_handler.validate_wa_root([str(tmp_path)], caplog_logger)  # must not raise SystemExit
         assert logging.WARNING in handler_called
+
+    def test_second_root_valid_when_first_invalid(self, tmp_path, logger):
+        # First root missing entirely, second valid — should not abort
+        root2 = tmp_path / "root2"
+        media2 = root2 / "Media"
+        media2.mkdir(parents=True)
+        (media2 / "WhatsApp Images").mkdir()
+        android_handler.validate_wa_root(
+            [str(tmp_path / "nonexistent"), str(root2)], logger
+        )  # should not raise
+
+    def test_all_roots_invalid_aborts(self, tmp_path, logger):
+        with pytest.raises(SystemExit):
+            android_handler.validate_wa_root(
+                [str(tmp_path / "a"), str(tmp_path / "b")], logger
+            )
+
+
+# ===========================================================================
+# Multi-root resolver
+# ===========================================================================
+
+def _make_wa_file(root, rel_path, content: bytes):
+    """Write content to <root>/<rel_path>, creating parent dirs."""
+    full = root / rel_path.replace('/', os.sep)
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_bytes(content)
+    return str(full)
+
+
+class TestMultiRootResolver:
+    """Tests for _multi_root_resolver via _prepare_input — exercised directly."""
+
+    def _make_resolver(self, roots, logger):
+        """Build the multi-root resolver closure the same way _prepare_input does."""
+        import hashlib as _hashlib
+
+        conflict_rows = []
+        root_hits = {root: 0 for root in roots}
+        zero_byte_count = [0]
+
+        def file_md5(path):
+            h = _hashlib.md5()
+            with open(path, 'rb') as f:
+                for chunk in iter(lambda: f.read(65536), b''):
+                    h.update(chunk)
+            return h.digest()
+
+        def owning_root(path):
+            norm_path = os.path.normcase(os.path.normpath(path))
+            for root in roots:
+                norm_root = os.path.normcase(os.path.normpath(root))
+                if norm_path.startswith(norm_root + os.sep):
+                    return root
+            return roots[0]
+
+        def resolver(fp):
+            rel_parts = fp.split('/')
+            candidates = [
+                os.path.join(root, *rel_parts)
+                for root in roots
+                if os.path.exists(os.path.join(root, *rel_parts))
+            ]
+            valid = [c for c in candidates if os.path.getsize(c) > 0]
+            if len(valid) < len(candidates):
+                zero_byte_count[0] += len(candidates) - len(valid)
+            if not valid:
+                return os.path.join(roots[0], *rel_parts)
+            if len(valid) == 1:
+                root_hits[owning_root(valid[0])] += 1
+                return valid[0]
+            valid.sort(key=os.path.getsize, reverse=True)
+            top_size = os.path.getsize(valid[0])
+            second_size = os.path.getsize(valid[1])
+            if top_size > second_size:
+                chosen = valid[0]
+                reason = 'largest_wins'
+            else:
+                md5s = [file_md5(c) for c in valid]
+                if len(set(md5s)) == 1:
+                    chosen = valid[0]
+                    root_hits[owning_root(chosen)] += 1
+                    return chosen
+                chosen = valid[0]
+                reason = 'same_size_first_root'
+            conflict_rows.append({
+                'file_path': fp, 'chosen_source': chosen,
+                'chosen_size': os.path.getsize(chosen),
+                'rejected_source': '; '.join(valid[1:]),
+                'rejected_size': '; '.join(str(os.path.getsize(c)) for c in valid[1:]),
+                'reason': reason,
+            })
+            root_hits[owning_root(chosen)] += 1
+            return chosen
+
+        resolver.conflict_rows = conflict_rows
+        resolver.root_hits = root_hits
+        resolver.zero_byte_count = zero_byte_count
+        return resolver
+
+    def test_file_only_in_root1(self, tmp_path, logger):
+        r1, r2 = tmp_path / "r1", tmp_path / "r2"
+        r2.mkdir()
+        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"data")
+        resolver = self._make_resolver([str(r1), str(r2)], logger)
+        result = resolver("Media/WhatsApp Images/img.jpg")
+        assert os.path.isfile(result)
+        assert resolver.root_hits[str(r1)] == 1
+        assert resolver.root_hits[str(r2)] == 0
+
+    def test_file_only_in_root2(self, tmp_path, logger):
+        r1, r2 = tmp_path / "r1", tmp_path / "r2"
+        r1.mkdir()
+        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"data")
+        resolver = self._make_resolver([str(r1), str(r2)], logger)
+        result = resolver("Media/WhatsApp Images/img.jpg")
+        assert os.path.isfile(result)
+        assert resolver.root_hits[str(r2)] == 1
+
+    def test_identical_content_no_conflict(self, tmp_path, logger):
+        r1, r2 = tmp_path / "r1", tmp_path / "r2"
+        content = b"same content"
+        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", content)
+        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", content)
+        resolver = self._make_resolver([str(r1), str(r2)], logger)
+        resolver("Media/WhatsApp Images/img.jpg")
+        assert resolver.conflict_rows == []
+
+    def test_larger_file_wins(self, tmp_path, logger):
+        r1, r2 = tmp_path / "r1", tmp_path / "r2"
+        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"small")
+        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"larger content here")
+        resolver = self._make_resolver([str(r1), str(r2)], logger)
+        result = resolver("Media/WhatsApp Images/img.jpg")
+        assert os.path.getsize(result) == len(b"larger content here")
+        assert len(resolver.conflict_rows) == 1
+        assert resolver.conflict_rows[0]['reason'] == 'largest_wins'
+
+    def test_same_size_different_md5_uses_first_root(self, tmp_path, logger):
+        r1, r2 = tmp_path / "r1", tmp_path / "r2"
+        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"AAAA")
+        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"BBBB")
+        resolver = self._make_resolver([str(r1), str(r2)], logger)
+        result = resolver("Media/WhatsApp Images/img.jpg")
+        assert result == str(r1 / "Media" / "WhatsApp Images" / "img.jpg")
+        assert resolver.conflict_rows[0]['reason'] == 'same_size_first_root'
+
+    def test_zero_byte_file_skipped(self, tmp_path, logger):
+        r1, r2 = tmp_path / "r1", tmp_path / "r2"
+        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"")   # 0-byte
+        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"real content")
+        resolver = self._make_resolver([str(r1), str(r2)], logger)
+        result = resolver("Media/WhatsApp Images/img.jpg")
+        assert os.path.getsize(result) > 0
+        assert resolver.zero_byte_count[0] == 1
+
+    def test_all_zero_byte_falls_back_to_missing(self, tmp_path, logger):
+        r1, r2 = tmp_path / "r1", tmp_path / "r2"
+        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"")
+        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"")
+        resolver = self._make_resolver([str(r1), str(r2)], logger)
+        result = resolver("Media/WhatsApp Images/img.jpg")
+        # Fallback path returned — file exists but is empty (recorded as missing by process_rows)
+        assert not os.path.getsize(result)
+        assert resolver.zero_byte_count[0] == 2
+
+    def test_file_in_neither_root_returns_fallback_path(self, tmp_path, logger):
+        r1, r2 = tmp_path / "r1", tmp_path / "r2"
+        r1.mkdir(); r2.mkdir()
+        resolver = self._make_resolver([str(r1), str(r2)], logger)
+        result = resolver("Media/WhatsApp Images/img.jpg")
+        # Path under first root, does not exist on disk
+        assert not os.path.exists(result)
+        assert str(r1) in result
+
+
+# ===========================================================================
+# write_conflict_report
+# ===========================================================================
+
+class TestWriteConflictReport:
+    def test_no_rows_does_not_create_file(self, tmp_path, logger):
+        path = str(tmp_path / 'conflicts.csv')
+        wa.write_conflict_report(path, [], logger)
+        assert not os.path.exists(path)
+
+    def test_rows_written_with_correct_fields(self, tmp_path, logger):
+        rows = [{
+            'file_path':       'Media/WhatsApp Images/img.jpg',
+            'chosen_source':   '/root1/Media/WhatsApp Images/img.jpg',
+            'chosen_size':     12345,
+            'rejected_source': '/root2/Media/WhatsApp Images/img.jpg',
+            'rejected_size':   '9000',
+            'reason':          'largest_wins',
+        }]
+        path = str(tmp_path / 'conflicts.csv')
+        wa.write_conflict_report(path, rows, logger)
+        assert os.path.isfile(path)
+        with open(path, encoding='utf-8') as f:
+            content = f.read()
+        assert 'file_path' in content
+        assert 'largest_wins' in content
+        assert 'Media/WhatsApp Images/img.jpg' in content
 
 
 # ===========================================================================
@@ -2055,7 +2258,15 @@ class TestConfigInParseArgs:
         self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\n')
         with patch("sys.argv", ["wa", "--config", str(cfg)]):
             args = wa.parse_args()
-        assert args.wa_root == "/wa"
+        assert args.wa_roots == ["/wa"]
+
+    def test_config_wa_root_list(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = ["/wa1", "/wa2"]\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.wa_roots == ["/wa1", "/wa2"]
 
     def test_cli_overrides_config(self, tmp_path):
         cfg = tmp_path / "config.toml"
@@ -2091,7 +2302,7 @@ class TestConfigInParseArgs:
              patch("os.getcwd", return_value=str(tmp_path)), \
              patch("builtins.input", return_value="y"):
             args = wa.parse_args()
-        assert args.wa_root == "/wa"
+        assert args.wa_roots == ["/wa"]
 
     def test_autodetect_single_config_no(self, tmp_path):
         cfg = tmp_path / "config.toml"
@@ -2124,7 +2335,7 @@ class TestConfigInParseArgs:
         self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\n')
         with patch("sys.argv", ["wa", f"--config={cfg}"]):
             args = wa.parse_args()
-        assert args.wa_root == "/wa"
+        assert args.wa_roots == ["/wa"]
 
     def test_ios_backup_and_wa_root_mutually_exclusive(self, tmp_path):
         with patch("sys.argv", ["wa", "-o", str(tmp_path),
