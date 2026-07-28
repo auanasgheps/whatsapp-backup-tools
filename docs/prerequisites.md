@@ -78,6 +78,8 @@ You need to copy this folder from your phone: you can use [Syncthing](https://sy
 
 Pass the path to the `WhatsApp/` folder (not `Media/`) to the script via `--wa_root`.
 
+If your media is spread across multiple locations (e.g. an old backup folder plus your current phone's `WhatsApp/` folder), you can repeat `--wa_root` for each source. See [docs/running-the-script.md](running-the-script.md) for an example.
+
 > ⚠️ **Run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower — the script hashes and copies every file in the archive. Running locally is strongly recommended.
 
 ### Obtaining the Database and running the Script
