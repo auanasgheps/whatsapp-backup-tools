@@ -53,35 +53,42 @@ def validate_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
     logger.info("Schema validated.")
 
 
-def validate_wa_root(wa_root: str, logger: logging.Logger):
+def validate_wa_root(wa_roots: list, logger: logging.Logger):
     """
-    Verify that wa_root is the correct WhatsApp folder (the one containing Media/).
+    Verify that each wa_root is the correct WhatsApp folder (the one containing Media/).
     Aborts with a diagnostic hint for the most common mistakes.
+    Raises SystemExit(1) only if none of the roots are valid.
     """
-    if not os.path.isdir(wa_root):
-        logger.error(f"--wa_root does not exist or is not a directory: {wa_root}")
-        raise SystemExit(1)
+    any_valid = False
+    for wa_root in wa_roots:
+        if not os.path.isdir(wa_root):
+            logger.error(f"--wa_root does not exist or is not a directory: {wa_root}")
+            continue
 
-    media_dir = os.path.join(wa_root, 'Media')
-    if not os.path.isdir(media_dir):
-        folder_name = os.path.basename(os.path.normpath(wa_root))
-        if folder_name == 'Media':
-            hint = "It looks like you passed the Media/ folder — pass its parent instead."
-        elif any(os.path.isdir(os.path.join(wa_root, s)) for s in _MEDIA_SUBFOLDERS):
-            hint = ("It looks like you passed a subfolder inside Media/ — "
-                    "pass the WhatsApp/ folder that contains Media/ instead.")
-        else:
-            hint = "Expected structure: <wa_root>/Media/WhatsApp Images/ etc."
-        logger.error(f"--wa_root has no Media/ subfolder: {wa_root}\n  {hint}")
-        raise SystemExit(1)
+        media_dir = os.path.join(wa_root, 'Media')
+        if not os.path.isdir(media_dir):
+            folder_name = os.path.basename(os.path.normpath(wa_root))
+            if folder_name == 'Media':
+                hint = "It looks like you passed the Media/ folder — pass its parent instead."
+            elif any(os.path.isdir(os.path.join(wa_root, s)) for s in _MEDIA_SUBFOLDERS):
+                hint = ("It looks like you passed a subfolder inside Media/ — "
+                        "pass the WhatsApp/ folder that contains Media/ instead.")
+            else:
+                hint = "Expected structure: <wa_root>/Media/WhatsApp Images/ etc."
+            logger.error(f"--wa_root has no Media/ subfolder: {wa_root}\n  {hint}")
+            continue
 
-    found = [s for s in _MEDIA_SUBFOLDERS if os.path.isdir(os.path.join(media_dir, s))]
-    if not found:
-        logger.warning(
-            f"Media/ found but no WhatsApp media subfolders detected under {media_dir}. "
-            f"The archive will likely be empty. "
-            f"Expected at least one of: {sorted(_MEDIA_SUBFOLDERS)}"
-        )
+        found = [s for s in _MEDIA_SUBFOLDERS if os.path.isdir(os.path.join(media_dir, s))]
+        if not found:
+            logger.warning(
+                f"Media/ found but no WhatsApp media subfolders detected under {media_dir}. "
+                f"Expected at least one of: {sorted(_MEDIA_SUBFOLDERS)}"
+            )
+        any_valid = True
+
+    if not any_valid:
+        logger.error("No valid --wa_root found. Aborting.")
+        raise SystemExit(1)
 
 
 def build_number_map(cursor: sqlite3.Cursor,
