@@ -6,7 +6,9 @@
 
 ### Added
 
-- **`wa_chat_viewer.py` — Media gallery archive view**: toggle button (⊞) in the gallery header switches between the classic grid and an archive view. The archive view (contacts only) mirrors the on-disk folder structure as an expandable year tree split into Received / Sent tabs. Each year node is collapsible with a single click; Expand all / Collapse all buttons control all nodes at once. The toggle is hidden for group chats.
+- **`wa_media_archiver.py` — Multiple media source roots (Android)**: `-wa` / `--wa_root` now accepts multiple values by repeating the flag (e.g. `-wa /old-archive -wa /current-phone`). The resolver searches all roots for each file using a collect-then-select strategy: zero-byte placeholders are filtered out; the largest file wins when content differs (best-quality heuristic); identical MD5s are silently deduplicated; same-size different-content ties fall back to the first root. A new `source_conflicts_report.csv` is written when any file resolved differently across roots. The final summary shows per-root hit counts, conflict count, and 0-byte skip count. TOML config accepts both `wa_root = "/path"` and `wa_root = ["/a", "/b"]`.
+
+ The archive view (contacts only) mirrors the on-disk folder structure as an expandable year tree split into Received / Sent tabs. Each year node is collapsible with a single click; Expand all / Collapse all buttons control all nodes at once. The toggle is hidden for group chats.
 
 ### Fixed
 

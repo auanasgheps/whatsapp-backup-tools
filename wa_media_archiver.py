@@ -194,8 +194,27 @@ def detect_db_platform(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Missing media CSV report
+# Source conflict CSV report
 # ---------------------------------------------------------------------------
+
+def write_conflict_report(report_path: str, rows: list, logger: logging.Logger):
+    """Write a CSV report of files that resolved differently across multiple wa_roots."""
+    if not rows:
+        logger.info("No source conflicts found.")
+        return
+    fieldnames = ['file_path', 'chosen_source', 'chosen_size',
+                  'rejected_source', 'rejected_size', 'reason']
+    with open(report_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    logger.info(
+        f"Source conflicts report written to: {report_path} "
+        f"({len(rows)} conflict(s))"
+    )
+
+
+
 
 def write_missing_report(report_path: str, rows: list, logger: logging.Logger):
     """Write the collected missing media rows to a CSV file."""
@@ -613,7 +632,13 @@ _EXAMPLE_CONFIG = """\
 output     = "/path/to/archive"         # required
 # msgstore = "msgstore.db"
 # e2e_key  = ""
-# wa_root  = ""
+
+# Single WhatsApp source folder (Android: folder containing Media/)
+# wa_root  = "/path/to/WhatsApp"
+
+# Multiple source folders — tried in order, best copy wins (Android only)
+# wa_root  = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]
+
 # contacts = ""
 # log      = ""
 # mode     = ""                         # "adb" or "restore"
@@ -698,11 +723,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('-c', '--contacts',
                         help='Path to contacts export file (Android ADB format)')
     parser.add_argument('-wa', '--wa_root',
-                        required=False,
+                        dest='wa_roots',
+                        action='append',
                         default=None,
+                        metavar='WA_ROOT',
                         help='Root path of WhatsApp folder on disk '
                              '(Android: folder containing Media/; '
                              'iOS pre-extracted: AppDomainGroup folder). '
+                             'Repeat to search multiple source folders (Android only). '
                              'Not required with --ios_backup or --mode restore.')
     parser.add_argument('--ios_backup',
                         default=None,
@@ -820,13 +848,26 @@ def parse_args() -> argparse.Namespace:
                     file=sys.stderr,
                 )
                 sys.exit(1)
+        if 'wa_root' in _config:
+            _wa_val = _config.pop('wa_root')
+            if isinstance(_wa_val, str):
+                _config['wa_roots'] = [_wa_val]
+            elif isinstance(_wa_val, list):
+                _config['wa_roots'] = _wa_val
+            else:
+                print(
+                    f"ERROR: 'wa_root' in config must be a string or list of strings, "
+                    f"got {type(_wa_val).__name__}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
         parser.set_defaults(**_config)
 
     args = parser.parse_args()
 
     if not args.output:
         parser.error("the following arguments are required: -o/--output")
-    if args.ios_backup and args.wa_root:
+    if args.ios_backup and args.wa_roots:
         parser.error("--ios_backup and --wa_root are mutually exclusive.")
     if args.ios_backup and args.mode == 'adb':
         parser.error("--ios_backup and --mode adb are mutually exclusive.")
@@ -836,16 +877,16 @@ def parse_args() -> argparse.Namespace:
             "iOS contacts are loaded automatically from the backup (ContactsV2.sqlite). "
             "Use --ios_contacts to supply a pre-extracted ContactsV2.sqlite instead."
         )
-    if args.mode != 'restore' and not args.ios_backup and not args.wa_root:
+    if args.mode != 'restore' and not args.ios_backup and not args.wa_roots:
         parser.error("--wa_root / -wa is required unless --ios_backup or --mode restore")
 
     return args
 
 
 def _warn_network_paths(args: argparse.Namespace, logger: logging.Logger):
-    """Warn if output or wa_root appear to be UNC network share paths."""
-    for label, path in [('--output', args.output),
-                         ('--wa_root', getattr(args, 'wa_root', None))]:
+    """Warn if output or any wa_root appear to be UNC network share paths."""
+    roots = args.wa_roots or []
+    for label, path in [('--output', args.output)] + [('--wa_root', r) for r in roots]:
         if path and (path.startswith('\\\\') or path.startswith('//')):
             logger.warning(
                 f"{label} appears to be a network share ({path}). "
@@ -894,9 +935,69 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
         ios_contacts_path = args.ios_contacts
         platform = None  # resolved by caller after decryption
 
-        def _wa_root_resolver(fp):
-            return os.path.join(args.wa_root, *fp.split('/'))
-        media_resolver = _wa_root_resolver
+        _conflict_rows = []
+        _root_hits = {root: 0 for root in args.wa_roots}
+        _zero_byte_count = [0]
+
+        def _multi_root_resolver(fp):
+            rel_parts = fp.split('/')
+            candidates = [
+                os.path.join(root, *rel_parts)
+                for root in args.wa_roots
+                if os.path.exists(os.path.join(root, *rel_parts))
+            ]
+            # filter zero-byte placeholders
+            valid = [c for c in candidates if os.path.getsize(c) > 0]
+            if len(valid) < len(candidates):
+                _zero_byte_count[0] += len(candidates) - len(valid)
+            if not valid:
+                # fallback path recorded as missing by process_rows
+                return os.path.join(args.wa_roots[0], *rel_parts)
+            if len(valid) == 1:
+                _root_hits[_owning_root(valid[0])] += 1
+                return valid[0]
+            # multiple candidates — sort largest first (best quality heuristic)
+            valid.sort(key=os.path.getsize, reverse=True)
+            top_size = os.path.getsize(valid[0])
+            second_size = os.path.getsize(valid[1])
+            if top_size > second_size:
+                chosen = valid[0]
+                reason = 'largest_wins'
+            else:
+                # same size — compare MD5; identical = no conflict
+                md5s = [file_md5(c) for c in valid]
+                if len(set(md5s)) == 1:
+                    chosen = valid[0]
+                    _root_hits[_owning_root(chosen)] += 1
+                    return chosen
+                chosen = valid[0]
+                reason = 'same_size_first_root'
+            _conflict_rows.append({
+                'file_path':       fp,
+                'chosen_source':   chosen,
+                'chosen_size':     os.path.getsize(chosen),
+                'rejected_source': '; '.join(valid[1:]),
+                'rejected_size':   '; '.join(str(os.path.getsize(c)) for c in valid[1:]),
+                'reason':          reason,
+            })
+            logger.warning(
+                f"CONFLICT {fp} — {reason}, using: {chosen}"
+            )
+            _root_hits[_owning_root(chosen)] += 1
+            return chosen
+
+        def _owning_root(path):
+            norm_path = os.path.normcase(os.path.normpath(path))
+            for root in args.wa_roots:
+                norm_root = os.path.normcase(os.path.normpath(root))
+                if norm_path.startswith(norm_root + os.sep):
+                    return root
+            return args.wa_roots[0]
+
+        media_resolver = _multi_root_resolver
+        media_resolver.conflict_rows = _conflict_rows
+        media_resolver.root_hits = _root_hits
+        media_resolver.zero_byte_count = _zero_byte_count
 
     # --- ADB pull ---
     if args.mode == 'adb':
@@ -1056,8 +1157,8 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
         if platform == 'ios':
             ios_handler.validate_ios_schema(cursor, logger)
 
-            if args.wa_root:
-                ios_handler.validate_ios_wa_root(args.wa_root, logger)
+            if args.wa_roots:
+                ios_handler.validate_ios_wa_root(args.wa_roots[0], logger)
 
             number_map = ios_handler.build_ios_number_map(cursor, logger)
 
@@ -1076,7 +1177,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
         else:
             android_handler.validate_schema(cursor, logger)
-            android_handler.validate_wa_root(args.wa_root, logger)
+            android_handler.validate_wa_root(args.wa_roots, logger)
             number_map = android_handler.build_number_map(cursor, logger)
 
             query = android_handler.build_query(args.limit, since_ms)
@@ -1139,8 +1240,11 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 )
 
             dup_report_path = os.path.join(args.output, 'duplicate_media_report.csv')
+            conflict_report_path = os.path.join(args.output, 'source_conflicts_report.csv')
             if not args.dry_run:
                 write_duplicate_report(dup_report_path, archive_conn, logger)
+                if hasattr(media_resolver, 'conflict_rows'):
+                    write_conflict_report(conflict_report_path, media_resolver.conflict_rows, logger)
 
         finally:
             archive_conn.close()
@@ -1155,10 +1259,21 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     logger.info(f"  Skipped             : {stats['skipped']}")
     logger.info(f"  Missing source files: {stats['missing']}")
     logger.info(f"  Errors / Warnings   : {stats['warnings']}")
+    if hasattr(media_resolver, 'root_hits'):
+        for root, count in media_resolver.root_hits.items():
+            logger.info(f"  Source {root:<14}: {count} file(s) used")
+        n_conflicts = len(media_resolver.conflict_rows)
+        n_zero = media_resolver.zero_byte_count[0]
+        if n_conflicts:
+            logger.info(f"  Conflicts (diff content): {n_conflicts}  → see source_conflicts_report.csv")
+        if n_zero:
+            logger.info(f"  0-byte skipped      : {n_zero}")
     logger.info(f"  Log file            : {log_path}")
     if not args.dry_run:
         logger.info(f"  {'Missing media report':<20}: {report_path}")
         logger.info(f"  {'Duplicate media report':<20}: {dup_report_path}")
+        if hasattr(media_resolver, 'conflict_rows') and media_resolver.conflict_rows:
+            logger.info(f"  {'Conflicts report':<20}: {conflict_report_path}")
         logger.info(f"  {'Archive DB':<20}: {db_path}")
 
 
