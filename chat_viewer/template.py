@@ -575,6 +575,12 @@ HTML_TEMPLATE = r"""
     .msg-quote[style*="cursor: pointer"]:hover { background: rgba(0,0,0,0.15); }
 
     .msg-bubble.search-highlight { outline: 2px solid var(--accent); }
+    @keyframes search-glow {
+      0%   { box-shadow: 0 0 0 0 rgba(0,168,132,0); }
+      30%  { box-shadow: 0 0 8px 4px rgba(0,168,132,0.55); }
+      100% { box-shadow: 0 0 0 0 rgba(0,168,132,0); }
+    }
+    .msg-bubble.search-jump-highlight { animation: search-glow 0.7s ease 3; }
   </style>
 </head>
 <body>
@@ -820,13 +826,35 @@ HTML_TEMPLATE = r"""
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
+  function linkify(text) {
+    if (!text) return '';
+    const urlRe = /https?:\/\/[^\s<>"]+/g;
+    let result = '';
+    let last = 0;
+    let m;
+    while ((m = urlRe.exec(text)) !== null) {
+      result += esc(text.slice(last, m.index));
+      let url = m[0];
+      // strip trailing punctuation that is unlikely to be part of the URL
+      url = url.replace(/[.,;:!?)\\]'"]+$/, '');
+      result += '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(url) + '</a>';
+      last = m.index + url.length;
+      // advance past trailing chars we stripped so they get picked up as plain text
+      urlRe.lastIndex = m.index + m[0].length;
+    }
+    result += esc(text.slice(last));
+    return result;
+  }
+
   function highlight(text, q) {
-    if (!q || !text) return esc(text || '');
+    if (!q || !text) return linkify(text || '');
     const words = q.trim().split(/\s+/);
-    let result = esc(text);
+    let result = linkify(text);
     for (const w of words) {
       const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-      result = result.replace(re, m => '<mark>' + m + '</mark>');
+      result = result.replace(/(<[^>]+>)|([^<]+)/g, (_, tag, txt) =>
+        tag ? tag : txt.replace(re, mm => '<mark>' + mm + '</mark>')
+      );
     }
     return result;
   }
@@ -913,8 +941,11 @@ HTML_TEMPLATE = r"""
   async function selectChat(chat, el) {
     document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
     el.classList.add('active');
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     currentChat = chat;
     msgList = [];
+    noMoreOlder = false;
+    noMoreNewer = false;
 
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
@@ -949,6 +980,8 @@ HTML_TEMPLATE = r"""
   // ---- load messages -------------------------------------------------------
 
   let loading = false;
+  let noMoreOlder = false;
+  let noMoreNewer = false;
 
   function showSpinner(position) {
     const el = document.createElement('div');
@@ -968,6 +1001,8 @@ HTML_TEMPLATE = r"""
 
   async function loadMessages(direction) {
     if (loading) return;
+    if (direction === 'older' && noMoreOlder) return;
+    if (direction === 'newer' && noMoreNewer) return;
     loading = true;
 
     const params = new URLSearchParams({
@@ -989,7 +1024,11 @@ HTML_TEMPLATE = r"""
       const msgs = await res.json();
       removeSpinner(direction === 'older' ? 'top' : 'bottom');
 
-      if (!msgs.length) { loading = false; return; }
+      if (!msgs.length) {
+        if (direction === 'older') noMoreOlder = true;
+        else noMoreNewer = true;
+        loading = false; return;
+      }
 
       const scroll = document.getElementById('message-scroll');
 
@@ -1519,13 +1558,23 @@ HTML_TEMPLATE = r"""
       <div class="sr-text">${highlight(snippet, q)}</div>
       <div class="sr-time">${fmtTime(r.timestamp_ms)}</div>
     `;
-    el.addEventListener('click', () => {
+    el.addEventListener('click', async () => {
       document.getElementById('search-input').value = '';
       clearSearchResults();
       const chat = allChats.find(c => c.id === r.chat_id && c.type === r.chat_type);
       if (chat) {
         const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
-        if (el2) selectChat(chat, el2);
+        if (el2) {
+          await selectChat(chat, el2);
+          const row = await jumpToTimestamp(r.timestamp_ms);
+          if (row) {
+            const bubble = row.querySelector('.msg-bubble');
+            if (bubble) {
+              bubble.classList.add('search-jump-highlight');
+              bubble.addEventListener('animationend', () => bubble.classList.remove('search-jump-highlight'), { once: true });
+            }
+          }
+        }
       }
     });
     return el;
@@ -1684,10 +1733,18 @@ HTML_TEMPLATE = r"""
     document.getElementById('date-clear-btn').style.display = hasVal ? 'inline-block' : 'none';
   });
 
-  document.getElementById('date-go-btn').addEventListener('click', () => {
+  document.getElementById('date-go-btn').addEventListener('click', async () => {
     const val = document.getElementById('date-picker-input').value;
     if (!val || !currentChat) return;
-    jumpToTimestamp(new Date(val).getTime());
+    const btn = document.getElementById('date-go-btn');
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    try {
+      await jumpToTimestamp(new Date(val).getTime());
+    } finally {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+    }
   });
 
   document.getElementById('date-clear-btn').addEventListener('click', () => {
@@ -1697,6 +1754,8 @@ HTML_TEMPLATE = r"""
   });
 
   async function jumpToTimestamp(ts) {
+    noMoreOlder = false;
+    noMoreNewer = false;
     const params = new URLSearchParams({
       chat_id: currentChat.id,
       chat_type: currentChat.type,
@@ -1724,6 +1783,7 @@ HTML_TEMPLATE = r"""
     );
     const targetEl = document.querySelector(`.msg-row[data-ts="${target.timestamp_ms}"]`);
     if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return targetEl || null;
   }
 
   // ---- toolbar toggle -------------------------------------------------------
