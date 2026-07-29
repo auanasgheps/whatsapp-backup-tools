@@ -891,10 +891,127 @@ class TestApiMedia:
         timestamps = [r["timestamp_ms"] for r in data]
         assert timestamps == sorted(timestamps, reverse=True)
 
+    def test_pagination_first_page_limited(self, tmp_path):
+        """First page respects GALLERY_PAGE_SIZE — seed 101 media messages, expect 100 returned."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
 
-# ---------------------------------------------------------------------------
-# Tests: iOS receipt blob parser
-# ---------------------------------------------------------------------------
+        for i in range(101):
+            msg_id = 100 + i
+            orig = f"Media/Images/photo{i}.jpg"
+            arch = f"Alice (00123456789)/photo{i}.jpg"
+            wa_conn.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+                f"VALUES ({msg_id}, 10, 1, {1700000010000 + i * 1000}, NULL, 3)"
+            )
+            wa_conn.execute(
+                f"INSERT INTO message_media (message_row_id, file_path, media_name) VALUES ({msg_id}, '{orig}', 'p.jpg')"
+            )
+            archive_conn.execute(f"INSERT INTO files (original_path, md5) VALUES ('{orig}', x'deadbeef')")
+            archive_conn.execute(
+                f"INSERT INTO archive_copies (original_path, archive_path) VALUES ('{orig}', '{arch}')"
+            )
+        wa_conn.commit()
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
+        assert len(data) == 100
+
+    def test_pagination_before_cursor(self, tmp_path):
+        """before cursor returns the next page, not overlapping with the first."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        for i in range(101):
+            msg_id = 100 + i
+            orig = f"Media/Images/photo{i}.jpg"
+            arch = f"Alice (00123456789)/photo{i}.jpg"
+            wa_conn.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+                f"VALUES ({msg_id}, 10, 1, {1700000010000 + i * 1000}, NULL, 3)"
+            )
+            wa_conn.execute(
+                f"INSERT INTO message_media (message_row_id, file_path, media_name) VALUES ({msg_id}, '{orig}', 'p.jpg')"
+            )
+            archive_conn.execute(f"INSERT INTO files (original_path, md5) VALUES ('{orig}', x'deadbeef')")
+            archive_conn.execute(
+                f"INSERT INTO archive_copies (original_path, archive_path) VALUES ('{orig}', '{arch}')"
+            )
+        wa_conn.commit()
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            page1 = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
+            oldest_ts = page1[-1]["timestamp_ms"]
+            page2 = client.get(
+                f"/api/media?chat_id=123456789&chat_type=contact&before={oldest_ts}"
+            ).get_json()
+
+        assert len(page1) == 100
+        assert len(page2) == 1  # the 101st item
+        # no overlap
+        page1_ts = {r["timestamp_ms"] for r in page1}
+        assert all(r["timestamp_ms"] not in page1_ts for r in page2)
+
+    def test_media_count_returns_totals(self, app_with_media):
+        """Count endpoint returns total and per-type breakdown."""
+        client, _ = app_with_media
+        data = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+        assert data["total"] == 1
+        assert data["archived"] == 1
+        assert "image" in data["by_type"]
+        assert data["by_type"]["image"]["count"] == 1
+        assert data["by_type"]["image"]["missing"] == 0
+
+    def test_media_count_missing(self, tmp_path):
+        """Count endpoint counts unarchived items as missing."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+        # media message with no archive_copies entry
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (5, 10, 1, 1700000005000, NULL, 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (5, 'Media/Images/lost.jpg', 'lost.jpg')"
+        )
+        archive_conn.execute(
+            "INSERT INTO files (original_path, md5) VALUES ('Media/Images/lost.jpg', x'deadbeef')"
+        )
+        # deliberately no archive_copies row
+        wa_conn.commit()
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+        assert data["total"] == 1
+        assert data["archived"] == 0
+        assert data["by_type"]["image"]["missing"] == 1
+
+
 
 def _encode_varint(value: int) -> bytes:
     """Encode a non-negative integer as a protobuf varint."""
