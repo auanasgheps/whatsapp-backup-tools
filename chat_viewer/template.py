@@ -827,7 +827,7 @@ HTML_TEMPLATE = r"""
       archiveSegments(m.archive_path).direction === direction);
 
     if (!filtered.length) {
-      tree.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media.</div>';
+      tree.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
       return;
     }
 
@@ -1538,6 +1538,10 @@ HTML_TEMPLATE = r"""
     const stats = document.getElementById('media-gallery-stats');
     const switcher = document.getElementById('media-view-switcher');
 
+    // disconnect any observer/sentinel from a previous open before clearing the grid
+    if (galleryObserver) { galleryObserver.disconnect(); galleryObserver = null; }
+    if (gallerySentinel) { gallerySentinel = null; }
+
     // reset to classic view each time
     archiveViewActive = false;
     switcher.style.display = currentChat.type === 'contact' ? '' : 'none';
@@ -1559,27 +1563,22 @@ HTML_TEMPLATE = r"""
     galleryLoadingMore = false;
     galleryLastMonthKey = null;
 
-    // fetch counts for stats bar in parallel with first page
+    // fetch counts first, then render media
     const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document'];
-    fetch('/api/media/count?chat_id=' + encodeURIComponent(currentChat.id) +
-          '&chat_type=' + encodeURIComponent(currentChat.type))
-      .then(r => r.json())
-      .then(counts => {
-        if (!counts.total) {
-          stats.innerHTML = '';
-          return;
-        }
-        const missing = counts.total - counts.archived;
-        const missingStr = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
-        let html = `<span class="gallery-stat"><strong>${counts.total}</strong> total${missingStr}</span>`;
-        for (const t of typeOrder) {
-          const d = counts.by_type[t];
-          if (!d) continue;
-          const ms = d.missing ? ` <span class="gallery-stat-missing">(${d.missing} missing)</span>` : '';
-          html += `<span class="gallery-stat"><strong>${d.count}</strong> ${t}${ms}</span>`;
-        }
-        stats.innerHTML = html;
-      });
+    const counts = await fetch('/api/media/count?chat_id=' + encodeURIComponent(currentChat.id) +
+          '&chat_type=' + encodeURIComponent(currentChat.type)).then(r => r.json());
+    if (counts.total) {
+      const missing = counts.total - counts.archived;
+      const missingStr = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
+      let html = `<span class="gallery-stat"><strong>${counts.total}</strong> total${missingStr}</span>`;
+      for (const t of typeOrder) {
+        const d = counts.by_type[t];
+        if (!d) continue;
+        const ms = d.missing ? ` <span class="gallery-stat-missing">(${d.missing} missing)</span>` : '';
+        html += `<span class="gallery-stat"><strong>${d.count}</strong> ${t}${ms}</span>`;
+      }
+      stats.innerHTML = html;
+    }
 
     grid.innerHTML = '';
 
@@ -1615,7 +1614,8 @@ HTML_TEMPLATE = r"""
       if (items.length < 100) galleryAllLoaded = true;
       currentGalleryItems.push(...items);
 
-      for (const msg of items.filter(m => m.archive_path)) {
+      const archived = items;
+      for (const msg of archived) {
         const mk = monthKey(msg.timestamp_ms);
         if (mk !== galleryLastMonthKey) {
           const hdr = document.createElement('div');
@@ -1628,7 +1628,6 @@ HTML_TEMPLATE = r"""
         const cell = renderGalleryItem(msg);
         if (gallerySentinel) grid.insertBefore(cell, gallerySentinel);
         else grid.appendChild(cell);
-        lightboxItems.push(msg);
       }
 
       if (archiveViewActive) {

@@ -2,6 +2,29 @@
 
 ---
 
+## [dev] — 2026-07-29
+
+### Added
+
+- **`wa_chat_viewer.py` — Media gallery pagination**: `/api/media` now accepts a `before` cursor and returns at most `GALLERY_PAGE_SIZE` (100) items per page. New `/api/media/count` endpoint returns total, archived, and per-type counts for the stats bar without fetching full rows.
+- **`chat_viewer/template.py` — Incremental gallery loading**: gallery grid loads the first 100 items on open and fetches more as the user scrolls, via an `IntersectionObserver` on a sentinel `div`. The stats bar is populated immediately from `/api/media/count` in parallel with the first page fetch.
+- **`chat_viewer/template.py` — Incremental archive view append**: `_appendToArchiveView()` inserts new items into existing year/month nodes as pages load, preserving collapsed/expanded state. `_createArchiveYearBlock()` extracted as shared helper.
+- **`chat_viewer/template.py` — Lightbox load-more**: the `›` button and `ArrowRight` key trigger a page fetch when the lightbox reaches the last loaded item and more items remain.
+
+### Fixed / Refactored (code review)
+
+- **`wa_chat_viewer.py` — Range media serving**: range requests now seek to the byte offset instead of loading the full file into memory. Large video scrubbing no longer allocates the whole file per request.
+- **`wa_chat_viewer.py` — Background indexing connection leak**: `_bg_index_chat` now wraps the SQLite connection in a `try/finally` so it is always closed even if indexing fails.
+- **`wa_chat_viewer.py` — Protobuf parser robustness**: `_parse_ios_receipt_blob` now skips fixed-width fields (wire types 1 and 5) instead of aborting entry parsing, matching the protobuf spec.
+- **`wa_chat_viewer.py` — Path traversal guard**: `serve_media` now uses `Path.relative_to` instead of string `startswith` for semantically correct path containment check.
+- **`wa_chat_viewer.py` — Preferences value validation**: `POST /api/preferences` now validates the value against an explicit allowlist (`VALID_PREF_VALUES`) in addition to the key.
+- **`wa_chat_viewer.py` — Dead code removed**: `_build_fts_index`, `_fts_android`, `_fts_ios` deleted (superseded by lazy per-chat indexing). Dead `wa_conn = None` and `get_output_root()` wrapper also removed.
+- **`wa_chat_viewer.py` — iOS sender SQL deduplicated**: `_IOS_SENDER_JID` constant extracted to replace triple repetition of the JID extraction expression in `_IOS_SELECT`.
+- **`wa_chat_viewer.py` — Background error logging**: `_bg_index_chat` now logs a full traceback on failure instead of just `str(e)`.
+- **`tests/test_wa_chat_viewer.py`**: added range-request tests, concurrent double-indexing race test, and full `TestIosReceiptBlobParser` suite (5 cases including wire-type regression).
+
+---
+
 ## [0.37] — 2026-07-26
 
 ### Added

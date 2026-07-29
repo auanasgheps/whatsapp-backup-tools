@@ -968,10 +968,10 @@ def create_app(output_root: Path, rescan: bool = False):
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             is_media, ts_col = _IOS_IS_MEDIA, _IOS_TS
         if before:
-            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND {ts_col} < ? ORDER BY {ts_col} DESC LIMIT ?"
+            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL AND {ts_col} < ? ORDER BY {ts_col} DESC LIMIT ?"
             rows = conn.execute(sql, chat_params + [int(before), GALLERY_PAGE_SIZE]).fetchall()
         else:
-            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} ORDER BY {ts_col} DESC LIMIT ?"
+            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL ORDER BY {ts_col} DESC LIMIT ?"
             rows = conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
         return jsonify([dict(r) for r in rows])
 
