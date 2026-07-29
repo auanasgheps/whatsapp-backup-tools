@@ -859,8 +859,8 @@ class TestApiMedia:
         assert "timestamp_ms" in item
         assert item["timestamp_ms"] == 1700000001000
 
-    def test_includes_unarchived_media_with_null_archive_path(self, tmp_path):
-        """Media message with no archive_copies entry is returned with archive_path=None."""
+    def test_excludes_unarchived_media(self, tmp_path):
+        """/api/media only returns items with an archive_copies entry."""
         wa_path = tmp_path / "msgstore.db"
         archive_path = tmp_path / ".wa_media_archiver.db"
         wa_conn = make_android_db(wa_path)
@@ -881,8 +881,7 @@ class TestApiMedia:
         app.config["TESTING"] = True
         with app.test_client() as client:
             data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
-        assert len(data) == 1
-        assert data[0]["archive_path"] is None
+        assert len(data) == 0  # unarchived item excluded from gallery
 
     def test_ordered_newest_first(self, app_with_media):
         """Results are sorted descending by timestamp."""
@@ -1139,4 +1138,21 @@ class TestHtmlTemplate:
         missing = ids_accessed - ids_in_html - dynamic_ids
         assert not missing, (
             f"getElementById called for IDs not present in HTML before <script>: {sorted(missing)}"
+        )
+
+    def test_load_gallery_page_does_not_push_lightbox_items(self):
+        """renderGalleryItem owns lightboxItems.push — _loadGalleryPage must not do it
+        too or every item ends up double-counted, breaking lightbox indices."""
+        template = viewer.HTML_TEMPLATE
+        script = template[template.index('<script>'):]
+
+        # isolate the _loadGalleryPage function body
+        fn_start = script.index('async function _loadGalleryPage(')
+        # find the end: next top-level 'async function' or plain 'function' at col 2
+        import re as _re
+        next_fn = _re.search(r'\n  (async )?function ', script[fn_start + 1:])
+        fn_body = script[fn_start: fn_start + 1 + (next_fn.start() if next_fn else len(script))]
+
+        assert 'lightboxItems.push' not in fn_body, (
+            "_loadGalleryPage must not push to lightboxItems — renderGalleryItem handles that"
         )
