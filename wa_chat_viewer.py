@@ -471,6 +471,7 @@ _ANDROID_CHAT_TYPE = "CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact
 
 _ANDROID_SELECT = f"""
     SELECT
+        m._id                                                        AS msg_id,
         {_ANDROID_CHAT_ID}                                           AS chat_id,
         {_ANDROID_CHAT_TYPE}                                         AS chat_type,
         COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
@@ -520,6 +521,7 @@ _IOS_CHAT_TYPE = "CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact
 
 _IOS_SELECT = f"""
     SELECT
+        m.Z_PK                                                       AS msg_id,
         {_IOS_CHAT_ID}                                               AS chat_id,
         {_IOS_CHAT_TYPE}                                             AS chat_type,
         CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)         AS timestamp_ms,
@@ -622,6 +624,110 @@ def _bg_index_chat(cache_db_path: str, source_type: str, wa_db_path: str,
     finally:
         with lock:
             state[(chat_id, chat_type)] = "done"
+
+
+def _parse_ios_receipt_blob(blob: bytes, conn) -> list:
+    """Parse ZWAMESSAGEINFO.ZRECEIPTINFO protobuf into a list of member receipt dicts."""
+    def _read_varint(data, pos):
+        result = 0
+        shift = 0
+        while pos < len(data):
+            b = data[pos]
+            pos += 1
+            result |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+        return result, pos
+
+    def _parse_member_entry(data):
+        pos = 0
+        phone_raw = None
+        status = 0
+        delta = 0
+        while pos < len(data):
+            tag_byte, pos = _read_varint(data, pos)
+            field = tag_byte >> 3
+            wire = tag_byte & 0x07
+            if wire == 2:  # length-delimited
+                length, pos = _read_varint(data, pos)
+                value = data[pos:pos + length]
+                pos += length
+                if field == 1:
+                    phone_raw = value
+            elif wire == 0:  # varint
+                value, pos = _read_varint(data, pos)
+                if field == 4:
+                    status = value
+                elif field == 5:
+                    delta = value
+            else:
+                break
+        phone = ""
+        if phone_raw and len(phone_raw) > 1:
+            phone = "".join(f"{b:02x}" for b in phone_raw[1:])
+        return phone, status, delta
+
+    base_ts = None
+    entries = []
+    pos = 0
+    while pos < len(blob):
+        try:
+            tag_byte, pos = _read_varint(blob, pos)
+        except Exception:
+            break
+        field = tag_byte >> 3
+        wire = tag_byte & 0x07
+        if wire == 2:
+            try:
+                length, pos = _read_varint(blob, pos)
+            except Exception:
+                break
+            value = blob[pos:pos + length]
+            pos += length
+            if field == 2:
+                entries.append(value)
+        elif wire == 0:
+            try:
+                value, pos = _read_varint(blob, pos)
+            except Exception:
+                break
+            if field == 3:
+                base_ts = value
+        else:
+            break
+
+    members = []
+    for entry_bytes in entries:
+        try:
+            phone, status, delta = _parse_member_entry(entry_bytes)
+        except Exception:
+            continue
+        delivered_ts = None
+        read_ts = None
+        if base_ts and delta:
+            ts_s = base_ts + delta
+            if status >= 1:
+                delivered_ts = ts_s * 1000
+            if status >= 2:
+                read_ts = ts_s * 1000
+
+        name = phone
+        if phone:
+            row = conn.execute(
+                "SELECT display_name FROM arch.contacts WHERE number = ?", (phone,)
+            ).fetchone()
+            if row and row[0]:
+                name = row[0]
+
+        members.append({
+            "name": name or phone or "",
+            "jid": phone or "",
+            "delivered_ts": delivered_ts,
+            "read_ts": read_ts,
+            "played_ts": None,
+        })
+    return members
 
 
 # ---------------------------------------------------------------------------
@@ -985,6 +1091,82 @@ def create_app(output_root: Path, rescan: bool = False):
 
         indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
         return jsonify({"results": [dict(r) for r in rows], "indexed_count": indexed_count})
+
+    # ---- API: message receipts ------------------------------------------------
+
+    @app.route("/api/message_receipts/<int:message_id>")
+    def api_message_receipts(message_id):
+        conn = get_wa()
+        if conn is None:
+            return jsonify({"available": False})
+
+        if source_type == "android":
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_user'"
+            ).fetchone()
+            if not table_exists:
+                return jsonify({"available": False})
+            rows = conn.execute("""
+                SELECT ru.receipt_timestamp, ru.read_timestamp, ru.played_timestamp,
+                       COALESCE(j_real.raw_string, j.raw_string) AS jid,
+                       COALESCE(j_real.user, j.user)             AS phone,
+                       COALESCE(con.display_name, con2.display_name,
+                                CASE WHEN COALESCE(j_real.user, j.user) IS NOT NULL
+                                     THEN '+' || COALESCE(j_real.user, j.user)
+                                END,
+                                COALESCE(j_real.raw_string, j.raw_string)) AS name
+                FROM receipt_user ru
+                LEFT JOIN jid j ON j._id = ru.receipt_user_jid_row_id
+                LEFT JOIN (
+                    SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                    FROM jid_map GROUP BY lid_row_id
+                ) jm ON jm.lid_row_id = ru.receipt_user_jid_row_id
+                LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+                LEFT JOIN arch.contacts con  ON con.number  = j_real.user
+                LEFT JOIN arch.contacts con2 ON con2.number = j.user
+                WHERE ru.message_row_id = ?
+            """, (message_id,)).fetchall()
+
+            if not rows:
+                return jsonify({"available": True, "members": []})
+
+            members = [
+                {
+                    "name": r["name"] or r["jid"] or "",
+                    "jid": r["jid"] or "",
+                    "delivered_ts": r["receipt_timestamp"] or None,
+                    "read_ts": r["read_timestamp"] or None,
+                    "played_ts": r["played_timestamp"] or None,
+                }
+                for r in rows
+            ]
+            result = {"available": True, "members": members}
+            if len(members) == 1:
+                result["delivered_ts"] = members[0]["delivered_ts"]
+                result["read_ts"] = members[0]["read_ts"]
+            return jsonify(result)
+
+        else:  # ios
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
+            ).fetchone()
+            if not table_exists:
+                return jsonify({"available": False})
+
+            row = conn.execute(
+                "SELECT ZRECEIPTINFO FROM ZWAMESSAGEINFO WHERE ZMESSAGE = ?",
+                (message_id,)
+            ).fetchone()
+            if not row or not row[0]:
+                return jsonify({"available": False})
+
+            blob = bytes(row[0])
+            members = _parse_ios_receipt_blob(blob, conn)
+            result = {"available": True, "members": members}
+            if len(members) == 1:
+                result["delivered_ts"] = members[0]["delivered_ts"]
+                result["read_ts"] = members[0]["read_ts"]
+            return jsonify(result)
 
     # ---- API: index status -------------------------------------------------
 

@@ -574,13 +574,61 @@ HTML_TEMPLATE = r"""
     .msg-quote-text { font-size: 12px; color: rgba(17,27,33,0.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .msg-quote[style*="cursor: pointer"]:hover { background: rgba(0,0,0,0.15); }
 
-    .msg-bubble.search-highlight { outline: 2px solid var(--accent); }
-    @keyframes search-glow {
-      0%   { box-shadow: 0 0 0 0 rgba(0,168,132,0); }
-      30%  { box-shadow: 0 0 8px 4px rgba(0,168,132,0.55); }
-      100% { box-shadow: 0 0 0 0 rgba(0,168,132,0); }
+    .msg-bubble.search-highlight {
+      outline: 2px solid var(--accent);
+      box-shadow: inset 0 0 0 9999px rgba(0,168,132,0.18);
     }
-    .msg-bubble.search-jump-highlight { animation: search-glow 0.7s ease 3; }
+    @keyframes search-flash {
+      0%, 100%  { box-shadow: none; outline: none; }
+      15%, 55%  { box-shadow: 0 0 0 3px var(--accent), inset 0 0 0 9999px rgba(0,168,132,0.4); outline: none; }
+      35%, 75%  { box-shadow: none; outline: none; }
+    }
+    .msg-bubble.search-jump-highlight { animation: search-flash 1s ease-in-out 1 forwards; }
+
+    /* ---- message details icon + popup ---- */
+    .msg-info-btn {
+      display: none;
+      font-size: 14px;
+      color: var(--text-muted);
+      cursor: pointer;
+      user-select: none;
+      vertical-align: middle;
+      margin: 0 3px;
+      line-height: 1;
+    }
+    .msg-bubble:hover .msg-info-btn { display: inline; }
+
+    #msg-details-popup {
+      position: fixed;
+      z-index: 200;
+      background: var(--surface2);
+      color: var(--text);
+      border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+      padding: 10px 14px;
+      min-width: 200px;
+      max-width: 480px;
+      max-height: 260px;
+      overflow-y: auto;
+      font-size: 13px;
+      display: none;
+    }
+    .msg-details-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+    .msg-details-label { color: var(--text-muted); white-space: nowrap; }
+    .msg-details-value { color: var(--text); text-align: right; }
+    .msg-details-table { width: 100%; border-collapse: collapse; }
+    .msg-details-table th { font-size: 11px; color: var(--text-muted); text-align: left; padding: 2px 4px 4px 0; font-weight: 500; }
+    .msg-details-table td { padding: 2px 4px 2px 0; vertical-align: top; }
+    .msg-details-table td:first-child { color: var(--text); }
+    .msg-details-table td:not(:first-child) { color: var(--text-muted); white-space: nowrap; }
+    .msg-details-na { color: var(--text-muted); font-style: italic; }
+    .msg-details-copy-row { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+    .msg-details-copy-btn {
+      background: var(--surface); border: 1px solid var(--border);
+      color: var(--text-muted); border-radius: 5px;
+      padding: 3px 10px; font-size: 12px; cursor: pointer; margin: 0;
+    }
+    .msg-details-copy-btn:hover { color: var(--text); border-color: var(--accent); }
   </style>
 </head>
 <body>
@@ -696,6 +744,8 @@ HTML_TEMPLATE = r"""
     </div>
   </div>
 </div>
+
+<div id="msg-details-popup"></div>
 
 <script>
 (function () {
@@ -1101,11 +1151,19 @@ HTML_TEMPLATE = r"""
 
   function pruneDom(keepEnd) {
     const scroll = document.getElementById('message-scroll');
+    let prunedRows = false;
     while (domNodes > MAX_DOM && scroll.children.length > 0) {
       const child = keepEnd === 'top' ? scroll.lastChild : scroll.firstChild;
       if (!child) break;
       scroll.removeChild(child);
-      if (child.classList && child.classList.contains('msg-row')) domNodes--;
+      if (child.classList && child.classList.contains('msg-row')) {
+        domNodes--;
+        prunedRows = true;
+      }
+    }
+    if (prunedRows) {
+      if (keepEnd === 'top') noMoreNewer = false;
+      else noMoreOlder = false;
     }
     // Re-sync msgList boundaries from surviving DOM rows
     const rows = scroll.querySelectorAll('.msg-row[data-ts]');
@@ -1121,6 +1179,7 @@ HTML_TEMPLATE = r"""
     const scroll = document.getElementById('message-scroll');
     const btn = document.getElementById('scroll-to-bottom');
     scroll.addEventListener('scroll', function () {
+      hideMsgDetails();
       const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
       btn.style.display = atBottom ? 'none' : 'block';
       if (loading) return;
@@ -1187,6 +1246,18 @@ HTML_TEMPLATE = r"""
       badge.className = 'direction-badge sent';
       badge.textContent = 'You';
       meta.appendChild(badge);
+    }
+    const showInfo = msg.from_me ? !!msg.msg_id : !!msg.archive_path;
+    if (showInfo) {
+      const infoBtn = document.createElement('span');
+      infoBtn.className = 'msg-info-btn';
+      infoBtn.title = 'Message details';
+      infoBtn.textContent = 'ⓘ';
+      infoBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        showMsgDetails(msg.from_me ? msg.msg_id : null, infoBtn, msg.archive_path || null);
+      });
+      meta.appendChild(infoBtn);
     }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
 
@@ -1821,6 +1892,95 @@ HTML_TEMPLATE = r"""
       document.getElementById('chat-search-input').value = '';
     }
   });
+
+  // ---- message details popup ------------------------------------------------
+
+  const msgDetailsPopup = document.getElementById('msg-details-popup');
+
+  function hideMsgDetails() {
+    msgDetailsPopup.style.display = 'none';
+  }
+
+  document.addEventListener('click', e => {
+    if (!msgDetailsPopup.contains(e.target)) hideMsgDetails();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') hideMsgDetails();
+  });
+
+  function fmtReceipt(ts) {
+    if (!ts) return '—';
+    return new Date(ts).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+  }
+
+  async function showMsgDetails(msgId, anchorEl, archivePath) {
+    let html = '';
+
+    if (msgId !== null) {
+      msgDetailsPopup.innerHTML = '<span style="color:var(--text-muted)">Loading…</span>';
+      positionPopup(anchorEl);
+      msgDetailsPopup.style.display = 'block';
+
+      let data;
+      try {
+        const res = await fetch('/api/message_receipts/' + msgId);
+        data = await res.json();
+      } catch (_) {
+        data = { available: false };
+      }
+
+      if (!data.available || !(data.members || []).length) {
+        html = '<span class="msg-details-na">No receipt data available.</span>';
+      } else if (data.members.length === 1) {
+        html =
+          `<div class="msg-details-row"><span class="msg-details-label">Delivered</span><span class="msg-details-value">${fmtReceipt(data.delivered_ts)}</span></div>` +
+          `<div class="msg-details-row"><span class="msg-details-label">Read</span><span class="msg-details-value">${fmtReceipt(data.read_ts)}</span></div>`;
+      } else {
+        let rows = '';
+        for (const m of data.members) {
+          rows += `<tr><td>${esc(m.name || m.jid || '?')}</td><td>${fmtReceipt(m.delivered_ts)}</td><td>${fmtReceipt(m.read_ts)}</td></tr>`;
+        }
+        html = `<table class="msg-details-table"><thead><tr><th>Member</th><th>Delivered</th><th>Read</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }
+    }
+
+    if (archivePath) {
+      html += `<div class="msg-details-copy-row"><button class="msg-details-copy-btn" data-path="${esc(archivePath)}">Copy path</button></div>`;
+    }
+
+    msgDetailsPopup.innerHTML = html;
+    msgDetailsPopup.querySelector('.msg-details-copy-btn')?.addEventListener('click', e => {
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      const sep = outputRoot.includes('\\') ? '\\' : '/';
+      const fullPath = outputRoot.replace(/[/\\]+$/, '') + sep + btn.dataset.path.replace(/\//g, sep);
+      navigator.clipboard.writeText(fullPath).then(() => {
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy path'; }, 1500);
+      });
+    });
+
+    positionPopup(anchorEl);
+    msgDetailsPopup.style.display = 'block';
+  }
+
+  function positionPopup(anchorEl) {
+    const rect = anchorEl.getBoundingClientRect();
+    const pane = document.getElementById('chat-pane').getBoundingClientRect();
+    const popupW = msgDetailsPopup.offsetWidth || 200;
+    let left = rect.right - popupW;
+    if (left < pane.left + 4) left = pane.left + 4;
+    if (left + popupW > pane.right - 4) left = pane.right - popupW - 4;
+    let top = rect.bottom + 4;
+    if (top + msgDetailsPopup.offsetHeight > window.innerHeight - 8) {
+      top = rect.top - msgDetailsPopup.offsetHeight - 4;
+    }
+    msgDetailsPopup.style.left = left + 'px';
+    msgDetailsPopup.style.top = top + 'px';
+  }
 
   // ---- init ----------------------------------------------------------------
 
