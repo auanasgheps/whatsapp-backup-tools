@@ -18,6 +18,10 @@
 
 ### Changed
 
+### Changed
+
+- **`chat_viewer/template.py` — Pico CSS v2 migration**: Replaced the ~640-line hand-written `<style>` block with Pico CSS v2.1.1 as the design foundation. Pico is vendored (`chat_viewer/pico.min.css`) — no CDN dependency. Six rules were surgically removed from `pico.min.css` to avoid conflicts: `width:100%` on inputs, the forced `height:calc(...)` on inputs, `opacity:0` on the calendar picker indicator, `background-image` SVG replacement of the native calendar icon, `appearance:none` + padding override on all inputs, and the search icon background-image injection on `[type=search]` inputs. `data-theme` moved from `body` to `<html>`; JS updated to `document.documentElement.dataset.theme`.
+
 - **`wa_chat_viewer.py` — Persistent per-thread WA connection**: `get_wa()` now stores the connection in `threading.local()` instead of Flask's per-request `g`. The connection (and its ATTACH to the archive DB) is opened once per worker thread and reused across all requests on that thread, keeping SQLite's page cache warm. `PRAGMA cache_size = -32000` (32 MB) set on first open. Previously a cold open + ATTACH was paid on every request, causing 1–2 s latency even for chats already indexed.
 
 - **`wa_chat_viewer.py` — Raw-column WHERE for message routes**: `/api/messages`, `/api/messages/at`, and `/api/media` now filter on physical columns (`m.chat_row_id`, `j_chat.user`, `m.ZCHATSESSION`) instead of SELECT aliases (`chat_id`, `chat_type`, `timestamp_ms`, `media_type`). SQLite cannot index computed aliases, causing a full table scan even for 50-row LIMIT queries. The fix allows SQLite to use existing indexes on raw columns and avoid evaluating JOINs on irrelevant rows. New helpers `_android_chat_filter` / `_ios_chat_filter` and constants `_ANDROID_TS`, `_IOS_TS`, `_ANDROID_IS_MEDIA`, `_IOS_IS_MEDIA` replace the inline alias references.
