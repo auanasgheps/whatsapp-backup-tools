@@ -103,6 +103,8 @@ VALID_PREF_VALUES = {
     "font_size":   {"small", "medium", "large"},
 }
 
+GALLERY_PAGE_SIZE = 100
+
 # SQL expression that maps a file path (or NULL) to a media_type string.
 # Used in live queries so Python's _media_type_from_path is not needed at serve time.
 _MEDIA_TYPE_EXPR = """
@@ -953,6 +955,7 @@ def create_app(output_root: Path, rescan: bool = False):
     def api_media():
         chat_id = request.args.get("chat_id", "")
         chat_type = request.args.get("chat_type", "")
+        before = request.args.get("before")
         conn = get_wa()
         if conn is None:
             return jsonify([])
@@ -964,9 +967,45 @@ def create_app(output_root: Path, rescan: bool = False):
         else:
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             is_media, ts_col = _IOS_IS_MEDIA, _IOS_TS
-        sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} ORDER BY {ts_col} DESC"
-        rows = conn.execute(sql, chat_params).fetchall()
+        if before:
+            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND {ts_col} < ? ORDER BY {ts_col} DESC LIMIT ?"
+            rows = conn.execute(sql, chat_params + [int(before), GALLERY_PAGE_SIZE]).fetchall()
+        else:
+            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} ORDER BY {ts_col} DESC LIMIT ?"
+            rows = conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
         return jsonify([dict(r) for r in rows])
+
+    # ---- API: media count --------------------------------------------------
+
+    @app.route("/api/media/count")
+    def api_media_count():
+        chat_id = request.args.get("chat_id", "")
+        chat_type = request.args.get("chat_type", "")
+        conn = get_wa()
+        if conn is None:
+            return jsonify({})
+        select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
+        extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
+        if source_type == "android":
+            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            is_media = _ANDROID_IS_MEDIA
+        else:
+            chat_pred, chat_params = _ios_chat_filter(chat_id)
+            is_media = _IOS_IS_MEDIA
+        rows = conn.execute(
+            f"{select} WHERE {chat_pred} {extra} AND {is_media}",
+            chat_params
+        ).fetchall()
+        total = len(rows)
+        archived = sum(1 for r in rows if r["archive_path"])
+        by_type: dict = {}
+        for r in rows:
+            t = r["media_type"]
+            by_type.setdefault(t, {"count": 0, "missing": 0})
+            by_type[t]["count"] += 1
+            if not r["archive_path"]:
+                by_type[t]["missing"] += 1
+        return jsonify({"total": total, "archived": archived, "by_type": by_type})
 
     # ---- API: search -------------------------------------------------------
 

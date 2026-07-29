@@ -838,19 +838,10 @@ HTML_TEMPLATE = r"""
     }
 
     for (const year of Object.keys(byYear).sort((a, b) => b - a)) {
-      const block = document.createElement('div');
-      block.className = 'archive-year open';
-
-      const hdr = document.createElement('div');
-      hdr.className = 'archive-year-header';
-      hdr.innerHTML =
-        `<span class="archive-year-chevron">&#9658;</span><span>${year}</span>` +
-        `<span style="margin-left:auto;font-weight:400;color:var(--text-muted);font-size:12px">` +
-        `${byYear[year].length}</span>`;
-      hdr.addEventListener('click', () => block.classList.toggle('open'));
-
-      const grid = document.createElement('div');
-      grid.className = 'archive-year-grid';
+      const block = _createArchiveYearBlock(year);
+      const grid = block.querySelector('.archive-year-grid');
+      const countEl = block.querySelector('.archive-year-count');
+      countEl.textContent = byYear[year].length;
 
       let lastMonth = null;
       for (const msg of byYear[year]) {
@@ -858,6 +849,7 @@ HTML_TEMPLATE = r"""
         if (mk !== lastMonth) {
           const mhdr = document.createElement('div');
           mhdr.className = 'gallery-month-header';
+          mhdr.dataset.month = mk;
           mhdr.textContent = new Date(msg.timestamp_ms).toLocaleString('default', { month: 'long' });
           grid.appendChild(mhdr);
           lastMonth = mk;
@@ -865,9 +857,68 @@ HTML_TEMPLATE = r"""
         grid.appendChild(renderGalleryItem(msg));
       }
 
-      block.appendChild(hdr);
-      block.appendChild(grid);
       tree.appendChild(block);
+    }
+  }
+
+  function _createArchiveYearBlock(year) {
+    const block = document.createElement('div');
+    block.className = 'archive-year open';
+    block.dataset.year = year;
+    const hdr = document.createElement('div');
+    hdr.className = 'archive-year-header';
+    hdr.innerHTML =
+      `<span class="archive-year-chevron">&#9658;</span><span>${year}</span>` +
+      `<span class="archive-year-count" style="margin-left:auto;font-weight:400;color:var(--text-muted);font-size:12px">0</span>`;
+    hdr.addEventListener('click', () => block.classList.toggle('open'));
+    const grid = document.createElement('div');
+    grid.className = 'archive-year-grid';
+    block.appendChild(hdr);
+    block.appendChild(grid);
+    return block;
+  }
+
+  function _appendToArchiveView(items, direction) {
+    const tree = document.getElementById('media-archive-tree');
+    // clear "No media." placeholder if present
+    if (tree.querySelector('div:not(.archive-year)')) tree.innerHTML = '';
+
+    const filtered = items.filter(m => m.archive_path &&
+      archiveSegments(m.archive_path).direction === direction);
+    if (!filtered.length) return;
+
+    for (const msg of filtered) {
+      const { year } = archiveSegments(msg.archive_path);
+
+      let block = tree.querySelector(`.archive-year[data-year="${year}"]`);
+      if (!block) {
+        block = _createArchiveYearBlock(year);
+        // insert in descending year order
+        const after = [...tree.querySelectorAll('.archive-year')]
+          .find(el => parseInt(el.dataset.year) < parseInt(year));
+        tree.insertBefore(block, after || null);
+      }
+
+      const grid = block.querySelector('.archive-year-grid');
+      const countEl = block.querySelector('.archive-year-count');
+      countEl.textContent = parseInt(countEl.textContent || '0') + 1;
+
+      const mk = monthKey(msg.timestamp_ms);
+      let monthHdr = grid.querySelector(`.gallery-month-header[data-month="${mk}"]`);
+      if (!monthHdr) {
+        monthHdr = document.createElement('div');
+        monthHdr.className = 'gallery-month-header';
+        monthHdr.dataset.month = mk;
+        monthHdr.textContent = new Date(msg.timestamp_ms).toLocaleString('default', { month: 'long' });
+        // insert before the first section with an older month key
+        const olderHdr = [...grid.querySelectorAll('.gallery-month-header')]
+          .find(el => parseInt(el.dataset.month) < mk);
+        grid.insertBefore(monthHdr, olderHdr || null);
+      }
+      // insert item after its month header, before the next month header
+      const nextSection = [...grid.querySelectorAll('.gallery-month-header')]
+        .find(el => parseInt(el.dataset.month) < mk) || null;
+      grid.insertBefore(renderGalleryItem(msg), nextSection);
     }
   }
 
@@ -1361,8 +1412,17 @@ HTML_TEMPLATE = r"""
     nextBtn.className = 'lb-arrow next';
     nextBtn.innerHTML = '&#10095;';
     nextBtn.title = 'Next';
-    nextBtn.disabled = index === lightboxItems.length - 1;
-    nextBtn.addEventListener('click', e => { e.stopPropagation(); lightboxIndex++; openLightboxAt(lightboxIndex); });
+    nextBtn.disabled = index === lightboxItems.length - 1 && galleryAllLoaded;
+    nextBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (lightboxIndex < lightboxItems.length - 1) {
+        lightboxIndex++; openLightboxAt(lightboxIndex);
+      } else if (!galleryAllLoaded) {
+        const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
+        await _loadGalleryPage(oldest);
+        if (lightboxIndex < lightboxItems.length - 1) { lightboxIndex++; openLightboxAt(lightboxIndex); }
+      }
+    });
     lb.appendChild(nextBtn);
 
     const tsEl = document.createElement('div');
@@ -1418,6 +1478,8 @@ HTML_TEMPLATE = r"""
 
   function closeMediaGallery() {
     document.getElementById('media-gallery').classList.remove('open');
+    if (galleryObserver) { galleryObserver.disconnect(); galleryObserver = null; }
+    if (gallerySentinel) { gallerySentinel.remove(); gallerySentinel = null; }
   }
 
   function renderGalleryItem(msg) {
@@ -1490,68 +1552,121 @@ HTML_TEMPLATE = r"""
     stats.innerHTML = '';
     document.getElementById('media-gallery').classList.add('open');
 
-    const r = await fetch(
-      '/api/media?chat_id=' + encodeURIComponent(currentChat.id) +
-      '&chat_type=' + encodeURIComponent(currentChat.type)
-    );
-    const items = await r.json();
-    currentGalleryItems = items;
+    // reset pagination state
+    currentGalleryItems = [];
+    lightboxItems = [];
+    galleryAllLoaded = false;
+    galleryLoadingMore = false;
+    galleryLastMonthKey = null;
+
+    // fetch counts for stats bar in parallel with first page
+    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document'];
+    fetch('/api/media/count?chat_id=' + encodeURIComponent(currentChat.id) +
+          '&chat_type=' + encodeURIComponent(currentChat.type))
+      .then(r => r.json())
+      .then(counts => {
+        if (!counts.total) {
+          stats.innerHTML = '';
+          return;
+        }
+        const missing = counts.total - counts.archived;
+        const missingStr = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
+        let html = `<span class="gallery-stat"><strong>${counts.total}</strong> total${missingStr}</span>`;
+        for (const t of typeOrder) {
+          const d = counts.by_type[t];
+          if (!d) continue;
+          const ms = d.missing ? ` <span class="gallery-stat-missing">(${d.missing} missing)</span>` : '';
+          html += `<span class="gallery-stat"><strong>${d.count}</strong> ${t}${ms}</span>`;
+        }
+        stats.innerHTML = html;
+      });
+
     grid.innerHTML = '';
 
-    if (!items.length) {
+    await _loadGalleryPage(null);
+
+    if (!currentGalleryItems.length) {
       grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
       return;
     }
 
-    // compute stats
-    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document'];
-    const total = items.length;
-    const totalMissing = items.filter(m => !m.archive_path).length;
-    const byType = {};
-    for (const m of items) {
-      byType[m.media_type] = byType[m.media_type] || {count: 0, missing: 0};
-      byType[m.media_type].count++;
-      if (!m.archive_path) byType[m.media_type].missing++;
-    }
-
-    const totalMissingStr = totalMissing ? ` <span class="gallery-stat-missing">(${totalMissing} missing)</span>` : '';
-    let html = `<span class="gallery-stat"><strong>${total}</strong> total${totalMissingStr}</span>`;
-    for (const t of typeOrder) {
-      if (!byType[t]) continue;
-      const {count, missing} = byType[t];
-      const missingStr = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
-      html += `<span class="gallery-stat"><strong>${count}</strong> ${t}${missingStr}</span>`;
-    }
-    stats.innerHTML = html;
-
-    lightboxItems = [];
-    let lastMonthKey = null;
-    for (const msg of items.filter(m => m.archive_path)) {
-      const mk = monthKey(msg.timestamp_ms);
-      if (mk !== lastMonthKey) {
-        const hdr = document.createElement('div');
-        hdr.className = 'gallery-month-header';
-        hdr.textContent = fmtMonthHeader(msg.timestamp_ms);
-        grid.appendChild(hdr);
-        lastMonthKey = mk;
+    // attach IntersectionObserver sentinel at bottom of grid
+    gallerySentinel = document.createElement('div');
+    gallerySentinel.style.height = '1px';
+    grid.appendChild(gallerySentinel);
+    galleryObserver = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) {
+        const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
+        _loadGalleryPage(oldest);
       }
-      grid.appendChild(renderGalleryItem(msg));
+    }, { root: grid, threshold: 0.1 });
+    galleryObserver.observe(gallerySentinel);
+  }
+
+  async function _loadGalleryPage(before) {
+    if (galleryAllLoaded || galleryLoadingMore) return;
+    galleryLoadingMore = true;
+    const grid = document.getElementById('media-gallery-grid');
+    try {
+      const url = '/api/media?chat_id=' + encodeURIComponent(currentChat.id) +
+                  '&chat_type=' + encodeURIComponent(currentChat.type) +
+                  (before != null ? '&before=' + before : '');
+      const items = await fetch(url).then(r => r.json());
+      if (items.length < 100) galleryAllLoaded = true;
+      currentGalleryItems.push(...items);
+
+      for (const msg of items.filter(m => m.archive_path)) {
+        const mk = monthKey(msg.timestamp_ms);
+        if (mk !== galleryLastMonthKey) {
+          const hdr = document.createElement('div');
+          hdr.className = 'gallery-month-header';
+          hdr.textContent = fmtMonthHeader(msg.timestamp_ms);
+          if (gallerySentinel) grid.insertBefore(hdr, gallerySentinel);
+          else grid.appendChild(hdr);
+          galleryLastMonthKey = mk;
+        }
+        const cell = renderGalleryItem(msg);
+        if (gallerySentinel) grid.insertBefore(cell, gallerySentinel);
+        else grid.appendChild(cell);
+        lightboxItems.push(msg);
+      }
+
+      if (archiveViewActive) {
+        const activeDir = document.querySelector('.archive-tab.active').dataset.dir;
+        _appendToArchiveView(items, activeDir);
+      }
+    } finally {
+      galleryLoadingMore = false;
     }
   }
 
   document.getElementById('media-btn').addEventListener('click', openMediaGallery);
   document.getElementById('media-gallery-close').addEventListener('click', closeMediaGallery);
-  document.addEventListener('keydown', e => {
+  document.addEventListener('keydown', async e => {
     if (document.getElementById('img-lightbox')) {
       if (e.key === 'Escape') { document.getElementById('img-lightbox').remove(); return; }
-      if (e.key === 'ArrowLeft'  && lightboxIndex > 0) { lightboxIndex--; openLightboxAt(lightboxIndex); return; }
-      if (e.key === 'ArrowRight' && lightboxIndex < lightboxItems.length - 1) { lightboxIndex++; openLightboxAt(lightboxIndex); return; }
+      if (e.key === 'ArrowLeft' && lightboxIndex > 0) { lightboxIndex--; openLightboxAt(lightboxIndex); return; }
+      if (e.key === 'ArrowRight') {
+        if (lightboxIndex < lightboxItems.length - 1) {
+          lightboxIndex++; openLightboxAt(lightboxIndex);
+        } else if (!galleryAllLoaded) {
+          const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
+          await _loadGalleryPage(oldest);
+          if (lightboxIndex < lightboxItems.length - 1) { lightboxIndex++; openLightboxAt(lightboxIndex); }
+        }
+        return;
+      }
     }
     if (e.key === 'Escape') closeMediaGallery();
   });
 
   let archiveViewActive = false;
   let currentGalleryItems = [];
+  let galleryAllLoaded = false;
+  let galleryLoadingMore = false;
+  let gallerySentinel = null;
+  let galleryObserver = null;
+  let galleryLastMonthKey = null;
 
   document.querySelectorAll('.media-view-btn').forEach(btn => {
     btn.addEventListener('click', () => {
