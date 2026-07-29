@@ -887,6 +887,15 @@ HTML_TEMPLATE = r"""
     });
   });
 
+  function resetFilterTo(filter) {
+    if (currentFilter === filter) return;
+    currentFilter = filter;
+    document.querySelectorAll('.filter-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.filter === filter);
+    });
+    renderChatList();
+  }
+
   function _startIndexPoll(chat, sidebarEl) {
     const params = new URLSearchParams({chat_id: chat.id, chat_type: chat.type});
     async function poll() {
@@ -1120,7 +1129,18 @@ HTML_TEMPLATE = r"""
         loadMessages('newer');
       }
     });
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
+      if (noMoreNewer) {
+        scroll.scrollTop = scroll.scrollHeight;
+        return;
+      }
+      // Newer messages exist outside the current DOM window — reload from latest
+      scroll.innerHTML = '';
+      msgList = [];
+      domNodes = 0;
+      noMoreOlder = false;
+      noMoreNewer = false;
+      await loadMessages('older');
       scroll.scrollTop = scroll.scrollHeight;
     });
   }
@@ -1542,6 +1562,7 @@ HTML_TEMPLATE = r"""
     el.addEventListener('click', () => {
       document.getElementById('search-input').value = '';
       clearSearchResults();
+      resetFilterTo('all');
       const el2 = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
       if (el2) selectChat(chat, el2);
     });
@@ -1563,6 +1584,7 @@ HTML_TEMPLATE = r"""
       clearSearchResults();
       const chat = allChats.find(c => c.id === r.chat_id && c.type === r.chat_type);
       if (chat) {
+        resetFilterTo('all');
         const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
         if (el2) {
           await selectChat(chat, el2);
