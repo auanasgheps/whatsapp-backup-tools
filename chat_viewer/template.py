@@ -1036,7 +1036,7 @@ HTML_TEMPLATE = r"""
       if (!msgs.length) {
         if (direction === 'older') noMoreOlder = true;
         else noMoreNewer = true;
-        loading = false; return;
+        return;
       }
 
       const scroll = document.getElementById('message-scroll');
@@ -1081,8 +1081,9 @@ HTML_TEMPLATE = r"""
 
     } catch (e) {
       removeSpinner(direction === 'older' ? 'top' : 'bottom');
+    } finally {
+      loading = false;
     }
-    loading = false;
   }
 
   function renderBubbleWithSep(msg, prevTs, direction) {
