@@ -6,6 +6,13 @@
 
 ### Added
 
+- **`chat_viewer/template.py` — Chat viewer UX improvements**:
+  - **No redundant load attempts at chat boundaries**: two module-level flags (`noMoreOlder` / `noMoreNewer`) are set when `/api/messages` returns an empty page. Subsequent scrolls past the boundary skip the spinner and the network request entirely. Flags reset on chat switch and on `jumpToTimestamp` (which replaces the DOM window).
+  - **Sidebar auto-scrolls to active chat**: `selectChat` now calls `el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })` immediately after marking the item active — covers both direct clicks and items opened from global search results.
+  - **Global search jumps to matched message with glow**: clicking a text result in the global sidebar search now calls `jumpToTimestamp(r.timestamp_ms)` after `selectChat` completes, centering the viewport on the matching message. The target bubble glows three times via a new `@keyframes search-glow` CSS animation (`.msg-bubble.search-jump-highlight`). `jumpToTimestamp` now returns the target DOM row.
+  - **Date picker Go button loading state**: the handler is now `async`; `aria-busy="true"` is set while `jumpToTimestamp` runs (Pico renders an inline spinner) and the button is `disabled` to prevent duplicate calls.
+  - **Clickable URLs in messages**: a new `linkify()` function wraps `https?://…` URLs in `<a target="_blank" rel="noopener noreferrer">` anchors, with trailing punctuation stripped. `highlight()` now calls `linkify()` as its base (instead of `esc()`), and the `<mark>` injection regex is updated to skip inside HTML tag attributes so that a search term matching part of a URL cannot corrupt the `href`.
+
 - **`wa_media_archiver.py` — Multiple media source roots (Android)**: `-wa` / `--wa_root` now accepts multiple values by repeating the flag (e.g. `-wa /old-archive -wa /current-phone`). The resolver searches all roots for each file using a collect-then-select strategy: zero-byte placeholders are filtered out; the largest file wins when content differs (best-quality heuristic); identical MD5s are silently deduplicated; same-size different-content ties fall back to the first root. A new `source_conflicts_report.csv` is written when any file resolved differently across roots. The final summary shows per-root hit counts, conflict count, and 0-byte skip count. TOML config accepts both `wa_root = "/path"` and `wa_root = ["/a", "/b"]`.
 
  The archive view (contacts only) mirrors the on-disk folder structure as an expandable year tree split into Received / Sent tabs. Each year node is collapsible with a single click; Expand all / Collapse all buttons control all nodes at once. The toggle is hidden for group chats.
