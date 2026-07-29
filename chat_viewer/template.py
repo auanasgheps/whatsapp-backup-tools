@@ -1754,8 +1754,6 @@ HTML_TEMPLATE = r"""
   });
 
   async function jumpToTimestamp(ts) {
-    noMoreOlder = false;
-    noMoreNewer = false;
     const params = new URLSearchParams({
       chat_id: currentChat.id,
       chat_type: currentChat.type,
@@ -1770,6 +1768,9 @@ HTML_TEMPLATE = r"""
     scroll.innerHTML = '';
     msgList = [];
     domNodes = 0;
+    // Reset after the fetch so any noMoreNewer set during the await is overridden
+    noMoreOlder = false;
+    noMoreNewer = false;
 
     msgs.forEach((m, i) => {
       msgList.push(m);
