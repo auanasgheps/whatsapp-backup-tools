@@ -266,7 +266,7 @@ class TestFtsBuildAndroid:
         archive_conn.close()
 
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._build_fts_index(cache_conn, "android", str(wa_path))
+        viewer._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
         assert len(rows) == 1
@@ -283,7 +283,7 @@ class TestFtsBuildAndroid:
         archive_conn.close()
 
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._build_fts_index(cache_conn, "android", str(wa_path))
+        viewer._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         results = cache_conn.execute("""
             SELECT mi.rowid, mi.chat_id FROM message_index mi
@@ -315,7 +315,7 @@ class TestFtsBuildAndroid:
         archive_conn.close()
 
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._build_fts_index(cache_conn, "android", str(wa_path))
+        viewer._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
         assert len(rows) == 1  # both system events excluded
@@ -454,6 +454,27 @@ class TestFlaskRoutes:
         client, tmp = app_and_tmp
         resp = client.get("/media/../wa_media_archiver.py")
         assert resp.status_code == 403
+
+    def test_media_range_request_returns_slice(self, app_and_tmp):
+        client, tmp = app_and_tmp
+        # Write a known file into the archive root
+        media_file = tmp / "test_video.mp4"
+        media_file.write_bytes(b"0123456789ABCDEF")  # 16 bytes
+
+        resp = client.get("/media/test_video.mp4", headers={"Range": "bytes=4-9"})
+        assert resp.status_code == 206
+        assert resp.data == b"456789"
+        assert resp.headers["Content-Length"] == "6"
+        assert resp.headers["Content-Range"] == "bytes 4-9/16"
+
+    def test_media_range_request_does_not_load_full_file(self, app_and_tmp):
+        client, tmp = app_and_tmp
+        media_file = tmp / "test_video.mp4"
+        media_file.write_bytes(b"0123456789ABCDEF")  # 16 bytes
+
+        resp = client.get("/media/test_video.mp4", headers={"Range": "bytes=0-3"})
+        assert resp.status_code == 206
+        assert len(resp.data) == 4  # must not return full 16 bytes
 
     def test_group_message_sender_resolved_to_name(self, tmp_path):
         """Inbound group message sender should be resolved to the contact display name."""
@@ -717,6 +738,36 @@ class TestLazyIndexing:
                 time.sleep(0.05)
             assert count_after == 1
 
+    def test_concurrent_messages_requests_do_not_double_index(self, tmp_path):
+        import time
+        self._setup(tmp_path)
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # Fire two initial requests before the first indexing completes
+            client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            client.get("/api/messages?chat_id=123456789&chat_type=contact")
+
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if client.get(
+                    "/api/chat-index-status?chat_id=123456789&chat_type=contact"
+                ).get_json()["status"] == "done":
+                    break
+                time.sleep(0.05)
+
+            # Exactly one entry in indexed_chats — not doubled
+            count = sqlite3.connect(
+                str(tmp_path / ".wa_viewer.db")
+            ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            assert count == 1
+
+            # Exactly one indexing run worth of rows in message_index
+            rows = sqlite3.connect(
+                str(tmp_path / ".wa_viewer.db")
+            ).execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
+            assert rows == 1  # matches the single seeded message
+
     def test_chat_index_status_idle_then_done(self, tmp_path):
         self._setup(tmp_path)
         app = viewer.create_app(tmp_path, rescan=False)
@@ -839,6 +890,112 @@ class TestApiMedia:
         data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
         timestamps = [r["timestamp_ms"] for r in data]
         assert timestamps == sorted(timestamps, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Tests: iOS receipt blob parser
+# ---------------------------------------------------------------------------
+
+def _encode_varint(value: int) -> bytes:
+    """Encode a non-negative integer as a protobuf varint."""
+    result = []
+    while True:
+        b = value & 0x7F
+        value >>= 7
+        if value:
+            result.append(b | 0x80)
+        else:
+            result.append(b)
+            break
+    return bytes(result)
+
+
+def _make_receipt_blob(base_ts: int, members: list) -> bytes:
+    """
+    Build a minimal ZRECEIPTINFO blob.
+    members: list of (phone_hex_str, status, delta) tuples
+      - phone_hex_str: digits only (e.g. "447911123456")
+      - status: 1=delivered, 2=read
+      - delta: seconds offset from base_ts
+    """
+    # Field 3, wire 0: base_ts
+    blob = _encode_varint((3 << 3) | 0) + _encode_varint(base_ts)
+
+    for phone, status, delta in members:
+        # Build entry bytes
+        # Field 1, wire 2: phone bytes (prefix 0x00 + ascii digits as raw bytes)
+        phone_bytes = b'\x00' + bytes.fromhex(phone)
+        entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(phone_bytes)) + phone_bytes
+        # Field 4, wire 0: status
+        entry += _encode_varint((4 << 3) | 0) + _encode_varint(status)
+        # Field 5, wire 0: delta
+        entry += _encode_varint((5 << 3) | 0) + _encode_varint(delta)
+        # Field 2, wire 2: the entry
+        blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
+
+    return blob
+
+
+class _NoOpConn:
+    """Minimal connection stub — no contacts to look up."""
+    def execute(self, sql, params=()):
+        return self
+
+    def fetchone(self):
+        return None
+
+
+class TestIosReceiptBlobParser:
+    def test_single_member_delivered(self):
+        base_ts = 1700000000
+        blob = _make_receipt_blob(base_ts, [("34313839383736", 1, 10)])
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn())
+        assert len(members) == 1
+        m = members[0]
+        assert m["delivered_ts"] == (base_ts + 10) * 1000
+        assert m["read_ts"] is None
+
+    def test_single_member_read(self):
+        base_ts = 1700000000
+        blob = _make_receipt_blob(base_ts, [("34313839383736", 2, 20)])
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn())
+        assert len(members) == 1
+        m = members[0]
+        assert m["delivered_ts"] == (base_ts + 20) * 1000
+        assert m["read_ts"] == (base_ts + 20) * 1000
+
+    def test_multiple_members(self):
+        base_ts = 1700000000
+        blob = _make_receipt_blob(base_ts, [
+            ("34313839383736", 2, 5),
+            ("34393837363534", 1, 15),
+        ])
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn())
+        assert len(members) == 2
+        assert members[0]["read_ts"] == (base_ts + 5) * 1000
+        assert members[1]["read_ts"] is None
+        assert members[1]["delivered_ts"] == (base_ts + 15) * 1000
+
+    def test_empty_blob_returns_empty_list(self):
+        members = viewer._parse_ios_receipt_blob(b"", _NoOpConn())
+        assert members == []
+
+    def test_unknown_fixed64_wire_type_is_skipped(self):
+        """A fixed64 field (wire=1) in an entry should be skipped, not abort parsing."""
+        base_ts = 1700000000
+        # Manually build an entry with a spurious fixed64 field before the real fields
+        phone_bytes = b'\x00' + bytes.fromhex("34313839383736")
+        entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(phone_bytes)) + phone_bytes
+        entry += _encode_varint((9 << 3) | 1) + b'\x00' * 8  # unknown field, wire=1 (fixed64)
+        entry += _encode_varint((4 << 3) | 0) + _encode_varint(2)   # status=2
+        entry += _encode_varint((5 << 3) | 0) + _encode_varint(10)  # delta=10
+
+        blob = _encode_varint((3 << 3) | 0) + _encode_varint(base_ts)
+        blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
+
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn())
+        assert len(members) == 1
+        assert members[0]["read_ts"] == (base_ts + 10) * 1000
 
 
 # ---------------------------------------------------------------------------

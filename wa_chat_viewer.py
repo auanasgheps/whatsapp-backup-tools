@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from pathlib import Path
 
@@ -95,6 +96,12 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     value TEXT
 );
 """
+
+VALID_PREF_VALUES = {
+    "theme":       {"dark", "light"},
+    "date_format": {"DD/MM/YYYY", "MM/DD/YYYY", "YYYY/MM/DD"},
+    "font_size":   {"small", "medium", "large"},
+}
 
 # SQL expression that maps a file path (or NULL) to a media_type string.
 # Used in live queries so Python's _media_type_from_path is not needed at serve time.
@@ -206,71 +213,8 @@ def _save_source_stamp(cache_conn: sqlite3.Connection, source_path: str):
 
 
 # ---------------------------------------------------------------------------
-# FTS index build
+# FTS index helpers
 # ---------------------------------------------------------------------------
-
-def _build_fts_index(cache_conn: sqlite3.Connection, source_type: str, wa_db_path: str):
-    wa_conn = sqlite3.connect(wa_db_path)
-    wa_conn.row_factory = sqlite3.Row
-
-    cache_conn.execute("DELETE FROM message_index")
-    cache_conn.execute("DELETE FROM message_index_fts")
-    cache_conn.commit()
-
-    if source_type == "android":
-        _fts_android(wa_conn, cache_conn)
-    else:
-        _fts_ios(wa_conn, cache_conn)
-
-    wa_conn.close()
-    cache_conn.commit()
-    cache_conn.execute("VACUUM")
-    cache_conn.commit()
-
-    count = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
-    print(f"[wa_chat_viewer] FTS index built: {count} messages")
-
-
-def _fts_android(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection):
-    cursor = wa_conn.execute("""
-        SELECT
-            m._id                                                    AS rowid,
-            CASE
-                WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
-                ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
-            END                                                      AS chat_id,
-            CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
-            COALESCE(m.timestamp, 0)                                AS timestamp_ms,
-            COALESCE(m.text_data, '')                               AS text_body,
-            m.message_type,
-            mm.file_path                                            AS media_file
-        FROM message m
-        LEFT JOIN chat c ON c._id = m.chat_row_id
-        LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
-        LEFT JOIN message_media mm ON mm.message_row_id = m._id
-        ORDER BY m.timestamp ASC
-    """)
-    _stream_fts_rows(cursor, cache_conn)
-
-
-def _fts_ios(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection):
-    cursor = wa_conn.execute("""
-        SELECT
-            m.Z_PK                                                      AS rowid,
-            CAST(m.ZCHATSESSION AS TEXT)                               AS chat_id,
-            CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
-                 ELSE 'contact' END                                     AS chat_type,
-            CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
-            COALESCE(m.ZTEXT, '')                                       AS text_body,
-            m.ZMESSAGETYPE                                              AS message_type,
-            mi.ZMEDIALOCALPATH                                          AS media_file
-        FROM ZWAMESSAGE m
-        LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
-        LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
-        ORDER BY m.ZMESSAGEDATE ASC
-    """)
-    _stream_fts_rows(cursor, cache_conn)
-
 
 def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2000):
     idx_sql = """
@@ -291,7 +235,7 @@ def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2
         idx_batch.append((row["rowid"], row["chat_id"], row["chat_type"], row["timestamp_ms"]))
         if text_body:
             fts_batch.append((row["rowid"], text_body))
-        if len(idx_batch) >= chunk_size:
+        if len(idx_batch) >= chunk_size:  # fts_batch <= idx_batch (media-only rows skip FTS)
             cache_conn.executemany(idx_sql, idx_batch)
             if fts_batch:
                 cache_conn.executemany(fts_sql, fts_batch)
@@ -519,6 +463,14 @@ _ANDROID_FILTER = """
 _IOS_CHAT_ID = "CAST(m.ZCHATSESSION AS TEXT)"
 _IOS_CHAT_TYPE = "CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END"
 
+# Raw phone extraction from group-member JID or sender JID — NULL when empty.
+_IOS_SENDER_JID = """CASE WHEN cs.ZGROUPINFO IS NOT NULL
+         THEN NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID,''), 1,
+                            INSTR(COALESCE(gm.ZMEMBERJID,'') || '@', '@') - 1), '')
+         ELSE NULLIF(SUBSTR(COALESCE(m.ZFROMJID,''), 1,
+                            INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1), '')
+    END"""
+
 _IOS_SELECT = f"""
     SELECT
         m.Z_PK                                                       AS msg_id,
@@ -528,20 +480,8 @@ _IOS_SELECT = f"""
         COALESCE(
             NULLIF(con_s.display_name, ''),
             NULLIF(m.ZPUSHNAME, ''),
-            CASE WHEN SUBSTR(COALESCE(
-                         CASE WHEN cs.ZGROUPINFO IS NOT NULL
-                              THEN NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID,''), 1,
-                                         INSTR(COALESCE(gm.ZMEMBERJID,'') || '@', '@') - 1), '')
-                              ELSE NULLIF(SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                                         INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1), '')
-                         END, ''), 1, 1) != ''
-                 THEN '+' || COALESCE(
-                         CASE WHEN cs.ZGROUPINFO IS NOT NULL
-                              THEN NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID,''), 1,
-                                         INSTR(COALESCE(gm.ZMEMBERJID,'') || '@', '@') - 1), '')
-                              ELSE NULLIF(SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                                         INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1), '')
-                         END, '')
+            CASE WHEN SUBSTR(COALESCE(({_IOS_SENDER_JID}), ''), 1, 1) != ''
+                 THEN '+' || ({_IOS_SENDER_JID})
             END,
             ''
         )                                                            AS sender,
@@ -572,13 +512,7 @@ _IOS_SELECT = f"""
     LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
     LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
     LEFT JOIN arch.contacts con_s
-          ON con_s.number = CASE
-              WHEN cs.ZGROUPINFO IS NOT NULL
-              THEN NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID,''), 1,
-                                 INSTR(COALESCE(gm.ZMEMBERJID,'') || '@', '@') - 1), '')
-              ELSE NULLIF(SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                                 INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1), '')
-          END
+          ON con_s.number = ({_IOS_SENDER_JID})
     LEFT JOIN arch.contacts con_sq
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
@@ -599,13 +533,13 @@ _ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type = 0)"
 _IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
 
 
-def _android_chat_filter(chat_id: str, chat_type: str) -> tuple:
+def _android_chat_filter(chat_id: str, chat_type: str) -> tuple[str, list]:
     if chat_type == "group":
         return "m.chat_row_id = CAST(? AS INTEGER)", [chat_id]
     return "j_chat.user = ?", [chat_id]
 
 
-def _ios_chat_filter(chat_id: str) -> tuple:
+def _ios_chat_filter(chat_id: str) -> tuple[str, list]:
     return "m.ZCHATSESSION = CAST(? AS INTEGER)", [chat_id]
 
 
@@ -614,13 +548,15 @@ def _bg_index_chat(cache_db_path: str, source_type: str, wa_db_path: str,
                    state: dict, lock: threading.Lock):
     try:
         cache_conn = sqlite3.connect(cache_db_path)
-        cache_conn.execute("PRAGMA journal_mode = WAL")
-        cache_conn.execute("PRAGMA synchronous = NORMAL")
-        cache_conn.row_factory = sqlite3.Row
-        _build_fts_chat(cache_conn, source_type, wa_db_path, chat_id, chat_type)
-        cache_conn.close()
-    except Exception as e:
-        print(f"[wa_chat_viewer] Background indexing error for {chat_id}: {e}")
+        try:
+            cache_conn.execute("PRAGMA journal_mode = WAL")
+            cache_conn.execute("PRAGMA synchronous = NORMAL")
+            cache_conn.row_factory = sqlite3.Row
+            _build_fts_chat(cache_conn, source_type, wa_db_path, chat_id, chat_type)
+        finally:
+            cache_conn.close()
+    except Exception:
+        print(f"[wa_chat_viewer] Background indexing error for {chat_id}:\n{traceback.format_exc()}")
     finally:
         with lock:
             state[(chat_id, chat_type)] = "done"
@@ -661,8 +597,12 @@ def _parse_ios_receipt_blob(blob: bytes, conn) -> list:
                     status = value
                 elif field == 5:
                     delta = value
+            elif wire == 1:  # 64-bit fixed
+                pos += 8
+            elif wire == 5:  # 32-bit fixed
+                pos += 4
             else:
-                break
+                break  # group wire types (3/4) — cannot skip safely
         phone = ""
         if phone_raw and len(phone_raw) > 1:
             phone = "".join(f"{b:02x}" for b in phone_raw[1:])
@@ -694,8 +634,12 @@ def _parse_ios_receipt_blob(blob: bytes, conn) -> list:
                 break
             if field == 3:
                 base_ts = value
+        elif wire == 1:  # 64-bit fixed
+            pos += 8
+        elif wire == 5:  # 32-bit fixed
+            pos += 4
         else:
-            break
+            break  # group wire types (3/4) — cannot skip safely
 
     members = []
     for entry_bytes in entries:
@@ -759,8 +703,6 @@ def create_app(output_root: Path, rescan: bool = False):
         else:
             count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             print(f"[wa_chat_viewer] {count} chat(s) already indexed")
-
-        wa_conn = None  # kept alive per-thread via _wa_local
 
         _wa_local = threading.local()
 
@@ -1201,8 +1143,10 @@ def create_app(output_root: Path, rescan: bool = False):
         data = request.get_json(force=True)
         key = data.get("key", "")
         value = data.get("value", "")
-        if key not in ("theme", "date_format", "font_size"):
+        if key not in VALID_PREF_VALUES:
             return jsonify({"error": "unknown preference key"}), 400
+        if value not in VALID_PREF_VALUES[key]:
+            return jsonify({"error": f"invalid value for {key}"}), 400
         get_cache().execute(
             "INSERT OR REPLACE INTO user_preferences (key, value) VALUES (?, ?)",
             (key, value),
@@ -1214,13 +1158,11 @@ def create_app(output_root: Path, rescan: bool = False):
 
     @app.route("/media/<path:p>")
     def serve_media(p):
-        safe = get_output_root() / p
         try:
-            safe = safe.resolve()
-            root = get_output_root().resolve()
-        except OSError:
-            return "Invalid path", 400
-        if not str(safe).startswith(str(root)):
+            safe = (output_root / p).resolve()
+            root = output_root.resolve()
+            safe.relative_to(root)
+        except (OSError, ValueError):
             return "Forbidden", 403
         if not safe.exists():
             return "Not found", 404
@@ -1241,7 +1183,9 @@ def create_app(output_root: Path, rescan: bool = False):
                 return "416 Range Not Satisfiable", 416
 
             length = end - start + 1
-            data = safe.read_bytes()[start:end + 1]
+            with open(safe, "rb") as f:
+                f.seek(start)
+                data = f.read(length)
             resp = Response(data, 206)
             resp.headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
             resp.headers["Accept-Ranges"] = "bytes"
@@ -1249,7 +1193,8 @@ def create_app(output_root: Path, rescan: bool = False):
             resp.headers["Content-Type"] = content_type or "application/octet-stream"
             return resp
         else:
-            data = safe.read_bytes()
+            with open(safe, "rb") as f:
+                data = f.read()
             resp = Response(data, 200)
             resp.headers["Content-Length"] = file_size
             resp.headers["Content-Type"] = content_type or "application/octet-stream"
@@ -1257,9 +1202,6 @@ def create_app(output_root: Path, rescan: bool = False):
             return resp
 
     # ---- UI ----------------------------------------------------------------
-
-    def get_output_root():
-        return output_root
 
     @app.route("/")
     def index():
