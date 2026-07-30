@@ -430,7 +430,11 @@ _ANDROID_SELECT = f"""
         m.from_me,
         ac.archive_path,
         CASE
-            WHEN m.message_type IS NULL OR m.message_type = 0 THEN 'text'
+            WHEN m.message_type IS NULL OR m.message_type = 0 THEN
+                CASE WHEN m.text_data IS NOT NULL
+                      AND (INSTR(LOWER(m.text_data), 'http://') > 0
+                           OR INSTR(LOWER(m.text_data), 'https://') > 0)
+                     THEN 'link' ELSE 'text' END
             ELSE {_MEDIA_TYPE_EXPR.format(col='mm.file_path')}
         END                                                          AS media_type,
         COALESCE(mm.media_name, '')                                 AS media_name,
@@ -490,7 +494,11 @@ _IOS_SELECT = f"""
         m.ZISFROMME                                                  AS from_me,
         ac.archive_path,
         CASE
-            WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN 'text'
+            WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
+                CASE WHEN m.ZTEXT IS NOT NULL
+                      AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
+                           OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)
+                     THEN 'link' ELSE 'text' END
             ELSE {_MEDIA_TYPE_EXPR.format(col="('Message/' || COALESCE(mi.ZMEDIALOCALPATH,''))")}
         END                                                          AS media_type,
         COALESCE(mi.ZTITLE, '')                                     AS media_name,
@@ -531,8 +539,36 @@ _IOS_FILTER = """
 
 _ANDROID_TS = "COALESCE(m.timestamp, 0)"
 _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
+
+# Stricter variants used only for first_ts: text arm requires message_type=0 so that
+# group-creation system messages (type=7 with text_data = group name) are excluded.
+_ANDROID_FILTER_TS = """
+    AND (
+        (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
+        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND mm.file_path IS NOT NULL)
+    )
+"""
+_IOS_FILTER_TS = """
+    AND (
+        (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+    )
+"""
 _ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type = 0)"
 _IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+
+_ANDROID_IS_LINK = (
+    "(m.message_type IS NULL OR m.message_type = 0)"
+    " AND m.text_data IS NOT NULL"
+    " AND (INSTR(LOWER(m.text_data), 'http://') > 0"
+    "      OR INSTR(LOWER(m.text_data), 'https://') > 0)"
+)
+_IOS_IS_LINK = (
+    "(m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+    " AND m.ZTEXT IS NOT NULL"
+    " AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0"
+    "      OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)"
+)
 
 
 def _android_chat_filter(chat_id: str, chat_type: str) -> tuple[str, list]:
@@ -975,6 +1011,26 @@ def create_app(output_root: Path, rescan: bool = False):
             rows = conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
         return jsonify([dict(r) for r in rows])
 
+    @app.route("/api/media/links")
+    def api_media_links():
+        chat_id = request.args.get("chat_id", "")
+        chat_type = request.args.get("chat_type", "")
+        conn = get_wa()
+        if conn is None:
+            return jsonify([])
+        select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
+        if source_type == "android":
+            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            is_link = _ANDROID_IS_LINK
+            ts_col = _ANDROID_TS
+        else:
+            chat_pred, chat_params = _ios_chat_filter(chat_id)
+            is_link = _IOS_IS_LINK
+            ts_col = _IOS_TS
+        sql = f"{select} WHERE {chat_pred} AND {is_link} ORDER BY {ts_col} DESC"
+        rows = conn.execute(sql, chat_params).fetchall()
+        return jsonify([dict(r) for r in rows])
+
     # ---- API: media count --------------------------------------------------
 
     @app.route("/api/media/count")
@@ -989,21 +1045,28 @@ def create_app(output_root: Path, rescan: bool = False):
         if source_type == "android":
             chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
             is_media = _ANDROID_IS_MEDIA
+            is_link = _ANDROID_IS_LINK
         else:
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             is_media = _IOS_IS_MEDIA
+            is_link = _IOS_IS_LINK
         rows = conn.execute(
             f"{select} WHERE {chat_pred} {extra} AND {is_media}",
             chat_params
         ).fetchall()
-        total = len(rows)
+        link_rows = conn.execute(
+            f"{select} WHERE {chat_pred} AND {is_link}",
+            chat_params
+        ).fetchall()
+        all_rows = list(rows) + list(link_rows)
+        total = len(all_rows)
         archived = sum(1 for r in rows if r["archive_path"])
         by_type: dict = {}
-        for r in rows:
+        for r in all_rows:
             t = r["media_type"]
             by_type.setdefault(t, {"count": 0, "missing": 0})
             by_type[t]["count"] += 1
-            if not r["archive_path"]:
+            if not r["archive_path"] and t != "link":
                 by_type[t]["missing"] += 1
         return jsonify({"total": total, "archived": archived, "by_type": by_type})
 
@@ -1148,6 +1211,341 @@ def create_app(output_root: Path, rescan: bool = False):
                 result["delivered_ts"] = members[0]["delivered_ts"]
                 result["read_ts"] = members[0]["read_ts"]
             return jsonify(result)
+
+    # ---- API: chat info -------------------------------------------------------
+
+    def _group_members_android(conn, chat_id: str) -> list:
+        """Return [{name, number}] for a group chat using group_participants if available.
+
+        group_participants uses plain JID strings (gjid/jid), not row-id FKs.
+        Rows with an empty jid are the current user's own placeholder — skipped.
+        """
+        try:
+            rows = conn.execute("""
+                SELECT
+                    NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '') AS number,
+                    COALESCE(
+                        NULLIF(con.display_name, ''),
+                        CASE WHEN NULLIF(SUBSTR(gp.jid, 1,
+                                               INSTR(gp.jid || '@', '@') - 1), '') IS NOT NULL
+                             THEN '+' || SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1)
+                        END,
+                        ''
+                    )                                                             AS name
+                FROM group_participants gp
+                JOIN chat c ON c._id = CAST(? AS INTEGER)
+                LEFT JOIN arch.contacts con
+                       ON con.number = NULLIF(SUBSTR(gp.jid, 1,
+                                                     INSTR(gp.jid || '@', '@') - 1), '')
+                WHERE gp.gjid = (SELECT j.raw_string FROM jid j WHERE j._id = c.jid_row_id)
+                  AND gp.jid != ''
+                ORDER BY name
+            """, (chat_id,)).fetchall()
+            return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+        except sqlite3.OperationalError:
+            pass
+        # Fallback: unique senders from message history
+        rows = conn.execute(f"""
+            SELECT DISTINCT
+                COALESCE(j2.user, j.user)                                AS number,
+                COALESCE(
+                    NULLIF(con.display_name, ''),
+                    CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
+                         THEN '+' || COALESCE(j2.user, j.user) END,
+                    ''
+                )                                                        AS name
+            FROM message m
+            JOIN chat c ON c._id = m.chat_row_id
+            LEFT JOIN jid j ON j._id = m.sender_jid_row_id
+            LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = m.sender_jid_row_id
+            LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
+            LEFT JOIN arch.contacts con ON con.number = COALESCE(j2.user, j.user)
+            WHERE m.chat_row_id = CAST(? AS INTEGER)
+              AND m.from_me = 0
+              AND COALESCE(j2.user, j.user) IS NOT NULL
+            ORDER BY name
+        """, (chat_id,)).fetchall()
+        return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+
+    def _group_members_ios(conn, chat_id: str) -> list:
+        """Return [{name, number}] for an iOS group chat from ZWAGROUPMEMBER.
+
+        ZWAGROUPMEMBER rows are referenced per-message via m.ZGROUPMEMBER, so we
+        collect the distinct member PKs that actually appear in this session's messages.
+        """
+        rows = conn.execute("""
+            SELECT DISTINCT
+                NULLIF(SUBSTR(gm.ZMEMBERJID, 1,
+                              INSTR(gm.ZMEMBERJID || '@', '@') - 1), '') AS number,
+                COALESCE(
+                    NULLIF(con.display_name, ''),
+                    CASE WHEN NULLIF(SUBSTR(gm.ZMEMBERJID, 1,
+                                           INSTR(gm.ZMEMBERJID || '@', '@') - 1), '') IS NOT NULL
+                         THEN '+' || SUBSTR(gm.ZMEMBERJID, 1,
+                                            INSTR(gm.ZMEMBERJID || '@', '@') - 1)
+                    END,
+                    gm.ZMEMBERJID
+                )                                                         AS name
+            FROM ZWAMESSAGE m
+            JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+            LEFT JOIN arch.contacts con
+                   ON con.number = NULLIF(SUBSTR(gm.ZMEMBERJID, 1,
+                                                 INSTR(gm.ZMEMBERJID || '@', '@') - 1), '')
+            WHERE m.ZCHATSESSION = CAST(? AS INTEGER)
+              AND m.ZGROUPMEMBER IS NOT NULL
+            ORDER BY name
+        """, (chat_id,)).fetchall()
+        return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+
+    @app.route("/api/chat-info")
+    def api_chat_info():
+        chat_id = request.args.get("chat_id", "")
+        chat_type = request.args.get("chat_type", "")
+
+        cache = get_cache()
+        ts_row = cache.execute(
+            "SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts "
+            "FROM message_index WHERE chat_id = ? AND chat_type = ?",
+            (chat_id, chat_type),
+        ).fetchone()
+        # last_ts from cache is fine; first_ts is recomputed from the live DB when
+        # available because the cache was built with a looser filter that admits
+        # group-creation system messages (type=7 with text_data = group name).
+        last_ts = ts_row["last_ts"] if ts_row else None
+        first_ts = None
+
+        conn = get_wa()
+
+        # Compute first_ts from the live WA DB using the stricter filter that
+        # excludes system messages (type != 0 with text_data).
+        # Also used as fallback when cache is empty (race condition on first open).
+        if conn is not None:
+            if source_type == "android":
+                chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+                live = conn.execute(
+                    f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts"
+                    f" FROM ({_ANDROID_SELECT} WHERE {chat_pred} {_ANDROID_FILTER_TS})",
+                    chat_params,
+                ).fetchone()
+            else:
+                chat_pred, chat_params = _ios_chat_filter(chat_id)
+                live = conn.execute(
+                    f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts"
+                    f" FROM ({_IOS_SELECT} WHERE {chat_pred} {_IOS_FILTER_TS})",
+                    chat_params,
+                ).fetchone()
+            if live:
+                first_ts = live["first_ts"]
+                last_ts = last_ts or live["last_ts"]
+        sent = received = total = None
+
+        display_name = None
+        number = None
+        members = []
+        top_senders = []
+        created_ts = None
+        creator_number = None
+
+        if conn is not None:
+            if source_type == "android":
+                chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+                extra = _ANDROID_FILTER
+                select = _ANDROID_SELECT
+
+                count_row = conn.execute(
+                    f"SELECT COUNT(*) AS total,"
+                    f" SUM(CASE WHEN from_me=1 THEN 1 ELSE 0 END) AS sent,"
+                    f" SUM(CASE WHEN from_me=0 THEN 1 ELSE 0 END) AS received"
+                    f" FROM ({select} WHERE {chat_pred} {extra})",
+                    chat_params,
+                ).fetchone()
+                total = count_row["total"] or 0 if count_row else 0
+                sent = count_row["sent"] or 0 if count_row else 0
+                received = count_row["received"] or 0 if count_row else 0
+
+                if chat_type == "contact":
+                    row = conn.execute("""
+                        SELECT COALESCE(j_real.user, j.user) AS user
+                        FROM chat c
+                        LEFT JOIN jid j ON j._id = c.jid_row_id
+                        LEFT JOIN (
+                            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                            FROM jid_map GROUP BY lid_row_id
+                        ) jm ON jm.lid_row_id = c.jid_row_id
+                        LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+                        WHERE c.subject IS NULL
+                          AND COALESCE(j_real.user, j.user) = ?
+                        LIMIT 1
+                    """, (chat_id,)).fetchone()
+                    number = row["user"] if row else chat_id
+
+                    name_row = conn.execute("""
+                        SELECT COALESCE(NULLIF(con.display_name,''), con.folder) AS name
+                        FROM arch.contacts con
+                        WHERE con.number = ?
+                    """, (chat_id,)).fetchone()
+                    display_name = name_row["name"] if name_row else None
+                else:
+                    members = _group_members_android(conn, chat_id)
+
+                    top_rows = conn.execute(
+                        f"SELECT CASE WHEN from_me=1 THEN 'You' ELSE sender END AS sndr,"
+                        f" COUNT(*) AS cnt FROM ({select} WHERE {chat_pred} {extra})"
+                        f" WHERE from_me=1 OR sender != '' GROUP BY sndr ORDER BY cnt DESC LIMIT 5",
+                        chat_params,
+                    ).fetchall()
+                    top_senders = [{"name": r["sndr"], "count": r["cnt"]} for r in top_rows]
+
+                    grp_row = conn.execute(
+                        "SELECT COALESCE(NULLIF(grp.subject,''), grp.folder) AS name"
+                        " FROM arch.groups grp WHERE grp.chat_row_id = ?",
+                        (chat_id,),
+                    ).fetchone()
+                    display_name = grp_row["name"] if grp_row else None
+
+                    try:
+                        cre_row = conn.execute("""
+                            SELECT c.created_timestamp,
+                                   NULLIF(COALESCE(j_real.user, j.user), '') AS creator
+                            FROM chat c
+                            LEFT JOIN message m
+                                   ON m.chat_row_id = c._id
+                                  AND m.timestamp = c.created_timestamp
+                                  AND m.message_type = 7
+                            LEFT JOIN jid j ON j._id = m.sender_jid_row_id
+                            LEFT JOIN (
+                                SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                                FROM jid_map GROUP BY lid_row_id
+                            ) jm ON jm.lid_row_id = m.sender_jid_row_id
+                            LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+                            WHERE c._id = CAST(? AS INTEGER)
+                            LIMIT 1
+                        """, (chat_id,)).fetchone()
+                        if cre_row:
+                            created_ts = cre_row["created_timestamp"]
+                            creator_number = cre_row["creator"]
+                    except sqlite3.OperationalError:
+                        pass
+
+            else:  # ios
+                chat_pred, chat_params = _ios_chat_filter(chat_id)
+                extra = _IOS_FILTER
+                select = _IOS_SELECT
+
+                count_row = conn.execute(
+                    f"SELECT COUNT(*) AS total,"
+                    f" SUM(CASE WHEN from_me=1 THEN 1 ELSE 0 END) AS sent,"
+                    f" SUM(CASE WHEN from_me=0 THEN 1 ELSE 0 END) AS received"
+                    f" FROM ({select} WHERE {chat_pred} {extra})",
+                    chat_params,
+                ).fetchone()
+                total = count_row["total"] or 0 if count_row else 0
+                sent = count_row["sent"] or 0 if count_row else 0
+                received = count_row["received"] or 0 if count_row else 0
+
+                if chat_type == "contact":
+                    row = conn.execute("""
+                        SELECT
+                            NULLIF(SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                         INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '') AS user,
+                            COALESCE(
+                                NULLIF(con.display_name,''), con.folder,
+                                cs.ZPARTNERNAME
+                            ) AS name
+                        FROM ZWACHATSESSION cs
+                        LEFT JOIN arch.contacts con ON con.number = NULLIF(
+                            SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                   INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '')
+                        WHERE cs.Z_PK = CAST(? AS INTEGER) AND cs.ZGROUPINFO IS NULL
+                    """, (chat_id,)).fetchone()
+                    number = row["user"] if row else None
+                    display_name = row["name"] if row else None
+                else:
+                    members = _group_members_ios(conn, chat_id)
+
+                    top_rows = conn.execute(
+                        f"SELECT CASE WHEN from_me=1 THEN 'You' ELSE sender END AS sndr,"
+                        f" COUNT(*) AS cnt FROM ({select} WHERE {chat_pred} {extra})"
+                        f" WHERE from_me=1 OR sender != '' GROUP BY sndr ORDER BY cnt DESC LIMIT 5",
+                        chat_params,
+                    ).fetchall()
+                    top_senders = [{"name": r["sndr"], "count": r["cnt"]} for r in top_rows]
+
+                    grp_row = conn.execute(
+                        "SELECT COALESCE(NULLIF(grp.subject,''), grp.folder) AS name"
+                        " FROM arch.groups grp WHERE grp.chat_row_id = ?",
+                        (chat_id,),
+                    ).fetchone()
+                    display_name = grp_row["name"] if grp_row else None
+
+                    cre_row = conn.execute("""
+                        SELECT CAST((gi.ZCREATIONDATE + 978307200) * 1000 AS INTEGER) AS created_ms,
+                               NULLIF(SUBSTR(COALESCE(gi.ZCREATORJID,''), 1,
+                                      INSTR(COALESCE(gi.ZCREATORJID,'') || '@', '@') - 1), '') AS creator
+                        FROM ZWACHATSESSION cs
+                        JOIN ZWAGROUPINFO gi ON gi.Z_PK = cs.ZGROUPINFO
+                        WHERE cs.Z_PK = CAST(? AS INTEGER)
+                    """, (chat_id,)).fetchone()
+                    if cre_row:
+                        created_ts = cre_row["created_ms"]
+                        creator_number = cre_row["creator"]
+
+        result = {
+            "display_name": display_name,
+            "number": number,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "sent": sent,
+            "received": received,
+            "total": total,
+        }
+        if chat_type == "group":
+            result["members"] = members
+            result["top_senders"] = top_senders
+            result["created_ts"] = created_ts
+            result["creator_number"] = creator_number
+        return jsonify(result)
+
+    @app.route("/api/chat-info/media-size")
+    def api_chat_info_media_size():
+        chat_id = request.args.get("chat_id", "")
+        chat_type = request.args.get("chat_type", "")
+
+        archive_conn = sqlite3.connect(str(archive_db_path), timeout=5.0)
+        archive_conn.row_factory = sqlite3.Row
+        try:
+            if chat_type == "contact":
+                folder_row = archive_conn.execute(
+                    "SELECT folder FROM contacts WHERE number = ?", (chat_id,)
+                ).fetchone()
+                prefix = f"Contacts/{folder_row['folder']}/" if folder_row else None
+            else:
+                folder_row = archive_conn.execute(
+                    "SELECT folder FROM groups WHERE chat_row_id = ?", (chat_id,)
+                ).fetchone()
+                prefix = f"Groups/{folder_row['folder']}/" if folder_row else None
+
+            if prefix is None:
+                return jsonify({"bytes": 0})
+
+            paths = [
+                r["archive_path"]
+                for r in archive_conn.execute(
+                    "SELECT archive_path FROM archive_copies WHERE archive_path LIKE ?",
+                    (prefix + "%",),
+                ).fetchall()
+            ]
+        finally:
+            archive_conn.close()
+
+        total_bytes = 0
+        for p in paths:
+            full = output_root / p
+            try:
+                total_bytes += full.stat().st_size
+            except OSError:
+                pass
+        return jsonify({"bytes": total_bytes})
 
     # ---- API: index status -------------------------------------------------
 

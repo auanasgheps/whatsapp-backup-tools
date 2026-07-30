@@ -2,6 +2,33 @@
 
 ---
 
+## [dev] — 2026-07-30 (session 3)
+
+### Added
+
+- **`wa_chat_viewer.py` — link detection**: `_ANDROID_IS_LINK` / `_IOS_IS_LINK` predicates detect `message_type=0` rows whose body contains `http://` or `https://`. `_ANDROID_SELECT` / `_IOS_SELECT` now return `media_type='link'` for these rows.
+- **`wa_chat_viewer.py` — `/api/media/links`**: returns all link messages for a chat (unpaginated; no binaries involved). Separate from `/api/media` to avoid contaminating the paginated media stream.
+- **`wa_chat_viewer.py` — `/api/media/count`**: now includes link rows in `total` and `by_type['link']`; links never count as "missing".
+- **`wa_chat_viewer.py` — creator LID fix**: Android group creator query now resolves LID JIDs → real phone numbers via `jid_map`, same as the contact-number lookup.
+- **`chat_viewer/template.py` — Links gallery view**: gallery fetches `/api/media/links` in parallel with the count on open. Link cards span full grid width (`grid-column: 1/-1`), show the URL and sender·date. Links are hidden by default (all other present types are pre-activated in `activeTypes`); clicking the Links pill reveals them.
+- **`tests/test_wa_chat_viewer.py`**: `test_media_count_includes_links`, `test_media_links_endpoint` (regression guard: `/api/media` must never return `media_type='link'` rows).
+
+### Fixed
+
+- **Creator "Created by" showing WhatsApp LID instead of phone number**: Android `message_type=7` sender JID resolved through `jid_map` to get real phone number.
+- **`fmtTs` ReferenceError in `renderGalleryItem`**: `fmtTs` was scoped inside `openChatInfo()`; link card meta now inlines `toLocaleDateString` directly.
+
+
+
+### Added
+
+- **`wa_chat_viewer.py` — `/api/chat-info`**: returns display name, phone number (contacts), conversation first/last timestamps (from `message_index`), sent/received/total message counts. For groups: members list (`group_participants` → unique-senders fallback) and top-5 senders.
+- **`wa_chat_viewer.py` — `/api/chat-info/media-size`**: async filesystem scan; sums `os.path.getsize()` over all `archive_copies` rows for the chat's folder prefix. Returns `{"bytes": N}`.
+- **`chat_viewer/template.py` — Chat info panel**: ℹ button in chat header opens a compact modal with all stats. Media size loads concurrently with main stats (spinner until resolved). "Open Gallery" link switches to gallery view. Closes via ✕, ESC, or backdrop click.
+- **`tests/test_wa_chat_viewer.py`**: 8 new tests covering contact fields, sent/received counts, group members, group_participants fallback, cache-sourced timestamps, media-only mode, and media-size endpoint.
+
+---
+
 ## [dev] — 2026-07-29
 
 ### Added

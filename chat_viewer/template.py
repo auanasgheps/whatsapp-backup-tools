@@ -402,6 +402,18 @@ HTML_TEMPLATE = r"""
     .lb-arrow:disabled { opacity: 0.15; cursor: default; }
     .lb-arrow.prev { left: 16px; }
     .lb-arrow.next { right: 16px; }
+    .lb-path {
+      display: flex; align-items: center; gap: 6px;
+      color: rgba(255,255,255,0.55); font-size: 11px;
+      margin-top: 8px; max-width: 90vw; word-break: break-all; text-align: center;
+    }
+    .lb-copy-btn {
+      flex-shrink: 0; background: none; border: none; color: rgba(255,255,255,0.55);
+      cursor: pointer; font-size: 14px; padding: 2px 4px; border-radius: 3px;
+      transition: color 0.15s; margin: 0; line-height: 1;
+    }
+    .lb-copy-btn:hover { color: #fff; }
+    .lb-copy-btn.copied { color: #4caf50; }
 
     /* ---- scroll-to-bottom ---- */
     #scroll-to-bottom {
@@ -420,10 +432,18 @@ HTML_TEMPLATE = r"""
     #media-btn {
       background: none; border: none;
       color: var(--text-muted); cursor: pointer;
-      font-size: 16px; padding: 4px 6px;
+      font-size: 18px; padding: 4px 6px;
       border-radius: 4px; line-height: 1; margin: 0;
     }
     #media-btn:hover { background: var(--surface2); color: var(--text); }
+    #chat-info-btn {
+      background: none; border: none;
+      color: var(--text-muted); cursor: pointer;
+      font-size: 18px; padding: 4px 6px;
+      border-radius: 4px; line-height: 1; margin: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    #chat-info-btn:hover { background: var(--surface2); color: var(--text); }
 
     #media-gallery {
       position: fixed; inset: 0; background: var(--bg); z-index: 900;
@@ -493,8 +513,28 @@ HTML_TEMPLATE = r"""
       font-size: 12px; color: var(--text-muted);
       display: flex; flex-wrap: wrap; gap: 6px 16px; flex-shrink: 0;
     }
-    .gallery-stat { white-space: nowrap; }
+    .gallery-stat {
+      white-space: nowrap; cursor: pointer; user-select: none;
+      padding: 2px 8px; border-radius: 12px;
+      border: 1px solid transparent;
+      transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+    }
+    .gallery-stat:hover { background: var(--surface2); }
+    .gallery-stat.active { border-color: var(--accent); color: var(--text); }
+    .gallery-stat.dimmed { opacity: 0.4; }
     .gallery-stat-missing { color: var(--text-muted); font-style: italic; }
+    @keyframes gallery-appear {
+      from { opacity: 0; transform: scale(0.88); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+    @keyframes gallery-disappear {
+      from { opacity: 1; transform: scale(1); }
+      to   { opacity: 0; transform: scale(0.88); }
+    }
+    .gallery-item.is-appearing    { animation: gallery-appear    0.18s ease forwards; }
+    .gallery-item.is-disappearing { animation: gallery-disappear 0.15s ease forwards; }
+    .gallery-item.type-hidden { display: none; }
+    .gallery-month-header.month-empty { display: none; }
     #media-gallery-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
@@ -511,6 +551,8 @@ HTML_TEMPLATE = r"""
       background: var(--surface); overflow: hidden; border-radius: 4px;
     }
     .gallery-item img, .gallery-item video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .gallery-video-thumb--err { object-fit: none; opacity: 0.3; }
+    .gallery-video-thumb--err::before { content: '▶'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 32px; opacity: 0.7; }
     .gallery-item .gallery-doc {
       display: flex; flex-direction: column; align-items: center;
       justify-content: center; height: 100%; font-size: 12px;
@@ -523,6 +565,19 @@ HTML_TEMPLATE = r"""
       opacity: 0; transition: opacity 0.15s; margin: 0;
     }
     .gallery-item:hover .gallery-goto { opacity: 1; }
+    .gallery-link-card {
+      grid-column: 1 / -1; height: auto; min-height: 64px;
+      display: flex; flex-direction: column; justify-content: center;
+      padding: 10px 14px; border-radius: 6px;
+      background: var(--surface2); border: 1px solid var(--border);
+      box-sizing: border-box; cursor: pointer;
+    }
+    .gallery-link-url {
+      font-size: 13px; color: var(--accent); text-decoration: none;
+      white-space: normal; overflow-wrap: break-word; word-break: break-all;
+    }
+    .gallery-link-url:hover { text-decoration: underline; }
+    .gallery-link-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 
     /* ---- search results ---- */
     .search-result-item {
@@ -587,16 +642,18 @@ HTML_TEMPLATE = r"""
 
     /* ---- message details icon + popup ---- */
     .msg-info-btn {
-      display: none;
-      font-size: 14px;
+      display: inline;
+      font-size: 16px;
       color: var(--text-muted);
       cursor: pointer;
       user-select: none;
       vertical-align: middle;
-      margin: 0 3px;
+      margin: 0 4px;
       line-height: 1;
+      border-radius: 50%;
+      transition: background 0.15s, color 0.15s;
     }
-    .msg-bubble:hover .msg-info-btn { display: inline; }
+    .msg-info-btn:hover { background: var(--accent); color: #fff; }
 
     #msg-details-popup {
       position: fixed;
@@ -629,6 +686,47 @@ HTML_TEMPLATE = r"""
       padding: 3px 10px; font-size: 12px; cursor: pointer; margin: 0;
     }
     .msg-details-copy-btn:hover { color: var(--text); border-color: var(--accent); }
+
+    /* ---- chat info panel ---- */
+    #chat-info-panel {
+      position: fixed; inset: 0; z-index: 300;
+      background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #chat-info-inner {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      width: 360px; max-width: 92vw;
+      max-height: 80vh; overflow-y: auto;
+      padding: 16px;
+    }
+    #chat-info-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    #chat-info-title { font-weight: 600; font-size: 15px; color: var(--text); }
+    #chat-info-close {
+      background: none; border: none; cursor: pointer;
+      color: var(--text-muted); font-size: 16px; line-height: 1; padding: 2px 4px;
+    }
+    #chat-info-close:hover { color: var(--text); }
+    .chat-info-row {
+      display: flex; gap: 8px; align-items: baseline;
+      padding: 6px 0; border-bottom: 1px solid var(--border);
+      font-size: 13px; color: var(--text);
+    }
+    .chat-info-row:last-child { border-bottom: none; }
+    .chat-info-label { color: var(--text-muted); min-width: 120px; flex-shrink: 0; font-size: 12px; }
+    .chat-info-value { flex: 1; }
+    .chat-info-link { color: var(--accent); cursor: pointer; text-decoration: underline; background: none; border: none; font-size: 13px; padding: 0; }
+    .chat-info-members { margin-top: 6px; }
+    .chat-info-member { font-size: 12px; color: var(--text-muted); padding: 2px 0; }
+    .chat-info-spinner {
+      display: inline-block; width: 10px; height: 10px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+    }
   </style>
 </head>
 <body>
@@ -657,6 +755,7 @@ HTML_TEMPLATE = r"""
       <div id="chat-header" style="display:none;">
         <h2 id="chat-title"></h2>
         <div id="chat-toolbar">
+          <button id="chat-info-btn" title="Chat info">&#8505;</button>
           <button id="media-btn" title="Media">&#128247;</button>
           <button id="toolbar-toggle" title="Search &amp; date">&#128269;</button>
           <div id="toolbar-expanded">
@@ -745,6 +844,16 @@ HTML_TEMPLATE = r"""
   </div>
 </div>
 
+<div id="chat-info-panel" style="display:none;">
+  <div id="chat-info-inner">
+    <div id="chat-info-header">
+      <span id="chat-info-title"></span>
+      <button id="chat-info-close">&#10005;</button>
+    </div>
+    <div id="chat-info-body"></div>
+  </div>
+</div>
+
 <div id="msg-details-popup"></div>
 
 <script>
@@ -814,8 +923,18 @@ HTML_TEMPLATE = r"""
     return d.toLocaleString('default', { month: 'long', year: 'numeric' });
   }
 
+  function activeArchiveDir() {
+    // Returns the selected Sent/Received direction, or null for group chats (no tabs)
+    if (!currentChat || currentChat.type !== 'contact') return null;
+    const active = document.querySelector('.archive-tab.active');
+    return active ? active.dataset.dir : null;
+  }
+
   function archiveSegments(archivePath) {
     const parts = archivePath.split('/');
+    // Contacts/<name>/<year>/Sent|Received/<file>  → parts[0]='Contacts'
+    // Groups/<name>/<year>/<file>                  → parts[0]='Groups'
+    if (parts[0] === 'Groups') return { year: parts[2], direction: null };
     return { year: parts[2], direction: parts[3] };
   }
 
@@ -824,7 +943,7 @@ HTML_TEMPLATE = r"""
     tree.innerHTML = '';
 
     const filtered = items.filter(m => m.archive_path &&
-      archiveSegments(m.archive_path).direction === direction);
+      (direction === null || archiveSegments(m.archive_path).direction === direction));
 
     if (!filtered.length) {
       tree.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
@@ -884,7 +1003,7 @@ HTML_TEMPLATE = r"""
     if (tree.querySelector('div:not(.archive-year)')) tree.innerHTML = '';
 
     const filtered = items.filter(m => m.archive_path &&
-      archiveSegments(m.archive_path).direction === direction);
+      (direction === null || archiveSegments(m.archive_path).direction === direction));
     if (!filtered.length) return;
 
     for (const msg of filtered) {
@@ -1021,7 +1140,7 @@ HTML_TEMPLATE = r"""
   }
 
   const MEDIA_LABELS = {image:'📷 Photo', video:'🎥 Video', audio:'🎵 Voice message',
-                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document'};
+                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link'};
   function chatPreview(chat) {
     const prefix = chat.last_msg_from_me ? 'You: ' : '';
     if (chat.last_msg_type !== 'text') {
@@ -1052,6 +1171,7 @@ HTML_TEMPLATE = r"""
     document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
     el.classList.add('active');
     el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    closeChatInfo();
     currentChat = chat;
     msgList = [];
     noMoreOlder = false;
@@ -1313,7 +1433,7 @@ HTML_TEMPLATE = r"""
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
 
     if (msg.media_type === 'text' || !msg.archive_path) {
-      if (!msg.archive_path && msg.media_type !== 'text') {
+      if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
         const txt = document.createElement('div');
         txt.className = 'msg-text msg-unavailable';
         const icon = msg.media_type === 'image' ? '🖼️' : msg.media_type === 'video' ? '🎥' :
@@ -1363,6 +1483,20 @@ HTML_TEMPLATE = r"""
       vid.preload = 'none';
       vid.src = src;
       wrap.appendChild(vid);
+      // extract first frame as poster so the bubble isn't blank before playback
+      const probe = document.createElement('video');
+      probe.src = src;
+      probe.muted = true;
+      probe.preload = 'metadata';
+      probe.addEventListener('loadeddata', () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = probe.videoWidth;
+        canvas.height = probe.videoHeight;
+        canvas.getContext('2d').drawImage(probe, 0, 0);
+        vid.poster = canvas.toDataURL('image/jpeg', 0.8);
+        probe.src = '';
+      }, { once: true });
+      probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
     } else if (mt === 'audio') {
       const aud = document.createElement('audio');
       aud.controls = true;
@@ -1404,23 +1538,29 @@ HTML_TEMPLATE = r"""
     prevBtn.className = 'lb-arrow prev';
     prevBtn.innerHTML = '&#10094;';
     prevBtn.title = 'Previous';
-    prevBtn.disabled = index === 0;
-    prevBtn.addEventListener('click', e => { e.stopPropagation(); lightboxIndex--; openLightboxAt(lightboxIndex); });
+    prevBtn.disabled = _nextLightboxIndex(index, -1) === -1;
+    prevBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      const i = _nextLightboxIndex(lightboxIndex, -1);
+      if (i !== -1) { lightboxIndex = i; openLightboxAt(lightboxIndex); }
+    });
     lb.appendChild(prevBtn);
 
     const nextBtn = document.createElement('button');
     nextBtn.className = 'lb-arrow next';
     nextBtn.innerHTML = '&#10095;';
     nextBtn.title = 'Next';
-    nextBtn.disabled = index === lightboxItems.length - 1 && galleryAllLoaded;
+    nextBtn.disabled = _nextLightboxIndex(index, 1) === -1 && galleryAllLoaded;
     nextBtn.addEventListener('click', async e => {
       e.stopPropagation();
-      if (lightboxIndex < lightboxItems.length - 1) {
-        lightboxIndex++; openLightboxAt(lightboxIndex);
+      let i = _nextLightboxIndex(lightboxIndex, 1);
+      if (i !== -1) {
+        lightboxIndex = i; openLightboxAt(lightboxIndex);
       } else if (!galleryAllLoaded) {
         const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
         await _loadGalleryPage(oldest);
-        if (lightboxIndex < lightboxItems.length - 1) { lightboxIndex++; openLightboxAt(lightboxIndex); }
+        i = _nextLightboxIndex(lightboxIndex, 1);
+        if (i !== -1) { lightboxIndex = i; openLightboxAt(lightboxIndex); }
       }
     });
     lb.appendChild(nextBtn);
@@ -1441,6 +1581,25 @@ HTML_TEMPLATE = r"""
       media.src = src;
     }
     lb.appendChild(media);
+
+    const pathRow = document.createElement('div');
+    pathRow.className = 'lb-path';
+    const pathText = document.createElement('span');
+    pathText.textContent = msg.archive_path;
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'lb-copy-btn';
+    copyBtn.title = 'Copy path';
+    copyBtn.innerHTML = '&#128203;';
+    copyBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(msg.archive_path).then(() => {
+        copyBtn.classList.add('copied');
+        setTimeout(() => copyBtn.classList.remove('copied'), 1500);
+      });
+    });
+    pathRow.appendChild(pathText);
+    pathRow.appendChild(copyBtn);
+    lb.appendChild(pathRow);
 
     lb.addEventListener('click', e => { if (e.target === lb) lb.remove(); });
     document.body.appendChild(lb);
@@ -1487,6 +1646,7 @@ HTML_TEMPLATE = r"""
     cell.className = 'gallery-item';
     const src = '/media/' + msg.archive_path;
     const mt = msg.media_type;
+    cell.dataset.type = mt;
 
     if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
       const img = document.createElement('img');
@@ -1498,19 +1658,64 @@ HTML_TEMPLATE = r"""
       img.addEventListener('click', () => { lightboxIndex = idx; openLightboxAt(idx); });
       cell.appendChild(img);
     } else if (mt === 'video') {
-      const vid = document.createElement('video');
-      vid.src = src;
-      vid.preload = 'none';
+      const img = document.createElement('img');
+      img.alt = msg.media_name || '';
+      img.className = 'gallery-video-thumb';
       const idx = lightboxItems.length;
       lightboxItems.push(msg);
-      vid.addEventListener('click', () => { lightboxIndex = idx; openLightboxAt(idx); });
-      cell.appendChild(vid);
+      img.addEventListener('click', () => { lightboxIndex = idx; openLightboxAt(idx); });
+      cell.appendChild(img);
+
+      // extract first frame into img; fall back to a muted play icon on error
+      const vid = document.createElement('video');
+      vid.src = src;
+      vid.muted = true;
+      vid.preload = 'metadata';
+      vid.addEventListener('loadeddata', () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = vid.videoWidth;
+        canvas.height = vid.videoHeight;
+        canvas.getContext('2d').drawImage(vid, 0, 0);
+        img.src = canvas.toDataURL('image/jpeg', 0.8);
+        vid.src = '';
+      }, { once: true });
+      vid.addEventListener('error', () => {
+        cell.querySelector('.gallery-video-thumb').classList.add('gallery-video-thumb--err');
+        vid.src = '';
+      }, { once: true });
     } else if (mt === 'audio') {
       const d = document.createElement('div');
       d.className = 'gallery-doc';
       d.innerHTML = '<span style="font-size:28px">🎵</span><span>' + esc(msg.media_name || 'audio') + '</span>';
       d.addEventListener('click', () => window.open(src, '_blank'));
       cell.appendChild(d);
+    } else if (mt === 'link') {
+      const urlMatch = msg.text_body.match(/https?:\/\/[^\s<>"]+/);
+      const url = urlMatch ? urlMatch[0] : msg.text_body;
+      cell.classList.add('gallery-link-card');
+      const a = document.createElement('a');
+      a.className = 'gallery-link-url';
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = url;
+      const meta = document.createElement('div');
+      meta.className = 'gallery-link-meta';
+      meta.textContent = (msg.sender || 'You') + ' · ' + new Date(msg.timestamp_ms).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+      cell.appendChild(a);
+      cell.appendChild(meta);
+      cell.addEventListener('click', e => { if (!e.target.closest('a')) window.open(url, '_blank'); });
+    } else if (mt === 'document') {
+      cell.classList.add('gallery-link-card');
+      const name = document.createElement('div');
+      name.className = 'gallery-link-url';
+      name.textContent = '📄 ' + (msg.media_name || 'file');
+      const meta = document.createElement('div');
+      meta.className = 'gallery-link-meta';
+      meta.textContent = (msg.sender || 'You') + ' · ' + new Date(msg.timestamp_ms).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+      cell.appendChild(name);
+      cell.appendChild(meta);
+      cell.addEventListener('click', () => window.open(src, '_blank'));
     } else {
       const d = document.createElement('div');
       d.className = 'gallery-doc';
@@ -1544,7 +1749,9 @@ HTML_TEMPLATE = r"""
 
     // reset to classic view each time
     archiveViewActive = false;
-    switcher.style.display = currentChat.type === 'contact' ? '' : 'none';
+    switcher.style.display = '';
+    document.getElementById('media-archive-tabs').style.display =
+      currentChat.type === 'contact' ? '' : 'none';
     document.querySelectorAll('.media-view-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
     grid.style.display = '';
     document.getElementById('media-archive-view').classList.remove('active');
@@ -1559,32 +1766,42 @@ HTML_TEMPLATE = r"""
     // reset pagination state
     currentGalleryItems = [];
     lightboxItems = [];
+    activeTypes = new Set();
     galleryAllLoaded = false;
     galleryLoadingMore = false;
     galleryLastMonthKey = null;
 
-    // fetch counts first, then render media
-    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document'];
-    const counts = await fetch('/api/media/count?chat_id=' + encodeURIComponent(currentChat.id) +
-          '&chat_type=' + encodeURIComponent(currentChat.type)).then(r => r.json());
+    // fetch counts and links in parallel, then render media
+    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'link'];
+    const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
+    const [counts, linkItems] = await Promise.all([
+      fetch('/api/media/count?' + qs).then(r => r.json()),
+      fetch('/api/media/links?' + qs).then(r => r.json()),
+    ]);
+    stats.innerHTML = '';
     if (counts.total) {
-      const missing = counts.total - counts.archived;
-      const missingStr = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
-      let html = `<span class="gallery-stat"><strong>${counts.total}</strong> total${missingStr}</span>`;
+      stats.appendChild(_makeStatPill('total', counts.total, null, counts.total - counts.archived));
       for (const t of typeOrder) {
         const d = counts.by_type[t];
         if (!d) continue;
-        const ms = d.missing ? ` <span class="gallery-stat-missing">(${d.missing} missing)</span>` : '';
-        html += `<span class="gallery-stat"><strong>${d.count}</strong> ${t}${ms}</span>`;
+        stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
       }
-      stats.innerHTML = html;
+      // secondary types (links, documents) are hidden by default
+      const hasSecondary = typeOrder.some(t => SECONDARY_TYPES.has(t) && counts.by_type[t]);
+      if (hasSecondary) {
+        typeOrder.filter(t => !SECONDARY_TYPES.has(t) && counts.by_type[t]).forEach(t => activeTypes.add(t));
+        defaultActiveTypes = new Set(activeTypes);
+      } else {
+        defaultActiveTypes = new Set();
+      }
+      _syncStatPills();
     }
 
     grid.innerHTML = '';
 
     await _loadGalleryPage(null);
 
-    if (!currentGalleryItems.length) {
+    if (!currentGalleryItems.length && !linkItems.length) {
       grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
       return;
     }
@@ -1600,6 +1817,15 @@ HTML_TEMPLATE = r"""
       }
     }, { root: grid, threshold: 0.1 });
     galleryObserver.observe(gallerySentinel);
+
+    // append link cards; they start hidden when secondary types are filtered out by default
+    for (const msg of linkItems) {
+      const cell = renderGalleryItem(msg);
+      if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
+        cell.classList.add('type-hidden');
+      }
+      grid.insertBefore(cell, gallerySentinel);
+    }
   }
 
   async function _loadGalleryPage(before) {
@@ -1626,13 +1852,15 @@ HTML_TEMPLATE = r"""
           galleryLastMonthKey = mk;
         }
         const cell = renderGalleryItem(msg);
+        if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
+          cell.classList.add('type-hidden');
+        }
         if (gallerySentinel) grid.insertBefore(cell, gallerySentinel);
         else grid.appendChild(cell);
       }
 
       if (archiveViewActive) {
-        const activeDir = document.querySelector('.archive-tab.active').dataset.dir;
-        _appendToArchiveView(items, activeDir);
+        _appendToArchiveView(items, activeArchiveDir());
       }
     } finally {
       galleryLoadingMore = false;
@@ -1644,28 +1872,161 @@ HTML_TEMPLATE = r"""
   document.addEventListener('keydown', async e => {
     if (document.getElementById('img-lightbox')) {
       if (e.key === 'Escape') { document.getElementById('img-lightbox').remove(); return; }
-      if (e.key === 'ArrowLeft' && lightboxIndex > 0) { lightboxIndex--; openLightboxAt(lightboxIndex); return; }
+      if (e.key === 'ArrowLeft') {
+        const i = _nextLightboxIndex(lightboxIndex, -1);
+        if (i !== -1) { lightboxIndex = i; openLightboxAt(lightboxIndex); }
+        return;
+      }
       if (e.key === 'ArrowRight') {
-        if (lightboxIndex < lightboxItems.length - 1) {
-          lightboxIndex++; openLightboxAt(lightboxIndex);
+        let i = _nextLightboxIndex(lightboxIndex, 1);
+        if (i !== -1) {
+          lightboxIndex = i; openLightboxAt(lightboxIndex);
         } else if (!galleryAllLoaded) {
           const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
           await _loadGalleryPage(oldest);
-          if (lightboxIndex < lightboxItems.length - 1) { lightboxIndex++; openLightboxAt(lightboxIndex); }
+          i = _nextLightboxIndex(lightboxIndex, 1);
+          if (i !== -1) { lightboxIndex = i; openLightboxAt(lightboxIndex); }
         }
         return;
       }
     }
-    if (e.key === 'Escape') closeMediaGallery();
+    if (e.key === 'Escape') {
+      if (document.getElementById('chat-info-panel').style.display !== 'none') {
+        closeChatInfo(); return;
+      }
+      closeMediaGallery();
+    }
   });
 
   let archiveViewActive = false;
   let currentGalleryItems = [];
+  let activeTypes = new Set();   // empty = show all; populated = show only those types
+  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
+  const SECONDARY_TYPES = new Set(['link', 'document']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
   let galleryLoadingMore = false;
   let gallerySentinel = null;
   let galleryObserver = null;
   let galleryLastMonthKey = null;
+
+  function _nextLightboxIndex(from, dir) {
+    let i = from + dir;
+    while (i >= 0 && i < lightboxItems.length) {
+      if (activeTypes.size === 0 || activeTypes.has(lightboxItems[i].media_type)) return i;
+      i += dir;
+    }
+    return -1;
+  }
+
+  function _makeStatPill(label, count, type, missing) {
+    const plurals = { audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links' };
+    const displayLabel = count === 1 ? label : (plurals[label] || label + 's');
+    const span = document.createElement('span');
+    span.className = 'gallery-stat';
+    span.dataset.type = type || 'total';
+    const ms = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
+    span.innerHTML = `<strong>${count}</strong> ${displayLabel}${ms}`;
+    span.addEventListener('click', () => _toggleTypeFilter(type));
+    return span;
+  }
+
+  function _toggleTypeFilter(type) {
+    if (type === null) {
+      // Total: toggle between show-all and the default media-only state
+      if (activeTypes.size === 0) {
+        activeTypes = new Set(defaultActiveTypes);
+      } else {
+        activeTypes.clear();
+      }
+    } else if (SECONDARY_TYPES.has(type) && defaultActiveTypes.size > 0) {
+      // Secondary type (link, document): toggle exclusive ↔ default state
+      if (activeTypes.has(type)) {
+        activeTypes = new Set(defaultActiveTypes);
+      } else {
+        activeTypes = new Set([type]);
+      }
+    } else if (activeTypes.size === 0) {
+      // No filter active → first click is exclusive
+      activeTypes.add(type);
+    } else if (activeTypes.has(type)) {
+      // Already selected → deselect; if nothing left, restore default
+      activeTypes.delete(type);
+      if (activeTypes.size === 0) activeTypes = new Set(defaultActiveTypes);
+    } else {
+      // Different type → add to selection
+      activeTypes.add(type);
+    }
+    _applyTypeFilter();
+    _syncStatPills();
+  }
+
+  function _applyTypeFilter() {
+    const items = document.querySelectorAll(
+      '#media-gallery-grid .gallery-item, #media-archive-view .gallery-item'
+    );
+    items.forEach(cell => {
+      const shouldHide = activeTypes.size > 0 && !activeTypes.has(cell.dataset.type);
+      const isHidden   = cell.classList.contains('type-hidden');
+      if (shouldHide && !isHidden) {
+        cell.classList.remove('is-appearing');
+        cell.classList.add('is-disappearing');
+        cell.addEventListener('animationend', () => {
+          cell.classList.remove('is-disappearing');
+          cell.classList.add('type-hidden');
+          _syncMonthHeaders();
+        }, { once: true });
+      } else if (!shouldHide && isHidden) {
+        cell.classList.remove('type-hidden');
+        cell.classList.remove('is-disappearing');
+        requestAnimationFrame(() => {
+          cell.classList.add('is-appearing');
+          cell.addEventListener('animationend', () => {
+            cell.classList.remove('is-appearing');
+            _syncMonthHeaders();
+          }, { once: true });
+        });
+      }
+    });
+  }
+
+  function _syncMonthHeaders() {
+    document.querySelectorAll('.gallery-month-header').forEach(hdr => {
+      let el = hdr.nextElementSibling;
+      let hasVisible = false;
+      while (el && !el.classList.contains('gallery-month-header')) {
+        if (el.classList.contains('gallery-item') && !el.classList.contains('type-hidden')) {
+          hasVisible = true;
+          break;
+        }
+        el = el.nextElementSibling;
+      }
+      hdr.classList.toggle('month-empty', !hasVisible);
+    });
+    document.querySelectorAll('.archive-year').forEach(block => {
+      const visible = block.querySelectorAll('.gallery-item:not(.type-hidden)').length;
+      block.querySelector('.archive-year-count').textContent = visible;
+    });
+  }
+
+  function _syncStatPills() {
+    const filtered = activeTypes.size > 0;
+    document.querySelectorAll('#media-gallery-stats .gallery-stat').forEach(pill => {
+      const t = pill.dataset.type;
+      // secondary types (links, docs) are never archived — hide their pills in archive view
+      if (archiveViewActive && t !== 'total' && SECONDARY_TYPES.has(t)) {
+        pill.style.display = 'none';
+        return;
+      }
+      pill.style.display = '';
+      if (t === 'total') {
+        pill.classList.toggle('active', !filtered);
+        pill.classList.remove('dimmed');
+      } else {
+        pill.classList.toggle('active', filtered && activeTypes.has(t));
+        pill.classList.toggle('dimmed', filtered && !activeTypes.has(t));
+      }
+    });
+  }
 
   document.querySelectorAll('.media-view-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1674,9 +2035,14 @@ HTML_TEMPLATE = r"""
       archiveViewActive = btn.dataset.view === 'archive';
       document.getElementById('media-gallery-grid').style.display = archiveViewActive ? 'none' : '';
       document.getElementById('media-archive-view').classList.toggle('active', archiveViewActive);
+      // if the active filter is secondary-types-only, those items don't exist in archive view — reset to default
+      if (archiveViewActive && activeTypes.size > 0 && [...activeTypes].every(t => SECONDARY_TYPES.has(t))) {
+        activeTypes = new Set(defaultActiveTypes);
+      }
+      _syncStatPills();
       if (archiveViewActive) {
-        const activeDir = document.querySelector('.archive-tab.active').dataset.dir;
-        buildArchiveView(currentGalleryItems, activeDir);
+        buildArchiveView(currentGalleryItems, activeArchiveDir());
+        if (activeTypes.size > 0) { _applyTypeFilter(); } else { _syncMonthHeaders(); }
       }
     });
   });
@@ -1686,6 +2052,7 @@ HTML_TEMPLATE = r"""
       document.querySelectorAll('.archive-tab').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       buildArchiveView(currentGalleryItems, btn.dataset.dir);
+      if (activeTypes.size > 0) { _applyTypeFilter(); } else { _syncMonthHeaders(); }
     });
   });
 
@@ -2005,6 +2372,177 @@ HTML_TEMPLATE = r"""
       clearChatSearch();
       document.getElementById('chat-search-input').value = '';
     }
+  });
+
+  // ---- chat info panel -------------------------------------------------------
+
+  function _formatBytes(bytes) {
+    if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+    if (bytes >= 1048576)    return (bytes / 1048576).toFixed(1) + ' MB';
+    if (bytes >= 1024)       return (bytes / 1024).toFixed(1) + ' KB';
+    return bytes + ' B';
+  }
+
+  function _infoRow(label, valueNode) {
+    const row = document.createElement('div');
+    row.className = 'chat-info-row';
+    const lbl = document.createElement('span');
+    lbl.className = 'chat-info-label';
+    lbl.textContent = label;
+    row.appendChild(lbl);
+    const val = document.createElement('span');
+    val.className = 'chat-info-value';
+    if (typeof valueNode === 'string') {
+      val.textContent = valueNode;
+    } else {
+      val.appendChild(valueNode);
+    }
+    row.appendChild(val);
+    return { row, val };
+  }
+
+  function _spinner() {
+    const s = document.createElement('span');
+    s.className = 'chat-info-spinner';
+    return s;
+  }
+
+  function closeChatInfo() {
+    document.getElementById('chat-info-panel').style.display = 'none';
+  }
+
+  async function openChatInfo() {
+    if (!currentChat) return;
+    const panel = document.getElementById('chat-info-panel');
+    const title = document.getElementById('chat-info-title');
+    const body  = document.getElementById('chat-info-body');
+
+    title.textContent = currentChat.display_name || '';
+    body.innerHTML = '';
+
+    // Show loading skeleton
+    const loadingRow = document.createElement('div');
+    loadingRow.className = 'chat-info-row';
+    loadingRow.appendChild(_spinner());
+    body.appendChild(loadingRow);
+    panel.style.display = 'flex';
+
+    const params = new URLSearchParams({ chat_id: currentChat.id, chat_type: currentChat.type });
+    const chatAtOpen = currentChat;
+
+    // Kick off both requests in parallel
+    let info, sizeData;
+    try {
+      const [infoResp, sizeResp] = await Promise.all([
+        fetch('/api/chat-info?' + params),
+        fetch('/api/chat-info/media-size?' + params),
+      ]);
+      info = await infoResp.json();
+      sizeData = await sizeResp.json();
+    } catch (_) {
+      if (currentChat === chatAtOpen && panel.style.display !== 'none') {
+        body.innerHTML = '<div class="chat-info-row" style="color:var(--text-muted)">Could not load chat info.</div>';
+      }
+      return;
+    }
+
+    // Panel may have been closed or chat switched while awaiting
+    if (currentChat !== chatAtOpen || panel.style.display === 'none') return;
+
+    body.innerHTML = '';
+
+    const fmtTs = ts => ts ? new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
+    const fmtNum = n => (n === null || n === undefined || n < 0) ? '—' : n.toLocaleString();
+
+    if (currentChat.type === 'contact' && info.number) {
+      body.appendChild(_infoRow('Phone', '+' + info.number).row);
+    }
+
+    if (currentChat.type === 'group' && info.created_ts) {
+      body.appendChild(_infoRow('Group created', fmtTs(info.created_ts)).row);
+      if (info.creator_number) {
+        const match = (info.members || []).find(m => m.number === info.creator_number);
+        const creatorName = (match && match.name) ? match.name : '+' + info.creator_number;
+        body.appendChild(_infoRow('Created by', creatorName).row);
+      }
+    }
+
+    body.appendChild(_infoRow('Conversation since', fmtTs(info.first_ts)).row);
+
+    if (info.first_ts && info.last_ts && info.last_ts !== info.first_ts) {
+      const days = Math.round((info.last_ts - info.first_ts) / 86400000);
+      const years = Math.floor(days / 365);
+      const months = Math.floor((days % 365) / 30);
+      let span = '';
+      if (years > 0) span += years + (years === 1 ? ' year' : ' years');
+      if (months > 0) span += (span ? ', ' : '') + months + (months === 1 ? ' month' : ' months');
+      if (!span) span = days + (days === 1 ? ' day' : ' days');
+      body.appendChild(_infoRow('Duration', span).row);
+    }
+
+    if (currentChat.type === 'contact') {
+      const sentReceived = document.createElement('span');
+      sentReceived.textContent = fmtNum(info.sent) + ' sent · ' + fmtNum(info.received) + ' received';
+      body.appendChild(_infoRow('Messages', sentReceived).row);
+    } else {
+      body.appendChild(_infoRow('Total messages', fmtNum(info.total)).row);
+    }
+
+    // Gallery link row
+    const galleryLink = document.createElement('button');
+    galleryLink.className = 'chat-info-link';
+    galleryLink.textContent = 'Open Media Gallery →';
+    galleryLink.addEventListener('click', () => { closeChatInfo(); openMediaGallery(); });
+    body.appendChild(_infoRow('Media', galleryLink).row);
+
+    // Media size row (already resolved since we awaited both)
+    body.appendChild(_infoRow('Media size', _formatBytes(sizeData.bytes || 0)).row);
+
+    // Group members
+    if (currentChat.type === 'group' && info.members && info.members.length > 0) {
+      const SHOW = 10;
+      const membersWrap = document.createElement('div');
+      membersWrap.className = 'chat-info-members';
+      const renderMember = m => {
+        const el = document.createElement('div');
+        el.className = 'chat-info-member';
+        const numSuffix = m.number && ('+' + m.number) !== m.name ? ' (+' + m.number + ')' : '';
+        el.textContent = (m.name || m.number || '?') + numSuffix;
+        return el;
+      };
+      info.members.slice(0, SHOW).forEach(m => membersWrap.appendChild(renderMember(m)));
+      if (info.members.length > SHOW) {
+        const more = document.createElement('button');
+        more.className = 'chat-info-link';
+        more.style.marginTop = '4px';
+        const remaining = info.members.length - SHOW;
+        more.textContent = '+ ' + remaining + ' more…';
+        more.addEventListener('click', () => {
+          info.members.slice(SHOW).forEach(m => membersWrap.insertBefore(renderMember(m), more));
+          more.remove();
+        });
+        membersWrap.appendChild(more);
+      }
+      body.appendChild(_infoRow('Members (' + info.members.length + ')', membersWrap).row);
+    }
+
+    // Top senders
+    if (currentChat.type === 'group' && info.top_senders && info.top_senders.length > 0) {
+      const sendersWrap = document.createElement('div');
+      info.top_senders.forEach(s => {
+        const el = document.createElement('div');
+        el.className = 'chat-info-member';
+        el.textContent = (s.name || '?') + ': ' + s.count.toLocaleString();
+        sendersWrap.appendChild(el);
+      });
+      body.appendChild(_infoRow('Top senders', sendersWrap).row);
+    }
+  }
+
+  document.getElementById('chat-info-btn').addEventListener('click', openChatInfo);
+  document.getElementById('chat-info-close').addEventListener('click', closeChatInfo);
+  document.getElementById('chat-info-panel').addEventListener('click', e => {
+    if (e.target === document.getElementById('chat-info-panel')) closeChatInfo();
   });
 
   // ---- message details popup ------------------------------------------------
