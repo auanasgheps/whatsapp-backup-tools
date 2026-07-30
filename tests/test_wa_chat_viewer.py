@@ -1010,6 +1010,60 @@ class TestApiMedia:
         assert data["archived"] == 0
         assert data["by_type"]["image"]["missing"] == 1
 
+    def test_media_count_includes_links(self, tmp_path):
+        """/api/media/count includes link-text messages and merges them into total."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+        seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
+        # add a link message (type=0, text contains https URL)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (50, 10, 0, 1700000050000, 'check this out https://example.com/page', NULL)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+        assert data["total"] == 2  # 1 image + 1 link
+        assert data["archived"] == 1  # only the image is archived
+        assert data["by_type"]["link"]["count"] == 1
+        assert data["by_type"]["link"]["missing"] == 0  # links have no archive concept
+        assert data["by_type"]["image"]["count"] == 1
+
+    def test_media_links_endpoint(self, tmp_path):
+        """/api/media/links returns link rows; /api/media never returns them."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+        seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (51, 10, 1, 1700000051000, 'see http://example.org/thing', NULL)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            links = client.get("/api/media/links?chat_id=123456789&chat_type=contact").get_json()
+            media = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
+        # links endpoint returns the link row
+        assert len(links) == 1
+        assert links[0]["media_type"] == "link"
+        assert "http://example.org/thing" in links[0]["text_body"]
+        # /api/media must NOT contain any link rows — regression guard
+        assert all(r["media_type"] != "link" for r in media)
+        # /api/media still returns the image
+        assert any(r["media_type"] == "image" for r in media)
 
 
 def _encode_varint(value: int) -> bytes:
@@ -1156,3 +1210,202 @@ class TestHtmlTemplate:
         assert 'lightboxItems.push' not in fn_body, (
             "_loadGalleryPage must not push to lightboxItems — renderGalleryItem handles that"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: /api/chat-info and /api/chat-info/media-size
+# ---------------------------------------------------------------------------
+
+def _make_android_app(tmp_path, seed_fn=None):
+    wa_path = tmp_path / "msgstore.db"
+    archive_path = tmp_path / ".wa_media_archiver.db"
+    wa_conn = make_android_db(wa_path)
+    archive_conn = make_archive_db(archive_path)
+    seed_android_db(wa_conn, archive_conn)
+    if seed_fn:
+        seed_fn(wa_conn, archive_conn, tmp_path)
+    wa_conn.close()
+    archive_conn.close()
+    app = viewer.create_app(tmp_path, rescan=False)
+    app.config["TESTING"] = True
+    return app
+
+
+class TestChatInfo:
+    def test_contact_returns_expected_fields(self, tmp_path):
+        app = _make_android_app(tmp_path)
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=123456789&chat_type=contact")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["number"] == "123456789"
+        assert "first_ts" in data
+        assert "last_ts" in data
+        assert data["sent"] is not None
+        assert data["received"] is not None
+        assert data["total"] is not None
+        assert "members" not in data
+        assert "top_senders" not in data
+
+    def test_contact_sent_received_counts(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        # Add a sent message to the same chat
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (2, 10, 1, NULL, 1700000001000, 'Reply', 0)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=123456789&chat_type=contact").get_json()
+        assert data["sent"] == 1
+        assert data["received"] == 1
+        assert data["total"] == 2
+
+    def test_group_returns_members_and_top_senders(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Set up a group chat
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (10, 20, 0, 3, 1700000000001, 'Hi group', 0)"
+        )
+        wa_conn.commit()
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('987654321', 'Bob (00987654321)', 'Bob')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('20', 'Test Group', 'Test Group')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=20&chat_type=group").get_json()
+
+        assert "members" in data
+        assert "top_senders" in data
+        assert data["total"] == 1
+        assert data["number"] is None
+        # top senders should list Bob
+        assert any(s["name"] == "Bob" for s in data["top_senders"])
+
+    def test_group_no_participants_table_falls_back_to_senders(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (10, 20, 0, 3, 1700000000001, 'Hi group', 0)"
+        )
+        wa_conn.commit()
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('987654321', 'Bob (00987654321)', 'Bob')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('20', 'Test Group', 'Test Group')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        # Note: group_participants table is NOT created in make_android_db, so the fallback path is exercised
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=20&chat_type=group").get_json()
+
+        assert "members" in data
+        assert isinstance(data["members"], list)
+
+    def test_first_ts_comes_from_cache(self, tmp_path):
+        """first_ts / last_ts are derived from message_index (cache), not live DB."""
+        app = _make_android_app(tmp_path)
+        # Seed the cache by opening messages (triggers background indexing)
+        import time
+        with app.test_client() as client:
+            client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if client.get(
+                    "/api/chat-index-status?chat_id=123456789&chat_type=contact"
+                ).get_json()["status"] == "done":
+                    break
+                time.sleep(0.05)
+            data = client.get("/api/chat-info?chat_id=123456789&chat_type=contact").get_json()
+        assert data["first_ts"] == 1700000000000
+        assert data["last_ts"] == 1700000000000
+
+    def test_media_only_mode_returns_null_counts(self, tmp_path):
+        """Without a WA source DB, counts are null and first_ts comes from cache."""
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('123456789', 'Alice', 'Alice')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=123456789&chat_type=contact").get_json()
+        assert data["sent"] is None
+        assert data["received"] is None
+        assert data["total"] is None
+
+    def test_media_size_returns_bytes(self, tmp_path):
+        """media-size sums file sizes for the chat folder."""
+        def seed_media(wa_conn, archive_conn, tmp_path):
+            seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
+            # Reorganise the archive copy to use the proper Contacts/ prefix
+            archive_conn.execute("DELETE FROM archive_copies")
+            archive_path = "Contacts/Alice (00123456789)/2023/Received/photo.jpg"
+            media_dir = tmp_path / "Contacts" / "Alice (00123456789)" / "2023" / "Received"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            (media_dir / "photo.jpg").write_bytes(b"\xff\xd8\xff" * 100)  # ~300 bytes
+            archive_conn.execute(
+                "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Images/photo.jpg', ?)",
+                (archive_path,),
+            )
+            archive_conn.commit()
+
+        app = _make_android_app(tmp_path, seed_fn=seed_media)
+        with app.test_client() as client:
+            data = client.get(
+                "/api/chat-info/media-size?chat_id=123456789&chat_type=contact"
+            ).get_json()
+        assert "bytes" in data
+        assert data["bytes"] > 0
+
+    def test_media_size_zero_when_no_files(self, tmp_path):
+        app = _make_android_app(tmp_path)
+        with app.test_client() as client:
+            data = client.get(
+                "/api/chat-info/media-size?chat_id=123456789&chat_type=contact"
+            ).get_json()
+        assert data["bytes"] == 0
