@@ -24,11 +24,13 @@ import webbrowser
 from pathlib import Path
 
 try:
-    from flask import Flask, Response, g, jsonify, render_template_string, request
+    from flask import Flask, Response, g, jsonify, render_template_string, request, send_from_directory
 except ImportError:
     sys.exit("Flask is not installed. Run: pip install flask")
 
 from chat_viewer.template import HTML_TEMPLATE
+
+_CHAT_VIEWER_DIR = Path(__file__).parent / "chat_viewer"
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -570,6 +572,20 @@ _IOS_IS_LINK = (
     "      OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)"
 )
 
+# Documents that were never downloaded to the phone (no file_path / no archive_path).
+# These are non-text messages whose media_type resolves to 'document' in _MEDIA_TYPE_EXPR,
+# but lack a local file path so they are excluded from _ANDROID_FILTER and api_media.
+_ANDROID_IS_DOCUMENT_UNDOWNLOADED = (
+    "NOT (m.message_type IS NULL OR m.message_type = 0)"
+    " AND mm.file_path IS NULL"
+    " AND mm.media_name IS NOT NULL AND mm.media_name != ''"
+)
+_IOS_IS_DOCUMENT_UNDOWNLOADED = (
+    "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+    " AND mi.ZMEDIALOCALPATH IS NULL"
+    " AND mi.ZTITLE IS NOT NULL AND mi.ZTITLE != ''"
+)
+
 
 def _android_chat_filter(chat_id: str, chat_type: str) -> tuple[str, list]:
     if chat_type == "group":
@@ -1031,6 +1047,26 @@ def create_app(output_root: Path, rescan: bool = False):
         rows = conn.execute(sql, chat_params).fetchall()
         return jsonify([dict(r) for r in rows])
 
+    @app.route("/api/media/documents")
+    def api_media_documents():
+        chat_id = request.args.get("chat_id", "")
+        chat_type = request.args.get("chat_type", "")
+        conn = get_wa()
+        if conn is None:
+            return jsonify([])
+        select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
+        if source_type == "android":
+            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            is_doc = _ANDROID_IS_DOCUMENT_UNDOWNLOADED
+            ts_col = _ANDROID_TS
+        else:
+            chat_pred, chat_params = _ios_chat_filter(chat_id)
+            is_doc = _IOS_IS_DOCUMENT_UNDOWNLOADED
+            ts_col = _IOS_TS
+        sql = f"{select} WHERE {chat_pred} AND {is_doc} ORDER BY {ts_col} DESC"
+        rows = conn.execute(sql, chat_params).fetchall()
+        return jsonify([dict(r) for r in rows])
+
     # ---- API: media count --------------------------------------------------
 
     @app.route("/api/media/count")
@@ -1046,10 +1082,12 @@ def create_app(output_root: Path, rescan: bool = False):
             chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
             is_media = _ANDROID_IS_MEDIA
             is_link = _ANDROID_IS_LINK
+            is_doc_undownloaded = _ANDROID_IS_DOCUMENT_UNDOWNLOADED
         else:
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             is_media = _IOS_IS_MEDIA
             is_link = _IOS_IS_LINK
+            is_doc_undownloaded = _IOS_IS_DOCUMENT_UNDOWNLOADED
         rows = conn.execute(
             f"{select} WHERE {chat_pred} {extra} AND {is_media}",
             chat_params
@@ -1058,16 +1096,24 @@ def create_app(output_root: Path, rescan: bool = False):
             f"{select} WHERE {chat_pred} AND {is_link}",
             chat_params
         ).fetchall()
-        all_rows = list(rows) + list(link_rows)
+        doc_rows = conn.execute(
+            f"{select} WHERE {chat_pred} AND {is_doc_undownloaded}",
+            chat_params
+        ).fetchall()
+        all_rows = list(rows) + list(doc_rows) + list(link_rows)
         total = len(all_rows)
         archived = sum(1 for r in rows if r["archive_path"])
         by_type: dict = {}
-        for r in all_rows:
+        for r in rows:
             t = r["media_type"]
             by_type.setdefault(t, {"count": 0, "missing": 0})
             by_type[t]["count"] += 1
-            if not r["archive_path"] and t != "link":
+            if not r["archive_path"]:
                 by_type[t]["missing"] += 1
+        for r in list(doc_rows) + list(link_rows):
+            t = r["media_type"]
+            by_type.setdefault(t, {"count": 0, "missing": 0})
+            by_type[t]["count"] += 1
         return jsonify({"total": total, "archived": archived, "by_type": by_type})
 
     # ---- API: search -------------------------------------------------------
@@ -1219,6 +1265,8 @@ def create_app(output_root: Path, rescan: bool = False):
 
         group_participants uses plain JID strings (gjid/jid), not row-id FKs.
         Rows with an empty jid are the current user's own placeholder — skipped.
+        Falls through to the message-history fallback when group_participants is
+        missing or returns no rows for this group's gjid.
         """
         try:
             rows = conn.execute("""
@@ -1241,9 +1289,11 @@ def create_app(output_root: Path, rescan: bool = False):
                   AND gp.jid != ''
                 ORDER BY name
             """, (chat_id,)).fetchall()
-            return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
-        except sqlite3.OperationalError:
-            pass
+            if rows:
+                return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
         # Fallback: unique senders from message history
         rows = conn.execute(f"""
             SELECT DISTINCT
@@ -1637,6 +1687,16 @@ def create_app(output_root: Path, rescan: bool = False):
             resp.headers["Content-Type"] = content_type or "application/octet-stream"
             resp.headers["Accept-Ranges"] = "bytes"
             return resp
+
+    # ---- static assets --------------------------------------------------------
+
+    @app.route("/static/app.css")
+    def serve_app_css():
+        return send_from_directory(_CHAT_VIEWER_DIR, "app.css")
+
+    @app.route("/static/app.js")
+    def serve_app_js():
+        return send_from_directory(_CHAT_VIEWER_DIR, "app.js")
 
     # ---- UI ----------------------------------------------------------------
 
