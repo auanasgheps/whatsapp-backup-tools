@@ -1174,15 +1174,16 @@ class TestIosReceiptBlobParser:
 
 class TestHtmlTemplate:
     def test_all_getElementById_targets_exist_before_script(self):
-        """Every getElementById('id') in the <script> block must refer to an
-        element defined in the HTML *before* the script tag.  A missing or
-        late-placed element causes a TypeError that silently kills the entire
-        IIFE, preventing chats from loading."""
+        """Every getElementById('id') in app.js must refer to an element defined
+        in the HTML before the external script tag.  A missing or late-placed
+        element causes a TypeError that silently kills the entire IIFE."""
         template = viewer.HTML_TEMPLATE
 
         script_start = template.index("<script>")
         html_before_script = template[:script_start]
-        script_body = template[script_start:]
+
+        app_js_path = Path(_ROOT) / "chat_viewer" / "app.js"
+        script_body = app_js_path.read_text(encoding="utf-8")
 
         ids_in_html = set(re.findall(r'\bid=["\']([^"\']+)["\']', html_before_script))
         ids_accessed = set(re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)", script_body))
@@ -1197,8 +1198,8 @@ class TestHtmlTemplate:
     def test_load_gallery_page_does_not_push_lightbox_items(self):
         """renderGalleryItem owns lightboxItems.push — _loadGalleryPage must not do it
         too or every item ends up double-counted, breaking lightbox indices."""
-        template = viewer.HTML_TEMPLATE
-        script = template[template.index('<script>'):]
+        app_js_path = Path(_ROOT) / "chat_viewer" / "app.js"
+        script = app_js_path.read_text(encoding="utf-8")
 
         # isolate the _loadGalleryPage function body
         fn_start = script.index('async function _loadGalleryPage(')
