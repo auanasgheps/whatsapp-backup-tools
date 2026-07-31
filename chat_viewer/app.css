@@ -587,7 +587,8 @@
     }
     .gallery-link-url {
       font-size: 13px; color: var(--accent); text-decoration: none;
-      white-space: normal; overflow-wrap: break-word; word-break: break-all;
+      display: block; min-width: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .gallery-link-url:hover { text-decoration: underline; }
     .gallery-link-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
@@ -656,13 +657,20 @@
 
     /* ---- message details icon + popup ---- */
     .msg-info-btn {
-      display: inline;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: none;
+      background: none;
       font-size: 16px;
       color: var(--text-muted);
       cursor: pointer;
       user-select: none;
       vertical-align: middle;
-      margin: 0 4px;
+      margin: 0 2px;
       line-height: 1;
       border-radius: 50%;
       transition: background 0.15s, color 0.15s;

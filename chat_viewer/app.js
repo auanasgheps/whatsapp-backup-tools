@@ -870,6 +870,7 @@
       const a = document.createElement('a');
       a.className = 'gallery-link-url';
       a.href = url;
+      a.title = url;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
       a.textContent = url;
