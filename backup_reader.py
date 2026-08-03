@@ -200,8 +200,8 @@ def extract_plaintext(backup_dir: str,
         if manifest_map.get('ContactsV2.sqlite'):
             logger.info("Extracting ContactsV2.sqlite from backup...")
             tmp_contacts = extract_to_temp(manifest_map, 'ContactsV2.sqlite', logger)
-            atexit.register(os.unlink, tmp_contacts)
-            ios_contacts_path = tmp_contacts
+            ios_contacts_path = _save_db_to_output(tmp_contacts, output_dir, 'ContactsV2.sqlite', logger)
+            os.unlink(tmp_contacts)
         else:
             logger.warning("ContactsV2.sqlite not found in backup; proceeding without contacts.")
 
@@ -277,8 +277,8 @@ def extract_encrypted(backup_dir: str,
             backup.extract_file(relative_path='ContactsV2.sqlite',
                                 domain_like=domain_like,
                                 output_filename=tmp_contacts.name)
-            atexit.register(os.unlink, tmp_contacts.name)
-            ios_contacts_path = tmp_contacts.name
+            ios_contacts_path = _save_db_to_output(tmp_contacts.name, output_dir, 'ContactsV2.sqlite', logger)
+            os.unlink(tmp_contacts.name)
             logger.info("Decrypted ContactsV2.sqlite.")
         except FileNotFoundError:
             logger.warning("ContactsV2.sqlite not found in encrypted backup; proceeding without contacts.")

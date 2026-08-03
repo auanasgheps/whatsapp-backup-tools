@@ -683,6 +683,7 @@
     closeBtn.title = 'Close';
     closeBtn.addEventListener('click', () => _closeLb());
     lb.appendChild(closeBtn);
+    const prevBtn = document.createElement('button');
     prevBtn.className = 'lb-arrow prev';
     prevBtn.innerHTML = '&#10094;';
     prevBtn.title = 'Previous';
@@ -757,6 +758,10 @@
 
   function showLightbox(src, mt, msg) {
     document.getElementById('img-lightbox')?.remove();
+
+    const lb = document.createElement('div');
+    lb.id = 'img-lightbox';
+    lb.className = 'img-lightbox';
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'lb-close';
