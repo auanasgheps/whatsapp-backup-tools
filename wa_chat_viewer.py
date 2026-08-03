@@ -486,8 +486,11 @@ _IOS_SELECT = f"""
         {_IOS_CHAT_TYPE}                                             AS chat_type,
         CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)         AS timestamp_ms,
         COALESCE(
+            NULLIF(ic_s.full_name, ''),
             NULLIF(con_s.display_name, ''),
-            NULLIF(m.ZPUSHNAME, ''),
+            NULLIF(cs_lid.ZPARTNERNAME, ''),
+            NULLIF(pp_lid.ZPUSHNAME, ''),
+            CASE WHEN gm.ZMEMBERJID NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
             CASE WHEN SUBSTR(COALESCE(({_IOS_SENDER_JID}), ''), 1, 1) != ''
                  THEN '+' || ({_IOS_SENDER_JID})
             END,
@@ -522,6 +525,9 @@ _IOS_SELECT = f"""
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
     LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+    LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = gm.ZMEMBERJID
+    LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = gm.ZMEMBERJID
+    LEFT JOIN _ios_contacts ic_s ON ic_s.jid = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
     LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
     LEFT JOIN arch.contacts con_s
           ON con_s.number = ({_IOS_SENDER_JID})
@@ -616,8 +622,21 @@ def _bg_index_chat(cache_db_path: str, source_type: str, wa_db_path: str,
             state[(chat_id, chat_type)] = "done"
 
 
-def _parse_ios_receipt_blob(blob: bytes, conn) -> list:
-    """Parse ZWAMESSAGEINFO.ZRECEIPTINFO protobuf into a list of member receipt dicts."""
+def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s: int = 0) -> list:
+    """Parse ZWAMESSAGEINFO.ZRECEIPTINFO protobuf into a list of member receipt dicts.
+
+    Two blob formats exist:
+
+    Old format (pre-2026): top-level field 3 = base_ts (Unix seconds).
+      - 1-to-1: per-entry status always 0; base_ts = delivered, base_ts + max(delta) = read.
+      - Group: per-entry field 4 = status (1=delivered, 2=read), field 5 = delta seconds.
+
+    New format (2026+): no top-level field 3; field 2 entries contain field 9 sub-entries
+    encoding (delta_minutes, event_type) offsets from message send time (msg_ts_s).
+      - event_type 1 = delivered, 3 = read.
+      - Collapse across all device entries: take the delta for each event type.
+      - Group: same structure but one field-2 entry per member; field 2 sub-field = JID string.
+    """
     def _read_varint(data, pos):
         result = 0
         shift = 0
@@ -630,7 +649,21 @@ def _parse_ios_receipt_blob(blob: bytes, conn) -> list:
             shift += 7
         return result, pos
 
+    def _skip_field(data, pos, wire):
+        if wire == 2:
+            length, pos = _read_varint(data, pos)
+            return pos + length
+        if wire == 0:
+            _, pos = _read_varint(data, pos)
+            return pos
+        if wire == 1:
+            return pos + 8
+        if wire == 5:
+            return pos + 4
+        return pos  # group wire types: cannot skip, caller should stop
+
     def _parse_member_entry(data):
+        """Old-format entry: field1=phone bytes, field4=status, field5=delta_s."""
         pos = 0
         phone_raw = None
         status = 0
@@ -639,29 +672,88 @@ def _parse_ios_receipt_blob(blob: bytes, conn) -> list:
             tag_byte, pos = _read_varint(data, pos)
             field = tag_byte >> 3
             wire = tag_byte & 0x07
-            if wire == 2:  # length-delimited
+            if wire == 2:
                 length, pos = _read_varint(data, pos)
                 value = data[pos:pos + length]
                 pos += length
                 if field == 1:
                     phone_raw = value
-            elif wire == 0:  # varint
+            elif wire == 0:
                 value, pos = _read_varint(data, pos)
                 if field == 4:
                     status = value
                 elif field == 5:
                     delta = value
-            elif wire == 1:  # 64-bit fixed
+            elif wire == 1:
                 pos += 8
-            elif wire == 5:  # 32-bit fixed
+            elif wire == 5:
                 pos += 4
             else:
-                break  # group wire types (3/4) — cannot skip safely
+                break
         phone = ""
         if phone_raw and len(phone_raw) > 1:
             phone = "".join(f"{b:02x}" for b in phone_raw[1:])
         return phone, status, delta
 
+    def _parse_new_entry(data):
+        """New-format entry: field1=phone bytes (same encoding as old format),
+        field9 sub-entries = (delta_minutes, event_type) offsets from msg_ts_s.
+        Returns (phone_str, delivered_delta_s, read_delta_s) where deltas are in seconds.
+        event_type 1=delivered, 3=read.
+        """
+        pos = 0
+        phone = ""
+        delivered_delta = None
+        read_delta = None
+        while pos < len(data):
+            tag_byte, pos = _read_varint(data, pos)
+            field = tag_byte >> 3
+            wire = tag_byte & 0x07
+            if wire == 2:
+                length, pos = _read_varint(data, pos)
+                value = data[pos:pos + length]
+                pos += length
+                if field == 1:
+                    # phone bytes: hex-encode bytes after the 0x8C prefix byte,
+                    # strip trailing 'f' padding nibble for odd-length numbers
+                    if len(value) > 1:
+                        s = "".join(f"{b:02x}" for b in value[1:])
+                        phone = s[:-1] if s.endswith("f") else s
+                elif field == 9:
+                    # (delta_seconds, event_type) pair
+                    # event_type >= 1 = delivered; event_type == 3 = read
+                    try:
+                        p2 = 0
+                        ds, ev = 0, 0
+                        while p2 < len(value):
+                            tb2, p2 = _read_varint(value, p2)
+                            f2, w2 = tb2 >> 3, tb2 & 0x07
+                            if w2 == 0:
+                                v2, p2 = _read_varint(value, p2)
+                                if f2 == 1:
+                                    ds = v2
+                                elif f2 == 2:
+                                    ev = v2
+                            else:
+                                p2 = _skip_field(value, p2, w2)
+                        ds_s = ds * 60
+                        if ev >= 1 and ev != 3 and (delivered_delta is None or ds_s < delivered_delta):
+                            delivered_delta = ds_s
+                        elif ev == 3 and (read_delta is None or ds_s < read_delta):
+                            read_delta = ds_s
+                    except Exception:
+                        pass
+            elif wire == 0:
+                _, pos = _read_varint(data, pos)
+            elif wire == 1:
+                pos += 8
+            elif wire == 5:
+                pos += 4
+            else:
+                break
+        return phone, delivered_delta, read_delta
+
+    # --- parse top-level blob ---
     base_ts = None
     entries = []
     pos = 0
@@ -688,12 +780,91 @@ def _parse_ios_receipt_blob(blob: bytes, conn) -> list:
                 break
             if field == 3:
                 base_ts = value
-        elif wire == 1:  # 64-bit fixed
+        elif wire == 1:
             pos += 8
-        elif wire == 5:  # 32-bit fixed
+        elif wire == 5:
             pos += 4
         else:
-            break  # group wire types (3/4) — cannot skip safely
+            break
+
+    # --- new format: no base_ts, entries use field9 delta_seconds offsets ---
+    if base_ts is None and entries and msg_ts_s:
+        if not is_group:
+            # Collapse all device entries — take min delivered delta, min read delta
+            delivered_delta = None
+            read_delta = None
+            for entry_bytes in entries:
+                try:
+                    _, dd, rd = _parse_new_entry(entry_bytes)
+                    if dd is not None and (delivered_delta is None or dd < delivered_delta):
+                        delivered_delta = dd
+                    if rd is not None and (read_delta is None or rd < read_delta):
+                        read_delta = rd
+                except Exception:
+                    continue
+            if delivered_delta is None and read_delta is None:
+                return []
+            return [{
+                "name": "",
+                "jid": "",
+                "delivered_ts": (msg_ts_s + delivered_delta) * 1000 if delivered_delta is not None else None,
+                "read_ts": (msg_ts_s + read_delta) * 1000 if read_delta is not None else None,
+                "played_ts": None,
+            }]
+        else:
+            members = []
+            for entry_bytes in entries:
+                try:
+                    phone, dd, rd = _parse_new_entry(entry_bytes)
+                except Exception:
+                    continue
+                name = phone
+                if phone:
+                    # Try _ios_contacts first (covers @lid numbers from address book)
+                    lid_jid = f"{phone}@lid"
+                    row = conn.execute(
+                        "SELECT full_name FROM _ios_contacts WHERE jid = ?", (lid_jid,)
+                    ).fetchone()
+                    if row and row[0]:
+                        name = row[0]
+                    else:
+                        row = conn.execute(
+                            "SELECT display_name FROM arch.contacts WHERE number = ?", (phone,)
+                        ).fetchone()
+                        if row and row[0]:
+                            name = row[0]
+                # delta=0 for delivered means the entry was written at send time as a
+                # placeholder, not an actual delivery confirmation — suppress it.
+                members.append({
+                    "name": name or phone or "",
+                    "jid": phone or "",
+                    "delivered_ts": (msg_ts_s + dd) * 1000 if dd else None,
+                    "read_ts": (msg_ts_s + rd) * 1000 if rd is not None else None,
+                    "played_ts": None,
+                })
+            return members
+
+    # --- old format ---
+    if not is_group:
+        # 1-to-1: per-entry status always 0; base_ts = delivered, base_ts + max(delta) = read.
+        # Multiple entries when recipient uses multiple devices — collapse to one result.
+        if not base_ts:
+            return []
+        deltas = []
+        for entry_bytes in entries:
+            try:
+                _, _, delta = _parse_member_entry(entry_bytes)
+                deltas.append(delta)
+            except Exception:
+                continue
+        max_delta = max(deltas) if deltas else 0
+        return [{
+            "name": "",
+            "jid": "",
+            "delivered_ts": base_ts * 1000,
+            "read_ts": (base_ts + max_delta) * 1000 if max_delta else None,
+            "played_ts": None,
+        }]
 
     members = []
     for entry_bytes in entries:
@@ -703,12 +874,10 @@ def _parse_ios_receipt_blob(blob: bytes, conn) -> list:
             continue
         delivered_ts = None
         read_ts = None
-        if base_ts and delta:
-            ts_s = base_ts + delta
-            if status >= 1:
-                delivered_ts = ts_s * 1000
-            if status >= 2:
-                read_ts = ts_s * 1000
+        if base_ts and delta and status >= 1:
+            delivered_ts = (base_ts + delta) * 1000
+        if base_ts and delta and status >= 2:
+            read_ts = (base_ts + delta) * 1000
 
         name = phone
         if phone:
@@ -777,6 +946,27 @@ def create_app(output_root: Path, rescan: bool = False):
                     FROM jid_map GROUP BY lid_row_id
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS _jid_map_resolved_lid ON _jid_map_resolved(lid_row_id)")
+            if source_type == "ios":
+                contacts_v2 = Path(wa_db_path).parent / "ContactsV2.sqlite"
+                if contacts_v2.exists():
+                    conn.execute("ATTACH DATABASE ? AS cv", (str(contacts_v2),))
+                    conn.execute("""
+                        CREATE TEMP TABLE IF NOT EXISTS _ios_contacts AS
+                        SELECT ZLID AS jid, ZFULLNAME AS full_name
+                            FROM cv.ZWAADDRESSBOOKCONTACT
+                            WHERE ZLID IS NOT NULL AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''
+                        UNION ALL
+                        SELECT ZWHATSAPPID, ZFULLNAME
+                            FROM cv.ZWAADDRESSBOOKCONTACT
+                            WHERE ZWHATSAPPID IS NOT NULL AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''
+                    """)
+                else:
+                    conn.execute(
+                        "CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT, full_name TEXT)"
+                    )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS _ios_contacts_jid ON _ios_contacts(jid)"
+                )
             _wa_local.conn = conn
         return conn
 
@@ -1244,14 +1434,39 @@ def create_app(output_root: Path, rescan: bool = False):
                 return jsonify({"available": False})
 
             row = conn.execute(
-                "SELECT ZRECEIPTINFO FROM ZWAMESSAGEINFO WHERE ZMESSAGE = ?",
+                """SELECT mi.ZRECEIPTINFO,
+                          cs.ZGROUPINFO IS NOT NULL AS is_group,
+                          CAST(m.ZMESSAGEDATE + 978307200 AS INTEGER) AS msg_ts_s,
+                          m.ZCHATSESSION AS chat_session_pk
+                   FROM ZWAMESSAGEINFO mi
+                   JOIN ZWAMESSAGE m ON m.Z_PK = mi.ZMESSAGE
+                   JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+                   WHERE mi.ZMESSAGE = ?""",
                 (message_id,)
             ).fetchone()
             if not row or not row[0]:
                 return jsonify({"available": False})
 
             blob = bytes(row[0])
-            members = _parse_ios_receipt_blob(blob, conn)
+            members = _parse_ios_receipt_blob(
+                blob, conn, is_group=bool(row[1]), msg_ts_s=row[2] or 0
+            )
+
+            # Filter out the user's own entry: blobs include a self-receipt for the
+            # sender's own devices, but that JID never appears as a ZWAGROUPMEMBER.
+            if bool(row[1]) and members:
+                known_jids = {
+                    r[0].split("@")[0]
+                    for r in conn.execute(
+                        """SELECT DISTINCT gm.ZMEMBERJID
+                           FROM ZWAMESSAGE m
+                           JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+                           WHERE m.ZCHATSESSION = ?
+                             AND gm.ZMEMBERJID IS NOT NULL""",
+                        (row["chat_session_pk"],)
+                    ).fetchall()
+                }
+                members = [m for m in members if m["jid"] in known_jids]
             result = {"available": True, "members": members}
             if len(members) == 1:
                 result["delivered_ts"] = members[0]["delivered_ts"]
