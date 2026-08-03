@@ -664,6 +664,7 @@
     if (!lb) return;
     lb.classList.add('is-closing');
     lb.addEventListener('animationend', () => lb.remove(), { once: true });
+    setTimeout(() => lb.isConnected && lb.remove(), 300);
   }
 
   function openLightboxAt(index) {
