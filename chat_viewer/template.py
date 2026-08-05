@@ -131,6 +131,19 @@ HTML_TEMPLATE = r"""
         <button class="pref-btn" data-pref="font_size" data-value="large">Large</button>
       </div>
     </div>
+    <div class="settings-section">
+      <div class="settings-label">Database</div>
+      <div class="settings-row" style="flex-direction:column;gap:8px;align-items:flex-start">
+        <button id="index-all-btn" class="pref-btn">Index all chats for search</button>
+        <div id="index-all-progress" style="display:none;width:100%">
+          <div class="index-progress-bar-wrap">
+            <div id="index-progress-bar" class="index-progress-bar"></div>
+          </div>
+          <div id="index-progress-label" class="index-progress-label"></div>
+        </div>
+        <button id="clear-index-btn" class="pref-btn">Clear search index</button>
+      </div>
+    </div>
   </div>
 </div>
 
