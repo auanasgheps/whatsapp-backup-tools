@@ -425,6 +425,7 @@ _ANDROID_SELECT = f"""
         COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
         COALESCE(
             NULLIF(con_s.display_name, ''),
+            CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
             CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
                  THEN '+' || COALESCE(j2.user, j.user) END,
             ''
@@ -1014,6 +1015,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         NULLIF(con.display_name, ''),
                         con.folder,
                         grp.subject,
+                        CASE WHEN COALESCE(j_chat_real.user, j_chat.user) = '0' THEN 'WhatsApp' END,
                         CASE WHEN COALESCE(j_chat_real.user, j_chat.user) IS NOT NULL
                              THEN '+' || COALESCE(j_chat_real.user, j_chat.user)
                              ELSE CAST(c._id AS TEXT) END
@@ -1395,6 +1397,7 @@ def create_app(output_root: Path, rescan: bool = False):
                        COALESCE(j_real.raw_string, j.raw_string) AS jid,
                        COALESCE(j_real.user, j.user)             AS phone,
                        COALESCE(con.display_name, con2.display_name,
+                                CASE WHEN COALESCE(j_real.user, j.user) = '0' THEN 'WhatsApp' END,
                                 CASE WHEN COALESCE(j_real.user, j.user) IS NOT NULL
                                      THEN '+' || COALESCE(j_real.user, j.user)
                                 END,
@@ -1653,7 +1656,12 @@ def create_app(output_root: Path, rescan: bool = False):
                         FROM arch.contacts con
                         WHERE con.number = ?
                     """, (chat_id,)).fetchone()
-                    display_name = name_row["name"] if name_row else None
+                    if name_row and name_row["name"]:
+                        display_name = name_row["name"]
+                    elif chat_id == '0':
+                        display_name = 'WhatsApp'
+                    else:
+                        display_name = None
                 else:
                     members = _group_members_android(conn, chat_id)
 
