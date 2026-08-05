@@ -582,7 +582,7 @@
         const icon = msg.media_type === 'image' ? '🖼️' : msg.media_type === 'video' ? '🎥' :
                      msg.media_type === 'audio' ? '🎵' : msg.media_type === 'sticker' ? '🩹' :
                      msg.media_type === 'gif' ? '🎞️' : '📄';
-        txt.textContent = icon + ' ' + (msg.text_body || 'Media not available');
+        txt.innerHTML = esc(icon) + ' ' + linkify(msg.text_body || 'Media not available');
         bubble.appendChild(txt);
       } else {
         const txt = document.createElement('div');

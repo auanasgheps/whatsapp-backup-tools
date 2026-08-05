@@ -57,9 +57,11 @@ HTML_TEMPLATE = r"""
             <span id="chat-search-count"></span>
             <button class="nav-btn" id="search-next" title="Next">&#8681;</button>
           </div>
-          <input id="date-picker-input" type="date" title="Jump to date">
-          <button id="date-go-btn">Go</button>
-          <button id="date-clear-btn">Clear</button>
+          <div id="date-group">
+            <input id="date-picker-input" type="date" title="Jump to date">
+            <button id="date-go-btn">Go</button>
+            <button id="date-clear-btn">Clear</button>
+          </div>
         </div>
       </div>
       <div id="message-scroll"></div>
