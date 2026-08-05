@@ -209,10 +209,102 @@
     return result;
   }
 
+  function waFormat(text) {
+    if (!text) return '';
+
+    // 1. Extract ``` code blocks — protect from any inner formatting
+    const codeBlocks = [];
+    text = text.replace(/```([\s\S]*?)```/g, (_, content) => {
+      codeBlocks.push(content);
+      return '\x00CB' + (codeBlocks.length - 1) + '\x00';
+    });
+
+    // 2. Split on URLs so they bypass formatting but still become links
+    const urlRe = /https?:\/\/[^\s<>"]+/g;
+    const parts = [];
+    let last = 0;
+    let m;
+    while ((m = urlRe.exec(text)) !== null) {
+      if (m.index > last) parts.push({ type: 'text', val: text.slice(last, m.index) });
+      let url = m[0].replace(/[.,;:!?)\\]'"]+$/, '');
+      parts.push({ type: 'url', val: url });
+      last = m.index + m[0].length;
+      urlRe.lastIndex = last;
+    }
+    if (last < text.length) parts.push({ type: 'text', val: text.slice(last) });
+
+    // 3. Format each non-URL segment
+    const codespans = [];
+    const formatted = parts.map(p => {
+      if (p.type === 'url') {
+        const u = esc(p.val);
+        return '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + u + '</a>';
+      }
+      let s = esc(p.val);
+
+      // Protect inline code spans from inner formatting
+      s = s.replace(/`([^`]+)`/g, (_, inner) => {
+        codespans.push(inner);
+        return '\x00CS' + (codespans.length - 1) + '\x00';
+      });
+
+      // Inline: bold *text*, italic _text_, strikethrough ~text~
+      // Markers must touch non-space on both inner sides
+      s = s.replace(/\*(\S(?:[^*]*\S)?)\*/g, '<strong>$1</strong>');
+      s = s.replace(/_(\S(?:[^_]*\S)?)_/g, '<em>$1</em>');
+      s = s.replace(/~(\S(?:[^~]*\S)?)~/g, '<s>$1</s>');
+
+      // Restore inline code spans
+      s = s.replace(/\x00CS(\d+)\x00/g, (_, i) => '<code>' + esc(codespans[+i]) + '</code>');
+
+      // Block-level: process line by line
+      const lines = s.split('\n');
+      let inUl = false, inOl = false;
+      const out = [];
+      for (let i = 0; i < lines.length; i++) {
+        let ln = lines[i];
+        const next = lines[i + 1];
+
+        if (/^###\s/.test(ln))      { closeLists(); out.push('<h3>' + ln.slice(4) + '</h3>'); continue; }
+        if (/^##\s/.test(ln))       { closeLists(); out.push('<h2>' + ln.slice(3) + '</h2>'); continue; }
+        if (/^#\s/.test(ln))        { closeLists(); out.push('<h1>' + ln.slice(2) + '</h1>'); continue; }
+        if (/^&gt;\s?/.test(ln))    { closeLists(); out.push('<blockquote>' + ln.replace(/^&gt;\s?/, '') + '</blockquote>'); continue; }
+
+        if (/^[-*]\s/.test(ln)) {
+          if (!inUl) { inUl = true; out.push('<ul>'); }
+          out.push('<li>' + ln.slice(2) + '</li>');
+          if (!next || !/^[-*]\s/.test(next)) { inUl = false; out.push('</ul>'); }
+          continue;
+        }
+        if (/^\d+\.\s/.test(ln)) {
+          if (!inOl) { inOl = true; out.push('<ol>'); }
+          out.push('<li>' + ln.replace(/^\d+\.\s/, '') + '</li>');
+          if (!next || !/^\d+\.\s/.test(next)) { inOl = false; out.push('</ol>'); }
+          continue;
+        }
+
+        closeLists();
+        out.push(ln);
+      }
+      closeLists();
+      return out.join('<br>');
+
+      function closeLists() {
+        if (inUl) { inUl = false; out.push('</ul>'); }
+        if (inOl) { inOl = false; out.push('</ol>'); }
+      }
+    }).join('');
+
+    // 4. Restore code blocks
+    return formatted.replace(/\x00CB(\d+)\x00/g, (_, i) =>
+      '<pre><code>' + esc(codeBlocks[+i]) + '</code></pre>'
+    );
+  }
+
   function highlight(text, q) {
-    if (!q || !text) return linkify(text || '');
+    if (!q || !text) return waFormat(text || '');
     const words = q.trim().split(/\s+/);
-    let result = linkify(text);
+    let result = waFormat(text);
     for (const w of words) {
       const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
       result = result.replace(/(<[^>]+>)|([^<]+)/g, (_, tag, txt) =>
@@ -582,7 +674,7 @@
         const icon = msg.media_type === 'image' ? '🖼️' : msg.media_type === 'video' ? '🎥' :
                      msg.media_type === 'audio' ? '🎵' : msg.media_type === 'sticker' ? '🩹' :
                      msg.media_type === 'gif' ? '🎞️' : '📄';
-        txt.innerHTML = esc(icon) + ' ' + linkify(msg.text_body || 'Media not available');
+        txt.innerHTML = esc(icon) + ' ' + highlight(msg.text_body || 'Media not available', '');
         bubble.appendChild(txt);
       } else {
         const txt = document.createElement('div');

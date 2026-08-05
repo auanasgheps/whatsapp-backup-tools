@@ -326,7 +326,21 @@
     .msg-text { font-size: var(--font-size); line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
     .msg-text a, .msg-caption a { overflow: visible; color: var(--accent); }
     .msg-unavailable { color: var(--text-muted); font-style: italic; }
-    .msg-caption { font-size: var(--font-size); line-height: 1.4; margin-top: 4px; }
+    .msg-caption { font-size: var(--font-size); line-height: 1.4; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+
+    .msg-text strong, .msg-caption strong { font-weight: 700; }
+    .msg-text em,     .msg-caption em     { font-style: italic; }
+    .msg-text s,      .msg-caption s      { text-decoration: line-through; }
+    .msg-text code,   .msg-caption code   { font-family: monospace; font-size: 0.9em; background: var(--code-bg, rgba(0,0,0,.07)); border-radius: 3px; padding: 0 3px; }
+    .msg-text pre,    .msg-caption pre    { font-family: monospace; font-size: 0.9em; white-space: pre-wrap; word-break: break-all; background: var(--code-bg, rgba(0,0,0,.07)); border-radius: 4px; padding: 6px 8px; margin: 4px 0; }
+    .msg-text pre code, .msg-caption pre code { background: none; padding: 0; }
+    .msg-text blockquote, .msg-caption blockquote { border-left: 3px solid var(--accent); margin: 2px 0 2px 4px; padding-left: 8px; opacity: 0.8; }
+    .msg-text h1, .msg-text h2, .msg-text h3, .msg-caption h1, .msg-caption h2, .msg-caption h3 { font-weight: 700; margin: 0; line-height: 1.4; }
+    .msg-text h1, .msg-caption h1 { font-size: 1.15em; }
+    .msg-text h2, .msg-caption h2 { font-size: 1.07em; }
+    .msg-text h3, .msg-caption h3 { font-size: 1em; }
+    .msg-text ul, .msg-text ol, .msg-caption ul, .msg-caption ol { margin: 2px 0 2px 1.2em; padding: 0; }
+    .msg-text li, .msg-caption li { margin: 0; }
     .msg-meta { font-size: 10px; color: var(--text-muted); text-align: right; margin-top: 2px; }
 
     .msg-row.sent .msg-meta { color: rgba(17,27,33,0.5); }

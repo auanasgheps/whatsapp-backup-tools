@@ -1013,9 +1013,9 @@ def create_app(output_root: Path, rescan: bool = False):
                          ELSE 'contact' END                            AS type,
                     COALESCE(
                         NULLIF(con.display_name, ''),
+                        CASE WHEN COALESCE(j_chat_real.user, j_chat.user) = '0' THEN 'WhatsApp' END,
                         con.folder,
                         grp.subject,
-                        CASE WHEN COALESCE(j_chat_real.user, j_chat.user) = '0' THEN 'WhatsApp' END,
                         CASE WHEN COALESCE(j_chat_real.user, j_chat.user) IS NOT NULL
                              THEN '+' || COALESCE(j_chat_real.user, j_chat.user)
                              ELSE CAST(c._id AS TEXT) END
@@ -1047,11 +1047,11 @@ def create_app(output_root: Path, rescan: bool = False):
                          ELSE 'contact' END                            AS type,
                     COALESCE(
                         NULLIF(con.display_name, ''),
-                        con.folder,
-                        grp.subject,
                         CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) = '0'
                              THEN 'WhatsApp' END,
+                        con.folder,
+                        grp.subject,
                         cs.ZPARTNERNAME,
                         CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) != ''
@@ -1656,10 +1656,10 @@ def create_app(output_root: Path, rescan: bool = False):
                         FROM arch.contacts con
                         WHERE con.number = ?
                     """, (chat_id,)).fetchone()
-                    if name_row and name_row["name"]:
-                        display_name = name_row["name"]
-                    elif chat_id == '0':
+                    if chat_id == '0':
                         display_name = 'WhatsApp'
+                    elif name_row and name_row["name"]:
+                        display_name = name_row["name"]
                     else:
                         display_name = None
                 else:
@@ -1726,10 +1726,11 @@ def create_app(output_root: Path, rescan: bool = False):
                             NULLIF(SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '') AS user,
                             COALESCE(
-                                NULLIF(con.display_name,''), con.folder,
+                                NULLIF(con.display_name,''),
                                 CASE WHEN NULLIF(SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '') = '0'
                                      THEN 'WhatsApp' END,
+                                con.folder,
                                 cs.ZPARTNERNAME
                             ) AS name
                         FROM ZWACHATSESSION cs
