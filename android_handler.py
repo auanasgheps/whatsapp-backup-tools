@@ -268,4 +268,5 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
         )
     else:
         logger.info(f"Loaded {len(contacts)} Android contacts.")
+    contacts.setdefault('0', 'WhatsApp')
     return contacts

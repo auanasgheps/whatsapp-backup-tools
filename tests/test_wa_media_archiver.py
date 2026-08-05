@@ -406,7 +406,7 @@ class TestLoadAndroidContacts:
         f = tmp_path / "contacts.txt"
         f.write_text("Row: display_name=Alice, data1=391234567890\n", encoding='utf-8')
         result = android_handler.load_contacts(str(f), logger)
-        assert result == {"391234567890": "Alice"}
+        assert result == {"391234567890": "Alice", "0": "WhatsApp"}
 
     def test_multiple_contacts(self, tmp_path, logger):
         f = tmp_path / "contacts.txt"
@@ -416,7 +416,7 @@ class TestLoadAndroidContacts:
             encoding='utf-8',
         )
         result = android_handler.load_contacts(str(f), logger)
-        assert result == {"111": "Alice", "222": "Bob"}
+        assert result == {"111": "Alice", "222": "Bob", "0": "WhatsApp"}
 
     def test_email_addresses_excluded(self, tmp_path, logger):
         # data1 values containing @ are skipped by the regex
@@ -434,7 +434,7 @@ class TestLoadAndroidContacts:
         f = tmp_path / "contacts.txt"
         f.write_text("", encoding='utf-8')
         result = android_handler.load_contacts(str(f), logger)
-        assert result == {}
+        assert result == {"0": "WhatsApp"}
 
     def test_missing_file_returns_empty(self, tmp_path, logger):
         result = android_handler.load_contacts(str(tmp_path / "nonexistent.txt"), logger)
@@ -1937,7 +1937,7 @@ class TestLoadIosContacts:
             ("393357214425@s.whatsapp.net", "Alice")
         ])
         result = ios.load_ios_contacts(path, logger)
-        assert result == {"393357214425": "Alice"}
+        assert result == {"393357214425": "Alice", "0": "WhatsApp"}
 
     def test_multiple_contacts(self, tmp_path, logger):
         path = _make_contacts_db(tmp_path, [
@@ -1945,7 +1945,7 @@ class TestLoadIosContacts:
             ("222@s.whatsapp.net", "Bob"),
         ])
         result = ios.load_ios_contacts(path, logger)
-        assert result == {"111": "Alice", "222": "Bob"}
+        assert result == {"111": "Alice", "222": "Bob", "0": "WhatsApp"}
 
     def test_non_whatsapp_jids_excluded(self, tmp_path, logger):
         path = _make_contacts_db(tmp_path, [

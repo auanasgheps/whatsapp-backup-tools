@@ -486,6 +486,7 @@ _IOS_SELECT = f"""
         {_IOS_CHAT_TYPE}                                             AS chat_type,
         CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)         AS timestamp_ms,
         COALESCE(
+            CASE WHEN ({_IOS_SENDER_JID}) = '0' THEN 'WhatsApp' END,
             NULLIF(ic_s.full_name, ''),
             NULLIF(con_s.display_name, ''),
             NULLIF(cs_lid.ZPARTNERNAME, ''),
@@ -1046,6 +1047,9 @@ def create_app(output_root: Path, rescan: bool = False):
                         NULLIF(con.display_name, ''),
                         con.folder,
                         grp.subject,
+                        CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                         INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) = '0'
+                             THEN 'WhatsApp' END,
                         cs.ZPARTNERNAME,
                         CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) != ''
@@ -1715,6 +1719,9 @@ def create_app(output_root: Path, rescan: bool = False):
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '') AS user,
                             COALESCE(
                                 NULLIF(con.display_name,''), con.folder,
+                                CASE WHEN NULLIF(SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                         INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '') = '0'
+                                     THEN 'WhatsApp' END,
                                 cs.ZPARTNERNAME
                             ) AS name
                         FROM ZWACHATSESSION cs
