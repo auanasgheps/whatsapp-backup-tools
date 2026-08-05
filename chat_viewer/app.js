@@ -351,20 +351,26 @@
     renderChatList();
   }
 
-  function _startIndexPoll(chat, sidebarEl) {
+  let _indexPollGen = 0;
+
+  function _startIndexPoll(chat) {
+    const gen = ++_indexPollGen;
     const params = new URLSearchParams({chat_id: chat.id, chat_type: chat.type});
     async function poll() {
+      if (gen !== _indexPollGen) return;
       try {
         const r = await fetch('/api/chat-index-status?' + params);
         const d = await r.json();
+        if (gen !== _indexPollGen) return;
         if (d.status === 'done') {
-          sidebarEl.querySelector('.index-spinner')?.remove();
+          document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"] .index-spinner`)?.remove();
           return;
         }
-        if (!sidebarEl.querySelector('.index-spinner')) {
+        const liveEl = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+        if (liveEl && !liveEl.querySelector('.index-spinner')) {
           const sp = document.createElement('span');
           sp.className = 'index-spinner';
-          sidebarEl.querySelector('.chat-name').appendChild(sp);
+          liveEl.querySelector('.chat-name').appendChild(sp);
         }
         setTimeout(poll, 500);
       } catch (_) {
@@ -403,6 +409,7 @@
   // ---- select chat ---------------------------------------------------------
 
   async function selectChat(chat, el) {
+    _indexPollGen++;
     document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
     el.classList.add('active');
     el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -439,7 +446,7 @@
     loadingEl.style.display = 'none';
     scroll.scrollTop = scroll.scrollHeight;
 
-    _startIndexPoll(chat, el);
+    _startIndexPoll(chat);
   }
 
   // ---- load messages -------------------------------------------------------
