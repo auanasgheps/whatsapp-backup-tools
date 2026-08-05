@@ -155,6 +155,17 @@
     }
     .pref-btn:hover { border-color: var(--accent); }
     .pref-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .pref-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .index-progress-bar-wrap {
+      height: 6px; border-radius: 3px;
+      background: var(--code-bg, rgba(0,0,0,.1)); overflow: hidden; margin-bottom: 4px;
+    }
+    .index-progress-bar {
+      height: 100%; width: 0%;
+      background: var(--accent); border-radius: 3px;
+      transition: width 0.4s ease;
+    }
+    .index-progress-label { font-size: 12px; color: var(--text-muted); }
 
     /* ---- chat list ---- */
     #chat-list { flex: 1; overflow-y: auto; }

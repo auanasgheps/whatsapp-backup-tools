@@ -220,7 +220,8 @@ def _save_source_stamp(cache_conn: sqlite3.Connection, source_path: str):
 # FTS index helpers
 # ---------------------------------------------------------------------------
 
-def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2000):
+def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2000,
+                     on_progress=None):
     idx_sql = """
         INSERT INTO message_index (rowid, chat_id, chat_type, timestamp_ms)
         VALUES (?, ?, ?, ?)
@@ -244,6 +245,8 @@ def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2
             if fts_batch:
                 cache_conn.executemany(fts_sql, fts_batch)
             cache_conn.commit()
+            if on_progress:
+                on_progress(len(idx_batch))
             idx_batch.clear()
             fts_batch.clear()
     if idx_batch:
@@ -251,6 +254,8 @@ def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2
         if fts_batch:
             cache_conn.executemany(fts_sql, fts_batch)
         cache_conn.commit()
+        if on_progress:
+            on_progress(len(idx_batch))
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +270,7 @@ def _clear_fts_index(cache_conn: sqlite3.Connection):
 
 
 def _fts_android_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
-                      chat_id: str, chat_type: str):
+                      chat_id: str, chat_type: str, on_progress=None):
     if chat_type == "group":
         where = "WHERE CAST(m.chat_row_id AS TEXT) = ?"
         params = (chat_id,)
@@ -291,10 +296,11 @@ def _fts_android_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connectio
         {where}
         ORDER BY m.timestamp ASC
     """, params)
-    _stream_fts_rows(cursor, cache_conn)
+    _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
 
 
-def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection, chat_id: str):
+def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
+                  chat_id: str, on_progress=None):
     cursor = wa_conn.execute("""
         SELECT
             m.Z_PK                                                      AS rowid,
@@ -311,17 +317,17 @@ def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection, c
         WHERE CAST(m.ZCHATSESSION AS TEXT) = ?
         ORDER BY m.ZMESSAGEDATE ASC
     """, (chat_id,))
-    _stream_fts_rows(cursor, cache_conn)
+    _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
 
 
 def _build_fts_chat(cache_conn: sqlite3.Connection, source_type: str, wa_db_path: str,
-                    chat_id: str, chat_type: str):
+                    chat_id: str, chat_type: str, on_progress=None):
     wa_conn = sqlite3.connect(wa_db_path)
     wa_conn.row_factory = sqlite3.Row
     if source_type == "android":
-        _fts_android_chat(wa_conn, cache_conn, chat_id, chat_type)
+        _fts_android_chat(wa_conn, cache_conn, chat_id, chat_type, on_progress=on_progress)
     else:
-        _fts_ios_chat(wa_conn, cache_conn, chat_id)
+        _fts_ios_chat(wa_conn, cache_conn, chat_id, on_progress=on_progress)
     wa_conn.close()
     cache_conn.execute(
         "INSERT OR IGNORE INTO indexed_chats (chat_id, chat_type) VALUES (?, ?)",
@@ -911,6 +917,7 @@ def create_app(output_root: Path, rescan: bool = False):
     cache_conn = _open_cache_db(output_root)
     _indexing_state: dict = {}
     _indexing_lock = threading.Lock()
+    _bulk_index_state: dict = {"running": False, "indexed_msgs": 0, "total_msgs": 0}
 
     if source_type is None:
         print("[wa_chat_viewer] Warning: No source WA DB found. Media-only mode.")
@@ -1848,6 +1855,100 @@ def create_app(output_root: Path, rescan: bool = False):
         with _indexing_lock:
             status = _indexing_state.get(key, "idle")
         return jsonify({"status": status})
+
+    @app.route("/api/index/source-size")
+    def api_index_source_size():
+        row = get_cache().execute(
+            "SELECT value FROM sync_meta WHERE key = 'source_size'"
+        ).fetchone()
+        size = int(row["value"]) if row and row["value"] else 0
+        return jsonify({"bytes": size})
+
+    @app.route("/api/index/progress")
+    def api_index_progress():
+        with _indexing_lock:
+            state = dict(_bulk_index_state)
+        return jsonify(state)
+
+    def _bg_index_all():
+        try:
+            wa_conn_bulk = sqlite3.connect(wa_db_path)
+            wa_conn_bulk.row_factory = sqlite3.Row
+            if source_type == "android":
+                chat_rows = wa_conn_bulk.execute("""
+                    SELECT
+                        CASE WHEN c.subject IS NOT NULL THEN CAST(c._id AS TEXT)
+                             ELSE COALESCE(j.user, CAST(c._id AS TEXT))
+                        END AS id,
+                        CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS type
+                    FROM chat c
+                    LEFT JOIN jid j ON j._id = c.jid_row_id
+                    WHERE c.hidden = 0
+                """).fetchall()
+                total = wa_conn_bulk.execute(
+                    "SELECT COUNT(*) FROM message"
+                ).fetchone()[0]
+            else:
+                chat_rows = wa_conn_bulk.execute("""
+                    SELECT CAST(cs.Z_PK AS TEXT) AS id,
+                           CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END AS type
+                    FROM ZWACHATSESSION cs
+                """).fetchall()
+                total = wa_conn_bulk.execute(
+                    "SELECT COUNT(*) FROM ZWAMESSAGE"
+                ).fetchone()[0]
+            wa_conn_bulk.close()
+
+            with _indexing_lock:
+                _bulk_index_state["total_msgs"] = total
+                _bulk_index_state["indexed_msgs"] = 0
+
+            cache_bulk = sqlite3.connect(str(get_cache_db_path(output_root)))
+            cache_bulk.execute("PRAGMA journal_mode = WAL")
+            cache_bulk.execute("PRAGMA synchronous = NORMAL")
+            cache_bulk.row_factory = sqlite3.Row
+
+            def _on_progress(n):
+                with _indexing_lock:
+                    _bulk_index_state["indexed_msgs"] += n
+
+            for row in chat_rows:
+                already = cache_bulk.execute(
+                    "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?",
+                    (row["id"], row["type"])
+                ).fetchone()
+                if not already:
+                    _build_fts_chat(cache_bulk, source_type, wa_db_path,
+                                    row["id"], row["type"], on_progress=_on_progress)
+
+            cache_bulk.close()
+        except Exception:
+            print(f"[wa_chat_viewer] Bulk index error:\n{traceback.format_exc()}")
+        finally:
+            with _indexing_lock:
+                _bulk_index_state["running"] = False
+                _bulk_index_state["indexed_msgs"] = _bulk_index_state["total_msgs"]
+
+    @app.route("/api/index/all", methods=["POST"])
+    def api_index_all():
+        if source_type is None:
+            return jsonify({"error": "no source database"}), 400
+        with _indexing_lock:
+            if _bulk_index_state["running"]:
+                return jsonify({"error": "already running"})
+            _bulk_index_state["running"] = True
+            _bulk_index_state["indexed_msgs"] = 0
+            _bulk_index_state["total_msgs"] = 0
+        threading.Thread(target=_bg_index_all, daemon=True).start()
+        return jsonify({"ok": True})
+
+    @app.route("/api/index/clear", methods=["POST"])
+    def api_index_clear():
+        with _indexing_lock:
+            if _bulk_index_state["running"]:
+                return jsonify({"error": "indexing in progress"}), 409
+        _clear_fts_index(get_cache())
+        return jsonify({"ok": True})
 
     # ---- API: preferences --------------------------------------------------
 
