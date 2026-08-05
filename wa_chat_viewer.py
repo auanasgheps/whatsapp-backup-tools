@@ -1948,6 +1948,7 @@ def create_app(output_root: Path, rescan: bool = False):
             if _bulk_index_state["running"]:
                 return jsonify({"error": "indexing in progress"}), 409
         _clear_fts_index(get_cache())
+        get_cache().execute("VACUUM")
         return jsonify({"ok": True})
 
     # ---- API: preferences --------------------------------------------------
