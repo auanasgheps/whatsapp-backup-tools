@@ -357,6 +357,23 @@
     .msg-row.sent .msg-meta { color: rgba(17,27,33,0.5); }
     .msg-row.recv .msg-meta { color: rgba(17,27,33,0.5); }
 
+    .msg-reactions {
+      display: flex; flex-wrap: wrap; gap: 3px;
+      margin-top: 2px; padding: 0;
+    }
+    .msg-row.sent .msg-reactions { justify-content: flex-end; }
+    .msg-row.recv .msg-reactions { justify-content: flex-start; }
+    .rx-badge {
+      display: inline-flex; align-items: center;
+      background: rgba(255,255,255,0.9);
+      border: 1px solid rgba(0,0,0,0.12);
+      border-radius: 10px;
+      font-size: 12px;
+      padding: 1px 5px;
+      line-height: 1.4;
+    }
+    .msg-row.sent .rx-badge { background: var(--surface2); }
+
     .msg-media { border-radius: 4px; overflow: hidden; max-width: 100%; }
     .msg-media img, .msg-media video { display: block; max-width: 320px; max-height: 300px; width: 100%; height: auto; cursor: pointer; }
     .msg-media audio { display: block; max-width: 300px; width: 100%; margin: 4px 0; }
