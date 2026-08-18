@@ -131,6 +131,64 @@ _MEDIA_TYPE_EXPR = """
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# WA DB performance indexes
+# ---------------------------------------------------------------------------
+
+def _ensure_wa_indexes(wa_db_path: Path) -> None:
+    """Add performance indexes to the exported WA DB if not already present.
+
+    The WA DB is read-only during normal use; these indexes are safe to create.
+    Idempotent: CREATE INDEX IF NOT EXISTS is a no-op when the index exists.
+    """
+    conn = sqlite3.connect(str(wa_db_path))
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")  # avoid locking issues
+        # Primary: speeds up the chat-open query (message.chat_row_id lookup)
+        idx = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_message_chat_ts'"
+        ).fetchone()
+        if not idx:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_chat_ts ON message(chat_row_id, timestamp)"
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# recent_messages cache helpers
+# ---------------------------------------------------------------------------
+
+def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> None:
+    """Write WA DB message rows into recent_messages for fast subsequent opens.
+
+    Uses INSERT OR REPLACE so updated messages (e.g. after a re-archive) overwrite
+    stale cache entries without duplicating.
+    """
+    if not rows:
+        return
+    sql = """
+        INSERT OR REPLACE INTO recent_messages
+            (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+             archive_path, media_type, media_name, text_body,
+             quoted_text, quoted_sender, quoted_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    keys = rows[0].keys()
+    archive_conn.executemany(sql, [
+        (r["chat_id"], r["chat_type"], r["msg_id"], r["timestamp_ms"],
+         r["sender"], r["from_me"], r["archive_path"] if "archive_path" in keys else None,
+         r["media_type"], r["media_name"] if "media_name" in keys else None,
+         r["text_body"], r["quoted_text"] if "quoted_text" in keys else None,
+         r["quoted_sender"] if "quoted_sender" in keys else None,
+         r["quoted_ts"] if "quoted_ts" in keys else None)
+        for r in rows
+    ])
+    archive_conn.commit()
+
+
+# ---------------------------------------------------------------------------
 
 def _media_type_from_path(path: str) -> str:
     if path is None:
@@ -344,6 +402,30 @@ def _ensure_chat_indexed(cache_conn: sqlite3.Connection, source_type: str, wa_db
     ).fetchone()
     if row is None:
         _build_fts_chat(cache_conn, source_type, wa_db_path, chat_id, chat_type)
+
+
+def _maybe_start_indexing(chat_id: str, chat_type: str,
+                          cache_conn, source_type: str, wa_db_path: str,
+                          output_root: Path,
+                          indexing_state: dict, indexing_lock):
+    """Start background FTS indexing for a chat if not already done or in-progress."""
+    key = (chat_id, chat_type)
+    already = cache_conn.execute(
+        "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key
+    ).fetchone()
+    if already:
+        return
+    with indexing_lock:
+        if key in indexing_state:
+            return
+        indexing_state[key] = "indexing"
+    threading.Thread(
+        target=_bg_index_chat,
+        args=(str(get_cache_db_path(output_root)), source_type,
+              wa_db_path, chat_id, chat_type,
+              indexing_state, indexing_lock),
+        daemon=True,
+    ).start()
 
 
 # ---------------------------------------------------------------------------
@@ -928,6 +1010,11 @@ def create_app(output_root: Path, rescan: bool = False):
         wa_conn = None
     else:
         print(f"[wa_chat_viewer] Source DB: {source_type} at {wa_db_path}")
+
+        # Ensure the WA DB has the performance index for chat_row_id queries.
+        # Safe: WA DB is read-only during normal use; CREATE INDEX IF NOT EXISTS is idempotent.
+        _ensure_wa_indexes(wa_db_path)
+
         if rescan or _source_changed(cache_conn, wa_db_path):
             _clear_fts_index(cache_conn)
             _save_source_stamp(cache_conn, wa_db_path)
@@ -986,6 +1073,36 @@ def create_app(output_root: Path, rescan: bool = False):
 
     def get_cache():
         return cache_conn
+
+    # Shared read-only connection to the archive DB for recent_messages lookups.
+    # Kept open for the lifetime of the app; safe: archive DB is never written by the viewer.
+    _archive_conn = sqlite3.connect(str(archive_db_path), check_same_thread=False)
+    _archive_conn.execute("PRAGMA journal_mode = WAL")
+    _archive_conn.row_factory = sqlite3.Row
+    # Ensure recent_messages schema is present (created by archiver; safe if already exists)
+    _archive_conn.executescript("""
+        CREATE TABLE IF NOT EXISTS recent_messages (
+            chat_id        TEXT NOT NULL,
+            chat_type      TEXT NOT NULL,
+            msg_id         INTEGER NOT NULL,
+            timestamp_ms   INTEGER NOT NULL,
+            sender         TEXT NOT NULL,
+            from_me        INTEGER NOT NULL,
+            archive_path   TEXT,
+            media_type     TEXT NOT NULL DEFAULT 'text',
+            media_name     TEXT,
+            text_body      TEXT NOT NULL,
+            quoted_text    TEXT,
+            quoted_sender  TEXT,
+            quoted_ts      INTEGER,
+            PRIMARY KEY (chat_id, chat_type, msg_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
+            ON recent_messages(chat_id, chat_type, timestamp_ms DESC);
+    """)
+
+    def get_archive():
+        return _archive_conn
 
     # ---- API: list chats ---------------------------------------------------
 
@@ -1119,26 +1236,30 @@ def create_app(output_root: Path, rescan: bool = False):
         after = request.args.get("after")
         limit = min(int(request.args.get("limit", 50)), 200)
 
+        if not before and not after:
+            # Initial load: try archive DB cache first (sub-ms, no WA DB hit)
+            rows = get_archive().execute(
+                """SELECT * FROM recent_messages
+                   WHERE chat_id = ? AND chat_type = ?
+                   ORDER BY timestamp_ms DESC LIMIT ?""",
+                (chat_id, chat_type, limit)
+            ).fetchall()
+            if rows:
+                _maybe_start_indexing(chat_id, chat_type, get_cache(), source_type,
+                                     wa_db_path, output_root,
+                                     _indexing_state, _indexing_lock)
+                return jsonify([dict(r) for r in rows])
+
+        # Fall through to WA DB (either pagination or cache miss).
+        # For initial load of an uncached chat, this also backfills recent_messages.
         conn = get_wa()
         if conn is None:
             return jsonify([])
 
         if not before and not after:
-            key = (chat_id, chat_type)
-            already = get_cache().execute(
-                "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key
-            ).fetchone()
-            if not already:
-                with _indexing_lock:
-                    if key not in _indexing_state:
-                        _indexing_state[key] = "indexing"
-                        threading.Thread(
-                            target=_bg_index_chat,
-                            args=(str(get_cache_db_path(output_root)), source_type,
-                                  wa_db_path, chat_id, chat_type,
-                                  _indexing_state, _indexing_lock),
-                            daemon=True,
-                        ).start()
+            _maybe_start_indexing(chat_id, chat_type, get_cache(), source_type,
+                                 wa_db_path, output_root,
+                                 _indexing_state, _indexing_lock)
 
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
@@ -1159,6 +1280,14 @@ def create_app(output_root: Path, rescan: bool = False):
         else:
             sql = f"{select} WHERE {chat_pred} {extra} ORDER BY {ts_col} DESC LIMIT ?"
             rows = conn.execute(sql, chat_params + [limit]).fetchall()
+
+        # Backfill recent_messages asynchronously so the response returns immediately.
+        if not before and not after:
+            threading.Thread(
+                target=_backfill_recent_messages,
+                args=(get_archive(), rows),
+                daemon=True,
+            ).start()
 
         return jsonify([dict(r) for r in rows])
 
@@ -1848,13 +1977,17 @@ def create_app(output_root: Path, rescan: bool = False):
         chat_id = request.args.get("chat_id", "")
         chat_type = request.args.get("chat_type", "")
         key = (chat_id, chat_type)
-        if get_cache().execute(
-            "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key
-        ).fetchone():
-            return jsonify({"status": "done"})
         with _indexing_lock:
-            status = _indexing_state.get(key, "idle")
-        return jsonify({"status": status})
+            if get_cache().execute(
+                "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key
+            ).fetchone():
+                return jsonify({"status": "done"})
+            state = _indexing_state.get(key, "idle")
+            if state == "done":
+                # Stale "done" from a crashed/failed bg thread — clear so api_messages retries.
+                _indexing_state.pop(key, None)
+                state = "idle"
+        return jsonify({"status": state})
 
     @app.route("/api/index/source-size")
     def api_index_source_size():

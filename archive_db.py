@@ -60,6 +60,24 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             PRIMARY KEY (original_path, archive_path)
         );
         CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
+        CREATE TABLE IF NOT EXISTS recent_messages (
+            chat_id        TEXT NOT NULL,
+            chat_type      TEXT NOT NULL,
+            msg_id         INTEGER NOT NULL,
+            timestamp_ms   INTEGER NOT NULL,
+            sender         TEXT NOT NULL,
+            from_me        INTEGER NOT NULL,
+            archive_path   TEXT,
+            media_type     TEXT NOT NULL DEFAULT 'text',
+            media_name     TEXT,
+            text_body      TEXT NOT NULL,
+            quoted_text    TEXT,
+            quoted_sender  TEXT,
+            quoted_ts      INTEGER,
+            PRIMARY KEY (chat_id, chat_type, msg_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
+            ON recent_messages(chat_id, chat_type, timestamp_ms DESC);
     """)
     return conn
 
