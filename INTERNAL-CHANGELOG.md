@@ -2,43 +2,87 @@
 
 ---
 
-## [dev] — 2026-07-30 (session 3)
+- **Chat loading performance: WA DB index + recent_messages cache** (`wa_chat_viewer.py`, `archive_db.py`): Two structural improvements to chat open latency.
 
-### Added
+  *WA DB composite index:* `create_app()` now runs `CREATE INDEX IF NOT EXISTS idx_message_chat_ts ON message(chat_row_id, timestamp)` against the exported `msgstore.db` on first start. Idempotent — skipped on subsequent starts. This changes the chat-open query from a full table scan to an index seek for group chats, and bounds the scan to `LIMIT 50` for contact chats.
 
-- **`wa_chat_viewer.py` — link detection**: `_ANDROID_IS_LINK` / `_IOS_IS_LINK` predicates detect `message_type=0` rows whose body contains `http://` or `https://`. `_ANDROID_SELECT` / `_IOS_SELECT` now return `media_type='link'` for these rows.
-- **`wa_chat_viewer.py` — `/api/media/links`**: returns all link messages for a chat (unpaginated; no binaries involved). Separate from `/api/media` to avoid contaminating the paginated media stream.
-- **`wa_chat_viewer.py` — `/api/media/count`**: now includes link rows in `total` and `by_type['link']`; links never count as "missing".
-- **`wa_chat_viewer.py` — creator LID fix**: Android group creator query now resolves LID JIDs → real phone numbers via `jid_map`, same as the contact-number lookup.
-- **`chat_viewer/template.py` — Links gallery view**: gallery fetches `/api/media/links` in parallel with the count on open. Link cards span full grid width (`grid-column: 1/-1`), show the URL and sender·date. Links are hidden by default (all other present types are pre-activated in `activeTypes`); clicking the Links pill reveals them.
-- **`tests/test_wa_chat_viewer.py`**: `test_media_count_includes_links`, `test_media_links_endpoint` (regression guard: `/api/media` must never return `media_type='link'` rows).
+  *`recent_messages` cache:* The archive DB (`.wa_media_archiver.db`) now includes a `recent_messages` table storing the last 100 denormalized messages per chat. `api_messages()` checks this table first on initial load (sub-ms, no WA DB hit). On a cache miss it falls back to the WA DB and silently backfills `recent_messages` via `INSERT OR REPLACE` so subsequent opens are instant. Pagination (`?before=`/`?after=`) always hits the WA DB (now fast with the index) to stay current. Schema: `(chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body, quoted_text, quoted_sender, quoted_ts)` with PK on `(chat_id, chat_type, msg_id)` and a covering index on `(chat_id, chat_type, timestamp_ms DESC)`.
+
+  *Schema migration:* `create_app()` runs `CREATE TABLE IF NOT EXISTS recent_messages ...` against `_archive_conn` on startup, so pre-existing archive DBs (created before this feature) get the table automatically.
+
+  *Async backfill:* The `recent_messages` write on cache miss runs in a daemon thread so the HTTP response returns immediately with the first messages; the cache population happens in the background.
+
+  *Stale spinner fix:* `api_chat_index_status` checks `indexed_chats` under `_indexing_lock`. When it finds a stale `"done"` state from a crashed background thread (no `indexed_chats` entry), it clears the stale key from `_indexing_state` and returns `"idle"` — which allows `api_messages` to start a new background thread. Previously the stale key was left in place, so retries were never triggered.
+
+  *Indexing never triggered on cache hit:* the FTS indexing trigger (`indexed_chats` check) was inside the cache-miss branch of `api_messages`. Once `recent_messages` was populated by the first visit, every re-visit returned from cache without ever reaching the trigger — un-indexed chats were never indexed after the first open. Fixed by extracting the trigger into `_maybe_start_indexing()` and calling it on both the cache-hit and cache-miss paths.
+
+- **WhatsApp text formatting rendered in chat bubbles** (`chat_viewer/app.js`, `chat_viewer/app.css`): Added `waFormat()` function that converts WhatsApp markdown syntax to HTML before display. Supports: `*bold*` → `<strong>`, `_italic_` → `<em>`, `~strikethrough~` → `<s>`, `` `code` `` → `<code>`, ` ```block``` ` → `<pre><code>`, `> quote` → `<blockquote>`, `# / ## / ###` headings, `- / * / 1.` lists. Code spans and blocks are protected from inner formatting. URLs are still linkified. `highlight()` now calls `waFormat()` instead of `linkify()`, so search highlighting works on formatted text. CSS added for all new element types scoped to `.msg-text` and `.msg-caption`; `.msg-caption` also gains `white-space: pre-wrap; word-break: break-word` (was missing).
+
+- **WhatsApp system contact COALESCE ordering bug** (`wa_chat_viewer.py`): Old archives have `folder = 'Unknown (000)'` for number `'0'` in `arch.contacts`. All chat list and `api_chat_info` COALESCE chains had `con.folder` before the `'0'` → `'WhatsApp'` guard, so the stale folder name always won. Fixed by moving the `CASE WHEN ... = '0'` arm to position 2 (before `con.folder`) in both Android and iOS chat list queries and iOS `api_chat_info`. Android `api_chat_info` Python guard reordered so `chat_id == '0'` is checked first.
+
+- **WhatsApp system contact named "Unknown (000)"** (`android_handler.py`, `ios_handler.py`, `wa_chat_viewer.py`): JID `0@s.whatsapp.net` (WhatsApp's own notification sender) had no special-case handling, so it fell through to the `Unknown (000)` folder/display name. Fixed by injecting `'0': 'WhatsApp'` into the contacts dict after parsing (both Android and iOS), and adding a leading `CASE WHEN ... = '0' THEN 'WhatsApp'` arm to the iOS chat viewer sender and display_name COALESCE chains.
+
+ Messages with a media type but no archived file fell into the `msg-unavailable` branch which used `textContent`, so any URL in `text_body` was rendered as plain text with no `<a>` tag. Fixed by switching to `innerHTML = esc(icon) + ' ' + linkify(text_body)` so URLs are linkified.
+
+ The date picker, Go, and Clear buttons were rendering on a new line starting at the left when the search nav row was visible. Wrapped them in `#date-group` (flex row) with `margin-left: auto` so they always push to the right edge of `#toolbar-expanded`.
+
+- **Lightbox overlay blocking all clicks after close** (`chat_viewer/app.js`): `_closeLb()` relied solely on the `lb-fade-out` `animationend` event to remove `#img-lightbox`. If the animation didn't fire (e.g. `prefers-reduced-motion`, animation interrupted), the `position:fixed; inset:0; z-index:1000` div stayed in the DOM invisibly blocking all link and image clicks. Fixed by adding a 300ms `setTimeout` fallback: `setTimeout(() => lb.isConnected && lb.remove(), 300)`.
+
+
 
 ### Fixed
 
-- **Creator "Created by" showing WhatsApp LID instead of phone number**: Android `message_type=7` sender JID resolved through `jid_map` to get real phone number.
-- **`fmtTs` ReferenceError in `renderGalleryItem`**: `fmtTs` was scoped inside `openChatInfo()`; link card meta now inlines `toLocaleDateString` directly.
+- **iOS receipts: new blob format (2026+) not decoded** (`wa_chat_viewer.py`): WhatsApp introduced a new `ZRECEIPTINFO` format where timestamps are stored as `(delta_seconds, event_type)` offsets from the message send time (field9 sub-entries inside field2 device entries), with no top-level `base_ts` (field3). The parser now detects this format by the absence of field3 and decodes it using `msg_ts_s` fetched from `ZWAMESSAGE.ZMESSAGEDATE`. event_type >= 1 (not 3) = delivered (take min delta across devices); event_type == 3 = read. Tested against real 2026 messages.
 
+- **iOS read receipts broken for all 1-to-1 chats** (`wa_chat_viewer.py`): the per-entry `status` field in `ZRECEIPTINFO` is always `0` for 1-to-1 messages (regardless of actual read state). The parser was gating timestamps on `status >= 1`, so `delivered_ts` and `read_ts` were always `None`. Fix: `_parse_ios_receipt_blob` now takes an `is_group` parameter. For 1-to-1 (`is_group=False`), `base_ts` is used directly as the delivered timestamp and `base_ts + delta` as the read timestamp (when `delta > 0`). Group logic is unchanged. The call site now fetches `ZGROUPINFO IS NOT NULL` alongside the blob.
 
+- **iOS group sender garbled for `@lid` contacts** (`wa_chat_viewer.py`, `backup_reader.py`): WhatsApp stores a binary protobuf blob in `ZWAMESSAGE.ZPUSHNAME` for `@lid` group senders instead of a readable name. The sender `COALESCE` was picking this up as the display name and rendering garbage (e.g. `CPm0jtMGIABIAZABAPABAtgC/6TXnuXrlQM=`). Also fixed: real address book names were not being used — `arch.contacts` was built from push names so saved names like "Pasquale D'Agnese" showed as "Pasquale Rocket". Fix: `backup_reader.py` now saves `ContactsV2.sqlite` to the output directory (same location as `ChatStorage.sqlite`) instead of a temp file, so it persists across runs. `wa_chat_viewer.py` attaches `ContactsV2.sqlite` at connection time and loads it into a temp table `_ios_contacts` (JID → full name, covering both `@lid` and `@s.whatsapp.net` JIDs). `_IOS_SELECT` joins this table as the top name source. For `@lid` senders, `ZPUSHNAME` is also skipped entirely since it is always a protobuf blob. Lookup priority: `ContactsV2` → `arch.contacts` → `ZWACHATSESSION.ZPARTNERNAME` → `ZWAPROFILEPUSHNAME` → `ZPUSHNAME` (non-`@lid` only) → numeric fallback. Gracefully degrades when `ContactsV2.sqlite` is absent.
 
-### Added
+- **iOS new-format receipt timestamps wrong (off by 60×)** (`wa_chat_viewer.py`): field9 delta values in the 2026+ `ZRECEIPTINFO` format are in **minutes**, not seconds. The parser was treating them as seconds, so a 62-minute read offset showed as ~1 minute. Verified against real DB: message sent 13:55 CEST, read delta=62 → 14:57 CEST (correct), previously showed 13:56. Fix: multiply `ds` by 60 before storing in `_parse_new_entry`. Tests updated accordingly.
 
-- **`wa_chat_viewer.py` — `/api/chat-info`**: returns display name, phone number (contacts), conversation first/last timestamps (from `message_index`), sent/received/total message counts. For groups: members list (`group_participants` → unique-senders fallback) and top-5 senders.
-- **`wa_chat_viewer.py` — `/api/chat-info/media-size`**: async filesystem scan; sums `os.path.getsize()` over all `archive_copies` rows for the chat's folder prefix. Returns `{"bytes": N}`.
-- **`chat_viewer/template.py` — Chat info panel**: ℹ button in chat header opens a compact modal with all stats. Media size loads concurrently with main stats (spinner until resolved). "Open Gallery" link switches to gallery view. Closes via ✕, ESC, or backdrop click.
-- **`tests/test_wa_chat_viewer.py`**: 8 new tests covering contact fields, sent/received counts, group members, group_participants fallback, cache-sourced timestamps, media-only mode, and media-size endpoint.
+- **iOS group new-format receipts: spurious 09:25 delivered time for all members** (`wa_chat_viewer.py`): group blobs write a placeholder `ev=1 delta=0` entry for every member at send time — not an actual delivery confirmation. The parser was emitting `delivered_ts = msg_ts_s * 1000` for these, so every member showed as delivered at the exact send time. Fix: suppress `delivered_ts` when `dd == 0` in the group new-format path. Members with only a placeholder entry now show `—` for both delivered and read, which is accurate. Delivery timestamps are only shown when `delta > 0`.
 
----
+- **iOS group read receipts: member names all `?`, info not populated** (`wa_chat_viewer.py`): the 2026+ new-format `ZRECEIPTINFO` group blobs store per-member identity in `field 1` (phone bytes, same BCD-hex encoding as the old format) — not in `field 2` (a JID string as originally assumed). `_parse_new_entry` was silently ignoring `field 1` and returning an empty `jid`, causing every receipt row to render as `?` with no name. Fix: `_parse_new_entry` now decodes `field 1` using hex-encode of bytes after the `0x8C` prefix, stripping a trailing `f` padding nibble for odd-length numbers (e.g. `103624826949719f` → `103624826949719`). Name resolution in the group path now first tries `_ios_contacts` (ContactsV2 address book, keyed by `<num>@lid`), then falls back to `arch.contacts`. The API handler also now filters out self-receipt entries: blobs contain an entry for the sender's own device(s) whose `@lid` number never appears as a `ZWAGROUPMEMBER` for the chat; these are excluded by cross-referencing the known member JIDs before returning the result.
 
-## [dev] — 2026-07-29
+- **Photos not opening in fullscreen from chat view** (`chat_viewer/app.js`): two broken variable references introduced during a prior refactor. `openLightboxAt` used `prevBtn` without declaring it (`const prevBtn = document.createElement('button')` was missing). `showLightbox` used `lb` without creating the div element first. Both threw a `ReferenceError` at the point of first use, silently aborting the click handler. Fixed by adding the missing declarations in both functions.
+
+### Changed (`chat_viewer/app.css`, `app.js`, `template.py`):
+  - Overlays fade in/out: `#settings-modal`, `#media-gallery`, `#chat-info-panel`, `#msg-details-popup` all use `opacity + visibility` transitions instead of `display` toggling. Modals and panels also scale/translate on enter.
+  - Lightbox fades in on open; close button, backdrop click, and Escape key trigger a fade-out animation before DOM removal via a `_closeLb()` helper.
+  - Scroll-to-bottom button fades in/out via `.visible` class instead of `display` toggling.
+  - `#toolbar-expanded` slides open with `max-height` transition instead of `display` toggling.
+  - Archive year rows slide open with `max-height` transition (chevron rotation was already animated).
+  - Global hover transitions added to all interactive elements that were missing them: buttons, filter pills, pref buttons, nav buttons, search result items, archive year headers, settings/close buttons.
+
+### Refactor
+
+- **Split `chat_viewer/template.py`** into three separate files to make the frontend maintainable:
+  - `chat_viewer/app.css` (~713 lines) — all custom CSS extracted verbatim from the template
+  - `chat_viewer/app.js` (~1,803 lines) — all JavaScript extracted verbatim; `outputRoot` now reads `window.OUTPUT_ROOT` instead of the Jinja expression
+  - `chat_viewer/template.py` shrunk from 2,666 to ~150 lines (HTML only)
+- **`wa_chat_viewer.py`**: added `send_from_directory` import, `_CHAT_VIEWER_DIR` constant, and two new routes `/static/app.css` + `/static/app.js`
+- **`tests/test_wa_chat_viewer.py`**: updated `TestHtmlTemplate` to read JS from `chat_viewer/app.js` directly instead of from `HTML_TEMPLATE`
 
 ### Added
 
 - **`wa_chat_viewer.py` — Media gallery pagination**: `/api/media` now accepts a `before` cursor and returns at most `GALLERY_PAGE_SIZE` (100) items per page. New `/api/media/count` endpoint returns total, archived, and per-type counts for the stats bar without fetching full rows.
-- **`chat_viewer/template.py` — Incremental gallery loading**: gallery grid loads the first 100 items on open and fetches more as the user scrolls, via an `IntersectionObserver` on a sentinel `div`. The stats bar is populated immediately from `/api/media/count` in parallel with the first page fetch.
-- **`chat_viewer/template.py` — Incremental archive view append**: `_appendToArchiveView()` inserts new items into existing year/month nodes as pages load, preserving collapsed/expanded state. `_createArchiveYearBlock()` extracted as shared helper.
-- **`chat_viewer/template.py` — Lightbox load-more**: the `›` button and `ArrowRight` key trigger a page fetch when the lightbox reaches the last loaded item and more items remain.
+- **`chat_viewer/app.js` — Incremental gallery loading**: gallery grid loads the first 100 items on open and fetches more as the user scrolls, via an `IntersectionObserver` on a sentinel `div`. The stats bar is populated immediately from `/api/media/count` in parallel with the first page fetch.
+- **`chat_viewer/app.js` — Incremental archive view append**: `_appendToArchiveView()` inserts new items into existing year/month nodes as pages load, preserving collapsed/expanded state. `_createArchiveYearBlock()` extracted as shared helper.
+- **`chat_viewer/app.js` — Lightbox load-more**: the `›` button and `ArrowRight` key trigger a page fetch when the lightbox reaches the last loaded item and more items remain.
+- **`wa_chat_viewer.py` — `/api/chat-info`**: returns display name, phone number (contacts), conversation first/last timestamps, sent/received/total message counts. For groups: members list (`group_participants` → unique-senders fallback) and top-5 senders.
+- **`wa_chat_viewer.py` — `/api/chat-info/media-size`**: async filesystem scan; sums `os.path.getsize()` over all `archive_copies` rows for the chat's folder prefix. Returns `{"bytes": N}`.
+- **`chat_viewer/app.js` — Chat info panel**: ℹ button in chat header opens a compact modal with all stats. Media size loads concurrently with main stats (spinner until resolved). "Open Gallery" link switches to gallery view. Closes via ✕, ESC, or backdrop click.
+- **`tests/test_wa_chat_viewer.py`**: 8 new tests covering contact fields, sent/received counts, group members, group_participants fallback, cache-sourced timestamps, media-only mode, and media-size endpoint.
+- **`wa_chat_viewer.py` — link detection**: `_ANDROID_IS_LINK` / `_IOS_IS_LINK` predicates detect `message_type=0` rows whose body contains `http://` or `https://`. `_ANDROID_SELECT` / `_IOS_SELECT` now return `media_type='link'` for these rows.
+- **`wa_chat_viewer.py` — `/api/media/links`**: returns all link messages for a chat (unpaginated). Separate from `/api/media` to avoid contaminating the paginated media stream.
+- **`chat_viewer/app.js` — Links gallery view**: gallery fetches `/api/media/links` in parallel with the count on open. Link cards span full grid width (`grid-column: 1/-1`), show the URL and sender·date. Links are hidden by default; clicking the Links pill reveals them.
+- **`tests/test_wa_chat_viewer.py`**: `test_media_count_includes_links`, `test_media_links_endpoint` (regression guard: `/api/media` must never return `media_type='link'` rows).
+- **`wa_chat_viewer.py` — document detection**: `_ANDROID_IS_DOCUMENT_UNDOWNLOADED` / `_IOS_IS_DOCUMENT_UNDOWNLOADED` predicates detect non-zero `message_type` rows with no `file_path` but a non-empty `media_name` — undownloaded documents invisible to the archived-media query.
+- **`wa_chat_viewer.py` — `/api/media/documents`**: returns all undownloaded document messages for a chat. Mirrors `/api/media/links` design.
+- **`wa_chat_viewer.py` — `/api/media/count`**: updated to fetch media, document, and link rows separately; documents and links are included in `total` and `by_type` but never count as "missing".
+- **`chat_viewer/app.js` — Documents gallery view**: gallery fetches `/api/media/documents` in parallel with counts and links. Document cards appear before link cards; correct month dividers derived from each item's own timestamp via a `secondaryLastMonth` tracker.
 
-### Fixed / Refactored (code review)
+### Fixed
 
 - **`wa_chat_viewer.py` — Range media serving**: range requests now seek to the byte offset instead of loading the full file into memory. Large video scrubbing no longer allocates the whole file per request.
 - **`wa_chat_viewer.py` — Background indexing connection leak**: `_bg_index_chat` now wraps the SQLite connection in a `try/finally` so it is always closed even if indexing fails.
@@ -49,6 +93,11 @@
 - **`wa_chat_viewer.py` — iOS sender SQL deduplicated**: `_IOS_SENDER_JID` constant extracted to replace triple repetition of the JID extraction expression in `_IOS_SELECT`.
 - **`wa_chat_viewer.py` — Background error logging**: `_bg_index_chat` now logs a full traceback on failure instead of just `str(e)`.
 - **`tests/test_wa_chat_viewer.py`**: added range-request tests, concurrent double-indexing race test, and full `TestIosReceiptBlobParser` suite (5 cases including wire-type regression).
+- **Creator "Created by" showing WhatsApp LID instead of phone number**: Android `message_type=7` sender JID resolved through `jid_map` to get real phone number.
+- **`fmtTs` ReferenceError in `renderGalleryItem`**: `fmtTs` was scoped inside `openChatInfo()`; link card meta now inlines `toLocaleDateString` directly.
+- **Group archive toolbar alignment**: `#media-archive-actions` uses `margin-left: auto` so the collapse/expand buttons always anchor to the right, even in group chats where the Received/Sent tabs are hidden.
+- **Links/docs month dividers**: secondary items (documents, links) now emit month headers derived from their own timestamps rather than the last loaded media item's header.
+- **Archive view premature "No media"**: `buildArchiveView` checks the `galleryAllLoaded` flag to distinguish in-flight loading from a genuinely empty chat.
 
 ---
 

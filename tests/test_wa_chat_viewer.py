@@ -13,6 +13,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -36,25 +37,43 @@ _spec.loader.exec_module(viewer)
 def make_archive_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.executescript("""
-        CREATE TABLE contacts (
+        CREATE TABLE IF NOT EXISTS contacts (
             number       TEXT PRIMARY KEY,
             folder       TEXT NOT NULL,
             display_name TEXT NOT NULL DEFAULT ''
         );
-        CREATE TABLE groups (
+        CREATE TABLE IF NOT EXISTS groups (
             chat_row_id  TEXT PRIMARY KEY,
             folder       TEXT NOT NULL,
             subject      TEXT NOT NULL DEFAULT ''
         );
-        CREATE TABLE files (
+        CREATE TABLE IF NOT EXISTS files (
             original_path TEXT PRIMARY KEY,
             md5           BLOB NOT NULL
         );
-        CREATE TABLE archive_copies (
+        CREATE TABLE IF NOT EXISTS archive_copies (
             original_path TEXT NOT NULL REFERENCES files(original_path),
             archive_path  TEXT NOT NULL,
             PRIMARY KEY (original_path, archive_path)
         );
+        CREATE TABLE IF NOT EXISTS recent_messages (
+            chat_id        TEXT NOT NULL,
+            chat_type      TEXT NOT NULL,
+            msg_id         INTEGER NOT NULL,
+            timestamp_ms   INTEGER NOT NULL,
+            sender         TEXT NOT NULL,
+            from_me        INTEGER NOT NULL,
+            archive_path   TEXT,
+            media_type     TEXT NOT NULL DEFAULT 'text',
+            media_name     TEXT,
+            text_body      TEXT NOT NULL,
+            quoted_text    TEXT,
+            quoted_sender  TEXT,
+            quoted_ts      INTEGER,
+            PRIMARY KEY (chat_id, chat_type, msg_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
+            ON recent_messages(chat_id, chat_type, timestamp_ms DESC);
     """)
     conn.commit()
     conn.row_factory = sqlite3.Row
@@ -1542,3 +1561,282 @@ class TestChatInfo:
                 "/api/chat-info/media-size?chat_id=123456789&chat_type=contact"
             ).get_json()
         assert data["bytes"] == 0
+
+
+# ---------------------------------------------------------------------------
+# recent_messages cache
+# ---------------------------------------------------------------------------
+
+def _seed_android_db_large(wa_conn):
+    """Insert 10 chats × 50 messages each for performance and routing tests.
+
+    Timestamps are Unix epoch milliseconds (like WhatsApp's message.timestamp column).
+    For chat_id=1 the range is 1700000000000..170000049000.
+    """
+    for chat_id in range(1, 11):
+        jid_row_id = chat_id
+        wa_conn.execute(
+            "INSERT OR IGNORE INTO jid (_id, user) VALUES (?, ?)",
+            (jid_row_id, str(chat_id * 111111111))
+        )
+        wa_conn.execute(
+            "INSERT OR IGNORE INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (?, ?, NULL, 0, ?, ?)",
+            (chat_id, jid_row_id, 1700000000000 + chat_id * 1000, chat_id * 50)
+        )
+        for i in range(50):
+            msg_id = chat_id * 100 + i
+            ts = 1700000000000 + (chat_id - 1) * 50 * 1000 + i * 1000
+            wa_conn.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (msg_id, chat_id, i % 2, jid_row_id, ts, f"msg {i}")
+            )
+    wa_conn.commit()
+
+
+class TestWaDbIndex:
+    def test_index_created_on_first_create_app(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        _seed_android_db_large(wa_conn)
+        wa_conn.close()
+
+        make_archive_db(archive_path)
+        # create_app opens the WA DB and creates the index
+        viewer.create_app(tmp_path, rescan=False)
+
+        conn = sqlite3.connect(str(wa_path))
+        try:
+            idxs = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )]
+        finally:
+            conn.close()
+        assert "idx_message_chat_ts" in idxs
+
+    def test_index_not_recreated_on_second_create_app(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        _seed_android_db_large(wa_conn)
+        wa_conn.close()
+        make_archive_db(archive_path)
+
+        viewer.create_app(tmp_path, rescan=False)
+        viewer.create_app(tmp_path, rescan=False)
+
+        conn = sqlite3.connect(str(wa_path))
+        try:
+            idxs = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_message_chat_ts'"
+            )]
+        finally:
+            conn.close()
+        assert len(idxs) == 1  # one index, not duplicated
+
+
+class TestRecentMessagesSchema:
+    def test_recent_messages_table_created(self, tmp_path):
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = make_archive_db(archive_path)
+        conn.close()
+
+        conn = sqlite3.connect(str(archive_path))
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(recent_messages)")}
+        finally:
+            conn.close()
+        expected = {
+            "chat_id", "chat_type", "msg_id", "timestamp_ms", "sender", "from_me",
+            "archive_path", "media_type", "media_name", "text_body",
+            "quoted_text", "quoted_sender", "quoted_ts"
+        }
+        assert expected.issubset(cols), f"Missing columns: {expected - cols}"
+
+    def test_recent_messages_pk_replace(self, tmp_path):
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = make_archive_db(archive_path)
+
+        conn.execute("""
+            INSERT INTO recent_messages
+            (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body)
+            VALUES ('1', 'contact', 1, 1000, 'Alice', 0, NULL, 'text', '', 'Hello')
+        """)
+        conn.commit()
+
+        # Same PK: REPLACE, not duplicate
+        conn.execute("""
+            INSERT OR REPLACE INTO recent_messages
+            (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body)
+            VALUES ('1', 'contact', 1, 2000, 'Bob', 1, NULL, 'text', '', 'Updated')
+        """)
+        conn.commit()
+
+        count = conn.execute(
+            "SELECT COUNT(*) FROM recent_messages WHERE chat_id='1' AND msg_id=1"
+        ).fetchone()[0]
+        assert count == 1
+        sender = conn.execute(
+            "SELECT sender FROM recent_messages WHERE chat_id='1' AND msg_id=1"
+        ).fetchone()[0]
+        assert sender == "Bob"  # replaced, not duplicated
+
+    def test_recent_messages_index_exists(self, tmp_path):
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        make_archive_db(archive_path)
+
+        conn = sqlite3.connect(str(archive_path))
+        try:
+            idxs = [(r[0], r[1]) for r in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='recent_messages'"
+            )]
+        finally:
+            conn.close()
+        assert any("timestamp_ms" in (sql or "") for _, sql in idxs)
+
+
+class TestRecentMessagesRouting:
+    def test_initial_load_served_from_recent_messages(self, tmp_path):
+        """When recent_messages has rows, /api/messages returns them directly (no WA DB)."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        _seed_android_db_large(wa_conn)
+        # Pre-populate recent_messages with known sender names (distinct from WA DB)
+        for i in range(10):
+            archive_conn.execute("""
+                INSERT OR REPLACE INTO recent_messages
+                (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body)
+                VALUES (?, 'contact', ?, ?, 'FROM_CACHE', 0, NULL, 'text', '', ?)
+            """, ("111111111", i + 1, 1700000000000 + i, f"cached msg {i}"))
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=111111111&chat_type=contact&limit=50")
+        data = resp.get_json()
+
+        assert resp.status_code == 200
+        assert len(data) == 10
+        # All messages have sender='FROM_CACHE' — proves they came from recent_messages, not WA DB
+        assert all(r["sender"] == "FROM_CACHE" for r in data)
+        # WA DB sender would be '+111111111', so this check is definitive
+
+    def test_fallback_and_backfill(self, tmp_path):
+        """When recent_messages is empty, /api/messages falls back to WA DB and backfills."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        _seed_android_db_large(wa_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=111111111&chat_type=contact&limit=50")
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert len(data) == 50  # all 50 messages for chat_row_id=1
+
+        # Wait for the daemon backfill thread to finish
+        time.sleep(0.3)
+
+        # recent_messages should now be backfilled
+        archive_conn2 = make_archive_db(archive_path)
+        count = archive_conn2.execute(
+            "SELECT COUNT(*) FROM recent_messages WHERE chat_id='111111111' AND chat_type='contact'"
+        ).fetchone()[0]
+        archive_conn2.close()
+        assert count == 50
+
+    def test_pagination_hits_wa_db(self, tmp_path):
+        """Scroll-up (?before=) always hits WA DB regardless of recent_messages content."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        _seed_android_db_large(wa_conn)
+        # Pre-populate recent_messages with the 5 OLDEST messages (timestamps 1700000000000..)
+        # WA DB will return the 50 NEWEST messages (timestamps 170000045000..) — no overlap
+        for i in range(5):
+            archive_conn.execute("""
+                INSERT OR REPLACE INTO recent_messages
+                (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body)
+                VALUES (?, 'contact', ?, ?, 'FROM_CACHE', 0, NULL, 'text', '', ?)
+            """, ("111111111", 100 + i, 1700000000000 + i * 1000, f"cached {i}"))
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            # ?before=9999999999999 orders all messages DESC and returns the newest 50.
+            # recent_messages has the oldest 5 messages (100..104, ts 1700000000000..170000004000)
+            # WA DB returns the newest 50 (100..149, ts 170000045000..170000049000) — no overlap.
+            # Sender for WA DB rows is '+111111111', not 'FROM_CACHE'.
+            resp = client.get(
+                "/api/messages?chat_id=111111111&chat_type=contact&limit=50&before=9999999999999"
+            )
+        data = resp.get_json()
+        assert len(data) > 0, "pagination should hit WA DB and return messages"
+        assert all(r["sender"] != "FROM_CACHE" for r in data), \
+            "pagination returned cached messages — WA DB was not used"
+
+    def test_recent_messages_response_schema(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        _seed_android_db_large(wa_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=111111111&chat_type=contact&limit=50")
+        data = resp.get_json()
+        assert len(data) > 0
+        expected_keys = {
+            "msg_id", "chat_id", "chat_type", "timestamp_ms", "sender",
+            "from_me", "archive_path", "media_type", "media_name", "text_body",
+            "quoted_text", "quoted_sender", "quoted_ts"
+        }
+        assert set(data[0].keys()) == expected_keys
+
+
+class TestChatOpenPerformance:
+    def test_chat_open_under_500ms(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        _seed_android_db_large(wa_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        import time
+        start = time.time()
+        with app.test_client() as client:
+            client.get("/api/messages?chat_id=111111111&chat_type=contact&limit=50")
+        elapsed = time.time() - start
+
+        assert elapsed < 0.5, f"Chat open took {elapsed:.3f}s — expected < 0.5s"
+
