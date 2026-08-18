@@ -2,6 +2,10 @@
 
 ---
 
+- **Message reaction emoji in chat bubbles** (`wa_chat_viewer.py`, `chat_viewer/app.js`, `chat_viewer/app.css`): Android reactions are now shown on message bubbles. The reaction emoji (👍❤️😂 etc.) appear as pill badges below the bubble — right-aligned for sent messages, left-aligned for received. Multiple reactions from different people are deduplicated: two 👍 show as `👍 2`, different emoji show as separate badges. The data comes from `message_add_on → message_add_on_reaction` in the exported WA DB, aggregated per message via `GROUP_CONCAT`. Old DB exports without those tables get `NULL` gracefully (no error). `reactions` column added to `recent_messages` schema with an `ALTER TABLE` migration for pre-existing archive DBs. iOS reactions (stored in protobuf blobs) are not yet implemented — the iOS query path returns `NULL` for `reactions` as a placeholder. Tests added in `TestAndroidReactions`.
+
+  *SQL prepare-time issue:* `CASE WHEN (SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on') = 1` inside a scalar subquery in the SELECT clause fails at SQL parse time if the table doesn't exist (not row-evaluation time). Fixed by checking table existence in Python inside `create_app()` and assigning `viewer._ANDROID_SELECT` to one of two pre-built string variants.
+
 - **Chat loading performance: WA DB index + recent_messages cache** (`wa_chat_viewer.py`, `archive_db.py`): Two structural improvements to chat open latency.
 
   *WA DB composite index:* `create_app()` now runs `CREATE INDEX IF NOT EXISTS idx_message_chat_ts ON message(chat_row_id, timestamp)` against the exported `msgstore.db` on first start. Idempotent — skipped on subsequent starts. This changes the chat-open query from a full table scan to an index seek for group chats, and bounds the scan to `LIMIT 50` for contact chats.

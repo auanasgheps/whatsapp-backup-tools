@@ -74,6 +74,7 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             quoted_text    TEXT,
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
+            reactions      TEXT,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts

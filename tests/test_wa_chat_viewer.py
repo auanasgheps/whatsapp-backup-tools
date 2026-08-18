@@ -70,6 +70,7 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
             quoted_text    TEXT,
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
+            reactions      TEXT,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -1085,6 +1086,140 @@ class TestApiMedia:
         assert any(r["media_type"] == "image" for r in media)
 
 
+class TestAndroidReactions:
+    """Tests for message reaction emoji from message_add_on tables."""
+
+    def _setup(self, tmp_path):
+        """Set up Android DB with message_add_on tables."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        # Create reaction tables
+        wa_conn.executescript("""
+            CREATE TABLE message_add_on (
+                _id                   INTEGER PRIMARY KEY,
+                parent_message_row_id INTEGER,
+                from_me               INTEGER DEFAULT 0,
+                sender_jid_row_id     INTEGER
+            );
+            CREATE TABLE message_add_on_reaction (
+                _id                   INTEGER PRIMARY KEY,
+                message_add_on_row_id INTEGER,
+                reaction              TEXT,
+                sender_timestamp      INTEGER
+            );
+        """)
+        # Seed contact chat (chat 10, jid 1)
+        seed_android_db(wa_conn, archive_conn)
+        # Add a second message for edge case tests
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (2, 10, 1, NULL, 1700000001000, 'Another message', 0)"
+        )
+        # Add reaction to message 1: two thumbs up
+        wa_conn.execute(
+            "INSERT INTO message_add_on (_id, parent_message_row_id, from_me, sender_jid_row_id) "
+            "VALUES (1, 1, 1, NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) "
+            "VALUES (1, '👍', 1700000000100)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on (_id, parent_message_row_id, from_me, sender_jid_row_id) "
+            "VALUES (2, 1, 0, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) "
+            "VALUES (2, '👍', 1700000000200)"
+        )
+        # Add reaction to message 2: one heart
+        wa_conn.execute(
+            "INSERT INTO message_add_on (_id, parent_message_row_id, from_me, sender_jid_row_id) "
+            "VALUES (3, 2, 0, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) "
+            "VALUES (3, '❤️', 1700000000300)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        return viewer.create_app(tmp_path, rescan=False)
+
+    def test_reactions_column_present(self, tmp_path):
+        """Response includes a reactions key."""
+        app = self._setup(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/messages?chat_id=123456789&chat_type=contact").get_json()
+        assert len(data) == 2
+        assert "reactions" in data[0]
+
+    def test_reactions_aggregated_from_multiple(self, tmp_path):
+        """Two 👍 reactions on the same message are aggregated."""
+        app = self._setup(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/messages?chat_id=123456789&chat_type=contact").get_json()
+        # Message 1 has two 👍 reactions
+        msg1 = next(m for m in data if m["msg_id"] == 1)
+        assert msg1["reactions"] == "👍,👍"
+
+    def test_reactions_different_emoji(self, tmp_path):
+        """Different emoji on the same message appear as comma-separated values."""
+        app = self._setup(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/messages?chat_id=123456789&chat_type=contact").get_json()
+        msg2 = next(m for m in data if m["msg_id"] == 2)
+        assert msg2["reactions"] == "❤️"
+
+    def test_no_reactions_returns_null(self, tmp_path):
+        """Message in a chat without reactions has null reactions column."""
+        # Use the existing setup (has reaction tables) but query a different chat
+        app = self._setup(tmp_path)
+        app.config["TESTING"] = True
+        wa_path = tmp_path / "msgstore.db"
+        # Add a second chat with a message (no reactions)
+        wa_conn = sqlite3.connect(str(wa_path))
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user) VALUES (2, '987654321')"
+        )
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (20, 2, NULL, 0, 1700000002000, 10)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (10, 20, 0, 2, 1700000002000, 'No reactions here', 0)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        with app.test_client() as client:
+            data = client.get("/api/messages?chat_id=987654321&chat_type=contact").get_json()
+        assert len(data) == 1
+        assert data[0]["reactions"] is None
+
+    def test_reactions_null_without_tables(self, tmp_path):
+        """When message_add_on tables don't exist, reactions column is NULL."""
+        # Start with plain make_android_db (no message_add_on tables)
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/messages?chat_id=123456789&chat_type=contact").get_json()
+        assert len(data) == 1
+        assert data[0]["reactions"] is None
+
+
 def _encode_varint(value: int) -> bytes:
     """Encode a non-negative integer as a protobuf varint."""
     result = []
@@ -1814,7 +1949,7 @@ class TestRecentMessagesRouting:
         expected_keys = {
             "msg_id", "chat_id", "chat_type", "timestamp_ms", "sender",
             "from_me", "archive_path", "media_type", "media_name", "text_body",
-            "quoted_text", "quoted_sender", "quoted_ts"
+            "quoted_text", "quoted_sender", "quoted_ts", "reactions"
         }
         assert set(data[0].keys()) == expected_keys
 

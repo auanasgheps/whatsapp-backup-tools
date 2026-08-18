@@ -679,6 +679,22 @@
     }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
 
+    if (msg.reactions) {
+      const rxEl = document.createElement('div');
+      rxEl.className = 'msg-reactions';
+      const seen = {};
+      msg.reactions.split(',').forEach(e => {
+        seen[e] = (seen[e] || 0) + 1;
+      });
+      Object.entries(seen).forEach(([emoji, count]) => {
+        const badge = document.createElement('span');
+        badge.className = 'rx-badge';
+        badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
+        rxEl.appendChild(badge);
+      });
+      bubble.appendChild(rxEl);
+    }
+
     if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
         const txt = document.createElement('div');

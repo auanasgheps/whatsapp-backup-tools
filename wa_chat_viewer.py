@@ -172,8 +172,8 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
         INSERT OR REPLACE INTO recent_messages
             (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
              archive_path, media_type, media_name, text_body,
-             quoted_text, quoted_sender, quoted_ts)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             quoted_text, quoted_sender, quoted_ts, reactions)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     keys = rows[0].keys()
     archive_conn.executemany(sql, [
@@ -182,7 +182,8 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
          r["media_type"], r["media_name"] if "media_name" in keys else None,
          r["text_body"], r["quoted_text"] if "quoted_text" in keys else None,
          r["quoted_sender"] if "quoted_sender" in keys else None,
-         r["quoted_ts"] if "quoted_ts" in keys else None)
+         r["quoted_ts"] if "quoted_ts" in keys else None,
+         r["reactions"] if "reactions" in keys else None)
         for r in rows
     ])
     archive_conn.commit()
@@ -505,50 +506,10 @@ _ANDROID_CHAT_ID = """
 
 _ANDROID_CHAT_TYPE = "CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END"
 
-_ANDROID_SELECT = f"""
-    SELECT
-        m._id                                                        AS msg_id,
-        {_ANDROID_CHAT_ID}                                           AS chat_id,
-        {_ANDROID_CHAT_TYPE}                                         AS chat_type,
-        COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
-        COALESCE(
-            NULLIF(con_s.display_name, ''),
-            CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
-            CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
-                 THEN '+' || COALESCE(j2.user, j.user) END,
-            ''
-        )                                                            AS sender,
-        m.from_me,
-        ac.archive_path,
-        CASE
-            WHEN m.message_type IS NULL OR m.message_type = 0 THEN
-                CASE WHEN m.text_data IS NOT NULL
-                      AND (INSTR(LOWER(m.text_data), 'http://') > 0
-                           OR INSTR(LOWER(m.text_data), 'https://') > 0)
-                     THEN 'link' ELSE 'text' END
-            ELSE {_MEDIA_TYPE_EXPR.format(col='mm.file_path')}
-        END                                                          AS media_type,
-        COALESCE(mm.media_name, '')                                 AS media_name,
-        COALESCE(m.text_data, '')                                   AS text_body,
-        COALESCE(mq.text_data, '')                                  AS quoted_text,
-        CASE WHEN mq.from_me = 1 THEN 'You'
-             ELSE COALESCE(
-                 NULLIF(con_sq.display_name, ''),
-                 CASE WHEN jq.user IS NOT NULL THEN '+' || jq.user END,
-                 '') END                                             AS quoted_sender,
-        COALESCE(mq.timestamp, 0)                                   AS quoted_ts
-    FROM message m
-    LEFT JOIN message_media mm ON mm.message_row_id = m._id
-    LEFT JOIN chat c ON c._id = m.chat_row_id
-    LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
-    LEFT JOIN jid j ON j._id = m.sender_jid_row_id
-    {_ANDROID_JID_MAP}
-    LEFT JOIN message_quoted mq ON mq.message_row_id = m._id
-    LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id
-    LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
-    LEFT JOIN arch.contacts con_sq ON con_sq.number = jq.user
-    LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
-"""
+# _ANDROID_SELECT is built lazily inside create_app() once we know whether the
+# message_add_on tables exist (graceful fallback for old DB exports).
+_ANDROID_SELECT = None
+
 
 _ANDROID_FILTER = """
     AND (
@@ -610,7 +571,8 @@ _IOS_SELECT = f"""
                  END,
                  '')
         END                                                         AS quoted_sender,
-        COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts
+        COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
+        NULL                                                           AS reactions
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
@@ -1079,8 +1041,9 @@ def create_app(output_root: Path, rescan: bool = False):
     _archive_conn = sqlite3.connect(str(archive_db_path), check_same_thread=False)
     _archive_conn.execute("PRAGMA journal_mode = WAL")
     _archive_conn.row_factory = sqlite3.Row
-    # Ensure recent_messages schema is present (created by archiver; safe if already exists)
-    _archive_conn.executescript("""
+    # Ensure recent_messages schema is present (created by archiver; safe if already exists).
+    # Also migrate existing tables that lack the reactions column.
+    _archive_conn.executescript(f"""
         CREATE TABLE IF NOT EXISTS recent_messages (
             chat_id        TEXT NOT NULL,
             chat_type      TEXT NOT NULL,
@@ -1095,11 +1058,80 @@ def create_app(output_root: Path, rescan: bool = False):
             quoted_text    TEXT,
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
+            reactions      TEXT,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
             ON recent_messages(chat_id, chat_type, timestamp_ms DESC);
     """)
+    # Migration: add reactions column if missing from a pre-existing table
+    cols = [r[1] for r in _archive_conn.execute(
+        "PRAGMA table_info(recent_messages)").fetchall()]
+    if "reactions" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
+
+    # Build _ANDROID_SELECT based on whether message_add_on tables exist.
+    # This is the only safe way to handle the subquery — CASE WHEN (SELECT 1 FROM ...)
+    # inside a scalar subquery is parsed at SQL-prepare time, not row-evaluation time,
+    # so it errors on all queries if the tables don't exist.
+    _tmp_wa = sqlite3.connect(str(wa_db_path))
+    has_reactions = _tmp_wa.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
+    ).fetchone() is not None
+    _tmp_wa.close()
+
+    _reactions_col = f"""
+        (SELECT GROUP_CONCAT(r.reaction)
+         FROM message_add_on ao
+         JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+         WHERE ao.parent_message_row_id = m._id)          AS reactions
+    """ if has_reactions else "NULL AS reactions"
+
+    globals()['_ANDROID_SELECT'] = f"""
+    SELECT
+        m._id                                                        AS msg_id,
+        {_ANDROID_CHAT_ID}                                           AS chat_id,
+        {_ANDROID_CHAT_TYPE}                                         AS chat_type,
+        COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
+        COALESCE(
+            NULLIF(con_s.display_name, ''),
+            CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
+            CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
+                 THEN '+' || COALESCE(j2.user, j.user) END,
+            ''
+        )                                                            AS sender,
+        m.from_me,
+        ac.archive_path,
+        CASE
+            WHEN m.message_type IS NULL OR m.message_type = 0 THEN
+                CASE WHEN m.text_data IS NOT NULL
+                      AND (INSTR(LOWER(m.text_data), 'http://') > 0
+                           OR INSTR(LOWER(m.text_data), 'https://') > 0)
+                     THEN 'link' ELSE 'text' END
+            ELSE {_MEDIA_TYPE_EXPR.format(col='mm.file_path')}
+        END                                                          AS media_type,
+        COALESCE(mm.media_name, '')                                 AS media_name,
+        COALESCE(m.text_data, '')                                   AS text_body,
+        COALESCE(mq.text_data, '')                                  AS quoted_text,
+        CASE WHEN mq.from_me = 1 THEN 'You'
+             ELSE COALESCE(
+                 NULLIF(con_sq.display_name, ''),
+                 CASE WHEN jq.user IS NOT NULL THEN '+' || jq.user END,
+                 '') END                                             AS quoted_sender,
+        COALESCE(mq.timestamp, 0)                                   AS quoted_ts,
+        {_reactions_col}
+    FROM message m
+    LEFT JOIN message_media mm ON mm.message_row_id = m._id
+    LEFT JOIN chat c ON c._id = m.chat_row_id
+    LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+    LEFT JOIN jid j ON j._id = m.sender_jid_row_id
+    {_ANDROID_JID_MAP}
+    LEFT JOIN message_quoted mq ON mq.message_row_id = m._id
+    LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id
+    LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
+    LEFT JOIN arch.contacts con_sq ON con_sq.number = jq.user
+    LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+"""
 
     def get_archive():
         return _archive_conn
