@@ -1,7 +1,7 @@
 [project]
 name = "wabtools"
 version = "0.37"
-description = "WhatsApp Backup Tools — archiver and viewer for WhatsApp media archives"
+description = "Archive and browse your WhatsApp data offline. Archive media from Android and iOS backups into a structured folder hierarchy. View chats in a WebUI that mirrors WhatsApp Web."
 requires-python = ">=3.11"
 dependencies = [
     "flask",
