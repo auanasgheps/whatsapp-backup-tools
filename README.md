@@ -6,18 +6,17 @@
 
 ## Overview
 
-WhatsApp Backup Tools consists of two complementary programs:
+WhatsApp Backup Tools is a suite to archive and access your WhatsApp data.
+Consists of two complementary programs:
 
-- **wab-archiver** organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
-- **wab-viewer** lets you browse and search your archived chats through a local web UI. See [docs/viewer/](docs/viewer/).
+- **wab-archiver** (WhatsApp Backup Archiver) organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
+- **wab-viewer** (WhatsApp Backup Viewer) lets you browse and search your archived chats through a local web UI, replicating WhatsApp Web. See [docs/viewer/](docs/viewer/).
 
 Both tools run locally — no data leaves your machine. Windows, Linux, and macOS are supported. Python 3.11 required.
 
 > ⚠️ **These tools are designed to run on a backup copy of your WhatsApp data — never on live device files.** The archiver always makes a copy of your data.
 
 ---
-
-## wab-archiver
 
 ### Features
 
@@ -38,6 +37,14 @@ Both tools run locally — no data leaves your machine. Windows, Linux, and macO
     - Android: requires a manual copy of your `/WhatsApp/Media/` folder
     - iOS: reads directly from an iPhone backup, encrypted backups are supported via `wa-crypt-tools`
 - Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
+
+### wab-viewer Features
+
+- Sidebar with contacts and groups, message counts, last activity time
+- Chronological chat timeline with lazy-loading as you scroll
+- Full-text search across messages, scoped to current chat or all chats
+- Media playback — images, videos, and audio stream in-browser with seeking
+- Image lightbox
 
 ### Supported Media Types
 
@@ -101,6 +108,15 @@ python -m wab_archiver \
 > 💡 Repeat `--wa_root` to search multiple media folders and automatically select the best copy of each file.
 
 See [docs/archiver/](docs/archiver/) for full setup instructions and command reference.
+
+### wab-viewer Quick Start
+
+```bash
+pip install flask
+python -m wab_viewer /path/to/archive
+```
+
+Opens in your browser at `http://127.0.0.1:5000`. See [docs/viewer/](docs/viewer/) for full usage.
 
 ---
 
