@@ -18,7 +18,7 @@ Both tools run locally — no data leaves your machine. Windows, Linux, and macO
 
 ---
 
-### WhatsApp Archiver Features
+### WhatsApp Backup Archiver Features
 
 Archive your WhatsApp media in a human readable format.
 
@@ -40,7 +40,7 @@ Archive your WhatsApp media in a human readable format.
     - iOS: reads directly from an iPhone backup, encrypted backups are supported via `wa-crypt-tools`
 - Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
 
-### WhatsApp Viewer Features
+### WhatsApp Backup Viewer Features
 
 Aims to replicate WhatsApp Web experience, but with your archived data.
 
@@ -95,7 +95,7 @@ After a successful run, the archive is organised as follows:
 
 ## Quick Start
 
-### wab-archiver quick Start
+### wab-archiver quick start
 Always do a dry run first:
 
 ```bash
@@ -113,7 +113,7 @@ python -m wab_archiver \
 
 See [docs/archiver/](docs/archiver/) for full setup instructions and command reference.
 
-### wab-viewer Quick Start
+### wab-viewer quick start
 
 First, run wab-archiver to create the archive. Then:
 
