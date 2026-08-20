@@ -1,0 +1,51 @@
+# Archiver
+
+Organise your WhatsApp media into a structured archive.
+
+## Quick Start
+
+Always do a dry run first:
+
+```bash
+python -m wab_archiver \
+  --msgstore /path/to/msgstore.db \
+  --wa_root /path/to/WhatsApp/storage \
+  --output /path/to/output \
+  --contacts /path/to/wa_contacts \
+  --dry-run
+```
+
+> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
+
+### Android — automatic pull and decrypt
+
+Connect your phone via USB with USB debugging enabled:
+
+```bash
+python -m wab_archiver \
+  --mode adb \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --wa_root /path/to/WhatsApp/storage \
+  --output /path/to/output \
+  --dry-run
+```
+
+### iOS — read directly from an iPhone backup
+
+```bash
+python -m wab_archiver \
+  --ios_backup /path/to/iPhone/backup \
+  --output /path/to/output \
+  --dry-run
+```
+
+---
+
+## Setup
+
+- [Android setup](setup-android.md)
+- [iOS setup](setup-ios.md)
+
+## Reference
+
+- [Command reference and config file](command-reference.md)

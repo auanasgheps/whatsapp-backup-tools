@@ -1,11 +1,5 @@
 """
-Tests for wa_media_archiver.py
-
-Run with:
-    pytest tests/ -v
-
-Requires:
-    pip install pytest
+Tests for wab_archiver
 """
 
 import logging
@@ -19,52 +13,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# Import the script as a module.
-# We skip the if __name__ == '__main__' block because we import, not run it.
+# Import the modules from their new package locations.
 # ---------------------------------------------------------------------------
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
-import importlib.util
 
-spec = importlib.util.spec_from_file_location(
-    "wa_media_archiver",
-    os.path.join(_ROOT, "wa_media_archiver.py"),
-)
-wa = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(wa)
-
-import importlib.util as _ilu
-
-_ios_spec = _ilu.spec_from_file_location(
-    "ios_handler", os.path.join(_ROOT, "ios_handler.py")
-)
-ios = _ilu.module_from_spec(_ios_spec)
-_ios_spec.loader.exec_module(ios)
-
-_br_spec = _ilu.spec_from_file_location(
-    "backup_reader", os.path.join(_ROOT, "backup_reader.py")
-)
-br = _ilu.module_from_spec(_br_spec)
-_br_spec.loader.exec_module(br)
-
-_android_spec = _ilu.spec_from_file_location(
-    "android_handler", os.path.join(_ROOT, "android_handler.py")
-)
-android_handler = _ilu.module_from_spec(_android_spec)
-_android_spec.loader.exec_module(android_handler)
-
-_adb_spec = _ilu.spec_from_file_location(
-    "adb_extractor", os.path.join(_ROOT, "adb_extractor.py")
-)
-adb = _ilu.module_from_spec(_adb_spec)
-_adb_spec.loader.exec_module(adb)
-
-_archive_db_spec = _ilu.spec_from_file_location(
-    "archive_db", os.path.join(_ROOT, "archive_db.py")
-)
-arc = _ilu.module_from_spec(_archive_db_spec)
-_archive_db_spec.loader.exec_module(arc)
+import wab_archiver.main as wa
+import wab_archiver.ios_handler as ios
+import wab_archiver.backup_reader as br
+import wab_archiver.android_handler as android_handler
+import wab_archiver.adb_extractor as adb
+import wab_archiver.archive_db as arc
 
 
 # ---------------------------------------------------------------------------
@@ -2053,11 +2013,11 @@ class TestBuildIosNumberMap:
 
 class TestCheckAdb:
     def test_found(self, logger):
-        with patch("adb_extractor.shutil.which", return_value="/usr/bin/adb"):
+        with patch("wab_archiver.adb_extractor.shutil.which", return_value="/usr/bin/adb"):
             assert adb.check_adb(logger) is True
 
     def test_not_found(self, logger):
-        with patch("adb_extractor.shutil.which", return_value=None):
+        with patch("wab_archiver.adb_extractor.shutil.which", return_value=None):
             assert adb.check_adb(logger) is False
 
 
@@ -2069,28 +2029,28 @@ class TestCheckDeviceConnected:
 
     def test_device_connected(self, logger):
         output = "List of devices attached\nemulator-5554\tdevice\n"
-        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)):
             assert adb.check_device_connected(logger) is True
 
     def test_no_devices(self, logger):
         output = "List of devices attached\n"
-        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)):
             assert adb.check_device_connected(logger) is False
 
     def test_unauthorized_not_counted(self, logger):
         output = "List of devices attached\n98abc123\tunauthorized\n"
-        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)):
             assert adb.check_device_connected(logger) is False
 
     def test_adb_failure(self, logger):
-        with patch("adb_extractor.subprocess.run",
+        with patch("wab_archiver.adb_extractor.subprocess.run",
                    side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"error")):
             assert adb.check_device_connected(logger) is False
 
 
 class TestPullMsgstore:
     def test_regular_path(self, logger, tmp_path):
-        with patch("adb_extractor.subprocess.run") as mock_run:
+        with patch("wab_archiver.adb_extractor.subprocess.run") as mock_run:
             result = adb.pull_msgstore(str(tmp_path), business=False, logger=logger)
             call_args = mock_run.call_args[0][0]
             assert 'com.whatsapp/WhatsApp' in call_args[2]
@@ -2099,13 +2059,13 @@ class TestPullMsgstore:
                result == os.path.join(str(tmp_path), 'msgstore.db.crypt15')
 
     def test_business_path(self, logger, tmp_path):
-        with patch("adb_extractor.subprocess.run") as mock_run:
+        with patch("wab_archiver.adb_extractor.subprocess.run") as mock_run:
             adb.pull_msgstore(str(tmp_path), business=True, logger=logger)
             call_args = mock_run.call_args[0][0]
             assert 'com.whatsapp.w4b' in call_args[2]
 
     def test_failure_raises(self, logger, tmp_path):
-        with patch("adb_extractor.subprocess.run",
+        with patch("wab_archiver.adb_extractor.subprocess.run",
                    side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"fail")):
             with pytest.raises(subprocess.CalledProcessError):
                 adb.pull_msgstore(str(tmp_path), logger=logger)
@@ -2120,7 +2080,7 @@ class TestPullContacts:
         )
         mock_result = MagicMock()
         mock_result.stdout = raw.encode()
-        with patch("adb_extractor.subprocess.run", return_value=mock_result):
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock_result):
             dest = adb.pull_contacts(str(tmp_path), logger=logger)
 
         content = open(dest, encoding='utf-8').read()
@@ -2129,7 +2089,7 @@ class TestPullContacts:
         assert content.count('@s.whatsapp.net') == 2
 
     def test_failure_raises(self, logger, tmp_path):
-        with patch("adb_extractor.subprocess.run",
+        with patch("wab_archiver.adb_extractor.subprocess.run",
                    side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"fail")):
             with pytest.raises(subprocess.CalledProcessError):
                 adb.pull_contacts(str(tmp_path), logger=logger)
@@ -2153,13 +2113,13 @@ class TestCheckDependencies:
 
     def test_adb_missing_raises(self, logger):
         args = self._args(mode='adb')
-        with patch("wa_media_archiver.shutil.which", return_value=None):
+        with patch("wab_archiver.main.shutil.which", return_value=None):
             with pytest.raises(SystemExit):
                 wa.check_dependencies(args, logger)
 
     def test_adb_present_passes(self, logger):
         args = self._args(mode='adb')
-        with patch("wa_media_archiver.shutil.which", return_value="/usr/bin/adb"):
+        with patch("wab_archiver.main.shutil.which", return_value="/usr/bin/adb"):
             wa.check_dependencies(args, logger)  # must not raise
 
     def test_wa_crypt_tools_missing_raises(self, logger):
@@ -2179,7 +2139,7 @@ class TestCheckDependencies:
         # Capture what logger.error receives by inspecting the call
         errors = []
         logger.error = lambda msg, *a, **kw: errors.append(msg)
-        with patch("wa_media_archiver.shutil.which", return_value=None), \
+        with patch("wab_archiver.main.shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=None), \
              pytest.raises(SystemExit):
             wa.check_dependencies(args, logger)

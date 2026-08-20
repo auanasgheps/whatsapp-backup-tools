@@ -1,11 +1,5 @@
 """
-Tests for wa_chat_viewer.py
-
-Run with:
-    pytest tests/test_wa_chat_viewer.py -v
-
-Requires:
-    pip install pytest flask
+Tests for wab_viewer
 """
 
 import os
@@ -21,13 +15,7 @@ import pytest
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
-import importlib.util
-
-_spec = importlib.util.spec_from_file_location(
-    "wa_chat_viewer", os.path.join(_ROOT, "wa_chat_viewer.py")
-)
-viewer = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(viewer)
+from wab_viewer import main as viewer
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +63,12 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
             ON recent_messages(chat_id, chat_type, timestamp_ms DESC);
+        CREATE TABLE IF NOT EXISTS reactions_cache (
+            chat_id    TEXT NOT NULL,
+            msg_id     INTEGER NOT NULL,
+            reactions  TEXT NOT NULL,
+            PRIMARY KEY (chat_id, msg_id)
+        );
     """)
     conn.commit()
     conn.row_factory = sqlite3.Row
@@ -1468,7 +1462,7 @@ class TestHtmlTemplate:
         script_start = template.index("<script>")
         html_before_script = template[:script_start]
 
-        app_js_path = Path(_ROOT) / "chat_viewer" / "app.js"
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
         script_body = app_js_path.read_text(encoding="utf-8")
 
         ids_in_html = set(re.findall(r'\bid=["\']([^"\']+)["\']', html_before_script))
@@ -1484,7 +1478,7 @@ class TestHtmlTemplate:
     def test_load_gallery_page_does_not_push_lightbox_items(self):
         """renderGalleryItem owns lightboxItems.push — _loadGalleryPage must not do it
         too or every item ends up double-counted, breaking lightbox indices."""
-        app_js_path = Path(_ROOT) / "chat_viewer" / "app.js"
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
         script = app_js_path.read_text(encoding="utf-8")
 
         # isolate the _loadGalleryPage function body
