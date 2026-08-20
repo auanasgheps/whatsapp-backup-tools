@@ -18,7 +18,9 @@ Both tools run locally — no data leaves your machine. Windows, Linux, and macO
 
 ---
 
-### Features
+### WhatsApp Archiver Features
+
+Archive your WhatsApp media in a human readable format.
 
 - Structured archival: `Contacts/` and `Groups/` top-level folders
 - Year and `Sent/` and `Received/` subfolders for 1-to-1 chats
@@ -38,13 +40,14 @@ Both tools run locally — no data leaves your machine. Windows, Linux, and macO
     - iOS: reads directly from an iPhone backup, encrypted backups are supported via `wa-crypt-tools`
 - Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
 
-### wab-viewer Features
+### WhatsApp Viewer Features
+
+Aims to replicate WhatsApp Web experience, but with your archived data.
 
 - Sidebar with contacts and groups, message counts, last activity time
-- Chronological chat timeline with lazy-loading as you scroll
+- Chronological chat timeline
 - Full-text search across messages, scoped to current chat or all chats
-- Media playback — images, videos, and audio stream in-browser with seeking
-- Image lightbox
+- Media gallery — images, videos, and audio stream in-browser with seeking
 
 ### Supported Media Types
 
@@ -92,6 +95,7 @@ After a successful run, the archive is organised as follows:
 
 ## Quick Start
 
+### wab-archiver quick Start
 Always do a dry run first:
 
 ```bash
@@ -110,6 +114,8 @@ python -m wab_archiver \
 See [docs/archiver/](docs/archiver/) for full setup instructions and command reference.
 
 ### wab-viewer Quick Start
+
+First, run wab-archiver to create the archive. Then:
 
 ```bash
 pip install flask
