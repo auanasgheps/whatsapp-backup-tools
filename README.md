@@ -1,19 +1,28 @@
-# WhatsApp Media Archiver
+# WhatsApp Backup Tools
 
 <p align="center">
-  <img src="icon.svg" alt="WhatsApp Media Archiver" width="120"/>
+  <img src="icon.svg" alt="WhatsApp Backup Tools" width="120"/>
 </p>
+
 ## Overview
 
-WhatsApp Media Archiver organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. 
-Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
+WhatsApp Backup Tools consists of two complementary programs:
 
-> ⚠️ **This tool is designed to run on a backup copy of your WhatsApp data — never on live device files.** For safeguard reasons, this script will always make a copy of your data.
+- **wab-archiver** organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
+- **wab-viewer** lets you browse and search your archived chats through a local web UI. See [docs/viewer/](docs/viewer/).
+
+Both tools run locally — no data leaves your machine. Windows, Linux, and macOS are supported. Python 3.11 required.
+
+> ⚠️ **These tools are designed to run on a backup copy of your WhatsApp data — never on live device files.** The archiver always makes a copy of your data.
+
+---
+
+## wab-archiver
 
 ### Features
 
 - Structured archival: `Contacts/` and `Groups/` top-level folders
-- Year and `Sent/`and `Received/` subfolders for 1-to-1 chats
+- Year and `Sent/` and `Received/` subfolders for 1-to-1 chats
 - Sender name appended to filenames in group chats
 - Correct file timestamps preserved from the WhatsApp database
 - Contact number change tracking — consolidates old and new numbers into one folder
@@ -25,21 +34,20 @@ Instead of an unstructured dump, you get a browsable archive sorted by contact o
 - Missing media CSV report for manual recovery of old or deleted files
 - Multiple Android media source roots — repeat `-wa` to search across several WhatsApp folders (e.g. old archive + current phone). Best copy selected automatically; content conflicts reported separately
 - Dry run mode for safe previewing before a full run
-- Windows, Linux and MacOS are supported to run the script.
 - WhatsApp platform: Android and iOS are both supported. No root or jailbreak are required.
-    - Android: requires a manual copy of your `/Whatsapp/Media/` folder
+    - Android: requires a manual copy of your `/WhatsApp/Media/` folder
     - iOS: reads directly from an iPhone backup, encrypted backups are supported via `wa-crypt-tools`
 - Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
 
 ### Supported Media Types
 
-The script handles: Images, Videos, Audio, Voice messages, Video Messages, Animated GIFs, and Documents.
+The archiver handles: Images, Videos, Audio, Voice messages, Video Messages, Animated GIFs, and Documents.
 
 ---
 
 ## Archive Structure
 
-After a successful run, the archive will be organized as follows:
+After a successful run, the archive is organised as follows:
 
 ```
 <output>/
@@ -61,7 +69,7 @@ After a successful run, the archive will be organized as follows:
 │   └── Work Team/
 │       └── 2024/
 ├── .wa_media_archiver.db
-├── wa_media_archiver.log
+├── wab-archiver.log
 ├── missing_media_report.csv
 ├── duplicate_media_report.csv
 └── source_conflicts_report.csv  ← only when multiple -wa roots produce conflicting copies
@@ -75,11 +83,35 @@ After a successful run, the archive will be organized as follows:
 
 ---
 
-### Platform
+## Quick Start
 
-The script runs on **Linux, macOS, and Windows** (Python 3.11 required).
+Always do a dry run first:
 
-> ⚠️ If you have WhatsApp on Android, **run the script on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower.
+```bash
+python -m wab_archiver \
+  --msgstore /path/to/msgstore.db \
+  --wa_root /path/to/WhatsApp/storage \
+  --output /path/to/output \
+  --contacts /path/to/wa_contacts \
+  --dry-run
+```
+
+> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
+
+> 💡 Repeat `--wa_root` to search multiple media folders and automatically select the best copy of each file.
+
+See [docs/archiver/](docs/archiver/) for full setup instructions and command reference.
+
+---
+
+## Re-running the Archiver
+
+The archiver is **safe to re-run** on an existing archive:
+- Files already copied with identical content will be **silently skipped**
+- Files with the same name but different content will be **renamed with a numeric suffix** and logged as a warning
+- New media not yet in the archive will be **copied normally**
+- If a contact has been **renamed** since the last run, their folder on disk will be **automatically renamed** to match, keeping the archive consolidated
+- Recommended: use the config file to keep settings for easier re-runs
 
 ---
 
@@ -93,53 +125,19 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ---
 
-## Running the Script
-
-Always do a dry run first:
-
-```bash
-python3 wa_media_archiver.py \
-  --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp/storage \
-  --output /path/to/output \
-  --contacts /path/to/wa_contacts \
-  --dry-run
-```
-
-> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
-
-> 💡 Repeat `--wa_root` to search multiple media folders and automatically select the best copy of each file — useful when you have an old archive alongside your current phone's folder.
-
-See [docs/running-the-script.md](docs/running-the-script.md) for the full command reference, all usage examples, output files description, and restore mode.
-
----
-
-## Re-running the Script
-
-The script is **safe to re-run** on an existing archive:
-- Files already copied with identical content will be **silently skipped**
-- Files with the same name but different content will be **renamed with a numeric suffix** and logged as a warning
-- New media not yet in the archive will be **copied normally**
-- If a contact has been **renamed** since the last run, their folder on disk will be **automatically renamed** to match, keeping the archive consolidated
-- Recommended: use the script config file to keep settings for easier re-runs.
-
----
-
 ## Known Limitations
 
-- Very old media is likely missing from disk even if present in the database. Use `missing_media_report.csv` to assist manual recovery.
-- Group names reflect the **current** name at time of DB export, not historical names.
-- Stickers are not archived in this version.
-- **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared.
-- **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `--mode restore` on an iOS archive exits with a clear error.
-- **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders.
+- Stickers are not archived in this version
+- **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
+- **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `--mode restore` on an iOS archive exits with a clear error
+- **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
 
 ---
 
 ## Credits
 
-- Inspired by [Wa_Immich_Tagger](https://github.com/mac12m99/Wa_Immich_Tagger) by mac12m99 — provided the initial Android DB query pattern.
-- iOS backup reading approach inspired by [whatsapp-chat-exporter](https://github.com/KnugiHK/whatsapp-chat-exporter) by KnugiHK — the idea of reading directly from the iPhone backup via `Manifest.db` instead of requiring a third-party extraction tool. iOS implementation in this project is original code.
+- Inspired by [Wa_Immich_Tagger](https://github.com/mac12m99/Wa_Immich_Tagger) by mac12m99 — provided the initial Android DB query pattern
+- iOS backup reading approach inspired by [whatsapp-chat-exporter](https://github.com/KnugiHK/whatsapp-chat-exporter) by KnugiHK
 
 ---
 
@@ -154,6 +152,6 @@ This tool was developed with the assistance of AI coding tools. Development was 
 
 ## Disclaimer
 
-WhatsApp Media Archiver is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the WhatsApp LLC, or any of its subsidiaries or its affiliates. 
+WhatsApp Backup Tools are not affiliated, associated, authorised, endorsed by, or in any way officially connected with WhatsApp LLC, or any of its subsidiaries or its affiliates.
 
 The project is provided 'as is' without any express or implied warranties.

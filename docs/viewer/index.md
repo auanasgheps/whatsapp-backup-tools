@@ -11,34 +11,31 @@ pip install flask
 ## Usage
 
 ```bash
-python wa_chat_viewer.py <output_root> [--port PORT] [--host HOST] [--rescan]
+python -m wab_viewer /path/to/archive
 ```
 
-- `<output_root>` — path to the archive output directory (contains `.wa_media_archiver.db`)
-- `--port` — port to listen on (default: `5000`)
-- `--host` — host to bind to (default: `127.0.0.1`)
-- `--rescan` — force rebuild of the viewer cache DB
-
-The script opens your default browser automatically.
+The viewer opens your browser at `http://127.0.0.1:5000`. Use `--rescan` to force a cache rebuild.
 
 ```bash
 # Example
-python wa_chat_viewer.py ./output
+python -m wab_viewer ./output
 
 # Custom port
-python wa_chat_viewer.py ./output --port 8080
+python -m wab_viewer ./output --port 8080
 
 # Rebuild the cache
-python wa_chat_viewer.py ./output --rescan
+python -m wab_viewer ./output --rescan
 ```
 
-## What it does
+## How It Works
 
-On first run (or with `--rescan`), the viewer scans the archive output directory and builds a **viewer cache DB** (`.wa_chat_viewer_cache.db`) by combining:
+On first run (or with `--rescan`), the viewer builds a cache DB (`.wa_chat_viewer_cache.db`) combining:
 
-1. **Source WA database** (`msgstore.db` for Android, `ChatStorage.sqlite` for iOS) — provides timestamps, sender names, and text message bodies
+1. **Source WhatsApp database** (`msgstore.db` for Android, `ChatStorage.sqlite` for iOS) — timestamps, sender names, and text message bodies
 2. **Archive database** (`.wa_media_archiver.db`) — maps original media paths to archived file locations
 3. **File mtime fallback** — used when no source WA database is present (media-only mode)
+
+The source WA database must be present for the viewer to resolve media file paths. If you archived without keeping it, only timestamps from file modification times are available.
 
 ## Features
 
@@ -49,7 +46,7 @@ On first run (or with `--rescan`), the viewer scans the archive output directory
 - **Image lightbox** — click any image to open it full-screen
 - **DOM windowing** — only ~100 message elements kept in the DOM at once, so long chats stay fast
 
-## Cache invalidation
+## Cache Invalidation
 
 The cache is rebuilt automatically when:
 
