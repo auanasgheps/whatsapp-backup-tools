@@ -7,9 +7,9 @@ Python 3.11 or later is required.
 
 ---
 
-## Optional Packages
+## wab-archiver Packages
 
-These packages are installed automatically when the relevant feature is used. You can also install them upfront.
+Install these manually before running the archiver.
 
 **Android encrypted backup decryption** (required for `--msgstore <file.crypt15>` or `--mode adb`):
 
@@ -27,6 +27,16 @@ pip install iphone-backup-decrypt
 
 ```bash
 pip install tzdata
+```
+
+---
+
+## wab-viewer Packages
+
+**Flask** (required):
+
+```bash
+pip install flask
 ```
 
 > 💡 **Windows users:** if `pip install` doesn't work for you, use `py -m pip install`.
