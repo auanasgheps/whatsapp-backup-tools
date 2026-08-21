@@ -13,14 +13,14 @@ HTML_TEMPLATE = r"""
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta id="meta-color-scheme" name="color-scheme" content="dark">
-  <title>WA Chat Viewer</title>
+  <title>WhatsApp Backup Tools</title>
   <style>""" + _PICO_CSS + r"""</style>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <div id="app">
   <div id="header">
-    <h1>WA Chat Viewer</h1>
+    <h1>WhatsApp Backup Tools</h1>
     <span class="subtitle">{{ output_root }}</span>
   </div>
 
