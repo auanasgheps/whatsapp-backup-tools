@@ -2181,7 +2181,7 @@ def create_app(output_root: Path, rescan: bool = False):
 
     @app.route("/")
     def index():
-        return render_template_string(HTML_TEMPLATE, output_root=str(output_root))
+        return render_template_string(HTML_TEMPLATE, output_root=str(output_root), version=_get_version())
 
     return app
 
