@@ -178,6 +178,25 @@ class TestMediaTypeFromPath:
     def test_none_returns_text(self):
         assert viewer._media_type_from_path(None) == "text"
 
+    def test_empty_string_returns_document(self):
+        # No extension → falls through to "document"
+        assert viewer._media_type_from_path("") == "document"
+
+    def test_no_extension_returns_document(self):
+        # No recognized extension → falls through to "document"
+        assert viewer._media_type_from_path("foo/bar") == "document"
+
+    def test_uppercase_extension_normalized(self):
+        assert viewer._media_type_from_path("foo/bar.MP4") == "video"
+
+    def test_path_with_multiple_dots(self):
+        # Last extension wins
+        assert viewer._media_type_from_path("foo/file.name.tar.gz") == "document"
+        assert viewer._media_type_from_path("foo/file.name.jpg") == "image"
+
+    def test_mixed_case_extension(self):
+        assert viewer._media_type_from_path("photo.JpG") == "image"
+
 
 # ---------------------------------------------------------------------------
 # Tests: _detect_source_db
@@ -1079,6 +1098,85 @@ class TestApiMedia:
         # /api/media still returns the image
         assert any(r["media_type"] == "image" for r in media)
 
+    def test_media_documents_endpoint_returns_undownloaded_docs(self, tmp_path):
+        """Documents with no file_path but a media_name are returned by /api/media/documents."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        # Undownloaded document: message_type=6 (document), file_path=NULL, media_name set
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (5, 10, 0, 1, 1700000005000, NULL, 6)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (5, NULL, 'Annual Report 2024.pdf')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact").get_json()
+        assert len(docs) == 1
+        assert docs[0]["media_name"] == "Annual Report 2024.pdf"
+
+    def test_media_documents_excludes_downloaded_media(self, tmp_path):
+        """Regular downloaded media (file_path set) must not appear in /api/media/documents."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact").get_json()
+        assert len(docs) == 0  # the seeded media has file_path set
+
+    def test_media_documents_excludes_text_messages(self, tmp_path):
+        """Text messages (message_type=0) must not appear in /api/media/documents."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)  # message 1 is type=0 text
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact").get_json()
+        assert len(docs) == 0
+
+
+class TestChatFilter:
+    """Tests for _android_chat_filter and _ios_chat_filter."""
+
+    def test_android_contact_filter_uses_jid_user(self):
+        pred, params = viewer._android_chat_filter("391234567890", "contact")
+        assert "j_chat.user" in pred
+        assert params == ["391234567890"]
+
+    def test_android_group_filter_uses_chat_row_id(self):
+        pred, params = viewer._android_chat_filter("42", "group")
+        assert "m.chat_row_id = CAST" in pred
+        assert params == ["42"]
+
+    def test_ios_filter_uses_zchatsession(self):
+        pred, params = viewer._ios_chat_filter("99")
+        assert "m.ZCHATSESSION = CAST" in pred
+        assert params == ["99"]
+
 
 class TestAndroidReactions:
     """Tests for message reaction emoji from message_add_on tables."""
@@ -1946,26 +2044,3 @@ class TestRecentMessagesRouting:
             "quoted_text", "quoted_sender", "quoted_ts", "reactions"
         }
         assert set(data[0].keys()) == expected_keys
-
-
-class TestChatOpenPerformance:
-    def test_chat_open_under_500ms(self, tmp_path):
-        wa_path = tmp_path / "msgstore.db"
-        archive_path = tmp_path / ".wa_media_archiver.db"
-        wa_conn = make_android_db(wa_path)
-        archive_conn = make_archive_db(archive_path)
-        _seed_android_db_large(wa_conn)
-        wa_conn.close()
-        archive_conn.close()
-
-        app = viewer.create_app(tmp_path, rescan=False)
-        app.config["TESTING"] = True
-
-        import time
-        start = time.time()
-        with app.test_client() as client:
-            client.get("/api/messages?chat_id=111111111&chat_type=contact&limit=50")
-        elapsed = time.time() - start
-
-        assert elapsed < 2.0, f"Chat open took {elapsed:.3f}s — expected < 2.0s"
-

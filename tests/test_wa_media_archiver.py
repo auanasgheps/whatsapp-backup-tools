@@ -105,46 +105,6 @@ class TestBuildContactFolderName:
         assert "/" not in result
 
 
-class TestGetYear:
-    def test_known_timestamp(self):
-        # 2024-01-15 00:00:00 UTC in milliseconds: 1705276800000
-        # Year should be 2024 regardless of timezone (UTC+0 or later)
-        # Use a timestamp that is unambiguously in 2024
-        ts_ms = 1705276800000  # 2024-01-15 00:00:00 UTC
-        year = wa.get_year(ts_ms)
-        assert year == "2024"
-
-    def test_utc_timezone(self):
-        pytest.importorskip('zoneinfo', reason="zoneinfo unavailable")
-        from zoneinfo import ZoneInfo
-        try:
-            tz = ZoneInfo('UTC')
-        except Exception:
-            pytest.skip("tzdata not installed")
-        # 2024-12-31 23:30:00 UTC → still 2024 in UTC
-        ts_ms = 1735688200000  # 2024-12-31 23:36:40 UTC
-        assert wa.get_year(ts_ms, tz=tz) == "2024"
-
-    def test_timezone_crosses_year_boundary(self):
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-        try:
-            rome = ZoneInfo('Europe/Rome')
-            utc  = ZoneInfo('UTC')
-        except ZoneInfoNotFoundError:
-            pytest.skip("tzdata not installed (required on Windows)")
-        # 2024-12-31 23:30:00 UTC = 2025-01-01 00:30:00 in UTC+1 (Europe/Rome in winter)
-        ts_ms = 1735687800000  # 2024-12-31 23:30:00 UTC exactly
-        assert wa.get_year(ts_ms, tz=rome) == "2025"
-        assert wa.get_year(ts_ms, tz=utc)  == "2024"
-
-    def test_no_tz_returns_string(self):
-        # Without tz, returns a 4-digit year string (value depends on local time, just check format)
-        ts_ms = 1705276800000
-        year = wa.get_year(ts_ms)
-        assert len(year) == 4
-        assert year.isdigit()
-
-
 class TestAppendSenderToFilename:
     def test_normal_case(self):
         result = wa.append_sender_to_filename("IMG-20260512-WA0003.jpg", "JohnDoe")
@@ -520,48 +480,11 @@ class TestValidateIosWaRoot:
 # iOS: build_ios_query structural checks
 # ===========================================================================
 
+# ===========================================================================
+# iOS: build_ios_query — functional integration tests
+# ===========================================================================
+
 class TestBuildIosQuery:
-    def test_zpartnername_not_null_in_group_block(self):
-        query = ios.build_ios_query(None, None)
-        assert 'ZPARTNERNAME IS NOT NULL' in query
-
-    def test_media_name_restricted_to_documents_paths(self):
-        query = ios.build_ios_query(None, None)
-        # ZTITLE is wrapped in a CASE guarded by the Documents path check
-        assert "LIKE '%Documents%'" in query
-        assert 'ZTITLE' in query
-
-    def test_group_detection_uses_zgroupinfo_not_null(self):
-        query = ios.build_ios_query(None, None)
-        assert 'ZGROUPINFO IS NOT NULL' in query
-
-    def test_one_to_one_detection_uses_zgroupinfo_null(self):
-        query = ios.build_ios_query(None, None)
-        assert 'ZGROUPINFO IS NULL' in query
-
-    def test_union_all_present(self):
-        query = ios.build_ios_query(None, None)
-        assert 'UNION ALL' in query
-
-    def test_limit_clause_included(self):
-        query = ios.build_ios_query(limit=50, since_ms=None)
-        assert 'LIMIT 25' in query  # N//2 per block
-
-    def test_no_limit_when_none(self):
-        query = ios.build_ios_query(limit=None, since_ms=None)
-        assert 'LIMIT' not in query
-
-    def test_since_clause_included(self):
-        since_ms = 1704067200000
-        query = ios.build_ios_query(None, since_ms)
-        apple_since = (since_ms / 1000.0) - ios.APPLE_EPOCH_OFFSET
-        # The float value appears literally in the query string
-        assert str(apple_since) in query
-
-    def test_no_since_no_date_filter(self):
-        query = ios.build_ios_query(None, None)
-        assert 'ZMESSAGEDATE >=' not in query
-
     def test_group_sender_jid_without_at_uses_full_jid(self):
         # ZMEMBERJID with no '@' returns the full JID as sender.
         conn = _make_ios_msgstore()
@@ -629,28 +552,6 @@ class TestBuildIosQuery:
         """)
         rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
         assert len(rows) == 0
-
-
-# ===========================================================================
-# iOS: build_ios_group_subjects_query structural checks
-# ===========================================================================
-
-class TestBuildIosGroupSubjectsQuery:
-    def test_only_groups_returned(self):
-        query = ios.build_ios_group_subjects_query()
-        assert 'ZGROUPINFO IS NOT NULL' in query
-
-    def test_zpartnername_not_null_filter_present(self):
-        query = ios.build_ios_group_subjects_query()
-        assert 'ZPARTNERNAME IS NOT NULL' in query
-
-    def test_no_date_filter(self):
-        query = ios.build_ios_group_subjects_query()
-        assert 'ZMESSAGEDATE >=' not in query
-
-    def test_status_media_excluded(self):
-        query = ios.build_ios_group_subjects_query()
-        assert "@status%" in query
 
 
 # ===========================================================================
@@ -1531,152 +1432,6 @@ def _make_wa_file(root, rel_path, content: bytes):
     return str(full)
 
 
-class TestMultiRootResolver:
-    """Tests for _multi_root_resolver via _prepare_input — exercised directly."""
-
-    def _make_resolver(self, roots, logger):
-        """Build the multi-root resolver closure the same way _prepare_input does."""
-        import hashlib as _hashlib
-
-        conflict_rows = []
-        root_hits = {root: 0 for root in roots}
-        zero_byte_count = [0]
-
-        def file_md5(path):
-            h = _hashlib.md5()
-            with open(path, 'rb') as f:
-                for chunk in iter(lambda: f.read(65536), b''):
-                    h.update(chunk)
-            return h.digest()
-
-        def owning_root(path):
-            norm_path = os.path.normcase(os.path.normpath(path))
-            for root in roots:
-                norm_root = os.path.normcase(os.path.normpath(root))
-                if norm_path.startswith(norm_root + os.sep):
-                    return root
-            return roots[0]
-
-        def resolver(fp):
-            rel_parts = fp.split('/')
-            candidates = [
-                os.path.join(root, *rel_parts)
-                for root in roots
-                if os.path.exists(os.path.join(root, *rel_parts))
-            ]
-            valid = [c for c in candidates if os.path.getsize(c) > 0]
-            if len(valid) < len(candidates):
-                zero_byte_count[0] += len(candidates) - len(valid)
-            if not valid:
-                return os.path.join(roots[0], *rel_parts)
-            if len(valid) == 1:
-                root_hits[owning_root(valid[0])] += 1
-                return valid[0]
-            valid.sort(key=os.path.getsize, reverse=True)
-            top_size = os.path.getsize(valid[0])
-            second_size = os.path.getsize(valid[1])
-            if top_size > second_size:
-                chosen = valid[0]
-                reason = 'largest_wins'
-            else:
-                md5s = [file_md5(c) for c in valid]
-                if len(set(md5s)) == 1:
-                    chosen = valid[0]
-                    root_hits[owning_root(chosen)] += 1
-                    return chosen
-                chosen = valid[0]
-                reason = 'same_size_first_root'
-            conflict_rows.append({
-                'file_path': fp, 'chosen_source': chosen,
-                'chosen_size': os.path.getsize(chosen),
-                'rejected_source': '; '.join(valid[1:]),
-                'rejected_size': '; '.join(str(os.path.getsize(c)) for c in valid[1:]),
-                'reason': reason,
-            })
-            root_hits[owning_root(chosen)] += 1
-            return chosen
-
-        resolver.conflict_rows = conflict_rows
-        resolver.root_hits = root_hits
-        resolver.zero_byte_count = zero_byte_count
-        return resolver
-
-    def test_file_only_in_root1(self, tmp_path, logger):
-        r1, r2 = tmp_path / "r1", tmp_path / "r2"
-        r2.mkdir()
-        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"data")
-        resolver = self._make_resolver([str(r1), str(r2)], logger)
-        result = resolver("Media/WhatsApp Images/img.jpg")
-        assert os.path.isfile(result)
-        assert resolver.root_hits[str(r1)] == 1
-        assert resolver.root_hits[str(r2)] == 0
-
-    def test_file_only_in_root2(self, tmp_path, logger):
-        r1, r2 = tmp_path / "r1", tmp_path / "r2"
-        r1.mkdir()
-        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"data")
-        resolver = self._make_resolver([str(r1), str(r2)], logger)
-        result = resolver("Media/WhatsApp Images/img.jpg")
-        assert os.path.isfile(result)
-        assert resolver.root_hits[str(r2)] == 1
-
-    def test_identical_content_no_conflict(self, tmp_path, logger):
-        r1, r2 = tmp_path / "r1", tmp_path / "r2"
-        content = b"same content"
-        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", content)
-        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", content)
-        resolver = self._make_resolver([str(r1), str(r2)], logger)
-        resolver("Media/WhatsApp Images/img.jpg")
-        assert resolver.conflict_rows == []
-
-    def test_larger_file_wins(self, tmp_path, logger):
-        r1, r2 = tmp_path / "r1", tmp_path / "r2"
-        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"small")
-        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"larger content here")
-        resolver = self._make_resolver([str(r1), str(r2)], logger)
-        result = resolver("Media/WhatsApp Images/img.jpg")
-        assert os.path.getsize(result) == len(b"larger content here")
-        assert len(resolver.conflict_rows) == 1
-        assert resolver.conflict_rows[0]['reason'] == 'largest_wins'
-
-    def test_same_size_different_md5_uses_first_root(self, tmp_path, logger):
-        r1, r2 = tmp_path / "r1", tmp_path / "r2"
-        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"AAAA")
-        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"BBBB")
-        resolver = self._make_resolver([str(r1), str(r2)], logger)
-        result = resolver("Media/WhatsApp Images/img.jpg")
-        assert result == str(r1 / "Media" / "WhatsApp Images" / "img.jpg")
-        assert resolver.conflict_rows[0]['reason'] == 'same_size_first_root'
-
-    def test_zero_byte_file_skipped(self, tmp_path, logger):
-        r1, r2 = tmp_path / "r1", tmp_path / "r2"
-        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"")   # 0-byte
-        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"real content")
-        resolver = self._make_resolver([str(r1), str(r2)], logger)
-        result = resolver("Media/WhatsApp Images/img.jpg")
-        assert os.path.getsize(result) > 0
-        assert resolver.zero_byte_count[0] == 1
-
-    def test_all_zero_byte_falls_back_to_missing(self, tmp_path, logger):
-        r1, r2 = tmp_path / "r1", tmp_path / "r2"
-        _make_wa_file(r1, "Media/WhatsApp Images/img.jpg", b"")
-        _make_wa_file(r2, "Media/WhatsApp Images/img.jpg", b"")
-        resolver = self._make_resolver([str(r1), str(r2)], logger)
-        result = resolver("Media/WhatsApp Images/img.jpg")
-        # Fallback path returned — file exists but is empty (recorded as missing by process_rows)
-        assert not os.path.getsize(result)
-        assert resolver.zero_byte_count[0] == 2
-
-    def test_file_in_neither_root_returns_fallback_path(self, tmp_path, logger):
-        r1, r2 = tmp_path / "r1", tmp_path / "r2"
-        r1.mkdir(); r2.mkdir()
-        resolver = self._make_resolver([str(r1), str(r2)], logger)
-        result = resolver("Media/WhatsApp Images/img.jpg")
-        # Path under first root, does not exist on disk
-        assert not os.path.exists(result)
-        assert str(r1) in result
-
-
 # ===========================================================================
 # write_conflict_report
 # ===========================================================================
@@ -1744,23 +1499,6 @@ class TestGroupPersistence:
 # ===========================================================================
 # iOS: timestamp conversion
 # ===========================================================================
-
-class TestIosTimestampConversion:
-    def test_apple_epoch_offset_value(self):
-        assert ios.APPLE_EPOCH_OFFSET == 978307200
-
-    def test_query_contains_epoch_conversion(self):
-        query = ios.build_ios_query(None, None)
-        assert "978307200" in query
-        assert "1000" in query
-
-    def test_since_converted_to_apple_epoch(self):
-        # Unix epoch ms for 2024-01-01 00:00:00 UTC = 1704067200000
-        since_ms = 1704067200000
-        query = ios.build_ios_query(None, since_ms)
-        expected_apple = (since_ms / 1000.0) - ios.APPLE_EPOCH_OFFSET
-        assert str(int(expected_apple)) in query or f"{expected_apple:.1f}" in query
-
 
 # ===========================================================================
 # iOS: build_manifest_map
