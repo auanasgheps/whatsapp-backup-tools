@@ -37,7 +37,15 @@ from shared import db, hashing
 # Requires Python 3.11+.
 # ==============================================================================
 
-__version__ = '0.37'
+def _get_version() -> str:
+    try:
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("wabtools")
+    except Exception:
+        import tomllib
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        return tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
 
 # ---------------------------------------------------------------------------
 # Helpers (shared)
@@ -648,7 +656,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument('--version', action='version',
-                        version=f'WhatsApp Backup Archiver v{__version__}')
+                        version=f'WhatsApp Backup Archiver v{_get_version()}')
     parser.add_argument('--config',
                         default=None,
                         metavar='PATH',
@@ -1219,7 +1227,7 @@ def main():
     _warn_network_paths(args, logger)
 
     if args.mode == 'restore':
-        logger.info(f"=== WhatsApp Backup Archiver v{__version__} started (restore mode) ===")
+        logger.info(f"=== WhatsApp Backup Archiver v{_get_version()} started (restore mode) ===")
         if args.dry_run:
             logger.info("*** DRY RUN MODE — no files will be copied ***")
         run_restore_mode(args, logger)
@@ -1227,7 +1235,7 @@ def main():
 
     if args.dry_run:
         logger.info("*** DRY RUN MODE — no files will be copied ***")
-    logger.info(f"=== WhatsApp Backup Archiver v{__version__} started ===")
+    logger.info(f"=== WhatsApp Backup Archiver v{_get_version()} started ===")
     run_forward_mode(args, logger)
 
 

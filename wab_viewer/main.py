@@ -28,6 +28,16 @@ try:
 except ImportError:
     sys.exit("Flask is not installed. Run: pip install flask")
 
+def _get_version() -> str:
+    try:
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("wabtools")
+    except Exception:
+        import tomllib
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        return tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+
 from wab_viewer.chat_viewer.template import HTML_TEMPLATE
 
 _CHAT_VIEWER_DIR = Path(__file__).parent / "chat_viewer"
@@ -45,6 +55,8 @@ def parse_args():
     p.add_argument("--port", type=int, default=5000, help="Port to listen on (default: 5000)")
     p.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
+    p.add_argument('--version', action='version',
+                   version=f'WhatsApp Backup Viewer v{_get_version()}')
     args = p.parse_args()
     if not args.output_root_flag and not args.output_root:
         p.error("output_root is required (positional or --output_root)")
