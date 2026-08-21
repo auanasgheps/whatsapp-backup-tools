@@ -656,7 +656,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument('--version', action='version',
-                        version=f'WhatsApp Backup Archiver v{_get_version()}')
+                        version=f'WhatsApp Backup Tools — Archiver v{_get_version()}')
     parser.add_argument('--config',
                         default=None,
                         metavar='PATH',
@@ -1227,7 +1227,7 @@ def main():
     _warn_network_paths(args, logger)
 
     if args.mode == 'restore':
-        logger.info(f"=== WhatsApp Backup Archiver v{_get_version()} started (restore mode) ===")
+        logger.info(f"=== WhatsApp Backup Tools — Archiver v{_get_version()} started (restore mode) ===")
         if args.dry_run:
             logger.info("*** DRY RUN MODE — no files will be copied ***")
         run_restore_mode(args, logger)
@@ -1235,7 +1235,7 @@ def main():
 
     if args.dry_run:
         logger.info("*** DRY RUN MODE — no files will be copied ***")
-    logger.info(f"=== WhatsApp Backup Archiver v{_get_version()} started ===")
+    logger.info(f"=== WhatsApp Backup Tools — Archiver v{_get_version()} started ===")
     run_forward_mode(args, logger)
 
 

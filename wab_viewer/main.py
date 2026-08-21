@@ -56,7 +56,7 @@ def parse_args():
     p.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
     p.add_argument('--version', action='version',
-                   version=f'WhatsApp Backup Viewer v{_get_version()}')
+                   version=f'WhatsApp Backup Tools — Viewer v{_get_version()}')
     args = p.parse_args()
     if not args.output_root_flag and not args.output_root:
         p.error("output_root is required (positional or --output_root)")
