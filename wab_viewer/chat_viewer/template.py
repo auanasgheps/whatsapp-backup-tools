@@ -20,7 +20,7 @@ HTML_TEMPLATE = r"""
 <body>
 <div id="app">
   <div id="header">
-    <h1>WhatsApp Backup Tools</h1>
+    <h1>WhatsApp Backup Viewer</h1>
     <span class="subtitle">{{ output_root }}</span>
   </div>
 
@@ -107,6 +107,14 @@ HTML_TEMPLATE = r"""
     <div id="settings-header">
       <span>Settings</span>
       <button id="settings-close">&#10005;</button>
+    </div>
+    <div id="settings-app-info">
+      <h2 id="settings-app-name">WhatsApp Backup Viewer</h2>
+      <p id="settings-app-subtitle">from WhatsApp Backup Tools</p>
+      <div id="settings-app-links">
+        <a id="settings-repo-link" href="https://github.com/auanasgheps/whatsapp-backup-tools" target="_blank" rel="noopener noreferrer">Repository</a>
+        <span id="settings-version">v{{ version }}</span>
+      </div>
     </div>
     <div class="settings-section">
       <div class="settings-label">Theme</div>
