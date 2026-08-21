@@ -583,6 +583,17 @@ class TestFlaskRoutes:
         with app1.test_client() as client:
             client.get("/api/messages?chat_id=123456789&chat_type=contact")
 
+        # Wait for the background daemon to finish indexing (macOS can be slower)
+        import time
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
+            count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            cache_conn.close()
+            if count == 1:
+                break
+            time.sleep(0.05)
+
         # second start with same file — indexed_chats should persist
         app2 = viewer.create_app(tmp_path, rescan=False)
         with app2.test_client() as client:
@@ -590,6 +601,7 @@ class TestFlaskRoutes:
             assert resp.status_code == 200
             cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
             count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            cache_conn.close()
             assert count == 1
 
 
