@@ -142,14 +142,25 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
     conn = sqlite3.connect(str(wa_db_path))
     try:
         conn.execute("PRAGMA journal_mode = WAL")
-        idx = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_message_chat_ts'"
-        ).fetchone()
-        if not idx:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_message_chat_ts ON message(chat_row_id, timestamp)"
-            )
-            conn.commit()
+        existing = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        if "idx_message_chat_ts" not in existing:
+            has_android = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
+            ).fetchone()
+            if has_android:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_message_chat_ts "
+                    "ON message(chat_row_id, timestamp)")
+        if "idx_zwamessage_chat_ts" not in existing:
+            has_ios = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
+            ).fetchone()
+            if has_ios:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_zwamessage_chat_ts "
+                    "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE)")
+        conn.commit()
     finally:
         conn.close()
 
@@ -1135,8 +1146,7 @@ def create_app(output_root: Path, rescan: bool = False):
     else:
         print(f"[wab_viewer] Source DB: {source_type} at {wa_db_path}")
 
-        if source_type == "android":
-            _ensure_wa_indexes(wa_db_path)
+        _ensure_wa_indexes(wa_db_path)
 
         if rescan or _source_changed(cache_conn, wa_db_path):
             _clear_fts_index(cache_conn)
