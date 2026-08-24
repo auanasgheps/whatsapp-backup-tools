@@ -241,14 +241,20 @@ def _scan_emojis(data: bytes) -> list[str]:
 
 
 def _parse_reactor_entry(data: bytes) -> tuple:
-    """Extract (sender_hex, [emoji_hex, ...]) from a reactor entry sub-blob."""
+    """Extract (sender_hex, [emoji_hex, ...]) from a reactor entry sub-blob.
+
+    Sub-fields 2 and 3 may contain emoji bytes. Sub-field 1 is the sender phone and
+    must NOT be scanned for emojis (phone bytes can accidentally match emoji byte
+    sequences and corrupt the output).
+    """
     sender = None
     all_emojis = []
     for sf, sw, sv in _parse_protobuf(data):
         if sw == "len":
             if sf == 1:
                 sender = sv.hex()
-            all_emojis.extend(_scan_emojis(sv))
+            elif sf in (2, 3):
+                all_emojis.extend(_scan_emojis(sv))
     return sender, all_emojis
 
 
@@ -294,9 +300,11 @@ def _ios_reactions(wa_conn: sqlite3.Connection,
 
     placeholders = ",".join("?" * len(msg_ids))
 
-    # Resolve "me" from a sent message in this chat so we can annotate reactions
-    my_jid = wa_conn.execute(f"""
-        SELECT gm.ZMEMBERJID
+    # Resolve "me" from a sent message in this chat so we can annotate reactions.
+    # In group chats ZGROUPMEMBER.ZMEMBERJID is populated; in 1-to-1 chats we fall
+    # back to ZWAMESSAGE.ZFROMJID.
+    my_row = wa_conn.execute(f"""
+        SELECT COALESCE(gm.ZMEMBERJID, m.ZFROMJID) AS me_jid
         FROM ZWAMESSAGE m
         LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
         WHERE m.ZCHATSESSION = CAST(? AS INTEGER)
@@ -305,8 +313,8 @@ def _ios_reactions(wa_conn: sqlite3.Connection,
     """, (chat_id,)).fetchone()
 
     my_phone = None
-    if my_jid:
-        jid = my_jid[0]
+    if my_row:
+        jid = my_row["me_jid"]
         at = jid.find("@")
         if at > 0:
             my_phone = jid[:at]
