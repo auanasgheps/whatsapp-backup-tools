@@ -1559,6 +1559,98 @@ class TestIosReceiptBlobParser:
 
 
 # ---------------------------------------------------------------------------
+# Tests: iOS reactions — ZRECEIPTINFO protobuf extraction
+# ---------------------------------------------------------------------------
+
+def _make_zreceipt_blob_with_reactions(reactors: list) -> bytes:
+    """
+    Build a ZRECEIPTINFO blob containing reaction entries.
+    reactors: list of (phone_hex_str, emoji_utf8_bytes) tuples
+    """
+    def encode_len_delimited(field, wire, data):
+        tag = (field << 3) | wire
+        return bytes([tag, len(data)]) + data
+
+    def make_reactor_entry(phone_hex_str, emoji_bytes):
+        # sub-field 1: sender phone as raw bytes (not hex string ASCII)
+        phone_data = bytes.fromhex(phone_hex_str)
+        # sub-field 3: emoji bytes
+        emoji_data = emoji_bytes
+        entry = encode_len_delimited(1, 2, phone_data)
+        entry += encode_len_delimited(3, 2, emoji_data)
+        return entry
+
+    field7_data = b""
+    for phone_hex, emoji_bytes in reactors:
+        entry_data = make_reactor_entry(phone_hex, emoji_bytes)
+        # entry tag 0x0a = field 1, wire 2
+        field7_data += bytes([0x0A, len(entry_data)]) + entry_data
+
+    # Top-level: field 7, wire 2
+    top_tag = (7 << 3) | 2
+    return bytes([top_tag, len(field7_data)]) + field7_data
+
+
+class TestIOSReactions:
+
+    def test_parse_heart_reaction(self):
+        blob = _make_zreceipt_blob_with_reactions([("334142384436", "❤️".encode("utf-8"))])
+        result = viewer._extract_ios_reactions(blob)
+        assert len(result) == 1
+        sender, emoji = result[0]
+        assert sender == "334142384436"
+        assert emoji == "❤️"
+
+    def test_parse_multiple_reactions(self):
+        blob = _make_zreceipt_blob_with_reactions([
+            ("334142384436", "❤️".encode("utf-8")),
+            ("334135434342", "😂".encode("utf-8")),
+        ])
+        result = viewer._extract_ios_reactions(blob)
+        assert len(result) == 2
+        assert result[0][1] == "❤️"
+        assert result[1][1] == "😂"
+
+    def test_parse_various_emoji(self):
+        blobs = []
+        for emoji in ["😂", "😮", "😭", "👏"]:
+            blobs.append(_make_zreceipt_blob_with_reactions([("334142384436", emoji.encode("utf-8"))]))
+        for i, emoji in enumerate(["😂", "😮", "😭", "👏"]):
+            result = viewer._extract_ios_reactions(blobs[i])
+            assert len(result) == 1, f"Failed for {emoji}"
+            assert result[0][1] == emoji, f"Expected {emoji}, got {result[0][1]}"
+
+    def test_parse_empty_blob(self):
+        result = viewer._extract_ios_reactions(b"")
+        assert result == []
+
+    def test_parse_no_field7(self):
+        # Blob with a different field (e.g. field 1)
+        blob = bytes([(1 << 3) | 2, 2, 0x41, 0x42])
+        result = viewer._extract_ios_reactions(blob)
+        assert result == []
+
+    def test_vs16_is_skipped_between_emoji(self):
+        # VS16 (efb88f) appears BETWEEN two real emoji — it should not be a separate reaction
+        blob = _make_zreceipt_blob_with_reactions([
+            ("334142384436", "❤️".encode("utf-8") + "👏".encode("utf-8")),
+        ])
+        result = viewer._extract_ios_reactions(blob)
+        # Both emoji returned; VS16 is a presentation modifier, not a standalone emoji
+        assert len(result) == 2
+        emojis = sorted(r[1] for r in result)
+        assert emojis == sorted(["❤️", "👏"])
+
+    def test_protobuf_skips_deprecated_wire_types(self):
+        # Build a blob with a deprecated wire type (6) embedded — should not crash
+        # Wire type 6 = deprecated start_group; we'll embed it inside field 7
+        entry_data = bytes([0x41, 0x42])  # field 8, wire 1 = deprecated
+        inner = bytes([0x0A, len(entry_data) + 1]) + bytes([6]) + entry_data
+        blob = bytes([(7 << 3) | 2, len(inner)]) + inner
+        result = viewer._extract_ios_reactions(blob)
+        assert result == []
+
+# ---------------------------------------------------------------------------
 # Tests: HTML template integrity
 # ---------------------------------------------------------------------------
 

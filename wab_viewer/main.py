@@ -164,6 +164,185 @@ def _strip_none_reactions(rows: list) -> list:
     return result
 
 
+# ---------------------------------------------------------------------------
+# iOS reactions — ZRECEIPTINFO protobuf extraction
+# ---------------------------------------------------------------------------
+
+def _parse_protobuf(data: bytes) -> list:
+    """Parse a protobuf blob into (field, wire_type, value) triples.
+
+    Handles wire types: 0=varint, 1=fixed64, 2=length-delimited, 5=fixed32.
+    Wire types 3,4,6,7 are deprecated protobuf — skipped.
+    """
+    results = []
+    pos = 0
+    while pos < len(data):
+        tag = data[pos]
+        f = tag >> 3
+        w = tag & 7
+        pos += 1
+        try:
+            if w == 0:  # varint
+                val, shift = 0, 0
+                while pos < len(data) and (data[pos - 1] & 0x80):
+                    b = data[pos]
+                    pos += 1
+                    val |= (b & 0x7f) << shift
+                    if not (b & 0x80):
+                        break
+                    shift += 7
+                results.append((f, "varint", val))
+            elif w == 1:  # 64-bit fixed
+                val = int.from_bytes(data[pos:pos + 8], "little")
+                pos += 8
+                results.append((f, "fixed64", val))
+            elif w == 2:  # length-delimited
+                length = data[pos]
+                pos += 1
+                val = data[pos:pos + length]
+                pos += length
+                results.append((f, "len", val))
+            elif w == 5:  # 32-bit fixed
+                pos += 4
+            else:
+                pass  # skip deprecated wire types 3,4,6,7
+        except (IndexError, ValueError):
+            break
+    return results
+
+
+def _scan_emojis(data: bytes) -> list[str]:
+    """Extract UTF-8 emoji sequences from raw bytes.
+
+    Skips Variation Selector 16 (efb88f) which is a presentation modifier, not a
+    standalone emoji. VS16 is merged into the preceding emoji's hex string so the
+    full emoji character (e.g. ❤️ = e29da4efb88f) is produced after hex decode.
+    """
+    emojis = []
+    i = 0
+    while i < len(data):
+        b = data[i]
+        if b == 0xEF and i + 2 < len(data) and data[i + 1] == 0xB8 and data[i + 2] == 0x8F:
+            # VS16 (Variation Selector 16) — merge with the previous emoji
+            if emojis:
+                emojis[-1] = emojis[-1] + "efb88f"
+            i += 3
+        elif b == 0xE2 and i + 2 < len(data):
+            # 3-byte emoji (e.g. ❤️ = e2 9d a4)
+            emojis.append(data[i:i + 3].hex())
+            i += 3
+        elif b == 0xF0 and i + 3 < len(data):
+            # 4-byte emoji (e.g. 😂 = f0 9f 98 82)
+            emojis.append(data[i:i + 4].hex())
+            i += 4
+        else:
+            i += 1
+    return emojis
+
+
+def _parse_reactor_entry(data: bytes) -> tuple:
+    """Extract (sender_hex, [emoji_hex, ...]) from a reactor entry sub-blob."""
+    sender = None
+    all_emojis = []
+    for sf, sw, sv in _parse_protobuf(data):
+        if sw == "len":
+            if sf == 1:
+                sender = sv.hex()
+            all_emojis.extend(_scan_emojis(sv))
+    return sender, all_emojis
+
+
+def _extract_ios_reactions(receipt_bytes: bytes) -> list:
+    """Extract (sender_hex, emoji_char) pairs from a ZRECEIPTINFO blob."""
+    for f, w, v in _parse_protobuf(receipt_bytes):
+        if f == 7 and w == "len":
+            reactors = []
+            pos = 0
+            while pos < len(v):
+                while pos < len(v) and v[pos] not in (0x0A, 0x12):
+                    pos += 1
+                if pos >= len(v):
+                    break
+                # pos now at entry tag (0x0a or 0x12)
+                # Skip tag (1 byte) and length (1 byte), then read 'length' bytes
+                pos += 2
+                length = v[pos - 1]  # length is the byte right after the tag
+                if pos + length > len(v):
+                    break
+                entry_data = v[pos:pos + length]
+                pos += length
+                sender, emojis = _parse_reactor_entry(entry_data)
+                for emoji_hex in emojis:
+                    emoji_char = bytes.fromhex(emoji_hex).decode("utf-8", errors="ignore")
+                    if emoji_char:
+                        reactors.append((sender, emoji_char))
+            return reactors
+    return []
+
+
+def _ios_reactions(wa_conn: sqlite3.Connection,
+                   chat_id: str,
+                   msg_ids: list) -> dict:
+    """Batch-fetch iOS reactions from ZRECEIPTINFO for a list of message IDs.
+
+    Returns a dict: {msg_id: [(sender_hex, emoji_hex), ...]}.
+    Reactions from the current user are annotated with from_me=1 so the frontend can
+    place them on the correct corner. "Me" is resolved from sent messages in this chat.
+    """
+    if not msg_ids:
+        return {}
+
+    placeholders = ",".join("?" * len(msg_ids))
+
+    # Resolve "me" from a sent message in this chat so we can annotate reactions
+    my_jid = wa_conn.execute(f"""
+        SELECT gm.ZMEMBERJID
+        FROM ZWAMESSAGE m
+        LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+        WHERE m.ZCHATSESSION = CAST(? AS INTEGER)
+          AND m.ZISFROMME = 1
+        LIMIT 1
+    """, (chat_id,)).fetchone()
+
+    my_phone = None
+    if my_jid:
+        jid = my_jid[0]
+        at = jid.find("@")
+        if at > 0:
+            my_phone = jid[:at]
+
+    rows = wa_conn.execute(f"""
+        SELECT m.Z_PK AS msg_id,
+               mi.ZRECEIPTINFO AS receipt_info
+        FROM ZWAMESSAGE m
+        LEFT JOIN ZWAMESSAGEINFO mi ON mi.Z_PK = m.ZMESSAGEINFO
+        WHERE m.Z_PK IN ({placeholders})
+          AND mi.ZRECEIPTINFO IS NOT NULL
+    """, msg_ids).fetchall()
+
+    if not rows:
+        return {}
+
+    reactions_by_msg = {}
+    for row in rows:
+        raw = row["receipt_info"]
+        if not raw:
+            continue
+        reactors = _extract_ios_reactions(bytes(raw))
+        if not reactors:
+            continue
+        annotated = []
+        for sender, emoji in reactors:
+            from_me = 0
+            if sender and my_phone:
+                if sender == my_phone:
+                    from_me = 1
+            annotated.append((sender, emoji, from_me))
+        reactions_by_msg[row["msg_id"]] = annotated
+
+    return reactions_by_msg
+
+
 def _resolve_and_cache_reactions(source_type: str,
                                  wa_conn: sqlite3.Connection,
                                  archive_conn: sqlite3.Connection,
@@ -1049,6 +1228,9 @@ def create_app(output_root: Path, rescan: bool = False):
     has_reactions = _tmp_wa.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
     ).fetchone() is not None
+    has_ios_reactions = _tmp_wa.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
+    ).fetchone() is not None
     _tmp_wa.close()
 
     globals()['_ANDROID_SELECT'] = f"""
@@ -1312,6 +1494,17 @@ def create_app(output_root: Path, rescan: bool = False):
             else:
                 for row in rows:
                     row["reactions"] = cached_map.get(row["msg_id"])
+        elif source_type == "ios" and rows and has_ios_reactions:
+            rows = [dict(r) for r in rows]
+            msg_ids = [r["msg_id"] for r in rows]
+            ios_rx = _ios_reactions(conn, chat_id, msg_ids)
+            for row in rows:
+                reactors = ios_rx.get(row["msg_id"])
+                if reactors:
+                    row["reactions"] = ",".join(e for _, e, _ in reactors)
+                    row["reactions_from_me"] = ",".join(str(f) for _, _, f in reactors)
+                else:
+                    row["reactions"] = None
         else:
             rows = [dict(r) for r in rows]
             for row in rows:
@@ -1368,6 +1561,17 @@ def create_app(output_root: Path, rescan: bool = False):
         combined = list(reversed(before_rows)) + list(after_rows)
         if source_type == "android" and combined and has_reactions:
             _resolve_and_cache_reactions(source_type, conn, get_archive(), combined)
+        elif source_type == "ios" and combined and has_ios_reactions:
+            combined = [dict(r) for r in combined]
+            msg_ids = [r["msg_id"] for r in combined]
+            ios_rx = _ios_reactions(conn, chat_id, msg_ids)
+            for row in combined:
+                reactors = ios_rx.get(row["msg_id"])
+                if reactors:
+                    row["reactions"] = ",".join(e for _, e, _ in reactors)
+                    row["reactions_from_me"] = ",".join(str(f) for _, _, f in reactors)
+                else:
+                    row["reactions"] = None
         return jsonify(_strip_none_reactions(combined))
 
     # ---- API: media gallery ------------------------------------------------
