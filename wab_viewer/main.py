@@ -284,7 +284,7 @@ def _extract_ios_reactions(receipt_bytes: bytes) -> list:
                 # Skip tag (1 byte) and length (1 byte), then read 'length' bytes
                 pos += 2
                 length = v[pos - 1]  # length is the byte right after the tag
-                if pos + length > len(v):
+                if length == 0 or pos + length > len(v):
                     break
                 entry_data = v[pos:pos + length]
                 pos += length
@@ -324,7 +324,7 @@ def _ios_reactions(wa_conn: sqlite3.Connection,
     """, (chat_id,)).fetchone()
 
     my_phone = None
-    if my_row:
+    if my_row and my_row["me_jid"]:
         jid = my_row["me_jid"]
         at = jid.find("@")
         if at > 0:
