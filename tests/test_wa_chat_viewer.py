@@ -1694,6 +1694,46 @@ class TestIOSReactions:
         # Sender phone 34393132343536373839 ≠ my phone 49123456789 → from_me=0
         assert from_me == 0
 
+    def test_ios_reactions_me_detection_null_jid(self, tmp_path):
+        """System messages have NULL ZFROMJID — _ios_reactions must not crash."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(wa_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE IF NOT EXISTS ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER, ZMESSAGEINFO INTEGER, ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB)")
+        conn.execute("CREATE INDEX IF NOT EXISTS ZWAMESSAGEINFO_ZMESSAGE_INDEX ON ZWAMESSAGEINFO (ZMESSAGE)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT)")
+
+        def encode_field7_reactor(phone_hex_str, emoji_bytes):
+            phone_data = bytes.fromhex(phone_hex_str)
+            entry = bytes([0x0a, len(phone_data)]) + phone_data
+            entry += bytes([0x1a, len(emoji_bytes)]) + emoji_bytes
+            field7 = bytes([0x0a, len(entry)]) + entry
+            return bytes([0x3a, len(field7)]) + field7
+
+        # Sent message with NULL ZFROMJID (system message) — "me" detection must not crash
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
+            "VALUES (1, 10, 1, NULL, 1000, NULL)"
+        )
+        # A message with reactions — reactor phone differs from "me" (which has NULL JID → my_phone=None)
+        conn.execute(
+            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (100, 2, ?)",
+            (encode_field7_reactor("34393132343536373839", "😂".encode("utf-8")),)
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
+            "VALUES (2, 10, 0, 100, 2000, '49876543210@s.whatsapp.net')"
+        )
+        conn.commit()
+
+        # Must not raise AttributeError: 'NoneType' object has no attribute 'find'
+        result = viewer._ios_reactions(conn, "10", [2])
+        assert 2 in result
+        sender, emoji, from_me = result[2][0]
+        assert emoji == "😂"
+        assert from_me == 0  # my_phone=None, reactor phone ≠ None → not from me
+
 # ---------------------------------------------------------------------------
 # Tests: HTML template integrity
 # ---------------------------------------------------------------------------
