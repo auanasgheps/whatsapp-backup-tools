@@ -1135,7 +1135,8 @@ def create_app(output_root: Path, rescan: bool = False):
     else:
         print(f"[wab_viewer] Source DB: {source_type} at {wa_db_path}")
 
-        _ensure_wa_indexes(wa_db_path)
+        if source_type == "android":
+            _ensure_wa_indexes(wa_db_path)
 
         if rescan or _source_changed(cache_conn, wa_db_path):
             _clear_fts_index(cache_conn)
