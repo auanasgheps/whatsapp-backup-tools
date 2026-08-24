@@ -715,17 +715,58 @@
     if (msg.reactions) {
       const rxEl = document.createElement('div');
       rxEl.className = 'msg-reactions';
-      const seen = {};
-      msg.reactions.split(',').forEach(e => {
-        seen[e] = (seen[e] || 0) + 1;
-      });
-      Object.entries(seen).forEach(([emoji, count]) => {
-        const badge = document.createElement('span');
-        badge.className = 'rx-badge';
-        badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
-        rxEl.appendChild(badge);
-      });
-      bubble.appendChild(rxEl);
+      if (msg.reactions_from_me !== undefined) {
+        // iOS: reactions split by sender (from_me encoded in reactions_from_me)
+        const emojis = msg.reactions.split(',');
+        const fromMes = msg.reactions_from_me.split(',');
+        const myRx = [], theirRx = [];
+        emojis.forEach((e, i) => {
+          if (fromMes[i] === '1') myRx.push(e);
+          else theirRx.push(e);
+        });
+        const seen = {};
+        const addBadges = (arr) => arr.forEach(e => { seen[e] = (seen[e] || 0) + 1; });
+        addBadges(msg.from_me ? theirRx : myRx);
+        Object.entries(seen).forEach(([emoji, count]) => {
+          const badge = document.createElement('span');
+          badge.className = 'rx-badge';
+          badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
+          rxEl.appendChild(badge);
+        });
+        // Second reactions on the opposite corner
+        if (myRx.length || theirRx.length) {
+          const rxEl2 = document.createElement('div');
+          rxEl2.className = 'msg-reactions rx-badge-2';
+          const seen2 = {};
+          const addBadges2 = (arr) => arr.forEach(e => { seen2[e] = (seen2[e] || 0) + 1; });
+          addBadges2(msg.from_me ? myRx : theirRx);
+          Object.entries(seen2).forEach(([emoji, count]) => {
+            const badge = document.createElement('span');
+            badge.className = 'rx-badge';
+            badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
+            rxEl2.appendChild(badge);
+          });
+          if (rxEl2.children.length) {
+            const metaIdx = Array.from(bubble.children).indexOf(meta);
+            bubble.insertBefore(rxEl2, bubble.children[metaIdx]);
+          }
+        }
+      } else {
+        // Android: all reactions shown on sender's corner (aggregated)
+        const seen = {};
+        msg.reactions.split(',').forEach(e => {
+          seen[e] = (seen[e] || 0) + 1;
+        });
+        Object.entries(seen).forEach(([emoji, count]) => {
+          const badge = document.createElement('span');
+          badge.className = 'rx-badge';
+          badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
+          rxEl.appendChild(badge);
+        });
+      }
+      if (rxEl.children.length) {
+        bubble.appendChild(rxEl);
+      }
     }
 
     bubble.appendChild(meta);

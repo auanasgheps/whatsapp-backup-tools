@@ -374,6 +374,9 @@
     }
     .msg-row.sent .msg-reactions { justify-content: flex-end; }
     .msg-row.recv .msg-reactions { justify-content: flex-start; }
+    /* Second reactions row (iOS only) — opposite corner */
+    .msg-row.sent .rx-badge-2 { justify-content: flex-start; }
+    .msg-row.recv .rx-badge-2 { justify-content: flex-end; }
     .rx-badge {
       display: inline-flex; align-items: center;
       background: rgba(255,255,255,0.9);
