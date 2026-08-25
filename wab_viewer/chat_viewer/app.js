@@ -566,9 +566,8 @@
     const needsSep = prevTs === null || dayKey(msg.timestamp_ms) !== dayKey(prevTs);
     if (needsSep && direction === 'after') nodes.push(makeDateSeparator(msg.timestamp_ms));
     nodes.push(renderBubble(msg));
-    // 'before': separator goes after the bubble so insertBefore puts it above the next row;
-    // label uses prevTs (= the chronologically newer neighbour, start of that day)
-    if (needsSep && direction === 'before' && prevTs !== null) nodes.push(makeDateSeparator(prevTs));
+    // 'before': separator goes after the bubble so insertBefore puts it above the next row
+    if (needsSep && direction === 'before' && prevTs !== null) nodes.push(makeDateSeparator(msg.timestamp_ms));
     return nodes;
   }
 
