@@ -653,12 +653,17 @@
   }
 
   function detectMediaGroups(messages) {
-    // Reset flags from any previous pass
+    // Reset flags from any previous pass. Preserve _rendered for messages
+    // already in the DOM — their nodes will be reused, not replaced.
+    // Using a DOM query as the "already rendered" sentinel avoids coupling
+    // detectMediaGroups to caller-specific logic about which items are new.
     for (const m of messages) {
       delete m._mediaGroup;
       delete m._mediaGroupStart;
       delete m._mediaGroupEnd;
-      delete m._rendered;
+      if (!document.querySelector(`.msg-row[data-ts="${m.timestamp_ms}"]`)) {
+        delete m._rendered;
+      }
     }
 
     for (let i = 0; i < messages.length; i++) {
@@ -2003,36 +2008,52 @@
     }
 
     // No groups found — safe to render only the new messages incrementally.
-    // Existing DOM rows are untouched (they don't form groups with the new batch).
+    // Existing DOM rows are untouched (their _rendered flag keeps them in place).
     const oldestNewTs = msgs[0].timestamp_ms;
+
+    // Find the first existing row that is newer than all new messages —
+    // that is the insertion point: insert before it so new (older) rows end up
+    // below all existing older rows in DOM order.
     let insertBeforeEl = null;
     for (const row of scroll.querySelectorAll('.msg-row[data-ts]')) {
-      if (parseInt(row.getAttribute('data-ts')) < oldestNewTs) {
-        insertBeforeEl = row;
-        break;
+      const ts = parseInt(row.getAttribute('data-ts'));
+      if (ts < oldestNewTs) continue; // skip rows that are older than the new batch
+      insertBeforeEl = row;
+      break;
+    }
+
+    // prevTs for the first new message is the actual last existing older row
+    // (the one just before the insertion point), so date separators are correct.
+    let prevLastTs = null;
+    if (insertBeforeEl) {
+      const prevRow = insertBeforeEl.previousElementSibling;
+      if (prevRow && prevRow.classList.contains('msg-row')) {
+        prevLastTs = parseInt(prevRow.getAttribute('data-ts'));
+      }
+    } else {
+      // All existing rows are older than the new batch — prev is the last DOM row.
+      const allRows = scroll.querySelectorAll('.msg-row[data-ts]');
+      if (allRows.length > 0) {
+        prevLastTs = parseInt(allRows[allRows.length - 1].getAttribute('data-ts'));
       }
     }
 
-    // prevTs for the first new message must be the actual last existing message
-    // (the one just before the insertion point), so date separators are placed correctly
-    const prevLastTs = insertBeforeEl
-      ? parseInt(insertBeforeEl.getAttribute('data-ts'))
-      : null;
-
-    // Insert oldest-first, after any existing rows older than the new content.
-    // Existing DOM rows are not touched — their _rendered flag is still true so
-    // renderBubbleWithSep returns [] for them automatically.
+    // Insert oldest-first, before insertBeforeEl (or append if no such row).
     for (let i = 0; i < msgs.length; i++) {
       const m = msgs[i];
       const prevTs = i === 0 ? prevLastTs : msgs[i - 1].timestamp_ms;
       const nodes = renderBubbleWithSep(m, prevTs, 'after');
+      // nodes = [separator?, bubble]; separator goes before insertBeforeEl,
+      // bubble goes after separator (i.e., still before insertBeforeEl).
       nodes.forEach(node => {
         if (insertBeforeEl) scroll.insertBefore(node, insertBeforeEl);
         else scroll.appendChild(node);
       });
+      domNodes += nodes.length;
     }
 
-    // Restore scroll position so the patch is invisible
+    pruneDom('top');
+    // Restore scroll position so the patch is invisible to the user
     scroll.scrollTop = prevScrollTop;
 
     const targetEl = document.querySelector(`.msg-row[data-ts="${target.timestamp_ms}"]`);
