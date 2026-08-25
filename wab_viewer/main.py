@@ -1427,7 +1427,7 @@ def create_app(output_root: Path, rescan: bool = False):
         after = request.args.get("after")
         limit = min(int(request.args.get("limit", 50)), 200)
 
-        if not before and not after:
+        if not before and not after and source_type == "android":
             rows = get_archive().execute(
                 """SELECT * FROM recent_messages
                    WHERE chat_id = ? AND chat_type = ?
