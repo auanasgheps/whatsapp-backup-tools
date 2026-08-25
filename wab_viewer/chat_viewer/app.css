@@ -3,10 +3,11 @@
       --bg: #111b21;
       --surface: #1f2c33;
       --surface2: #2a3942;
-      --bubble-in: #d9fdd3;
-      --bubble-out: #dcf8c6;
-      --bubble-in-text: #111b21;
-      --bubble-out-text: #111b21;
+      --bubble-in: #202c33;
+      --bubble-out: #005c4b;
+      --bubble-in-text: #e9edef;
+      --bubble-out-text: #e9edef;
+      --bubble-meta: rgba(233,237,239,0.6);
       --text: #e9edef;
       --text-muted: #8696a0;
       --accent: #00a884;
@@ -23,6 +24,7 @@
       --bubble-out: #d9fdd3;
       --bubble-in-text: #111b21;
       --bubble-out-text: #111b21;
+      --bubble-meta: rgba(17,27,33,0.5);
       --text: #111b21;
       --text-muted: #54656f;
       --accent: #00a884;
@@ -365,8 +367,8 @@
     .msg-text li, .msg-caption li { margin: 0; }
     .msg-meta { font-size: 10px; color: var(--text-muted); text-align: right; margin-top: 2px; }
 
-    .msg-row.sent .msg-meta { color: rgba(17,27,33,0.5); }
-    .msg-row.recv .msg-meta { color: rgba(17,27,33,0.5); }
+    .msg-row.sent .msg-meta { color: var(--bubble-meta); }
+    .msg-row.recv .msg-meta { color: var(--bubble-meta); }
 
     .msg-reactions {
       display: flex; flex-wrap: wrap; gap: 3px;
@@ -701,7 +703,7 @@
     }
     .msg-row.sent .msg-quote { background: rgba(0,0,0,0.1); }
     .msg-quote-sender { font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 1px; }
-    .msg-quote-text { font-size: 12px; color: rgba(17,27,33,0.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .msg-quote-text { font-size: 12px; color: var(--bubble-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .msg-quote[style*="cursor: pointer"]:hover { background: rgba(0,0,0,0.15); }
 
     .msg-bubble.search-highlight {
