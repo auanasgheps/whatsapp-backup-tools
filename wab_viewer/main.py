@@ -179,6 +179,22 @@ def _strip_none_reactions(rows: list) -> list:
 # iOS reactions — ZRECEIPTINFO protobuf extraction
 # ---------------------------------------------------------------------------
 
+def _read_varint(data: bytes, pos: int) -> tuple:
+    """Read a base-128 varint from data at pos. Returns (value, new_pos).
+
+    Each byte contributes 7 bits; the high bit (0x80) signals continuation.
+    """
+    val, shift = 0, 0
+    while pos < len(data):
+        b = data[pos]
+        pos += 1
+        val |= (b & 0x7f) << shift
+        if not (b & 0x80):
+            break
+        shift += 7
+    return val, pos
+
+
 def _parse_protobuf(data: bytes) -> list:
     """Parse a protobuf blob into (field, wire_type, value) triples.
 
@@ -188,35 +204,26 @@ def _parse_protobuf(data: bytes) -> list:
     results = []
     pos = 0
     while pos < len(data):
-        tag = data[pos]
-        f = tag >> 3
-        w = tag & 7
-        pos += 1
         try:
+            tag, pos = _read_varint(data, pos)
+            f = tag >> 3
+            w = tag & 7
             if w == 0:  # varint
-                val, shift = 0, 0
-                while pos < len(data) and (data[pos - 1] & 0x80):
-                    b = data[pos]
-                    pos += 1
-                    val |= (b & 0x7f) << shift
-                    if not (b & 0x80):
-                        break
-                    shift += 7
+                val, pos = _read_varint(data, pos)
                 results.append((f, "varint", val))
             elif w == 1:  # 64-bit fixed
                 val = int.from_bytes(data[pos:pos + 8], "little")
                 pos += 8
                 results.append((f, "fixed64", val))
             elif w == 2:  # length-delimited
-                length = data[pos]
-                pos += 1
+                length, pos = _read_varint(data, pos)
                 val = data[pos:pos + length]
                 pos += length
                 results.append((f, "len", val))
             elif w == 5:  # 32-bit fixed
                 pos += 4
             else:
-                pass  # skip deprecated wire types 3,4,6,7
+                break  # deprecated wire types 3,4,6,7 — cannot resync, stop
         except (IndexError, ValueError):
             break
     return results
@@ -270,25 +277,18 @@ def _parse_reactor_entry(data: bytes) -> tuple:
 
 
 def _extract_ios_reactions(receipt_bytes: bytes) -> list:
-    """Extract (sender_hex, emoji_char) pairs from a ZRECEIPTINFO blob."""
+    """Extract (sender_hex, emoji_char) pairs from a ZRECEIPTINFO blob.
+
+    Field 7 is the reactor group; each reactor is a repeated length-delimited
+    sub-field (field 1 or 2). Sub-field 1 holds the sender, sub-fields 2/3 the emoji.
+    """
+    reactors = []
     for f, w, v in _parse_protobuf(receipt_bytes):
         if f == 7 and w == "len":
-            reactors = []
-            pos = 0
-            while pos < len(v):
-                while pos < len(v) and v[pos] not in (0x0A, 0x12):
-                    pos += 1
-                if pos >= len(v):
-                    break
-                # pos now at entry tag (0x0a or 0x12)
-                # Skip tag (1 byte) and length (1 byte), then read 'length' bytes
-                pos += 2
-                length = v[pos - 1]  # length is the byte right after the tag
-                if length == 0 or pos + length > len(v):
-                    break
-                entry_data = v[pos:pos + length]
-                pos += length
-                sender, emojis = _parse_reactor_entry(entry_data)
+            for ef, ew, ev in _parse_protobuf(v):
+                if ew != "len":
+                    continue
+                sender, emojis = _parse_reactor_entry(ev)
                 for emoji_hex in emojis:
                     emoji_char = bytes.fromhex(emoji_hex).decode("utf-8", errors="ignore")
                     if emoji_char:
