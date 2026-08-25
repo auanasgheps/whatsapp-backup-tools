@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -1566,10 +1567,13 @@ def _make_zreceipt_blob_with_reactions(reactors: list) -> bytes:
     """
     Build a ZRECEIPTINFO blob containing reaction entries.
     reactors: list of (phone_hex_str, emoji_utf8_bytes) tuples
+
+    Length prefixes are varint-encoded, so blobs with field 7 >= 128 bytes
+    (many reactors) are represented correctly.
     """
     def encode_len_delimited(field, wire, data):
         tag = (field << 3) | wire
-        return bytes([tag, len(data)]) + data
+        return _encode_varint(tag) + _encode_varint(len(data)) + data
 
     def make_reactor_entry(phone_hex_str, emoji_bytes):
         # sub-field 1: sender phone as raw bytes (not hex string ASCII)
@@ -1584,11 +1588,11 @@ def _make_zreceipt_blob_with_reactions(reactors: list) -> bytes:
     for phone_hex, emoji_bytes in reactors:
         entry_data = make_reactor_entry(phone_hex, emoji_bytes)
         # entry tag 0x0a = field 1, wire 2
-        field7_data += bytes([0x0A, len(entry_data)]) + entry_data
+        field7_data += _encode_varint(0x0A) + _encode_varint(len(entry_data)) + entry_data
 
     # Top-level: field 7, wire 2
     top_tag = (7 << 3) | 2
-    return bytes([top_tag, len(field7_data)]) + field7_data
+    return _encode_varint(top_tag) + _encode_varint(len(field7_data)) + field7_data
 
 
 class TestIOSReactions:
@@ -1640,6 +1644,41 @@ class TestIOSReactions:
         assert len(result) == 2
         emojis = sorted(r[1] for r in result)
         assert emojis == sorted(["❤️", "👏"])
+
+    def test_many_reactions_large_field7(self):
+        """Field 7 >= 128 bytes needs a multi-byte varint length; all reactors survive.
+
+        The old single-byte length read truncated field 7 and dropped reactors.
+        """
+        reactors = [(f"33414238{i:04d}", "❤️".encode("utf-8")) for i in range(11)]
+        blob = _make_zreceipt_blob_with_reactions(reactors)
+        assert len(blob) > 128  # forces a multi-byte varint length on field 7
+        result = viewer._extract_ios_reactions(blob)
+        assert len(result) == 11
+        assert all(emoji == "❤️" for _, emoji in result)
+
+    def test_emoji_in_subfield_2(self):
+        """Some reactor entries store the emoji in sub-field 2 (tag 0x12), not 3.
+
+        Combined with a field 7 that needs a 2-byte varint length, the old parser's
+        single-byte length read dropped the trailing byte and discarded this entry.
+        """
+        # Two entries with emoji in sub-field 3, plus a final entry with emoji in
+        # sub-field 2. Pad the blob past 128 bytes so field 7 uses a 2-byte varint.
+        def entry(field, emoji):
+            sub1 = _encode_varint(0x0A) + _encode_varint(30) + (b"\x11" * 30)
+            sub_emoji = _encode_varint((field << 3) | 2) + _encode_varint(len(emoji)) + emoji
+            body = sub1 + sub_emoji
+            return _encode_varint(0x0A) + _encode_varint(len(body)) + body
+
+        laugh = "😂".encode("utf-8")
+        heart = "❤️".encode("utf-8")
+        field7 = entry(3, heart) + entry(3, laugh) + entry(3, laugh) + entry(2, laugh)
+        blob = _encode_varint((7 << 3) | 2) + _encode_varint(len(field7)) + field7
+        assert len(field7) > 128  # forces a 2-byte varint length on field 7
+        result = viewer._extract_ios_reactions(blob)
+        counts = Counter(emoji for _, emoji in result)
+        assert counts == Counter({"😂": 3, "❤️": 1})
 
     def test_protobuf_skips_deprecated_wire_types(self):
         # Build a blob with a deprecated wire type (6) embedded — should not crash
