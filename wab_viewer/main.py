@@ -1448,6 +1448,8 @@ def create_app(output_root: Path, rescan: bool = False):
                     rx_map = {r["msg_id"]: r["reactions"] for r in rx_cache}
                     for row in rows:
                         row["reactions"] = rx_map.get(row["msg_id"])
+                elif rows:
+                    rows = [dict(r) for r in rows]
                 return jsonify(rows)
 
         conn = get_wa()
