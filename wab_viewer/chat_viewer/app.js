@@ -517,6 +517,16 @@
         // The message currently at the top of our list is the boundary for date seps
         const firstExistingTs = msgList.length > 0 ? msgList[0].timestamp_ms : null;
 
+        // If the newest prepended message shares a day with the current top message,
+        // that top message is no longer the first of its day: drop the now-stale
+        // separator above it (the prepended block adds the correct one further up).
+        if (firstExistingTs !== null &&
+            dayKey(ordered[ordered.length - 1].timestamp_ms) === dayKey(firstExistingTs)) {
+          const topRow = scroll.querySelector(`.msg-row[data-ts="${firstExistingTs}"]`);
+          const prevSib = topRow && topRow.previousElementSibling;
+          if (prevSib && prevSib.classList.contains('date-separator')) prevSib.remove();
+        }
+
         // Prepend into msgList
         for (let i = ordered.length - 1; i >= 0; i--) {
           msgList.unshift(ordered[i]);
@@ -525,13 +535,14 @@
         const prevHeight = scroll.scrollHeight;
         const prevTop = scroll.scrollTop;
 
-        // Insert into DOM oldest-first (each goes before the current firstChild)
-        // so final order is oldest-at-top. For date sep: compare each msg with
-        // the one that comes after it in the DOM (i.e. ordered[i+1] or firstExistingTs).
+        // Insert into DOM oldest-first (each goes before the current firstChild) so
+        // the final order is oldest-at-top. A message is the first of its day when
+        // its day differs from its older neighbour (ordered[i-1], or null for the
+        // oldest loaded); place the separator there, matching the 'after' path.
         for (let i = ordered.length - 1; i >= 0; i--) {
           const m = ordered[i];
-          const nextTs = i < ordered.length - 1 ? ordered[i + 1].timestamp_ms : firstExistingTs;
-          const nodes = renderBubbleWithSep(m, nextTs, 'before');
+          const olderTs = i > 0 ? ordered[i - 1].timestamp_ms : null;
+          const nodes = renderBubbleWithSep(m, olderTs, 'before');
           nodes.forEach(node => scroll.insertBefore(node, scroll.firstChild));
         }
 
@@ -562,12 +573,15 @@
   }
 
   function renderBubbleWithSep(msg, prevTs, direction) {
+    // prevTs is always the OLDER (chronologically previous) neighbour, or null when
+    // msg is the oldest loaded message. A message is the first of its day when its
+    // day differs from that neighbour, so the separator goes above it either way.
     const nodes = [];
     const needsSep = prevTs === null || dayKey(msg.timestamp_ms) !== dayKey(prevTs);
     if (needsSep && direction === 'after') nodes.push(makeDateSeparator(msg.timestamp_ms));
     nodes.push(renderBubble(msg));
-    // 'before': separator goes after the bubble so insertBefore puts it above the next row
-    if (needsSep && direction === 'before' && prevTs !== null) nodes.push(makeDateSeparator(msg.timestamp_ms));
+    // 'before': separator goes after the bubble so insertBefore puts it above the row
+    if (needsSep && direction === 'before') nodes.push(makeDateSeparator(msg.timestamp_ms));
     return nodes;
   }
 
