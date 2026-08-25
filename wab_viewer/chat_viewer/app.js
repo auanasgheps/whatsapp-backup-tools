@@ -1966,6 +1966,14 @@
     });
   }
 
+  // Recent iOS messages record that a message was read (aggregate status) but no
+  // longer store the precise read time. Show that state instead of a blank dash.
+  function fmtRead(entry) {
+    if (entry.read_ts) return fmtReceipt(entry.read_ts);
+    if (entry.read_known) return '<span class="msg-details-na">Read (time not stored)</span>';
+    return '—';
+  }
+
   async function showMsgDetails(msgId, anchorEl, archivePath) {
     let html = '';
 
@@ -1987,11 +1995,11 @@
       } else if (data.members.length === 1) {
         html =
           `<div class="msg-details-row"><span class="msg-details-label">Delivered</span><span class="msg-details-value">${fmtReceipt(data.delivered_ts)}</span></div>` +
-          `<div class="msg-details-row"><span class="msg-details-label">Read</span><span class="msg-details-value">${fmtReceipt(data.read_ts)}</span></div>`;
+          `<div class="msg-details-row"><span class="msg-details-label">Read</span><span class="msg-details-value">${fmtRead(data)}</span></div>`;
       } else {
         let rows = '';
         for (const m of data.members) {
-          rows += `<tr><td>${esc(m.name || m.jid || '?')}</td><td>${fmtReceipt(m.delivered_ts)}</td><td>${fmtReceipt(m.read_ts)}</td></tr>`;
+          rows += `<tr><td>${esc(m.name || m.jid || '?')}</td><td>${fmtReceipt(m.delivered_ts)}</td><td>${fmtRead(m)}</td></tr>`;
         }
         html = `<table class="msg-details-table"><thead><tr><th>Member</th><th>Delivered</th><th>Read</th></tr></thead><tbody>${rows}</tbody></table>`;
       }
