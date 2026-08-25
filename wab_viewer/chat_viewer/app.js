@@ -574,7 +574,38 @@
         pruneDom('top');
       } else {
         msgs.forEach(m => msgList.push(m));
+
+        // Fast pass: detect groups in the new batch
         detectMediaGroups(msgs);
+
+        // Check if the oldest new message could continue a group across the
+        // boundary with the first existing message (same sender, within gap).
+        const newestExisting = msgList.length > msgs.length
+          ? msgList[msgList.length - msgs.length - 1]
+          : null;
+        if (newestExisting && msgs.length > 0) {
+          const oldestNew = msgs[0];
+          if (isGrouableMedia(oldestNew) && isGrouableMedia(newestExisting) &&
+              sameSender(oldestNew, newestExisting) &&
+              oldestNew.timestamp_ms - newestExisting.timestamp_ms <= MEDIA_GROUP_GAP_MS) {
+            detectMediaGroups(msgList);
+          }
+        }
+
+        // If any group found, re-render from scratch so stale individual bubbles
+        // are removed and the grid replaces them correctly.
+        if (msgList.some(m => m._mediaGroupStart)) {
+          scroll.innerHTML = '';
+          domNodes = 0;
+          for (let i = 0; i < msgList.length; i++) {
+            const prevTs = i > 0 ? msgList[i - 1].timestamp_ms : null;
+            renderBubbleWithSep(msgList[i], prevTs, 'after').forEach(node => scroll.appendChild(node));
+            domNodes++;
+          }
+          scroll.scrollTop = scroll.scrollHeight;
+          pruneDom('bottom');
+          return;
+        }
 
         const prevLastTs = msgList.length > msgs.length
           ? msgList[msgList.length - msgs.length - 1].timestamp_ms
@@ -1929,15 +1960,21 @@
     const msgs = await res.json();
     if (!msgs.length) return null;
 
-    // Reset _rendered so re-detect clears stale flags from a prior render
+    // Add new messages to msgList so detectMediaGroups can see the full picture
+    msgs.forEach(m => msgList.push(m));
+    msgList.sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+
+    // Reset _rendered on all messages so detectMediaGroups can re-assign group
+    // flags from scratch — existing DOM rows will be re-rendered but that's cheap
     for (const m of msgList) {
       delete m._rendered;
+      delete m._mediaGroup;
+      delete m._mediaGroupStart;
+      delete m._mediaGroupEnd;
     }
     detectMediaGroups(msgList);
 
-    // Patch new messages into existing DOM without wiping anything.
-    // Find the insertion point: last existing row whose timestamp is older than
-    // the oldest message in the API response.
+    // Find insertion point: last existing DOM row older than the oldest new message
     const oldestNewTs = msgs[0].timestamp_ms;
     let insertBeforeEl = null;
     for (const row of scroll.querySelectorAll('.msg-row[data-ts]')) {
@@ -1952,10 +1989,18 @@
       Math.abs(m.timestamp_ms - ts) < Math.abs(best.timestamp_ms - ts) ? m : best
     );
 
-    // Insert oldest-first, after any existing rows older than the new content
+    // prevTs for the first new message must be the actual last existing message
+    // (the one just before the insertion point), so date separators are placed correctly
+    const prevLastTs = insertBeforeEl
+      ? parseInt(insertBeforeEl.getAttribute('data-ts'))
+      : null;
+
+    // Insert oldest-first, after any existing rows older than the new content.
+    // Existing DOM rows are not touched — their _rendered flag is still true so
+    // renderBubbleWithSep returns [] for them automatically.
     for (let i = 0; i < msgs.length; i++) {
       const m = msgs[i];
-      const prevTs = i === 0 ? null : msgs[i - 1].timestamp_ms;
+      const prevTs = i === 0 ? prevLastTs : msgs[i - 1].timestamp_ms;
       const nodes = renderBubbleWithSep(m, prevTs, 'after');
       nodes.forEach(node => {
         if (insertBeforeEl) scroll.insertBefore(node, insertBeforeEl);
