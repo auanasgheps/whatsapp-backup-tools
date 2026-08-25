@@ -1056,6 +1056,15 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
     return members
 
 
+def _ios_read_without_timestamp(msg_status: int, read_ts) -> bool:
+    """iOS aggregate ZMESSAGESTATUS 8 = read (in groups WhatsApp only sets it once
+    every recipient has read). Recent messages (~mid-2026 onward) keep this flag but
+    no longer persist the per-recipient read timestamp. Return True when the message
+    is confirmed read yet no timestamp is stored, so the UI can show that state
+    instead of a blank."""
+    return msg_status == 8 and read_ts is None
+
+
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -1774,7 +1783,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 """SELECT mi.ZRECEIPTINFO,
                           cs.ZGROUPINFO IS NOT NULL AS is_group,
                           CAST(m.ZMESSAGEDATE + 978307200 AS INTEGER) AS msg_ts_s,
-                          m.ZCHATSESSION AS chat_session_pk
+                          m.ZCHATSESSION AS chat_session_pk,
+                          m.ZMESSAGESTATUS AS msg_status
                    FROM ZWAMESSAGEINFO mi
                    JOIN ZWAMESSAGE m ON m.Z_PK = mi.ZMESSAGE
                    JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
@@ -1802,10 +1812,19 @@ def create_app(output_root: Path, rescan: bool = False):
                     ).fetchall()
                 }
                 members = [m for m in members if m["jid"] in known_jids]
+
+            # iOS stopped persisting per-recipient read timestamps for recent
+            # messages (~mid-2026), but the aggregate ZMESSAGESTATUS still records
+            # the read state. Surface it as read-without-time so the UI can
+            # distinguish it from a genuinely unread message.
+            for m in members:
+                m["read_known"] = _ios_read_without_timestamp(row["msg_status"], m["read_ts"])
+
             result = {"available": True, "members": members}
             if len(members) == 1:
                 result["delivered_ts"] = members[0]["delivered_ts"]
                 result["read_ts"] = members[0]["read_ts"]
+                result["read_known"] = members[0]["read_known"]
             return jsonify(result)
 
     # ---- API: chat info -------------------------------------------------------

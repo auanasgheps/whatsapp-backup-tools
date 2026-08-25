@@ -1555,6 +1555,25 @@ class TestIosReceiptBlobParser:
         assert members[0]["delivered_ts"] == base_ts * 1000
 
 
+class TestIosReadWithoutTimestamp:
+    """iOS keeps the aggregate read flag (ZMESSAGESTATUS 8) for recent messages but
+    no longer stores per-recipient read timestamps; the route surfaces that state."""
+
+    def test_read_status_without_timestamp_is_flagged(self):
+        assert viewer._ios_read_without_timestamp(8, None) is True
+
+    def test_read_status_with_timestamp_is_not_flagged(self):
+        # A stored timestamp already conveys the read state.
+        assert viewer._ios_read_without_timestamp(8, 1700000000000) is False
+
+    def test_delivered_status_is_not_flagged(self):
+        # Status 6 = delivered, not read.
+        assert viewer._ios_read_without_timestamp(6, None) is False
+
+    def test_sent_status_is_not_flagged(self):
+        assert viewer._ios_read_without_timestamp(1, None) is False
+
+
 # ---------------------------------------------------------------------------
 # Tests: iOS reactions — ZRECEIPTINFO protobuf extraction
 # ---------------------------------------------------------------------------
