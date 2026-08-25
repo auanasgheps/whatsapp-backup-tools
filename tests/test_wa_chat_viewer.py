@@ -1339,29 +1339,59 @@ def _encode_varint(value: int) -> bytes:
     return bytes(result)
 
 
+def _lid_field1_bytes(lid_digits: str) -> bytes:
+    """Encode a LID as field-1 bytes: a prefix byte + hex-nibble digits.
+
+    The parser reads value[1:].hex() and strips a single trailing 'f', so an
+    odd-length LID is padded with an 'f' nibble here. Synthetic values only.
+    """
+    h = lid_digits if len(lid_digits) % 2 == 0 else lid_digits + "f"
+    return b"\x8c" + bytes.fromhex(h)
+
+
 def _make_receipt_blob(base_ts: int, members: list) -> bytes:
+    """Build a rich-format ZRECEIPTINFO blob (top field 3 = base_ts).
+
+    members: list of dicts, each with ALL keys present (None to omit the field):
+      - lid: synthetic LID digit string (e.g. "1234567890123")
+      - delivered_delta: seconds offset for the field-10 delivered event, or None
+      - read_delta: seconds offset for the field-5 read time, or None
+      - noise4: value for field 4 (ignored by the parser), or None
     """
-    Build a minimal ZRECEIPTINFO blob.
-    members: list of (phone_hex_str, status, delta) tuples
-      - phone_hex_str: digits only (e.g. "447911123456")
-      - status: 1=delivered, 2=read
-      - delta: seconds offset from base_ts
-    """
-    # Field 3, wire 0: base_ts
     blob = _encode_varint((3 << 3) | 0) + _encode_varint(base_ts)
-
-    for phone, status, delta in members:
-        # Build entry bytes
-        # Field 1, wire 2: phone bytes (prefix 0x00 + ascii digits as raw bytes)
-        phone_bytes = b'\x00' + bytes.fromhex(phone)
-        entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(phone_bytes)) + phone_bytes
-        # Field 4, wire 0: status
-        entry += _encode_varint((4 << 3) | 0) + _encode_varint(status)
-        # Field 5, wire 0: delta
-        entry += _encode_varint((5 << 3) | 0) + _encode_varint(delta)
-        # Field 2, wire 2: the entry
+    for m in members:
+        lid_bytes = _lid_field1_bytes(m["lid"])
+        entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(lid_bytes)) + lid_bytes
+        if m["noise4"] is not None:
+            entry += _encode_varint((4 << 3) | 0) + _encode_varint(m["noise4"])
+        if m["read_delta"] is not None:
+            entry += _encode_varint((5 << 3) | 0) + _encode_varint(m["read_delta"])
+        if m["delivered_delta"] is not None:
+            event = (
+                _encode_varint((1 << 3) | 0) + _encode_varint(m["delivered_delta"]) +
+                _encode_varint((2 << 3) | 0) + _encode_varint(1)  # code (ignored)
+            )
+            entry += _encode_varint((10 << 3) | 2) + _encode_varint(len(event)) + event
         blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
+    return blob
 
+
+def _make_compact_receipt_blob(members: list) -> bytes:
+    """Build a compact-format ZRECEIPTINFO blob (NO top field 3, NO field 5).
+
+    Delivered events live in field 9; read is never stored.
+    members: list of dicts with keys: lid, delivered_delta (seconds).
+    """
+    blob = b""
+    for m in members:
+        lid_bytes = _lid_field1_bytes(m["lid"])
+        entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(lid_bytes)) + lid_bytes
+        event = (
+            _encode_varint((1 << 3) | 0) + _encode_varint(m["delivered_delta"]) +
+            _encode_varint((2 << 3) | 0) + _encode_varint(3)  # code (ignored)
+        )
+        entry += _encode_varint((9 << 3) | 2) + _encode_varint(len(event)) + event
+        blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
     return blob
 
 
@@ -1375,31 +1405,63 @@ class _NoOpConn:
 
 
 class TestIosReceiptBlobParser:
-    # --- group mode (is_group=True): per-entry status field is reliable ---
+    # Validated model: base_ts = top field 3; delivered = base + min(field-10 deltas)
+    # in seconds (0 valid); read = base + field 5 (seconds) if present; field 4 ignored.
 
-    def test_group_single_member_delivered(self):
+    def test_group_delivered_only(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [("34313839383736", 1, 10)])
+        blob = _make_receipt_blob(base_ts, [
+            {"lid": "1234567890123", "delivered_delta": 10, "read_delta": None, "noise4": None},
+        ])
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 1
-        m = members[0]
-        assert m["delivered_ts"] == (base_ts + 10) * 1000
-        assert m["read_ts"] is None
+        assert members[0]["delivered_ts"] == (base_ts + 10) * 1000
+        assert members[0]["read_ts"] is None
 
-    def test_group_single_member_read(self):
+    def test_group_delivered_and_read(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [("34313839383736", 2, 20)])
+        blob = _make_receipt_blob(base_ts, [
+            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 20, "noise4": None},
+        ])
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 1
-        m = members[0]
-        assert m["delivered_ts"] == (base_ts + 20) * 1000
-        assert m["read_ts"] == (base_ts + 20) * 1000
+        assert members[0]["delivered_ts"] == base_ts * 1000  # delta 0 is a real delivery
+        assert members[0]["read_ts"] == (base_ts + 20) * 1000
+
+    def test_group_read_at_send_delta_zero(self):
+        # read_delta == 0 means read at send time — must not collapse to None.
+        base_ts = 1700000000
+        blob = _make_receipt_blob(base_ts, [
+            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 0, "noise4": None},
+        ])
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        assert members[0]["delivered_ts"] == base_ts * 1000
+        assert members[0]["read_ts"] == base_ts * 1000
+
+    def test_group_field4_is_ignored(self):
+        # A large field-4 value (read receipts disabled) must not gate delivered/read.
+        base_ts = 1700000000
+        blob = _make_receipt_blob(base_ts, [
+            {"lid": "1234567890123", "delivered_delta": 17, "read_delta": None, "noise4": 1089263},
+        ])
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        assert members[0]["delivered_ts"] == (base_ts + 17) * 1000
+        assert members[0]["read_ts"] is None
+
+    def test_group_lid_trailing_f_stripped(self):
+        # Odd-length LID is padded with an 'f' nibble; parser must strip it.
+        base_ts = 1700000000
+        blob = _make_receipt_blob(base_ts, [
+            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": None, "noise4": None},
+        ])
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        assert members[0]["jid"] == "1234567890123"
 
     def test_group_multiple_members(self):
         base_ts = 1700000000
         blob = _make_receipt_blob(base_ts, [
-            ("34313839383736", 2, 5),
-            ("34393837363534", 1, 15),
+            {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 5, "noise4": None},
+            {"lid": "2222222222222", "delivered_delta": 15, "read_delta": None, "noise4": None},
         ])
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 2
@@ -1407,149 +1469,82 @@ class TestIosReceiptBlobParser:
         assert members[1]["read_ts"] is None
         assert members[1]["delivered_ts"] == (base_ts + 15) * 1000
 
-    # --- 1-to-1 mode (is_group=False, the default): per-entry status is always 0 ---
-    # base_ts = delivered timestamp; base_ts + delta = read timestamp (if delta > 0)
+    def test_group_regression_verified_deltas(self):
+        # Mirrors two real ground-truth messages (synthetic LIDs, real validated deltas):
+        #   read 5926s / 4708s / 1462s after send; a member with read receipts off (no field 5).
+        base_ts = 1768325919
+        blob = _make_receipt_blob(base_ts, [
+            {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 5926, "noise4": 2},
+            {"lid": "2222222222222", "delivered_delta": 17, "read_delta": None, "noise4": 1089263},
+            {"lid": "3333333333333", "delivered_delta": 0, "read_delta": 0, "noise4": None},
+        ])
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        assert members[0]["read_ts"] == (base_ts + 5926) * 1000
+        assert members[1]["read_ts"] is None  # read receipts disabled
+        assert members[1]["delivered_ts"] == (base_ts + 17) * 1000
+        assert members[2]["read_ts"] == base_ts * 1000  # read at send
 
-    def test_1to1_read(self):
-        # Real blob shape: status=0, delta>0 means delivered+read
+    # --- 1-to-1 mode (is_group=False): collapse to a single member ---
+
+    def test_1to1_delivered_and_read(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [("34313839383736", 0, 120)])
+        blob = _make_receipt_blob(base_ts, [
+            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 120, "noise4": None},
+        ])
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000
         assert members[0]["read_ts"] == (base_ts + 120) * 1000
 
     def test_1to1_delivered_only(self):
-        # delta=0 means delivered but not yet read
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [("34313839383736", 0, 0)])
+        blob = _make_receipt_blob(base_ts, [
+            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": None, "noise4": None},
+        ])
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000
         assert members[0]["read_ts"] is None
 
-    def test_1to1_multi_device_collapses_to_one_member(self):
-        # Recipient uses two devices: one entry with delta>0 (read), one with delta=0 (own device)
+    def test_1to1_multi_device_collapses_to_earliest(self):
         base_ts = 1700000000
         blob = _make_receipt_blob(base_ts, [
-            ("34313839383736", 0, 253),  # recipient device, read
-            ("34393837363534", 0, 0),    # sender's own secondary device, not read
+            {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 253, "noise4": None},
+            {"lid": "2222222222222", "delivered_delta": 26, "read_delta": None, "noise4": None},
         ])
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
-        assert members[0]["delivered_ts"] == base_ts * 1000
+        assert members[0]["delivered_ts"] == base_ts * 1000  # min delta = 0
         assert members[0]["read_ts"] == (base_ts + 253) * 1000
+
+    # --- compact format: no base_ts, delivered from field 9, read blank ---
+
+    def test_compact_group_delivered_only(self):
+        msg_ts_s = 1784037821
+        blob = _make_compact_receipt_blob([
+            {"lid": "1111111111111", "delivered_delta": 0},
+            {"lid": "2222222222222", "delivered_delta": 60},
+        ])
+        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True, msg_ts_s=msg_ts_s)
+        assert len(members) == 2
+        assert members[0]["delivered_ts"] == msg_ts_s * 1000
+        assert members[0]["read_ts"] is None
+        assert members[1]["delivered_ts"] == (msg_ts_s + 60) * 1000
+        assert members[1]["read_ts"] is None
 
     def test_empty_blob_returns_empty_list(self):
         members = viewer._parse_ios_receipt_blob(b"", _NoOpConn())
         assert members == []
 
-    def test_new_format_1to1_delivered_and_read(self):
-        # New format: no top-level field 3; field 2 entries with field 9 (delta_min, event_type)
-        # event_type >= 1 (not 3) = delivered; event_type == 3 = read
-        # timestamps = (msg_ts_s + delta_min * 60) * 1000
-        msg_ts_s = 1700000000
-
-        def make_f9(delta_min, event_type):
-            return (
-                _encode_varint((1 << 3) | 0) + _encode_varint(delta_min) +
-                _encode_varint((2 << 3) | 0) + _encode_varint(event_type)
-            )
-
-        def make_new_entry(f9_list):
-            entry = b""
-            for f9 in f9_list:
-                entry += _encode_varint((9 << 3) | 2) + _encode_varint(len(f9)) + f9
-            return entry
-
-        # One device entry: delivered at 0 min, read after 19 min
-        entry = make_new_entry([make_f9(0, 1), make_f9(19, 3)])
-        blob = _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
-        blob += _encode_varint((4 << 3) | 0) + _encode_varint(2)
-
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False, msg_ts_s=msg_ts_s)
-        assert len(members) == 1
-        assert members[0]["delivered_ts"] == msg_ts_s * 1000
-        assert members[0]["read_ts"] == (msg_ts_s + 19 * 60) * 1000
-
-    def test_new_format_1to1_multi_device_collapses(self):
-        # Two device entries; collapse to one result with earliest delivered + read
-        msg_ts_s = 1700000000
-
-        def make_f9(delta_min, event_type):
-            return (
-                _encode_varint((1 << 3) | 0) + _encode_varint(delta_min) +
-                _encode_varint((2 << 3) | 0) + _encode_varint(event_type)
-            )
-
-        def make_new_entry(f9_list):
-            entry = b""
-            for f9 in f9_list:
-                entry += _encode_varint((9 << 3) | 2) + _encode_varint(len(f9)) + f9
-            return entry
-
-        entry_a = make_new_entry([make_f9(0, 1), make_f9(19, 3)])
-        entry_b = make_new_entry([make_f9(26, 1)])  # secondary device, delivered later
-        blob = (
-            _encode_varint((2 << 3) | 2) + _encode_varint(len(entry_a)) + entry_a +
-            _encode_varint((2 << 3) | 2) + _encode_varint(len(entry_b)) + entry_b +
-            _encode_varint((4 << 3) | 0) + _encode_varint(2)
-        )
-
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False, msg_ts_s=msg_ts_s)
-        assert len(members) == 1
-        assert members[0]["delivered_ts"] == msg_ts_s * 1000  # min delta = 0
-        assert members[0]["read_ts"] == (msg_ts_s + 19 * 60) * 1000
-
-    def test_new_format_group_phone_bytes_decoded(self):
-        # New-format group blobs use field 1 (phone bytes, same as old format) NOT field 2 JID string.
-        # Phone bytes: 0x8C prefix + hex digits; trailing 'f' nibble stripped for odd-length numbers.
-        # field 9 delta is in minutes; parser converts to seconds before computing timestamps.
-        msg_ts_s = 1784037821
-
-        def make_f9(delta_min, event_type):
-            return (
-                _encode_varint((1 << 3) | 0) + _encode_varint(delta_min) +
-                _encode_varint((2 << 3) | 0) + _encode_varint(event_type)
-            )
-
-        def make_new_entry_group(phone_hex, f9_list):
-            # field 1: 0x8C prefix + phone hex bytes
-            phone_raw = bytes.fromhex("8c") + bytes.fromhex(phone_hex)
-            entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(phone_raw)) + phone_raw
-            for f9 in f9_list:
-                entry += _encode_varint((9 << 3) | 2) + _encode_varint(len(f9)) + f9
-            return entry
-
-        # Two members:
-        # 103624826949719 (@lid, trailing f) — delivered+0min, read+62min
-        # 90490749890629  (@lid, no trailing f) — delivered+0min only
-        entry_a = make_new_entry_group("103624826949719f", [make_f9(0, 1), make_f9(62, 3)])
-        entry_b = make_new_entry_group("90490749890629", [make_f9(0, 1)])
-        blob = (
-            _encode_varint((2 << 3) | 2) + _encode_varint(len(entry_a)) + entry_a +
-            _encode_varint((2 << 3) | 2) + _encode_varint(len(entry_b)) + entry_b +
-            _encode_varint((4 << 3) | 0) + _encode_varint(2)
-        )
-
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True, msg_ts_s=msg_ts_s)
-        assert len(members) == 2
-        assert members[0]["jid"] == "103624826949719"
-        assert members[0]["delivered_ts"] is None  # delta=0 suppressed (placeholder, not real delivery)
-        assert members[0]["read_ts"] == (msg_ts_s + 62 * 60) * 1000
-        assert members[1]["jid"] == "90490749890629"
-        assert members[1]["delivered_ts"] is None  # delta=0 suppressed
-        assert members[1]["read_ts"] is None
-
     def test_unknown_fixed64_wire_type_is_skipped(self):
         """A fixed64 field (wire=1) in an entry should be skipped, not abort parsing."""
         base_ts = 1700000000
-        # Manually build an entry with a spurious fixed64 field before the real fields
-        phone_bytes = b'\x00' + bytes.fromhex("34313839383736")
-        entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(phone_bytes)) + phone_bytes
-        entry += _encode_varint((9 << 3) | 1) + b'\x00' * 8  # unknown field, wire=1 (fixed64)
-        entry += _encode_varint((4 << 3) | 0) + _encode_varint(2)   # status=2
-        entry += _encode_varint((5 << 3) | 0) + _encode_varint(10)  # delta=10
+        lid_bytes = _lid_field1_bytes("1234567890123")
+        entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(lid_bytes)) + lid_bytes
+        entry += _encode_varint((8 << 3) | 1) + b'\x00' * 8  # unknown field, wire=1 (fixed64)
+        entry += _encode_varint((5 << 3) | 0) + _encode_varint(10)  # read delta=10
+        event = _encode_varint((1 << 3) | 0) + _encode_varint(0)
+        entry += _encode_varint((10 << 3) | 2) + _encode_varint(len(event)) + event
 
         blob = _encode_varint((3 << 3) | 0) + _encode_varint(base_ts)
         blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
@@ -1557,6 +1552,7 @@ class TestIosReceiptBlobParser:
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 1
         assert members[0]["read_ts"] == (base_ts + 10) * 1000
+        assert members[0]["delivered_ts"] == base_ts * 1000
 
 
 # ---------------------------------------------------------------------------
