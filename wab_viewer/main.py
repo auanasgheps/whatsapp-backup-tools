@@ -881,6 +881,19 @@ def _bg_index_chat(cache_db_path: str, source_type: str, wa_db_path: str,
 
 
 def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s: int = 0) -> list:
+    """Decode iOS ZRECEIPTINFO into per-recipient delivered/read timestamps.
+
+    Blob layout (validated against real DB + phone screenshots):
+      top field 3 = base_ts (unix seconds = send time)
+      top field 2 = repeated recipient entry
+    Recipient entry:
+      field 1  = LID bytes (value[1:] hex, strip a trailing 'f')
+      field 5  = read delta in seconds (present => read at base + field5)
+      field 10 = repeated delivered event {1: delta_seconds}; delivered = base + min(deltas)
+      field 9  = repeated event {1: delta_seconds}; delivered fallback when field 10 absent
+                 (compact format: no base_ts, no field 5 => delivered-only, read blank)
+      field 4  = unrelated large value; NOT a delivered/read gate => ignored
+    """
     def _read_varint(data, pos):
         result = 0
         shift = 0
@@ -893,56 +906,36 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
             shift += 7
         return result, pos
 
-    def _skip_field(data, pos, wire):
-        if wire == 2:
-            length, pos = _read_varint(data, pos)
-            return pos + length
-        if wire == 0:
-            _, pos = _read_varint(data, pos)
-            return pos
-        if wire == 1:
-            return pos + 8
-        if wire == 5:
-            return pos + 4
-        return pos
-
-    def _parse_member_entry(data):
+    def _event_delta(value):
+        """Return sub-field 1 (delta in seconds) of a field-9/field-10 event, or None."""
         pos = 0
-        phone_raw = None
-        status = 0
-        delta = 0
-        while pos < len(data):
-            tag_byte, pos = _read_varint(data, pos)
+        delta = None
+        while pos < len(value):
+            tag_byte, pos = _read_varint(value, pos)
             field = tag_byte >> 3
             wire = tag_byte & 0x07
-            if wire == 2:
-                length, pos = _read_varint(data, pos)
-                value = data[pos:pos + length]
-                pos += length
+            if wire == 0:
+                v, pos = _read_varint(value, pos)
                 if field == 1:
-                    phone_raw = value
-            elif wire == 0:
-                value, pos = _read_varint(data, pos)
-                if field == 4:
-                    status = value
-                elif field == 5:
-                    delta = value
+                    delta = v
+            elif wire == 2:
+                length, pos = _read_varint(value, pos)
+                pos += length
             elif wire == 1:
                 pos += 8
             elif wire == 5:
                 pos += 4
             else:
                 break
-        phone = ""
-        if phone_raw and len(phone_raw) > 1:
-            phone = "".join(f"{b:02x}" for b in phone_raw[1:])
-        return phone, status, delta
+        return delta
 
-    def _parse_new_entry(data):
+    def _parse_member_entry(data):
+        """Return (lid, delivered_delta, read_delta). Deltas are seconds; None when absent."""
         pos = 0
-        phone = ""
-        delivered_delta = None
+        lid = ""
         read_delta = None
+        delivered_deltas = []
+        fallback_deltas = []
         while pos < len(data):
             tag_byte, pos = _read_varint(data, pos)
             field = tag_byte >> 3
@@ -953,39 +946,33 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
                 pos += length
                 if field == 1:
                     if len(value) > 1:
-                        s = "".join(f"{b:02x}" for b in value[1:])
-                        phone = s[:-1] if s.endswith("f") else s
+                        s = value[1:].hex()
+                        lid = s[:-1] if s.endswith("f") else s
+                elif field == 10:
+                    d = _event_delta(value)
+                    if d is not None:
+                        delivered_deltas.append(d)
                 elif field == 9:
-                    try:
-                        p2 = 0
-                        ds, ev = 0, 0
-                        while p2 < len(value):
-                            tb2, p2 = _read_varint(value, p2)
-                            f2, w2 = tb2 >> 3, tb2 & 0x07
-                            if w2 == 0:
-                                v2, p2 = _read_varint(value, p2)
-                                if f2 == 1:
-                                    ds = v2
-                                elif f2 == 2:
-                                    ev = v2
-                            else:
-                                p2 = _skip_field(value, p2, w2)
-                        ds_s = ds * 60
-                        if ev >= 1 and ev != 3 and (delivered_delta is None or ds_s < delivered_delta):
-                            delivered_delta = ds_s
-                        elif ev == 3 and (read_delta is None or ds_s < read_delta):
-                            read_delta = ds_s
-                    except Exception:
-                        pass
+                    d = _event_delta(value)
+                    if d is not None:
+                        fallback_deltas.append(d)
             elif wire == 0:
-                _, pos = _read_varint(data, pos)
+                value, pos = _read_varint(data, pos)
+                if field == 5:
+                    read_delta = value
             elif wire == 1:
                 pos += 8
             elif wire == 5:
                 pos += 4
             else:
                 break
-        return phone, delivered_delta, read_delta
+        if delivered_deltas:
+            delivered_delta = min(delivered_deltas)
+        elif fallback_deltas:
+            delivered_delta = min(fallback_deltas)
+        else:
+            delivered_delta = None
+        return lid, delivered_delta, read_delta
 
     base_ts = None
     entries = []
@@ -1020,103 +1007,50 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
         else:
             break
 
-    if base_ts is None and entries and msg_ts_s:
-        if not is_group:
-            delivered_delta = None
-            read_delta = None
-            for entry_bytes in entries:
-                try:
-                    _, dd, rd = _parse_new_entry(entry_bytes)
-                    if dd is not None and (delivered_delta is None or dd < delivered_delta):
-                        delivered_delta = dd
-                    if rd is not None and (read_delta is None or rd < read_delta):
-                        read_delta = rd
-                except Exception:
-                    continue
-            if delivered_delta is None and read_delta is None:
-                return []
-            return [{
-                "name": "",
-                "jid": "",
-                "delivered_ts": (msg_ts_s + delivered_delta) * 1000 if delivered_delta is not None else None,
-                "read_ts": (msg_ts_s + read_delta) * 1000 if read_delta is not None else None,
-                "played_ts": None,
-            }]
-        else:
-            members = []
-            for entry_bytes in entries:
-                try:
-                    phone, dd, rd = _parse_new_entry(entry_bytes)
-                except Exception:
-                    continue
-                name = phone
-                if phone:
-                    lid_jid = f"{phone}@lid"
-                    row = conn.execute(
-                        "SELECT full_name FROM _ios_contacts WHERE jid = ?", (lid_jid,)
-                    ).fetchone()
-                    if row and row[0]:
-                        name = row[0]
-                    else:
-                        row = conn.execute(
-                            "SELECT display_name FROM arch.contacts WHERE number = ?", (phone,)
-                        ).fetchone()
-                        if row and row[0]:
-                            name = row[0]
-                members.append({
-                    "name": name or phone or "",
-                    "jid": phone or "",
-                    "delivered_ts": (msg_ts_s + dd) * 1000 if dd else None,
-                    "read_ts": (msg_ts_s + rd) * 1000 if rd is not None else None,
-                    "played_ts": None,
-                })
-            return members
+    anchor = base_ts if base_ts is not None else msg_ts_s
+    if anchor is None or not entries:
+        return []
+
+    parsed = []
+    for entry_bytes in entries:
+        try:
+            parsed.append(_parse_member_entry(entry_bytes))
+        except Exception:
+            continue
 
     if not is_group:
-        if not base_ts:
+        delivered_deltas = [dd for _, dd, _ in parsed if dd is not None]
+        read_deltas = [rd for _, _, rd in parsed if rd is not None]
+        if not delivered_deltas and not read_deltas:
             return []
-        deltas = []
-        for entry_bytes in entries:
-            try:
-                _, _, delta = _parse_member_entry(entry_bytes)
-                deltas.append(delta)
-            except Exception:
-                continue
-        max_delta = max(deltas) if deltas else 0
         return [{
             "name": "",
             "jid": "",
-            "delivered_ts": base_ts * 1000,
-            "read_ts": (base_ts + max_delta) * 1000 if max_delta else None,
+            "delivered_ts": (anchor + min(delivered_deltas)) * 1000 if delivered_deltas else None,
+            "read_ts": (anchor + min(read_deltas)) * 1000 if read_deltas else None,
             "played_ts": None,
         }]
 
     members = []
-    for entry_bytes in entries:
-        try:
-            phone, status, delta = _parse_member_entry(entry_bytes)
-        except Exception:
-            continue
-        delivered_ts = None
-        read_ts = None
-        if base_ts and delta and status >= 1:
-            delivered_ts = (base_ts + delta) * 1000
-        if base_ts and delta and status >= 2:
-            read_ts = (base_ts + delta) * 1000
-
-        name = phone
-        if phone:
+    for lid, delivered_delta, read_delta in parsed:
+        name = lid
+        if lid:
             row = conn.execute(
-                "SELECT display_name FROM arch.contacts WHERE number = ?", (phone,)
+                "SELECT full_name FROM _ios_contacts WHERE jid = ?", (f"{lid}@lid",)
             ).fetchone()
             if row and row[0]:
                 name = row[0]
-
+            else:
+                row = conn.execute(
+                    "SELECT display_name FROM arch.contacts WHERE number = ?", (lid,)
+                ).fetchone()
+                if row and row[0]:
+                    name = row[0]
         members.append({
-            "name": name or phone or "",
-            "jid": phone or "",
-            "delivered_ts": delivered_ts,
-            "read_ts": read_ts,
+            "name": name or lid or "",
+            "jid": lid or "",
+            "delivered_ts": (anchor + delivered_delta) * 1000 if delivered_delta is not None else None,
+            "read_ts": (anchor + read_delta) * 1000 if read_delta is not None else None,
             "played_ts": None,
         })
     return members
