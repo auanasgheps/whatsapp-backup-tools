@@ -1964,17 +1964,46 @@
     msgs.forEach(m => msgList.push(m));
     msgList.sort((a, b) => a.timestamp_ms - b.timestamp_ms);
 
-    // Reset _rendered on all messages so detectMediaGroups can re-assign group
-    // flags from scratch — existing DOM rows will be re-rendered but that's cheap
+    // Reset _rendered only on messages that are not already in the DOM.
+    // Existing DOM rows must stay _rendered = true so renderBubbleWithSep skips
+    // them — they are already displaying correctly. New messages get _rendered
+    // set to true by renderBubble so they too are skipped on any subsequent pass.
     for (const m of msgList) {
-      delete m._rendered;
-      delete m._mediaGroup;
-      delete m._mediaGroupStart;
-      delete m._mediaGroupEnd;
+      const inDom = !!document.querySelector(`.msg-row[data-ts="${m.timestamp_ms}"]`);
+      if (!inDom) delete m._rendered;
     }
     detectMediaGroups(msgList);
 
-    // Find insertion point: last existing DOM row older than the oldest new message
+    // Find the message closest to ts (the actual jump target) — needed in both branches
+    const target = msgs.reduce((best, m) =>
+      Math.abs(m.timestamp_ms - ts) < Math.abs(best.timestamp_ms - ts) ? m : best
+    );
+
+    // If any group was found, we must do a full re-render. The existing DOM rows
+    // are still there but now have stale content (individual bubbles instead of grids).
+    // Clearing and re-rendering everything from scratch is the only way to ensure
+    // groups spanning the jump boundary render correctly.
+    // First, clear _rendered on ALL messages so renderBubbleWithSep doesn't skip them.
+    if (msgList.some(m => m._mediaGroupStart)) {
+      for (const m of msgList) {
+        delete m._rendered;
+      }
+      scroll.innerHTML = '';
+      domNodes = 0;
+      for (let i = 0; i < msgList.length; i++) {
+        const prevTs = i > 0 ? msgList[i - 1].timestamp_ms : null;
+        renderBubbleWithSep(msgList[i], prevTs, 'after').forEach(node => scroll.appendChild(node));
+        domNodes++;
+      }
+      scroll.scrollTop = scroll.scrollHeight;
+      pruneDom('bottom');
+      const targetEl = document.querySelector(`.msg-row[data-ts="${target.timestamp_ms}"]`);
+      if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return targetEl || null;
+    }
+
+    // No groups found — safe to render only the new messages incrementally.
+    // Existing DOM rows are untouched (they don't form groups with the new batch).
     const oldestNewTs = msgs[0].timestamp_ms;
     let insertBeforeEl = null;
     for (const row of scroll.querySelectorAll('.msg-row[data-ts]')) {
@@ -1983,11 +2012,6 @@
         break;
       }
     }
-
-    // Find the message closest to ts (the actual jump target)
-    const target = msgs.reduce((best, m) =>
-      Math.abs(m.timestamp_ms - ts) < Math.abs(best.timestamp_ms - ts) ? m : best
-    );
 
     // prevTs for the first new message must be the actual last existing message
     // (the one just before the insertion point), so date separators are placed correctly
