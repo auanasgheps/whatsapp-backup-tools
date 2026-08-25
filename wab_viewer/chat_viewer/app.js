@@ -509,49 +509,76 @@
         return;
       }
 
+      // Capture scroll height BEFORE touching msgList (used for 'older' re-render)
       const scroll = document.getElementById('message-scroll');
+      const preHeight = scroll.scrollHeight;
 
       if (direction === 'older') {
         // API returns DESC; reverse to get chronological order for prepending
         const ordered = msgs.slice().reverse();
-        // The message currently at the top of our list is the boundary for date seps
-        const firstExistingTs = msgList.length > 0 ? msgList[0].timestamp_ms : null;
+        for (let i = ordered.length - 1; i >= 0; i--) {
+          msgList.unshift(ordered[i]);
+        }
 
-        // If the newest prepended message shares a day with the current top message,
-        // that top message is no longer the first of its day: drop the now-stale
-        // separator above it (the prepended block adds the correct one further up).
+        // Detect groups in just the new batch first (fast — O(batch))
+        detectMediaGroups(ordered);
+
+        // Check if a group might span the page boundary: the oldest new message
+        // could continue a group that started before the page boundary
+        // (same sender, within gap threshold of the first existing message).
+        const oldestNew = ordered[0];
+        const firstExisting = msgList[ordered.length];
+        if (oldestNew && firstExisting &&
+            isGrouableMedia(oldestNew) && isGrouableMedia(firstExisting) &&
+            sameSender(oldestNew, firstExisting) &&
+            firstExisting.timestamp_ms - oldestNew.timestamp_ms <= MEDIA_GROUP_GAP_MS) {
+          // Same group spans the boundary — re-detect on the full list
+          detectMediaGroups(msgList);
+        }
+
+        // If any group was found, re-render from scratch so stale individual
+        // bubbles are removed and the grid replaces them correctly.
+        if (msgList.some(m => m._mediaGroupStart)) {
+          const prevScrollTop = scroll.scrollTop;
+          scroll.innerHTML = '';
+          domNodes = 0;
+          for (let i = 0; i < msgList.length; i++) {
+            const m = msgList[i];
+            const prevTs = i > 0 ? msgList[i - 1].timestamp_ms : null;
+            renderBubbleWithSep(m, prevTs, 'before').forEach(node =>
+              scroll.insertBefore(node, scroll.firstChild));
+            domNodes++;
+          }
+          scroll.scrollTop = prevScrollTop + (scroll.scrollHeight - preHeight);
+          pruneDom('top');
+          return;
+        }
+
+        // No group — normal incremental prepend
+        const firstExistingTs = msgList.length > msgs.length ? msgList[msgs.length].timestamp_ms : null;
         if (firstExistingTs !== null &&
             dayKey(ordered[ordered.length - 1].timestamp_ms) === dayKey(firstExistingTs)) {
           const topRow = scroll.querySelector(`.msg-row[data-ts="${firstExistingTs}"]`);
           const prevSib = topRow && topRow.previousElementSibling;
           if (prevSib && prevSib.classList.contains('date-separator')) prevSib.remove();
         }
-
-        // Prepend into msgList
-        for (let i = ordered.length - 1; i >= 0; i--) {
-          msgList.unshift(ordered[i]);
-        }
-
-        const prevHeight = scroll.scrollHeight;
         const prevTop = scroll.scrollTop;
-
-        // Insert into DOM oldest-first (each goes before the current firstChild) so
-        // the final order is oldest-at-top. A message is the first of its day when
-        // its day differs from its older neighbour (ordered[i-1], or null for the
-        // oldest loaded); place the separator there, matching the 'after' path.
         for (let i = ordered.length - 1; i >= 0; i--) {
           const m = ordered[i];
           const olderTs = i > 0 ? ordered[i - 1].timestamp_ms : null;
           const nodes = renderBubbleWithSep(m, olderTs, 'before');
           nodes.forEach(node => scroll.insertBefore(node, scroll.firstChild));
         }
-
         domNodes += ordered.length;
-        scroll.scrollTop = prevTop + (scroll.scrollHeight - prevHeight);
+        scroll.scrollTop = prevTop + (scroll.scrollHeight - preHeight);
         pruneDom('top');
       } else {
-        const prevLastTs = msgList.length > 0 ? msgList[msgList.length - 1].timestamp_ms : null;
         msgs.forEach(m => msgList.push(m));
+        detectMediaGroups(msgs);
+
+        const prevLastTs = msgList.length > msgs.length
+          ? msgList[msgList.length - msgs.length - 1].timestamp_ms
+          : null;
         msgs.forEach((m, i) => {
           const prevTs = i === 0 ? prevLastTs : msgs[i - 1].timestamp_ms;
           renderBubbleWithSep(m, prevTs, 'after').forEach(node => scroll.appendChild(node));
@@ -572,10 +599,135 @@
     }
   }
 
+  // ---- media grouping -------------------------------------------------------
+  //
+  // Groups consecutive image/video messages from the same sender (within 2 min gaps)
+  // into a 2x2 grid bubble. A run must have >= 4 items to qualify.
+
+  const MEDIA_GROUP_GAP_MS = 2 * 60 * 1000;
+  const MEDIA_GROUP_MIN = 4;
+
+  function isGrouableMedia(msg) {
+    return msg.archive_path && (msg.media_type === 'image' || msg.media_type === 'video');
+  }
+
+  function sameSender(a, b) {
+    if (a.from_me !== b.from_me) return false;
+    // For 1:1 chats, from_me alone is sufficient.
+    // For groups, also check the display name.
+    if (currentChat && currentChat.type === 'group') {
+      return (a.sender || '') === (b.sender || '');
+    }
+    return true;
+  }
+
+  function detectMediaGroups(messages) {
+    // Reset flags from any previous pass
+    for (const m of messages) {
+      delete m._mediaGroup;
+      delete m._mediaGroupStart;
+      delete m._mediaGroupEnd;
+      delete m._rendered;
+    }
+
+    for (let i = 0; i < messages.length; i++) {
+      const first = messages[i];
+      if (!isGrouableMedia(first) || first._mediaGroup) continue;
+
+      const run = [first];
+      let j = i + 1;
+
+      while (j < messages.length) {
+        const prev = run[run.length - 1];
+        const curr = messages[j];
+        if (!isGrouableMedia(curr)) break;
+        if (!sameSender(first, curr)) break;
+        if (curr.timestamp_ms - prev.timestamp_ms > MEDIA_GROUP_GAP_MS) break;
+        run.push(curr);
+        j++;
+      }
+
+      if (run.length >= MEDIA_GROUP_MIN) {
+        run[0]._mediaGroupStart = true;
+        run[run.length - 1]._mediaGroupEnd = true;
+        run[0]._mediaGroup = run;
+        run[run.length - 1]._mediaGroup = run;
+        run[0]._mediaGroupIndex = 0;
+        run[run.length - 1]._mediaGroupIndex = run.length - 1;
+      }
+
+      i = j - 1; // skip processed run
+    }
+  }
+
+  function renderMediaGrid(group) {
+    const grid = document.createElement('div');
+    grid.className = 'media-grid';
+
+    const visible = group.slice(0, 4);
+    visible.forEach((msg, idx) => {
+      const cell = document.createElement('div');
+      cell.className = 'media-grid-cell';
+
+      // Build a lightweight media element (no caption, no reactions in grid)
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-media';
+      const src = '/media/' + msg.archive_path;
+      const mt = msg.media_type;
+
+      if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
+        const img = document.createElement('img');
+        img.src = src;
+        img.loading = 'lazy';
+        img.alt = msg.media_name || 'image';
+        img.addEventListener('click', () => showLightboxForGroup(group, idx));
+        wrap.appendChild(img);
+      } else if (mt === 'video') {
+        const vid = document.createElement('video');
+        vid.controls = true;
+        vid.preload = 'none';
+        vid.src = src;
+        wrap.appendChild(vid);
+        const probe = document.createElement('video');
+        probe.src = src;
+        probe.muted = true;
+        probe.preload = 'metadata';
+        probe.addEventListener('loadeddata', () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = probe.videoWidth;
+          canvas.height = probe.videoHeight;
+          canvas.getContext('2d').drawImage(probe, 0, 0);
+          vid.poster = canvas.toDataURL('image/jpeg', 0.8);
+          probe.src = '';
+        }, { once: true });
+        probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
+      }
+
+      cell.appendChild(wrap);
+
+      // Overflow badge on the last visible cell
+      if (idx === 3 && group.length > 4) {
+        const badge = document.createElement('div');
+        badge.className = 'media-grid-overflow';
+        badge.textContent = '+' + (group.length - 4);
+        cell.appendChild(badge);
+      }
+
+      grid.appendChild(cell);
+    });
+
+    return grid;
+  }
+
+  function showLightboxForGroup(group, index) {
+    showLightbox('/media/' + group[index].archive_path, group[index].media_type, group[index]);
+  }
+
   function renderBubbleWithSep(msg, prevTs, direction) {
     // prevTs is always the OLDER (chronologically previous) neighbour, or null when
     // msg is the oldest loaded message. A message is the first of its day when its
     // day differs from that neighbour, so the separator goes above it either way.
+    if (msg._rendered) return [];
     const nodes = [];
     const needsSep = prevTs === null || dayKey(msg.timestamp_ms) !== dayKey(prevTs);
     if (needsSep && direction === 'after') nodes.push(makeDateSeparator(msg.timestamp_ms));
@@ -649,6 +801,59 @@
     const row = document.createElement('div');
     row.className = 'msg-row ' + (msg.from_me ? 'sent' : 'recv');
     row.dataset.ts = msg.timestamp_ms;
+
+    // Mark all items in the run as rendered so renderBubbleWithSep skips them
+    if (msg._mediaGroup) {
+      msg._mediaGroup.forEach(m => { m._rendered = true; });
+    }
+
+    // Render media group as a single grid bubble
+    if (msg._mediaGroupStart && msg._mediaGroup) {
+      const bubble = document.createElement('div');
+      bubble.className = 'msg-bubble';
+
+      const group = msg._mediaGroup;
+
+      // Sender name for received messages (both groups and private chats)
+      if (!msg.from_me && msg.sender) {
+        const senderEl = document.createElement('div');
+        senderEl.className = 'msg-sender';
+        senderEl.textContent = msg.sender;
+        bubble.appendChild(senderEl);
+      }
+
+      // Media grid (no sender name for sent messages — shown in meta badge instead)
+      bubble.appendChild(renderMediaGrid(group));
+
+      // Caption from the last message in the group
+      const lastMsg = group[group.length - 1];
+      if (lastMsg.text_body) {
+        const cap = document.createElement('div');
+        cap.className = 'msg-caption';
+        cap.innerHTML = highlight(lastMsg.text_body, '');
+        bubble.appendChild(cap);
+      }
+
+      // Single shared meta row for the whole group
+      const meta = document.createElement('div');
+      meta.className = 'msg-meta';
+      if (msg.from_me) {
+        const badge = document.createElement('span');
+        badge.className = 'direction-badge sent';
+        badge.textContent = 'You';
+        meta.appendChild(badge);
+      }
+      meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
+      bubble.appendChild(meta);
+
+      row.appendChild(bubble);
+      return row;
+    }
+
+    // Non-start items in a group are already marked _rendered — return empty row
+    if (msg._mediaGroup) {
+      return row;
+    }
 
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
@@ -1723,6 +1928,12 @@
     const res = await fetch('/api/messages/at?' + params);
     const msgs = await res.json();
     if (!msgs.length) return null;
+
+    // Reset _rendered so re-detect clears stale flags from a prior render
+    for (const m of msgList) {
+      delete m._rendered;
+    }
+    detectMediaGroups(msgList);
 
     // Patch new messages into existing DOM without wiping anything.
     // Find the insertion point: last existing row whose timestamp is older than
