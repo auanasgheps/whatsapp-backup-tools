@@ -5,7 +5,7 @@
   let allChats = [];
   let currentChat = null;
   let msgList = [];
-  let domNodes = 0;
+  let suppressScroll = false;
   let prefs = { theme: 'dark', date_format: 'DD/MM/YYYY', font_size: 'medium' };
 
   async function loadPrefs() {
@@ -26,7 +26,7 @@
       btn.classList.toggle('active', prefs[btn.dataset.pref] === btn.dataset.value);
     });
   }
-  const MAX_DOM = 100;
+  const MAX_WINDOW = 150;
 
   // ---- util ----------------------------------------------------------------
 
@@ -424,7 +424,6 @@
 
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
-    domNodes = 0;
     document.getElementById('scroll-to-bottom').classList.remove('visible');
 
     document.getElementById('chat-header').style.display = '';
@@ -488,14 +487,13 @@
       chat_type: currentChat.type,
       limit: 50
     });
-
     if (direction === 'older' && msgList.length > 0) {
       params.set('before', msgList[0].timestamp_ms);
     } else if (direction === 'newer' && msgList.length > 0) {
       params.set('after', msgList[msgList.length - 1].timestamp_ms);
     }
 
-    const spinner = showSpinner(direction === 'older' ? 'top' : 'bottom');
+    showSpinner(direction === 'older' ? 'top' : 'bottom');
 
     try {
       const res = await fetch('/api/messages?' + params);
@@ -509,114 +507,14 @@
         return;
       }
 
-      // Capture scroll height BEFORE touching msgList (used for 'older' re-render)
       const scroll = document.getElementById('message-scroll');
-      const preHeight = scroll.scrollHeight;
-
-      if (direction === 'older') {
-        // API returns DESC; reverse to get chronological order for prepending
-        const ordered = msgs.slice().reverse();
-        for (let i = ordered.length - 1; i >= 0; i--) {
-          msgList.unshift(ordered[i]);
-        }
-
-        // Detect groups in just the new batch first (fast — O(batch))
-        detectMediaGroups(ordered);
-
-        // Check if a group might span the page boundary: the oldest new message
-        // could continue a group that started before the page boundary
-        // (same sender, within gap threshold of the first existing message).
-        const oldestNew = ordered[0];
-        const firstExisting = msgList[ordered.length];
-        if (oldestNew && firstExisting &&
-            isGrouableMedia(oldestNew) && isGrouableMedia(firstExisting) &&
-            sameSender(oldestNew, firstExisting) &&
-            firstExisting.timestamp_ms - oldestNew.timestamp_ms <= MEDIA_GROUP_GAP_MS) {
-          // Same group spans the boundary — re-detect on the full list
-          detectMediaGroups(msgList);
-        }
-
-        // If any group was found, re-render from scratch so stale individual
-        // bubbles are removed and the grid replaces them correctly.
-        if (msgList.some(m => m._mediaGroupStart)) {
-          const prevScrollTop = scroll.scrollTop;
-          scroll.innerHTML = '';
-          domNodes = 0;
-          for (let i = 0; i < msgList.length; i++) {
-            const m = msgList[i];
-            const prevTs = i > 0 ? msgList[i - 1].timestamp_ms : null;
-            renderBubbleWithSep(m, prevTs, 'before').forEach(node =>
-              scroll.insertBefore(node, scroll.firstChild));
-            domNodes++;
-          }
-          scroll.scrollTop = prevScrollTop + (scroll.scrollHeight - preHeight);
-          pruneDom('top');
-          return;
-        }
-
-        // No group — normal incremental prepend
-        const firstExistingTs = msgList.length > msgs.length ? msgList[msgs.length].timestamp_ms : null;
-        if (firstExistingTs !== null &&
-            dayKey(ordered[ordered.length - 1].timestamp_ms) === dayKey(firstExistingTs)) {
-          const topRow = scroll.querySelector(`.msg-row[data-ts="${firstExistingTs}"]`);
-          const prevSib = topRow && topRow.previousElementSibling;
-          if (prevSib && prevSib.classList.contains('date-separator')) prevSib.remove();
-        }
-        const prevTop = scroll.scrollTop;
-        for (let i = ordered.length - 1; i >= 0; i--) {
-          const m = ordered[i];
-          const olderTs = i > 0 ? ordered[i - 1].timestamp_ms : null;
-          const nodes = renderBubbleWithSep(m, olderTs, 'before');
-          nodes.forEach(node => scroll.insertBefore(node, scroll.firstChild));
-        }
-        domNodes += ordered.length;
-        scroll.scrollTop = prevTop + (scroll.scrollHeight - preHeight);
-        pruneDom('top');
-      } else {
-        msgs.forEach(m => msgList.push(m));
-
-        // Fast pass: detect groups in the new batch
-        detectMediaGroups(msgs);
-
-        // Check if the oldest new message could continue a group across the
-        // boundary with the first existing message (same sender, within gap).
-        const newestExisting = msgList.length > msgs.length
-          ? msgList[msgList.length - msgs.length - 1]
-          : null;
-        if (newestExisting && msgs.length > 0) {
-          const oldestNew = msgs[0];
-          if (isGrouableMedia(oldestNew) && isGrouableMedia(newestExisting) &&
-              sameSender(oldestNew, newestExisting) &&
-              oldestNew.timestamp_ms - newestExisting.timestamp_ms <= MEDIA_GROUP_GAP_MS) {
-            detectMediaGroups(msgList);
-          }
-        }
-
-        // If any group found, re-render from scratch so stale individual bubbles
-        // are removed and the grid replaces them correctly.
-        if (msgList.some(m => m._mediaGroupStart)) {
-          scroll.innerHTML = '';
-          domNodes = 0;
-          for (let i = 0; i < msgList.length; i++) {
-            const prevTs = i > 0 ? msgList[i - 1].timestamp_ms : null;
-            renderBubbleWithSep(msgList[i], prevTs, 'after').forEach(node => scroll.appendChild(node));
-            domNodes++;
-          }
-          scroll.scrollTop = scroll.scrollHeight;
-          pruneDom('bottom');
-          return;
-        }
-
-        const prevLastTs = msgList.length > msgs.length
-          ? msgList[msgList.length - msgs.length - 1].timestamp_ms
-          : null;
-        msgs.forEach((m, i) => {
-          const prevTs = i === 0 ? prevLastTs : msgs[i - 1].timestamp_ms;
-          renderBubbleWithSep(m, prevTs, 'after').forEach(node => scroll.appendChild(node));
-        });
-        domNodes += msgs.length;
-        pruneDom('bottom');
-      }
+      const anchor = captureAnchor();
+      mergePage(msgs);
+      pruneList(direction);
+      renderWindow();
+      restoreAnchor(anchor);
+      await _awaitImagesSettled(scroll);
+      if (gen === _loadGen) restoreAnchor(anchor);
 
     } finally {
       if (gen === _loadGen) {
@@ -645,55 +543,130 @@
   function sameSender(a, b) {
     if (a.from_me !== b.from_me) return false;
     // For 1:1 chats, from_me alone is sufficient.
-    // For groups, also check the display name.
+    // For groups, check display name; unknown sender (empty string) never matches.
     if (currentChat && currentChat.type === 'group') {
-      return (a.sender || '') === (b.sender || '');
+      if (!a.sender || !b.sender) return false;
+      return a.sender === b.sender;
     }
     return true;
   }
 
-  function detectMediaGroups(messages) {
-    // Reset flags from any previous pass. Preserve _rendered for messages
-    // already in the DOM — their nodes will be reused, not replaced.
-    // Using a DOM query as the "already rendered" sentinel avoids coupling
-    // detectMediaGroups to caller-specific logic about which items are new.
-    for (const m of messages) {
-      delete m._mediaGroup;
-      delete m._mediaGroupStart;
-      delete m._mediaGroupEnd;
-      if (!document.querySelector(`.msg-row[data-ts="${m.timestamp_ms}"]`)) {
-        delete m._rendered;
+  function rowForMsgId(id) {
+    const key = String(id);
+    const direct = document.querySelector(`.msg-row[data-msg-id="${key}"]`);
+    if (direct) return direct;
+    return document.querySelector(`.msg-row[data-group-ids~="${key}"]`) || null;
+  }
+
+  function nearestMsgToTs(ts) {
+    if (!msgList.length) return null;
+    return msgList.reduce((best, m) =>
+      Math.abs(m.timestamp_ms - ts) < Math.abs(best.timestamp_ms - ts) ? m : best
+    );
+  }
+
+  function captureAnchor() {
+    const scroll = document.getElementById('message-scroll');
+    const top = scroll.getBoundingClientRect().top;
+    for (const row of scroll.querySelectorAll('.msg-row[data-msg-id]')) {
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom > top) {
+        return { id: row.dataset.msgId, offset: rect.top - top };
       }
     }
+    return null;
+  }
 
-    for (let i = 0; i < messages.length; i++) {
-      const first = messages[i];
-      if (!isGrouableMedia(first) || first._mediaGroup) continue;
+  function restoreAnchor(anchor) {
+    if (!anchor) return;
+    const row = rowForMsgId(anchor.id);
+    if (!row) return;
+    const scroll = document.getElementById('message-scroll');
+    const top = scroll.getBoundingClientRect().top;
+    suppressScroll = true;
+    scroll.scrollTop += (row.getBoundingClientRect().top - top) - anchor.offset;
+    suppressScroll = false;
+  }
 
-      const run = [first];
-      let j = i + 1;
-
-      while (j < messages.length) {
-        const prev = run[run.length - 1];
-        const curr = messages[j];
-        if (!isGrouableMedia(curr)) break;
-        if (!sameSender(first, curr)) break;
-        if (curr.timestamp_ms - prev.timestamp_ms > MEDIA_GROUP_GAP_MS) break;
-        run.push(curr);
-        j++;
+  function mergePage(newMsgs) {
+    const seenIds = new Map(msgList.map(m => [String(m.msg_id), m]));
+    for (const m of newMsgs) {
+      if (!seenIds.has(String(m.msg_id))) {
+        seenIds.set(String(m.msg_id), m);
+        msgList.push(m);
       }
-
-      if (run.length >= MEDIA_GROUP_MIN) {
-        run[0]._mediaGroupStart = true;
-        run[run.length - 1]._mediaGroupEnd = true;
-        run[0]._mediaGroup = run;
-        run[run.length - 1]._mediaGroup = run;
-        run[0]._mediaGroupIndex = 0;
-        run[run.length - 1]._mediaGroupIndex = run.length - 1;
-      }
-
-      i = j - 1; // skip processed run
     }
+    msgList.sort((a, b) => (a.timestamp_ms - b.timestamp_ms) || (a.msg_id - b.msg_id));
+  }
+
+  function pruneList(direction) {
+    if (msgList.length <= MAX_WINDOW) return;
+    const drop = msgList.length - MAX_WINDOW;
+    if (direction === 'older') {
+      msgList.splice(msgList.length - drop, drop);
+      noMoreNewer = false;
+    } else {
+      msgList.splice(0, drop);
+      noMoreOlder = false;
+    }
+  }
+
+  function computeRenderUnits(list) {
+    const units = [];
+    for (let i = 0; i < list.length;) {
+      const first = list[i];
+      if (isGrouableMedia(first)) {
+        const run = [first];
+        let j = i + 1;
+        while (j < list.length) {
+          const prev = run[run.length - 1];
+          const curr = list[j];
+          if (!isGrouableMedia(curr)) break;
+          if (!sameSender(first, curr)) break;
+          if (curr.timestamp_ms - prev.timestamp_ms > MEDIA_GROUP_GAP_MS) break;
+          run.push(curr);
+          j++;
+        }
+        if (run.length >= MEDIA_GROUP_MIN) {
+          units.push({ type: 'group', members: run });
+          i = j;
+          continue;
+        }
+      }
+      units.push({ type: 'single', msg: first });
+      i++;
+    }
+    return units;
+  }
+
+  function renderWindow() {
+    const scroll = document.getElementById('message-scroll');
+    scroll.innerHTML = '';
+    const units = computeRenderUnits(msgList);
+    let prevTs = null;
+    for (const unit of units) {
+      const ts = unit.type === 'group' ? unit.members[0].timestamp_ms : unit.msg.timestamp_ms;
+      if (prevTs === null || dayKey(ts) !== dayKey(prevTs)) {
+        scroll.appendChild(makeDateSeparator(ts));
+      }
+      scroll.appendChild(renderBubble(unit));
+      prevTs = unit.type === 'group'
+        ? unit.members[unit.members.length - 1].timestamp_ms
+        : unit.msg.timestamp_ms;
+    }
+  }
+
+  async function jumpToMessage(msg) {
+    const inWin = rowForMsgId(msg.msg_id);
+    if (inWin) { inWin.scrollIntoView({ behavior: 'instant', block: 'center' }); return inWin; }
+    await jumpToTimestamp(msg.timestamp_ms, msg.msg_id);
+    const row = rowForMsgId(msg.msg_id);
+    if (row) {
+      suppressScroll = true;
+      row.scrollIntoView({ behavior: 'instant', block: 'center' });
+      suppressScroll = false;
+    }
+    return row;
   }
 
   function renderMediaGrid(group) {
@@ -756,48 +729,9 @@
   }
 
   function showLightboxForGroup(group, index) {
-    showLightbox('/media/' + group[index].archive_path, group[index].media_type, group[index]);
+    showLightbox(group[index]);
   }
 
-  function renderBubbleWithSep(msg, prevTs, direction) {
-    // prevTs is always the OLDER (chronologically previous) neighbour, or null when
-    // msg is the oldest loaded message. A message is the first of its day when its
-    // day differs from that neighbour, so the separator goes above it either way.
-    if (msg._rendered) return [];
-    const nodes = [];
-    const needsSep = prevTs === null || dayKey(msg.timestamp_ms) !== dayKey(prevTs);
-    if (needsSep && direction === 'after') nodes.push(makeDateSeparator(msg.timestamp_ms));
-    nodes.push(renderBubble(msg));
-    // 'before': separator goes after the bubble so insertBefore puts it above the row
-    if (needsSep && direction === 'before') nodes.push(makeDateSeparator(msg.timestamp_ms));
-    return nodes;
-  }
-
-  // ---- append / prepend with pruning ---------------------------------------
-
-  function pruneDom(keepEnd) {
-    const scroll = document.getElementById('message-scroll');
-    let prunedRows = false;
-    while (domNodes > MAX_DOM && scroll.children.length > 0) {
-      const child = keepEnd === 'top' ? scroll.lastChild : scroll.firstChild;
-      if (!child) break;
-      scroll.removeChild(child);
-      if (child.classList && child.classList.contains('msg-row')) {
-        domNodes--;
-        prunedRows = true;
-      }
-    }
-    if (prunedRows) {
-      if (keepEnd === 'top') noMoreOlder = false;
-      else noMoreNewer = false;
-    }
-    // Re-sync msgList boundaries from surviving DOM rows
-    const rows = scroll.querySelectorAll('.msg-row[data-ts]');
-    if (rows.length === 0) { msgList = []; return; }
-    const minTs = parseInt(rows[0].dataset.ts);
-    const maxTs = parseInt(rows[rows.length - 1].dataset.ts);
-    msgList = msgList.filter(m => m.timestamp_ms >= minTs && m.timestamp_ms <= maxTs);
-  }
 
   // ---- scroll trigger -------------------------------------------------------
 
@@ -805,6 +739,7 @@
     const scroll = document.getElementById('message-scroll');
     const btn = document.getElementById('scroll-to-bottom');
     scroll.addEventListener('scroll', function () {
+      if (suppressScroll) return;
       hideMsgDetails();
       const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
       btn.classList.toggle('visible', !atBottom);
@@ -818,39 +753,34 @@
     });
     btn.addEventListener('click', async () => {
       if (noMoreNewer) {
+        suppressScroll = true;
         scroll.scrollTop = scroll.scrollHeight;
+        suppressScroll = false;
         return;
       }
-      // Newer messages exist outside the current DOM window — reload from latest
-      scroll.innerHTML = '';
       msgList = [];
-      domNodes = 0;
       noMoreOlder = false;
       noMoreNewer = false;
       await loadMessages('older');
+      suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
+      suppressScroll = false;
     });
   }
   setupScrollTrigger();
 
-  function renderBubble(msg) {
-    const row = document.createElement('div');
-    row.className = 'msg-row ' + (msg.from_me ? 'sent' : 'recv');
-    row.dataset.ts = msg.timestamp_ms;
+  function renderBubble(unit) {
+    if (unit.type === 'group') {
+      const group = unit.members;
+      const msg = group[0];
+      const row = document.createElement('div');
+      row.className = 'msg-row ' + (msg.from_me ? 'sent' : 'recv');
+      row.dataset.msgId = String(msg.msg_id);
+      row.dataset.groupIds = group.map(m => String(m.msg_id)).join(' ');
 
-    // Mark all items in the run as rendered so renderBubbleWithSep skips them
-    if (msg._mediaGroup) {
-      msg._mediaGroup.forEach(m => { m._rendered = true; });
-    }
-
-    // Render media group as a single grid bubble
-    if (msg._mediaGroupStart && msg._mediaGroup) {
       const bubble = document.createElement('div');
       bubble.className = 'msg-bubble';
 
-      const group = msg._mediaGroup;
-
-      // Sender name for received messages (both groups and private chats)
       if (!msg.from_me && msg.sender) {
         const senderEl = document.createElement('div');
         senderEl.className = 'msg-sender';
@@ -858,10 +788,8 @@
         bubble.appendChild(senderEl);
       }
 
-      // Media grid (no sender name for sent messages — shown in meta badge instead)
       bubble.appendChild(renderMediaGrid(group));
 
-      // Caption from the last message in the group
       const lastMsg = group[group.length - 1];
       if (lastMsg.text_body) {
         const cap = document.createElement('div');
@@ -870,7 +798,6 @@
         bubble.appendChild(cap);
       }
 
-      // Single shared meta row for the whole group
       const meta = document.createElement('div');
       meta.className = 'msg-meta';
       if (msg.from_me) {
@@ -886,10 +813,10 @@
       return row;
     }
 
-    // Non-start items in a group are already marked _rendered — return empty row
-    if (msg._mediaGroup) {
-      return row;
-    }
+    const msg = unit.msg;
+    const row = document.createElement('div');
+    row.className = 'msg-row ' + (msg.from_me ? 'sent' : 'recv');
+    row.dataset.msgId = String(msg.msg_id);
 
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
@@ -914,7 +841,7 @@
       if (msg.quoted_ts) {
         quote.style.cursor = 'pointer';
         quote.title = 'Jump to original message';
-        quote.addEventListener('click', () => jumpToTimestamp(msg.quoted_ts));
+        quote.addEventListener('click', () => jumpToTimestamp(msg.quoted_ts, null));
       }
       bubble.appendChild(quote);
     }
@@ -970,7 +897,6 @@
       const rxEl = document.createElement('div');
       rxEl.className = 'msg-reactions';
       if (msg.reactions_from_me !== undefined) {
-        // iOS: reactions split by sender (from_me encoded in reactions_from_me)
         const emojis = msg.reactions.split(',');
         const fromMes = msg.reactions_from_me.split(',');
         const myRx = [], theirRx = [];
@@ -987,7 +913,6 @@
           badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
           rxEl.appendChild(badge);
         });
-        // Second reactions on the opposite corner
         if (myRx.length || theirRx.length) {
           const rxEl2 = document.createElement('div');
           rxEl2.className = 'msg-reactions rx-badge-2';
@@ -1006,7 +931,6 @@
           }
         }
       } else {
-        // Android: all reactions shown on sender's corner (aggregated)
         const seen = {};
         msg.reactions.split(',').forEach(e => {
           seen[e] = (seen[e] || 0) + 1;
@@ -1041,7 +965,7 @@
       img.src = src;
       img.loading = 'lazy';
       img.alt = msg.media_name || 'image';
-      img.addEventListener('click', () => showLightbox(src, mt, msg));
+      img.addEventListener('click', () => showLightbox(msg));
       wrap.appendChild(img);
     } else if (mt === 'video') {
       const vid = document.createElement('video');
@@ -1081,6 +1005,12 @@
 
   let lightboxItems = [];
   let lightboxIndex = 0;
+  let lightboxContext = 'gallery'; // 'gallery' | 'chat' — controls pagination + type filtering
+
+  function isLightboxMedia(m) {
+    return m.archive_path && (m.media_type === 'image' || m.media_type === 'video' ||
+      m.media_type === 'gif' || m.media_type === 'sticker');
+  }
 
   function _closeLb() {
     const lb = document.getElementById('img-lightbox');
@@ -1123,13 +1053,14 @@
     nextBtn.className = 'lb-arrow next';
     nextBtn.innerHTML = '&#10095;';
     nextBtn.title = 'Next';
-    nextBtn.disabled = _nextLightboxIndex(index, 1) === -1 && galleryAllLoaded;
+    nextBtn.disabled = _nextLightboxIndex(index, 1) === -1 &&
+      (lightboxContext !== 'gallery' || galleryAllLoaded);
     nextBtn.addEventListener('click', async e => {
       e.stopPropagation();
       let i = _nextLightboxIndex(lightboxIndex, 1);
       if (i !== -1) {
         lightboxIndex = i; openLightboxAt(lightboxIndex);
-      } else if (!galleryAllLoaded) {
+      } else if (lightboxContext === 'gallery' && !galleryAllLoaded) {
         const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
         await _loadGalleryPage(oldest);
         i = _nextLightboxIndex(lightboxIndex, 1);
@@ -1180,60 +1111,18 @@
     document.body.appendChild(lb);
   }
 
-  function showLightbox(src, mt, msg) {
-    document.getElementById('img-lightbox')?.remove();
-
-    const lb = document.createElement('div');
-    lb.id = 'img-lightbox';
-    lb.className = 'img-lightbox';
-
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'lb-close';
-    closeBtn.innerHTML = '&#10005;';
-    closeBtn.title = 'Close';
-    closeBtn.addEventListener('click', () => _closeLb());
-    lb.appendChild(closeBtn);
-
-    const tsEl = document.createElement('div');
-    tsEl.className = 'lb-timestamp';
-    tsEl.textContent = fmtTime(msg.timestamp_ms);
-    lb.appendChild(tsEl);
-
-    let media;
-    if (mt === 'video') {
-      media = document.createElement('video');
-      media.controls = true;
-      media.autoplay = true;
-      media.src = src;
-    } else {
-      media = document.createElement('img');
-      media.src = src;
+  function showLightbox(msg) {
+    // Navigate the chat's currently-loaded media (chronological), not the stale
+    // gallery list. msg is the same object reference held in msgList, so identity
+    // lookup gives its position. Falls back to a single-item view if not found.
+    lightboxContext = 'chat';
+    lightboxItems = msgList.filter(isLightboxMedia);
+    lightboxIndex = lightboxItems.indexOf(msg);
+    if (lightboxIndex === -1) {
+      lightboxItems = [msg];
+      lightboxIndex = 0;
     }
-    lb.appendChild(media);
-
-    const pathRow = document.createElement('div');
-    pathRow.className = 'lb-path';
-    const pathText = document.createElement('span');
-    const sep = outputRoot.includes('\\') ? '\\' : '/';
-    const fullPath = outputRoot.replace(/[/\\]+$/, '') + sep + msg.archive_path.replace(/\//g, sep);
-    pathText.textContent = fullPath;
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'lb-copy-btn';
-    copyBtn.title = 'Copy path';
-    copyBtn.innerHTML = '&#128203;';
-    copyBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      navigator.clipboard.writeText(fullPath).then(() => {
-        copyBtn.classList.add('copied');
-        setTimeout(() => copyBtn.classList.remove('copied'), 1500);
-      });
-    });
-    pathRow.appendChild(pathText);
-    pathRow.appendChild(copyBtn);
-    lb.appendChild(pathRow);
-
-    lb.addEventListener('click', e => { if (e.target === lb) _closeLb(); });
-    document.body.appendChild(lb);
+    openLightboxAt(lightboxIndex);
   }
 
   // ---- media gallery -------------------------------------------------------
@@ -1258,7 +1147,7 @@
       img.alt = msg.media_name || '';
       const idx = lightboxItems.length;
       lightboxItems.push(msg);
-      img.addEventListener('click', () => { lightboxIndex = idx; openLightboxAt(idx); });
+      img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx); });
       cell.appendChild(img);
     } else if (mt === 'video') {
       const img = document.createElement('img');
@@ -1266,7 +1155,7 @@
       img.className = 'gallery-video-thumb';
       const idx = lightboxItems.length;
       lightboxItems.push(msg);
-      img.addEventListener('click', () => { lightboxIndex = idx; openLightboxAt(idx); });
+      img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx); });
       cell.appendChild(img);
 
       // extract first frame into img; fall back to a muted play icon on error
@@ -1335,7 +1224,7 @@
     btn.addEventListener('click', e => {
       e.stopPropagation();
       closeMediaGallery();
-      jumpToTimestamp(msg.timestamp_ms);
+      jumpToMessage(msg);
     });
     cell.appendChild(btn);
     return cell;
@@ -1495,7 +1384,7 @@
         let i = _nextLightboxIndex(lightboxIndex, 1);
         if (i !== -1) {
           lightboxIndex = i; openLightboxAt(lightboxIndex);
-        } else if (!galleryAllLoaded) {
+        } else if (lightboxContext === 'gallery' && !galleryAllLoaded) {
           const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
           await _loadGalleryPage(oldest);
           i = _nextLightboxIndex(lightboxIndex, 1);
@@ -1526,7 +1415,9 @@
   function _nextLightboxIndex(from, dir) {
     let i = from + dir;
     while (i >= 0 && i < lightboxItems.length) {
-      if (activeTypes.size === 0 || activeTypes.has(lightboxItems[i].media_type)) return i;
+      // activeTypes is a gallery-only filter; in chat context every item in
+      // lightboxItems is already a renderable media message, so accept it.
+      if (lightboxContext !== 'gallery' || activeTypes.size === 0 || activeTypes.has(lightboxItems[i].media_type)) return i;
       i += dir;
     }
     return -1;
@@ -1755,7 +1646,7 @@
         const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
         if (el2) {
           await selectChat(chat, el2);
-          const row = await jumpToTimestamp(r.timestamp_ms);
+          const row = await jumpToTimestamp(r.timestamp_ms, null);
           if (row) {
             const bubble = row.querySelector('.msg-bubble');
             if (bubble) {
@@ -1896,13 +1787,13 @@
     const result = chatSearchResults[idx];
     if (!result) return;
     document.querySelectorAll('.search-highlight').forEach(el => el.classList.remove('search-highlight'));
-    const existing = document.querySelector(`.msg-row[data-ts="${result.timestamp_ms}"]`);
+    const existing = rowForMsgId(result.msg_id);
     if (existing) {
       highlightMessageRow(existing);
       return;
     }
-    await jumpToTimestamp(result.timestamp_ms);
-    const loaded = document.querySelector(`.msg-row[data-ts="${result.timestamp_ms}"]`);
+    await jumpToTimestamp(result.timestamp_ms, result.msg_id);
+    const loaded = rowForMsgId(result.msg_id);
     if (loaded) highlightMessageRow(loaded);
   }
 
@@ -1929,7 +1820,7 @@
     btn.disabled = true;
     btn.setAttribute('aria-busy', 'true');
     try {
-      await jumpToTimestamp(new Date(val).getTime());
+      await jumpToTimestamp(new Date(val).getTime(), null);
     } finally {
       btn.disabled = false;
       btn.removeAttribute('aria-busy');
@@ -1942,123 +1833,72 @@
     document.getElementById('date-clear-btn').style.display = 'none';
   });
 
-  async function jumpToTimestamp(ts) {
-    // If already in DOM, just scroll to it
-    const existing = document.querySelector(`.msg-row[data-ts="${ts}"]`);
-    if (existing) {
-      existing.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return existing;
+  // Resolve once every <img> in container has finished loading (or errored),
+  // capped per image so a slow/broken source can't stall a jump indefinitely.
+  function _awaitImagesSettled(container) {
+    const pending = [...container.querySelectorAll('img')].filter(img => !img.complete);
+    if (!pending.length) return Promise.resolve();
+    return Promise.all(pending.map(img => new Promise(resolve => {
+      const done = () => resolve();
+      img.addEventListener('load', done, { once: true });
+      img.addEventListener('error', done, { once: true });
+      setTimeout(done, 2000);
+    })));
+  }
+
+  // exactMsgId: when the caller needs a specific message in the DOM (e.g. jumpToMessage,
+  // chat search), pass its msg_id to bypass the nearest-ts early-exit — the caller already
+  // confirmed the message is not in the current window, so a full fetch is always needed.
+  // Pass null for nearest-ts callers (date picker, quoted-message jumps).
+  async function jumpToTimestamp(ts, exactMsgId) {
+    if (exactMsgId == null) {
+      const near = nearestMsgToTs(ts);
+      const existing = near && Math.abs(near.timestamp_ms - ts) < 86400000 && rowForMsgId(near.msg_id);
+      if (existing) {
+        suppressScroll = true;
+        existing.scrollIntoView({ behavior: 'instant', block: 'center' });
+        suppressScroll = false;
+        return existing;
+      }
     }
 
-    // Save current scroll position so we can restore it after patching
+    const gen = ++_loadGen;
+    loading = true;
+    pendingLoad = null;
     const scroll = document.getElementById('message-scroll');
-    const prevScrollTop = scroll.scrollTop;
 
-    // Load context window around the target
-    const params = new URLSearchParams({
-      chat_id: currentChat.id,
-      chat_type: currentChat.type,
-      ts,
-      limit: 50
-    });
-    const res = await fetch('/api/messages/at?' + params);
-    const msgs = await res.json();
-    if (!msgs.length) return null;
-
-    // Add new messages to msgList so detectMediaGroups can see the full picture
-    msgs.forEach(m => msgList.push(m));
-    msgList.sort((a, b) => a.timestamp_ms - b.timestamp_ms);
-
-    // Reset _rendered only on messages that are not already in the DOM.
-    // Existing DOM rows must stay _rendered = true so renderBubbleWithSep skips
-    // them — they are already displaying correctly. New messages get _rendered
-    // set to true by renderBubble so they too are skipped on any subsequent pass.
-    for (const m of msgList) {
-      const inDom = !!document.querySelector(`.msg-row[data-ts="${m.timestamp_ms}"]`);
-      if (!inDom) delete m._rendered;
-    }
-    detectMediaGroups(msgList);
-
-    // Find the message closest to ts (the actual jump target) — needed in both branches
-    const target = msgs.reduce((best, m) =>
-      Math.abs(m.timestamp_ms - ts) < Math.abs(best.timestamp_ms - ts) ? m : best
-    );
-
-    // If any group was found, we must do a full re-render. The existing DOM rows
-    // are still there but now have stale content (individual bubbles instead of grids).
-    // Clearing and re-rendering everything from scratch is the only way to ensure
-    // groups spanning the jump boundary render correctly.
-    // First, clear _rendered on ALL messages so renderBubbleWithSep doesn't skip them.
-    if (msgList.some(m => m._mediaGroupStart)) {
-      for (const m of msgList) {
-        delete m._rendered;
-      }
-      scroll.innerHTML = '';
-      domNodes = 0;
-      for (let i = 0; i < msgList.length; i++) {
-        const prevTs = i > 0 ? msgList[i - 1].timestamp_ms : null;
-        renderBubbleWithSep(msgList[i], prevTs, 'after').forEach(node => scroll.appendChild(node));
-        domNodes++;
-      }
-      scroll.scrollTop = scroll.scrollHeight;
-      pruneDom('bottom');
-      const targetEl = document.querySelector(`.msg-row[data-ts="${target.timestamp_ms}"]`);
-      if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return targetEl || null;
-    }
-
-    // No groups found — safe to render only the new messages incrementally.
-    // Existing DOM rows are untouched (their _rendered flag keeps them in place).
-    const oldestNewTs = msgs[0].timestamp_ms;
-
-    // Find the first existing row that is newer than all new messages —
-    // that is the insertion point: insert before it so new (older) rows end up
-    // below all existing older rows in DOM order.
-    let insertBeforeEl = null;
-    for (const row of scroll.querySelectorAll('.msg-row[data-ts]')) {
-      const ts = parseInt(row.getAttribute('data-ts'));
-      if (ts < oldestNewTs) continue; // skip rows that are older than the new batch
-      insertBeforeEl = row;
-      break;
-    }
-
-    // prevTs for the first new message is the actual last existing older row
-    // (the one just before the insertion point), so date separators are correct.
-    let prevLastTs = null;
-    if (insertBeforeEl) {
-      const prevRow = insertBeforeEl.previousElementSibling;
-      if (prevRow && prevRow.classList.contains('msg-row')) {
-        prevLastTs = parseInt(prevRow.getAttribute('data-ts'));
-      }
-    } else {
-      // All existing rows are older than the new batch — prev is the last DOM row.
-      const allRows = scroll.querySelectorAll('.msg-row[data-ts]');
-      if (allRows.length > 0) {
-        prevLastTs = parseInt(allRows[allRows.length - 1].getAttribute('data-ts'));
-      }
-    }
-
-    // Insert oldest-first, before insertBeforeEl (or append if no such row).
-    for (let i = 0; i < msgs.length; i++) {
-      const m = msgs[i];
-      const prevTs = i === 0 ? prevLastTs : msgs[i - 1].timestamp_ms;
-      const nodes = renderBubbleWithSep(m, prevTs, 'after');
-      // nodes = [separator?, bubble]; separator goes before insertBeforeEl,
-      // bubble goes after separator (i.e., still before insertBeforeEl).
-      nodes.forEach(node => {
-        if (insertBeforeEl) scroll.insertBefore(node, insertBeforeEl);
-        else scroll.appendChild(node);
+    try {
+      const params = new URLSearchParams({
+        chat_id: currentChat.id,
+        chat_type: currentChat.type,
+        ts,
+        limit: 50
       });
-      domNodes += nodes.length;
+      const res = await fetch('/api/messages/at?' + params);
+      const msgs = await res.json();
+      if (gen !== _loadGen) return null;
+      if (!msgs.length) return null;
+
+      msgList = [];
+      noMoreOlder = false;
+      noMoreNewer = false;
+      mergePage(msgs);
+      renderWindow();
+
+      await _awaitImagesSettled(scroll);
+      if (gen !== _loadGen) return null;
+
+      const target = nearestMsgToTs(ts);
+      const targetEl = target && rowForMsgId(target.msg_id);
+      if (targetEl) {
+        suppressScroll = true;
+        targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+        suppressScroll = false;
+      }
+      return targetEl || null;
+    } finally {
+      if (gen === _loadGen) loading = false;
     }
-
-    pruneDom('top');
-    // Restore scroll position so the patch is invisible to the user
-    scroll.scrollTop = prevScrollTop;
-
-    const targetEl = document.querySelector(`.msg-row[data-ts="${target.timestamp_ms}"]`);
-    if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    return targetEl || null;
   }
 
   // ---- toolbar toggle -------------------------------------------------------
