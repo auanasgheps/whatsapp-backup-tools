@@ -32,7 +32,8 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
         );
         CREATE TABLE IF NOT EXISTS files (
             original_path  TEXT PRIMARY KEY,
-            md5            BLOB NOT NULL
+            md5            BLOB NOT NULL,
+            size           INTEGER
         );
         CREATE TABLE IF NOT EXISTS archive_copies (
             original_path  TEXT NOT NULL REFERENCES files(original_path),
@@ -59,7 +60,19 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
             ON recent_messages(chat_id, chat_type, timestamp_ms DESC);
+        CREATE TABLE IF NOT EXISTS adb_pull_state (
+            remote_path    TEXT    NOT NULL,
+            device_serial  TEXT    NOT NULL,
+            status         TEXT    NOT NULL,
+            pulled_at      TEXT,
+            PRIMARY KEY (remote_path, device_serial)
+        );
     """)
+    # Migrate existing DBs: add size column if absent (safe no-op on new DBs)
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+    if 'size' not in existing:
+        conn.execute("ALTER TABLE files ADD COLUMN size INTEGER")
+        conn.commit()
     return conn
 
 
@@ -123,11 +136,12 @@ def save_groups_to_db(conn: sqlite3.Connection, index: dict):
 # ---------------------------------------------------------------------------
 
 def record_file_archived(cursor: sqlite3.Cursor,
-                         original_path: str, md5: bytes, archive_path: str):
+                         original_path: str, md5: bytes, archive_path: str,
+                         size: int):
     cursor.execute(
-        "INSERT INTO files (original_path, md5) VALUES (?, ?) "
-        "ON CONFLICT(original_path) DO UPDATE SET md5 = excluded.md5",
-        (original_path, md5)
+        "INSERT INTO files (original_path, md5, size) VALUES (?, ?, ?) "
+        "ON CONFLICT(original_path) DO UPDATE SET md5 = excluded.md5, size = excluded.size",
+        (original_path, md5, size)
     )
     cursor.execute(
         "INSERT OR IGNORE INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
@@ -280,3 +294,70 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
         updated_index[canonical] = (new_folder, display_name)
 
     return updated_index
+
+
+# ---------------------------------------------------------------------------
+# ADB pull state
+# ---------------------------------------------------------------------------
+
+def build_archive_filename_index(conn: sqlite3.Connection) -> dict:
+    """Return {basename: (size_or_none, md5)} for all archived files.
+
+    Used as the delta pre-filter for ADB pull: O(1) lookup by filename.
+    If the same basename appears at multiple paths, the last row wins — any
+    match is sufficient to identify a file as already archived.
+    """
+    index = {}
+    for original_path, md5, size in conn.execute(
+        "SELECT original_path, md5, size FROM files"
+    ):
+        basename = os.path.basename(original_path.replace('\\', '/'))
+        index[basename] = (size, md5)
+    return index
+
+
+def get_adb_done_paths(conn: sqlite3.Connection, device_serial: str) -> set:
+    """Return remote paths already successfully pulled for this device."""
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT remote_path FROM adb_pull_state "
+            "WHERE device_serial = ? AND status = 'done'",
+            (device_serial,),
+        )
+    }
+
+
+def get_adb_partial_paths(conn: sqlite3.Connection, device_serial: str) -> list:
+    """Return remote paths that were partially pulled (interrupted) for this device."""
+    return [
+        row[0]
+        for row in conn.execute(
+            "SELECT remote_path FROM adb_pull_state "
+            "WHERE device_serial = ? AND status = 'partial'",
+            (device_serial,),
+        )
+    ]
+
+
+def upsert_adb_pull_state(conn: sqlite3.Connection, remote_path: str,
+                          device_serial: str, status: str):
+    import datetime
+    conn.execute(
+        "INSERT INTO adb_pull_state (remote_path, device_serial, status, pulled_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(remote_path, device_serial) DO UPDATE SET "
+        "status = excluded.status, pulled_at = excluded.pulled_at",
+        (remote_path, device_serial, status,
+         datetime.datetime.now(datetime.timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+
+def remove_adb_pull_state(conn: sqlite3.Connection, remote_path: str,
+                          device_serial: str):
+    conn.execute(
+        "DELETE FROM adb_pull_state WHERE remote_path = ? AND device_serial = ?",
+        (remote_path, device_serial),
+    )
+    conn.commit()

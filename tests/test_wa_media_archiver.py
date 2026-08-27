@@ -886,12 +886,13 @@ class TestRecordFileArchived:
         cursor = conn.cursor()
         md5 = b'\x01' * 16
         arc.record_file_archived(cursor, 'orig.jpg', md5,
-                                'Contacts/Alice (00111)/2024/Received/orig.jpg')
+                                'Contacts/Alice (00111)/2024/Received/orig.jpg', 1024)
         conn.commit()
         row = conn.execute(
-            "SELECT md5 FROM files WHERE original_path = 'orig.jpg'"
+            "SELECT md5, size FROM files WHERE original_path = 'orig.jpg'"
         ).fetchone()
         assert row[0] == md5
+        assert row[1] == 1024
         copy = conn.execute(
             "SELECT archive_path FROM archive_copies WHERE original_path = 'orig.jpg'"
         ).fetchone()
@@ -902,8 +903,8 @@ class TestRecordFileArchived:
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b'\x01' * 16
-        arc.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
-        arc.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
+        arc.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg', 512)
+        arc.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg', 512)
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -915,8 +916,8 @@ class TestRecordFileArchived:
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b'\x01' * 16
-        arc.record_file_archived(cursor, 'orig.jpg', md5, 'path1.jpg')
-        arc.record_file_archived(cursor, 'orig.jpg', md5, 'path2.jpg')
+        arc.record_file_archived(cursor, 'orig.jpg', md5, 'path1.jpg', 256)
+        arc.record_file_archived(cursor, 'orig.jpg', md5, 'path2.jpg', 256)
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -933,8 +934,109 @@ class TestCheckDbHealth:
 
 
 # ===========================================================================
-# CSV reports
+# Archive DB: ADB pull state + filename index
 # ===========================================================================
+
+class TestAdbPullState:
+    def test_upsert_and_get_done_paths(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/a.jpg', 'ABC123', 'done')
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/b.jpg', 'ABC123', 'done')
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/c.jpg', 'ABC123', 'partial')
+        done = arc.get_adb_done_paths(conn, 'ABC123')
+        assert done == {'/sdcard/Media/a.jpg', '/sdcard/Media/b.jpg'}
+        conn.close()
+
+    def test_partial_paths_returned(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/x.jpg', 'DEV1', 'partial')
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/y.jpg', 'DEV1', 'done')
+        partials = arc.get_adb_partial_paths(conn, 'DEV1')
+        assert partials == ['/sdcard/Media/x.jpg']
+        conn.close()
+
+    def test_upsert_updates_status(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/a.jpg', 'DEV1', 'partial')
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/a.jpg', 'DEV1', 'done')
+        done = arc.get_adb_done_paths(conn, 'DEV1')
+        assert '/sdcard/Media/a.jpg' in done
+        partials = arc.get_adb_partial_paths(conn, 'DEV1')
+        assert partials == []
+        conn.close()
+
+    def test_different_devices_isolated(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/a.jpg', 'DEV1', 'done')
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/a.jpg', 'DEV2', 'partial')
+        assert '/sdcard/Media/a.jpg' in arc.get_adb_done_paths(conn, 'DEV1')
+        assert '/sdcard/Media/a.jpg' not in arc.get_adb_done_paths(conn, 'DEV2')
+        assert '/sdcard/Media/a.jpg' in arc.get_adb_partial_paths(conn, 'DEV2')
+        conn.close()
+
+    def test_remove_pull_state(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, '/sdcard/Media/a.jpg', 'DEV1', 'done')
+        arc.remove_adb_pull_state(conn, '/sdcard/Media/a.jpg', 'DEV1')
+        assert arc.get_adb_done_paths(conn, 'DEV1') == set()
+        conn.close()
+
+
+class TestBuildArchiveFilenameIndex:
+    def test_returns_basename_size_md5(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+        md5a = b'\x01' * 16
+        md5b = b'\x02' * 16
+        arc.record_file_archived(cursor, '/staging/WhatsApp Images/photo.jpg',
+                                 md5a, 'Contacts/Alice/photo.jpg', 2048)
+        arc.record_file_archived(cursor, '/staging/WhatsApp Video/clip.mp4',
+                                 md5b, 'Contacts/Bob/clip.mp4', 512000)
+        conn.commit()
+        index = arc.build_archive_filename_index(conn)
+        assert 'photo.jpg' in index
+        assert index['photo.jpg'] == (2048, md5a)
+        assert 'clip.mp4' in index
+        assert index['clip.mp4'] == (512000, md5b)
+        conn.close()
+
+    def test_null_size_preserved(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        # Simulate a pre-size-column record by inserting with NULL size directly
+        conn.execute(
+            "INSERT INTO files (original_path, md5, size) VALUES (?, ?, NULL)",
+            ('/old/path/legacy.jpg', b'\xAA' * 16),
+        )
+        conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
+            ('/old/path/legacy.jpg', 'Contacts/old/legacy.jpg'),
+        )
+        conn.commit()
+        index = arc.build_archive_filename_index(conn)
+        assert 'legacy.jpg' in index
+        size, md5 = index['legacy.jpg']
+        assert size is None
+        assert md5 == b'\xAA' * 16
+        conn.close()
+
+    def test_migration_adds_size_column_to_existing_db(self, tmp_path):
+        # Create a DB without size column, then re-open — migration should add it
+        import sqlite3 as _sqlite3
+        db_path = str(tmp_path / '.wa_media_archiver.db')
+        old_conn = _sqlite3.connect(db_path)
+        old_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS files (
+                original_path TEXT PRIMARY KEY,
+                md5 BLOB NOT NULL
+            );
+        """)
+        old_conn.close()
+        conn = arc.open_archive_db(str(tmp_path))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+        assert 'size' in cols
+        conn.close()
+
+
 
 class TestWriteMissingReport:
     def test_no_rows_does_not_create_file(self, tmp_path, logger):
@@ -978,7 +1080,7 @@ class TestWriteDuplicateReport:
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = hashlib.md5(b'data').digest()
-        cursor.execute("INSERT INTO files VALUES (?, ?)", ('orig.jpg', md5))
+        cursor.execute("INSERT INTO files (original_path, md5) VALUES (?, ?)", ('orig.jpg', md5))
         cursor.execute("INSERT INTO archive_copies VALUES (?, ?)",
                        ('orig.jpg', 'Contacts/Alice (00111)/2024/Received/orig.jpg'))
         cursor.execute("INSERT INTO archive_copies VALUES (?, ?)",

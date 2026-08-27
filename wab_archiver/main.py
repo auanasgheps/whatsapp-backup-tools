@@ -322,7 +322,8 @@ def _copy_or_skip(src, dest_path, dest_dir, file_path, timestamp,
         if resolved is None:
             if cursor is not None:
                 rel = os.path.relpath(dest_path, output_root).replace(os.sep, '/')
-                archive_db.record_file_archived(cursor, file_path, src_hash, rel)
+                archive_db.record_file_archived(cursor, file_path, src_hash, rel,
+                                                os.path.getsize(dest_path))
             return 0, 1, 0
     else:
         src_hash = None
@@ -343,7 +344,8 @@ def _copy_or_skip(src, dest_path, dest_dir, file_path, timestamp,
     logger.debug(f"COPIED: {src} -> {resolved}")
     if cursor is not None:
         rel = os.path.relpath(resolved, output_root).replace(os.sep, '/')
-        archive_db.record_file_archived(cursor, file_path, src_hash, rel)
+        archive_db.record_file_archived(cursor, file_path, src_hash, rel,
+                                        os.path.getsize(resolved))
     return 1, 0, 0
 
 
@@ -573,6 +575,7 @@ def run_restore_mode(args, logger):
 _VALID_CONFIG_KEYS = {
     'output', 'msgstore', 'e2e_key', 'wa_root', 'contacts', 'log',
     'mode', 'business', 'timezone', 'since', 'ios_backup', 'ios_password', 'ios_contacts',
+    'adb_pull_media', 'media_staging_dir',
 }
 
 _EXAMPLE_CONFIG = """\
@@ -712,9 +715,20 @@ def parse_args() -> argparse.Namespace:
                              '(default: <output>/wab-archiver.log)')
     parser.add_argument('-mode', '--mode',
                         choices=['adb', 'restore'],
-                        help='adb = pull msgstore and contacts via ADB; '
+                        help='adb = pull msgstore and contacts via ADB '
+                             '(use with --adb-pull-media to also pull media files); '
                              'restore = reconstruct original Media/ tree from archive '
                              '(Android archives only)')
+    parser.add_argument('--adb-pull-media',
+                        action='store_true',
+                        help='Pull WhatsApp media files from the connected device via ADB. '
+                             'Only valid with --mode adb. Requires --media-staging-dir.')
+    parser.add_argument('--media-staging-dir',
+                        default=None,
+                        metavar='PATH',
+                        help='Persistent local directory where ADB-pulled media is staged '
+                             'before archiving. Created on first run if absent. '
+                             'Required when --pull-media is set.')
     parser.add_argument('--dry-run',
                         action='store_true',
                         help='Simulate the run without copying any files')
@@ -829,8 +843,14 @@ def parse_args() -> argparse.Namespace:
             "iOS contacts are loaded automatically from the backup (ContactsV2.sqlite). "
             "Use --ios_contacts to supply a pre-extracted ContactsV2.sqlite instead."
         )
-    if args.mode != 'restore' and not args.ios_backup and not args.wa_roots:
-        parser.error("--wa_root / -wa is required unless --ios_backup or --mode restore")
+    if getattr(args, 'adb_pull_media', False) and args.mode != 'adb':
+        parser.error("--adb-pull-media requires --mode adb.")
+    if getattr(args, 'adb_pull_media', False) and not getattr(args, 'media_staging_dir', None):
+        parser.error("--adb-pull-media requires --media-staging-dir.")
+    if args.mode != 'restore' and not args.ios_backup and not args.wa_roots \
+            and not getattr(args, 'adb_pull_media', False):
+        parser.error("--wa_root / -wa is required unless --ios_backup, --mode restore, "
+                     "or --adb-pull-media")
 
     return args
 
@@ -960,6 +980,26 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
             args.contacts = adb_extractor.pull_contacts(tmp_dir, logger)
         except subprocess.CalledProcessError:
             raise SystemExit(1)
+
+        if getattr(args, 'adb_pull_media', False):
+            staging_dir = args.media_staging_dir
+            conn_for_pull = archive_db.open_archive_db(args.output)
+            try:
+                pulled, skipped, conflicts = adb_extractor.pull_media(
+                    staging_dir, args.business, conn_for_pull, logger,
+                )
+            except (RuntimeError, KeyboardInterrupt) as e:
+                logger.error(f"ADB media pull stopped: {e}")
+                conn_for_pull.close()
+                raise SystemExit(1)
+            conn_for_pull.close()
+
+            if conflicts:
+                report_path = os.path.join(args.output, 'adb_conflicts_report.csv')
+                adb_extractor.write_adb_conflicts_report(report_path, conflicts, logger)
+
+            if not args.wa_roots:
+                args.wa_roots = [staging_dir]
 
     # --- Load contacts ---
     contacts = {}
