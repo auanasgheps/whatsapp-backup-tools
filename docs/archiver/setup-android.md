@@ -21,7 +21,11 @@ When asked, create the end-to-end encrypted backup.
 
 ## Your WhatsApp Media Folder
 
-Before running the archiver, copy the `WhatsApp/` folder (the one **containing** the `Media` subfolder) from your phone to your machine. [Syncthing](https://syncthing.net/) makes this easy.
+You need a local copy of your `WhatsApp/` folder (the one **containing** the `Media` subfolder) to run the archiver. There are two ways to get it.
+
+### Syncthing (recommended)
+
+[Syncthing](https://syncthing.net/) keeps a live copy of the folder in sync over your local network — no manual steps after the initial setup.
 
 ```
 /path/to/WhatsApp/
@@ -33,6 +37,49 @@ Before running the archiver, copy the `WhatsApp/` folder (the one **containing**
 ```
 
 Pass the path to the `WhatsApp/` folder (not `Media/`) to the archiver via `--wa_root`.
+
+### ADB Pull Media (optional)
+
+If you prefer not to set up Syncthing, the archiver can pull your media files directly from the device over USB. This is significantly **slower and less reliable** — ADB overhead per file makes it impractical for large collections, and connections can drop mid-transfer.
+
+> 💡 **Syncthing is the recommended approach.** Use ADB pull only if you are unfamiliar with it or need a one-time transfer without installing additional software.
+
+**How it works:** The archiver tracks every file it pulls in a state table inside the archive's `.wa_media_archiver.db`. On subsequent runs:
+
+- Files already in the archive are **skipped without re-transferring** — detected via filename and file size, with remote MD5 verification for matching sizes
+- Interrupted transfers are **resumed automatically** — partial files are cleaned up at the start of each run and re-pulled
+- Files with the same name but different content on device vs archive are **logged to `adb_conflicts_report.csv`** and skipped — resolve these manually
+
+**Requirements:**
+- USB debugging enabled on the device
+- `--media-staging-dir <path>` — a persistent local folder for pulled files, used as `--wa_root` for archiving. **Do not use a temp folder**; state is stored in the archive DB, not here.
+
+**Example:**
+
+```bash
+python -m wab_archiver \
+  --mode adb \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --adb-pull-media \
+  --media-staging-dir /path/to/wa-staging \
+  --output /path/to/output
+```
+
+> ⚠️ On first run, every file is transferred — if you have many gigabytes of media, expect this to take hours. Voice messages and other small files are the bottleneck: ADB spawns a new subprocess per file, making transfers very slow per unit of data.
+
+**Hybrid workflow:** If you already have a manual copy of your media (via MTP/cable), archive it first without `--adb-pull-media`:
+
+```bash
+python -m wab_archiver \
+  --mode adb \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --wa_root /path/to/existing-WhatsApp \
+  --output /path/to/output
+```
+
+This populates the archive DB with all your existing files. From the next run onward, switch to `--adb-pull-media` — the archiver will skip everything already archived and only pull new files.
+
+### Multiple Source Folders
 
 If your media is spread across multiple locations (e.g. an old backup folder plus your current phone's `WhatsApp/` folder), repeat `--wa_root` for each source. The archiver searches all roots and selects the best available copy of each file automatically.
 

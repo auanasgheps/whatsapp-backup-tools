@@ -30,6 +30,8 @@ python -m wab_archiver \
   --dry-run
 ```
 
+To also pull media files over ADB (instead of using Syncthing or a manual copy), add `--adb-pull-media --media-staging-dir /path/to/staging`. See [Android setup](setup-android.md#pulling-media-via-adb-optional) for details.
+
 ### iOS — read directly from an iPhone backup
 
 ```bash

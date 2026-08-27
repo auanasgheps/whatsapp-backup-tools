@@ -32,6 +32,10 @@ output     = "/path/to/archive"
 # timezone  = ""          # e.g. Europe/Rome
 # since     = ""          # e.g. 2024-01-01
 
+# Android — pull media over ADB (slower than Syncthing; see setup-android.md)
+# adb_pull_media    = false
+# media_staging_dir = ""    # persistent folder for pulled media
+
 # iOS
 # ios_backup   = ""
 # ios_password = ""
@@ -73,6 +77,8 @@ usage: python -m wab_archiver [-h]
                         --output PATH
                         [--log PATH]
                         [--mode {adb,restore}]
+                        [--adb-pull-media]
+                        [--media-staging-dir PATH]
                         [--dry-run]
                         [--limit N]
                         [--since DATE]
@@ -94,6 +100,8 @@ usage: python -m wab_archiver [-h]
 | `--output PATH` | **Yes** | Destination folder for the archive |
 | `--log PATH` | No | Custom log file path. Defaults to `<output>/wab-archiver.log` |
 | `--mode {adb,restore}` | No | `adb` = automatically pull msgstore and contacts from a connected Android device; `restore` = reconstruct original `Media/` tree from the archive (Android only) |
+| `--adb-pull-media` | No | Pull WhatsApp media files from the connected device via ADB. Only valid with `--mode adb`. See [Android setup](setup-android.md#pulling-media-via-adb-optional) before using |
+| `--media-staging-dir PATH` | If `--adb-pull-media` | Local directory where ADB-pulled media is staged before archiving. Must be persistent across runs — state is tracked in the archive DB, not in this directory |
 | `--dry-run` | No | Simulate the run without copying any files |
 | `--limit N` | No | Cap rows returned per chat type (N/2 from groups, N/2 from 1-to-1). Total rows ≤ N. Useful for test runs |
 | `--since DATE` | No | Only include messages on or after this date (`YYYY-MM-DD`). Combines freely with `--limit` |
@@ -123,6 +131,21 @@ python -m wab_archiver \
   --output /path/to/output \
   --dry-run
 ```
+
+#### ADB mode — also pull media over USB
+
+Use this if you do not use Syncthing and want the archiver to handle everything in one step. See [setup-android.md](setup-android.md#pulling-media-via-adb-optional) for important caveats about speed and reliability.
+
+```bash
+python -m wab_archiver \
+  --mode adb \
+  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --adb-pull-media \
+  --media-staging-dir /path/to/wa-staging \
+  --output /path/to/output
+```
+
+> ⚠️ On first run, every media file is transferred — this can take hours for large collections. Subsequent runs skip already-archived files automatically.
 
 #### Manual — decrypted database
 
