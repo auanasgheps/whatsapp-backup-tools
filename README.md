@@ -36,7 +36,7 @@ Archive your WhatsApp media in a human readable format.
 - Multiple Android media source roots — repeat `-wa` to search across several WhatsApp folders (e.g. old archive + current phone). Best copy selected automatically; content conflicts reported separately
 - Dry run mode for safe previewing before a full run
 - WhatsApp platform: Android and iOS are both supported. No root or jailbreak are required.
-    - Android: requires a manual copy of your `/WhatsApp/Media/` folder
+    - Android: Syncthing is the recommended way to get your media files off the phone. If you prefer not to set that up, `--mode adb --adb-pull-media` can pull them directly over USB — but it is slow and unreliable for large collections (many small files over ADB can take hours and drop mid-transfer). See [docs/archiver/setup-android.md](docs/archiver/setup-android.md).
     - iOS: reads directly from an iPhone backup, encrypted backups are supported via `wa-crypt-tools`
 - Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
 

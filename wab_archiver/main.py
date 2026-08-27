@@ -603,6 +603,10 @@ output     = "/path/to/archive"         # required
 # timezone = ""                         # e.g. Europe/Rome
 # since    = ""                         # e.g. 2024-01-01
 
+# Android — pull media over ADB (slower than Syncthing; see setup-android.md)
+# adb_pull_media    = false
+# media_staging_dir = ""                # persistent folder for pulled media
+
 # iOS
 # ios_backup   = ""
 # ios_password = ""
@@ -728,7 +732,7 @@ def parse_args() -> argparse.Namespace:
                         metavar='PATH',
                         help='Persistent local directory where ADB-pulled media is staged '
                              'before archiving. Created on first run if absent. '
-                             'Required when --pull-media is set.')
+                             'Required when --adb-pull-media is set.')
     parser.add_argument('--dry-run',
                         action='store_true',
                         help='Simulate the run without copying any files')
