@@ -382,13 +382,14 @@
     .rx-badge {
       display: inline-flex; align-items: center;
       background: rgba(255,255,255,0.9);
+      color: #000;
       border: 1px solid rgba(0,0,0,0.12);
       border-radius: 10px;
       font-size: 12px;
       padding: 1px 5px;
       line-height: 1.4;
     }
-    .msg-row.sent .rx-badge { background: var(--surface2); }
+    .msg-row.sent .rx-badge { background: var(--surface2); color: var(--text); }
 
     .msg-media { border-radius: 4px; overflow: hidden; max-width: 100%; }
     .msg-media img, .msg-media video { display: block; max-width: 320px; max-height: 300px; width: 100%; height: auto; cursor: pointer; }
