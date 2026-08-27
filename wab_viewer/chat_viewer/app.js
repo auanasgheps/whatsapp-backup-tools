@@ -1833,6 +1833,28 @@
     document.getElementById('date-clear-btn').style.display = 'none';
   });
 
+  // Center targetEl and hold it there as lazy media above it loads and shifts layout.
+  // Re-centers each animation frame until the position holds steady (3 stable frames)
+  // or 1500 ms have passed. Bails immediately if a newer load superseded this one.
+  async function _pinToMsg(targetEl, gen) {
+    const scroll = document.getElementById('message-scroll');
+    const recenter = () => {
+      suppressScroll = true;
+      targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+      suppressScroll = false;
+    };
+    recenter();
+    const deadline = performance.now() + 1500;
+    let stable = 0;
+    while (performance.now() < deadline && stable < 3) {
+      await new Promise(r => requestAnimationFrame(r));
+      if (gen !== _loadGen) return;
+      const before = scroll.scrollTop;
+      recenter();
+      stable = Math.abs(scroll.scrollTop - before) < 2 ? stable + 1 : 0;
+    }
+  }
+
   // Resolve once every <img> in container has finished loading (or errored),
   // capped per image so a slow/broken source can't stall a jump indefinitely.
   function _awaitImagesSettled(container) {
@@ -1885,16 +1907,10 @@
       mergePage(msgs);
       renderWindow();
 
-      await _awaitImagesSettled(scroll);
-      if (gen !== _loadGen) return null;
-
       const target = nearestMsgToTs(ts);
       const targetEl = target && rowForMsgId(target.msg_id);
-      if (targetEl) {
-        suppressScroll = true;
-        targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
-        suppressScroll = false;
-      }
+      if (targetEl) await _pinToMsg(targetEl, gen);
+      if (gen !== _loadGen) return null;
       return targetEl || null;
     } finally {
       if (gen === _loadGen) loading = false;
