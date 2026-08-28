@@ -7,9 +7,9 @@ Organise your WhatsApp media into a structured archive.
 Always do a dry run first:
 
 ```bash
-python -m wab_archiver \
+wab-archiver archive \
   --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp/storage \
+  --wa-root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --contacts /path/to/wa_contacts \
   --dry-run
@@ -22,21 +22,20 @@ python -m wab_archiver \
 Connect your phone via USB with USB debugging enabled:
 
 ```bash
-python -m wab_archiver \
-  --mode adb \
-  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
-  --wa_root /path/to/WhatsApp/storage \
+wab-archiver archive \
+  --from-adb \
+  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --output /path/to/output \
   --dry-run
 ```
 
-To also pull media files over ADB (instead of using Syncthing or a manual copy), add `--adb-pull-media --media-staging-dir /path/to/staging`. See [Android setup](setup-android.md#pulling-media-via-adb-optional) for details.
+To also pull media files over ADB (instead of using Syncthing or a manual copy), add `--pull-media --staging /path/to/staging`. See [Android setup](setup-android.md#pulling-media-via-adb-optional) for details.
 
 ### iOS — read directly from an iPhone backup
 
 ```bash
-python -m wab_archiver \
-  --ios_backup /path/to/iPhone/backup \
+wab-archiver archive \
+  --ios-backup /path/to/iPhone/backup \
   --output /path/to/output \
   --dry-run
 ```

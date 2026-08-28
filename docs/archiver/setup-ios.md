@@ -1,6 +1,6 @@
 # iOS Setup
 
-WhatsApp on iOS stores its database and media inside an iPhone backup. The archiver reads the backup directly via `--ios_backup`.
+WhatsApp on iOS stores its database and media inside an iPhone backup. The archiver reads the backup directly via `--ios-backup`.
 
 ---
 
@@ -42,7 +42,7 @@ Disable it in WhatsApp: `Settings → Chats → Chat Backup → End-to-end Encry
 C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>\
 ```
 
-The backup directory is the folder that contains `Manifest.db`. Pass it to `--ios_backup`.
+The backup directory is the folder that contains `Manifest.db`. Pass it to `--ios-backup`.
 
 ---
 
@@ -51,8 +51,8 @@ The backup directory is the folder that contains `Manifest.db`. Pass it to `--io
 Unencrypted backup:
 
 ```bash
-python -m wab_archiver \
-  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+wab-archiver archive \
+  --ios-backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
   --output /path/to/output \
   --dry-run
 ```
@@ -60,9 +60,9 @@ python -m wab_archiver \
 Encrypted iPhone backup (use the password you set in Finder/Apple Devices):
 
 ```bash
-python -m wab_archiver \
-  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
-  --ios_password your_backup_password \
+wab-archiver archive \
+  --ios-backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --ios-password your_backup_password \
   --output /path/to/output \
   --dry-run
 ```
@@ -78,4 +78,4 @@ Contacts are automatically extracted from the backup. `ChatStorage.sqlite` is al
 Both encrypted and unencrypted iPhone backups are supported.
 
 - **Unencrypted backup** — no extra argument needed.
-- **Encrypted backup** — pass `--ios_password <password>`. Requires `pip install iphone-backup-decrypt`.
+- **Encrypted backup** — pass `--ios-password <password>`. Requires `pip install iphone-backup-decrypt`.

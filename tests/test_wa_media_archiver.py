@@ -1942,7 +1942,7 @@ class TestPullContacts:
 class TestCheckDependencies:
     def _args(self, **kwargs):
         """Return a minimal namespace; only set the fields under test."""
-        defaults = dict(mode=None, e2e_key=None, ios_password=None)
+        defaults = dict(from_adb=False, e2e_key=None, ios_password=None)
         defaults.update(kwargs)
         import argparse
         return argparse.Namespace(**defaults)
@@ -1952,13 +1952,13 @@ class TestCheckDependencies:
         wa.check_dependencies(args, logger)  # must not raise
 
     def test_adb_missing_raises(self, logger):
-        args = self._args(mode='adb')
+        args = self._args(from_adb=True)
         with patch("wab_archiver.main.shutil.which", return_value=None):
             with pytest.raises(SystemExit):
                 wa.check_dependencies(args, logger)
 
     def test_adb_present_passes(self, logger):
-        args = self._args(mode='adb')
+        args = self._args(from_adb=True)
         with patch("wab_archiver.main.shutil.which", return_value="/usr/bin/adb"):
             wa.check_dependencies(args, logger)  # must not raise
 
@@ -1975,7 +1975,7 @@ class TestCheckDependencies:
                 wa.check_dependencies(args, logger)
 
     def test_multiple_missing_reported_together(self, logger, caplog):
-        args = self._args(mode='adb', e2e_key='key.bin')
+        args = self._args(from_adb=True, e2e_key='key.bin')
         # Capture what logger.error receives by inspecting the call
         errors = []
         logger.error = lambda msg, *a, **kw: errors.append(msg)
@@ -2073,7 +2073,7 @@ class TestConfigInParseArgs:
         self._write_config(cfg, 'output = "/from/config"\n')
         out = self._toml_path(tmp_path)
         with patch("sys.argv", ["wa", "--config", str(cfg),
-                                 "-o", str(tmp_path), "--wa_root", "/cli"]):
+                                 "-o", str(tmp_path), "--wa-root", "/cli"]):
             args = wa.parse_args()
         assert args.output == str(tmp_path)
 
@@ -2108,7 +2108,7 @@ class TestConfigInParseArgs:
         cfg = tmp_path / "config.toml"
         self._write_config(cfg, 'output = "/from/config"\nwa_root = "/wa"\n')
         out = self._toml_path(tmp_path)
-        with patch("sys.argv", ["wa", "-o", str(tmp_path), "--wa_root", "/cli"]), \
+        with patch("sys.argv", ["wa", "-o", str(tmp_path), "--wa-root", "/cli"]), \
              patch("os.path.dirname", return_value=str(tmp_path)), \
              patch("os.getcwd", return_value="/different/dir"), \
              patch("builtins.input", return_value="n"):
@@ -2138,8 +2138,13 @@ class TestConfigInParseArgs:
         assert args.wa_roots == ["/wa"]
 
     def test_ios_backup_and_wa_root_mutually_exclusive(self, tmp_path):
-        with patch("sys.argv", ["wa", "-o", str(tmp_path),
-                                 "--ios_backup", "/backup", "--wa_root", "/wa"]):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path),
+                                 "--ios-backup", "/backup", "--wa-root", "/wa"]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_no_source_exits(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path)]):
             with pytest.raises(SystemExit):
                 wa.parse_args()
 

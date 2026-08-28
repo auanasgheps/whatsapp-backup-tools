@@ -36,7 +36,7 @@ You need a local copy of your `WhatsApp/` folder (the one **containing** the `Me
     └── WhatsApp Audio/
 ```
 
-Pass the path to the `WhatsApp/` folder (not `Media/`) to the archiver via `--wa_root`.
+Pass the path to the `WhatsApp/` folder (not `Media/`) to the archiver via `--wa-root`.
 
 ### ADB Pull Media (optional)
 
@@ -52,36 +52,36 @@ If you prefer not to set up Syncthing, the archiver can pull your media files di
 
 **Requirements:**
 - USB debugging enabled on the device
-- `--media-staging-dir <path>` — a persistent local folder for pulled files, used as `--wa_root` for archiving. **Do not use a temp folder**; state is stored in the archive DB, not here.
+- `--staging <path>` — a persistent local folder for pulled files, used as `--wa-root` for archiving. **Do not use a temp folder**; state is stored in the archive DB, not here.
 
 **Example:**
 
 ```bash
-python -m wab_archiver \
-  --mode adb \
-  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
-  --adb-pull-media \
-  --media-staging-dir /path/to/wa-staging \
+wab-archiver archive \
+  --from-adb \
+  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --pull-media \
+  --staging /path/to/wa-staging \
   --output /path/to/output
 ```
 
 > ⚠️ On first run, every file is transferred — if you have many gigabytes of media, expect this to take hours. Voice messages and other small files are the bottleneck: ADB spawns a new subprocess per file, making transfers very slow per unit of data.
 
-**Hybrid workflow:** If you already have a manual copy of your media (via MTP/cable), archive it first without `--adb-pull-media`:
+**Hybrid workflow:** If you already have a manual copy of your media (via MTP/cable), archive it first without `--pull-media`:
 
 ```bash
-python -m wab_archiver \
-  --mode adb \
-  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
-  --wa_root /path/to/existing-WhatsApp \
+wab-archiver archive \
+  --from-adb \
+  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --wa-root /path/to/existing-WhatsApp \
   --output /path/to/output
 ```
 
-This populates the archive DB with all your existing files. From the next run onward, switch to `--adb-pull-media` — the archiver will skip everything already archived and only pull new files.
+This populates the archive DB with all your existing files. From the next run onward, switch to `--pull-media` — the archiver will skip everything already archived and only pull new files.
 
 ### Multiple Source Folders
 
-If your media is spread across multiple locations (e.g. an old backup folder plus your current phone's `WhatsApp/` folder), repeat `--wa_root` for each source. The archiver searches all roots and selects the best available copy of each file automatically.
+If your media is spread across multiple locations (e.g. an old backup folder plus your current phone's `WhatsApp/` folder), repeat `--wa-root` for each source. The archiver searches all roots and selects the best available copy of each file automatically.
 
 > ⚠️ **Run the archiver on the same machine where the media files are physically stored.** Processing files over a network share (NFS, SMB, etc.) will be significantly slower — the archiver hashes and copies every file.
 
@@ -89,7 +89,7 @@ If your media is spread across multiple locations (e.g. an old backup folder plu
 
 ## Obtaining the Database
 
-### Recommended — Automatic Retrieval (`--mode adb`)
+### Recommended — Automatic Retrieval (`--from-adb`)
 
 This is the simplest approach for most users. Connect your phone via USB with USB Debugging enabled, then let the archiver handle the pull and decryption automatically.
 
@@ -105,10 +105,9 @@ This is the simplest approach for most users. Connect your phone via USB with US
 Run the archiver:
 
 ```bash
-python -m wab_archiver \
-  --mode adb \
-  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
-  --wa_root /path/to/WhatsApp/storage \
+wab-archiver archive \
+  --from-adb \
+  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --output /path/to/output
 ```
 
@@ -159,20 +158,20 @@ wadecrypt your_key msgstore.db.crypt15 msgstore.db
 Alternatively, skip the manual decrypt and let the archiver handle it by passing the `.crypt15` file directly:
 
 ```bash
-python -m wab_archiver \
+wab-archiver archive \
   --msgstore /path/to/msgstore.db.crypt15 \
-  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
-  --wa_root /path/to/WhatsApp/storage \
+  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --wa-root /path/to/WhatsApp/storage \
   --output /path/to/output
 ```
 
-> ⚠️ If `--msgstore` points to a `.crypt15` file and `--e2e` is not provided, the archiver will exit with an error.
+> ⚠️ If `--msgstore` points to a `.crypt15` file and `--e2e-key` is not provided, the archiver will exit with an error.
 
 ---
 
 ## Obtaining WhatsApp Contacts
 
-> This step is only required for manual pull — when using automatic retrieval (`--mode adb`), contacts are pulled automatically.
+> This step is only required for manual pull — when using `--from-adb`, contacts are pulled automatically.
 
 Contacts are optional but strongly recommended — without them, folder names will show raw phone numbers instead of contact names.
 
