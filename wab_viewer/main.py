@@ -4,7 +4,6 @@ wab_viewer — Browse archived WhatsApp chats via a local Flask web UI.
 
 Usage:
     python -m wab_viewer <output_root> [--port PORT] [--host HOST] [--rescan]
-    python -m wab_viewer --output_root <PATH> [--port PORT] [--host HOST] [--rescan]
 
 Dependencies:
     pip install flask
@@ -50,16 +49,14 @@ def parse_args():
     p = argparse.ArgumentParser(description="Browse archived WhatsApp chats")
     p.add_argument("output_root", nargs="?", default=None,
                    help="Path to the archive output directory")
-    p.add_argument("--output_root", dest="output_root_flag", default=None, metavar="PATH",
-                   help="Path to the archive output directory (alternative to positional argument)")
     p.add_argument("--port", type=int, default=5000, help="Port to listen on (default: 5000)")
     p.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
     p.add_argument('--version', action='version',
                    version=f'WhatsApp Backup Tools — Viewer v{_get_version()}')
     args = p.parse_args()
-    if not args.output_root_flag and not args.output_root:
-        p.error("output_root is required (positional or --output_root)")
+    if not args.output_root:
+        p.error("output_root is required")
     return args
 
 
@@ -2371,7 +2368,7 @@ def create_app(output_root: Path, rescan: bool = False):
 def validate_output_root(output_root: Path) -> None:
     hint = (
         "Run 'wab-archiver' first to create an archive, "
-        "or choose a different folder with --output_root."
+        "or pass a different path as the argument."
     )
 
     if not output_root.exists():
@@ -2393,7 +2390,7 @@ def validate_output_root(output_root: Path) -> None:
 
 def main():
     args = parse_args()
-    raw_path = args.output_root_flag or args.output_root
+    raw_path = args.output_root
     output_root = Path(raw_path).expanduser().resolve()
 
     validate_output_root(output_root)

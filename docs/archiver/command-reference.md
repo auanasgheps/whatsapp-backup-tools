@@ -7,7 +7,7 @@ The config file is the easiest way to run (and re-run) the archiver: instead of 
 ### Generating the Example File
 
 ```bash
-python -m wab_archiver --generate-config
+wab-archiver config generate
 ```
 
 This writes `example-config.toml` next to the package. Open it, fill in your values, then rename it to `config.toml`.
@@ -27,14 +27,13 @@ output     = "/path/to/archive"
 # wa_root   = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]  # multiple source folders
 # contacts  = ""
 # log       = ""
-# mode      = ""          # "adb" or "restore"
 # business  = false
 # timezone  = ""          # e.g. Europe/Rome
 # since     = ""          # e.g. 2024-01-01
 
-# Android — pull media over ADB (slower than Syncthing; see setup-android.md)
-# adb_pull_media    = false
-# media_staging_dir = ""    # persistent folder for pulled media
+# Android — pull via ADB (wab-archiver archive --from-adb; see setup-android.md)
+# pull_media = false
+# staging    = ""         # persistent folder for pulled media
 
 # iOS
 # ios_backup   = ""
@@ -62,50 +61,55 @@ CLI arguments always win. A value set in `config.toml` acts as a default and is 
 
 ## Command Reference
 
+The archiver uses subcommands. `archive` is the default and can be omitted.
+
+### `archive` (default)
+
 ```
-usage: python -m wab_archiver [-h]
-                        [--config PATH]
-                        [--generate-config]
-                        [--msgstore PATH]
-                        [--e2e_key KEY]
-                        [--contacts PATH]
-                        [--wa_root PATH]
-                        [--ios_backup PATH]
-                        [--ios_password PASSWORD]
-                        [--ios_contacts PATH]
-                        [--business]
-                        --output PATH
-                        [--log PATH]
-                        [--mode {adb,restore}]
-                        [--adb-pull-media]
-                        [--media-staging-dir PATH]
-                        [--dry-run]
-                        [--limit N]
-                        [--since DATE]
-                        [--timezone TZ]
+wab-archiver archive [--wa-root PATH | --ios-backup PATH | --from-adb]
+                     [--msgstore PATH] [--e2e-key KEY]
+                     [-c PATH] [--ios-password PASSWORD] [--ios-contacts PATH]
+                     [--business] [--pull-media] [--staging PATH]
+                     -o PATH [-l PATH] [--timezone TZ] [--config PATH]
+                     [--dry-run] [--limit N] [--since DATE]
 ```
 
 | Argument | Required | Description |
 |---|---|---|
-| `--config PATH` | No | Path to a TOML config file. If omitted, auto-detects `config.toml` in the package folder or current directory |
-| `--generate-config` | No | Write `example-config.toml` to the package folder and exit |
+| `--wa-root PATH` | Android / iOS pre-extracted | Root path of your WhatsApp folder. **Repeat the flag** to specify multiple source folders |
+| `--ios-backup PATH` | iOS (recommended) | Path to the iPhone backup directory (the folder containing `Manifest.db`). Mutually exclusive with `--wa-root` |
+| `--from-adb` | ADB mode | Pull msgstore and contacts automatically from a connected Android device via ADB. Mutually exclusive with `--wa-root` and `--ios-backup` |
 | `--msgstore PATH` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Defaults to `msgstore.db` in the current folder |
-| `--e2e_key KEY` | If encrypted | Your cryptographic key for `.crypt15` decryption |
-| `--contacts PATH` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
-| `--wa_root PATH` | Android / iOS pre-extracted | Root path of your WhatsApp folder. **Repeat the flag** to specify multiple source folders — the archiver searches all roots and selects the best available copy of each file |
-| `--ios_backup PATH` | iOS (recommended) | Path to the iPhone backup directory (the folder containing `Manifest.db`). Mutually exclusive with `--wa_root` |
-| `--ios_password PASSWORD` | No | Password for an encrypted iPhone backup |
-| `--ios_contacts PATH` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios_backup` if omitted |
+| `--e2e-key KEY` | If encrypted | Your cryptographic key for `.crypt15` decryption |
+| `-c`, `--contacts PATH` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
+| `--ios-password PASSWORD` | No | Password for an encrypted iPhone backup |
+| `--ios-contacts PATH` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios-backup` if omitted |
 | `--business` | No | Target **WhatsApp Business** instead of the regular WhatsApp app |
-| `--output PATH` | **Yes** | Destination folder for the archive |
-| `--log PATH` | No | Custom log file path. Defaults to `<output>/wab-archiver.log` |
-| `--mode {adb,restore}` | No | `adb` = automatically pull msgstore and contacts from a connected Android device; `restore` = reconstruct original `Media/` tree from the archive (Android only) |
-| `--adb-pull-media` | No | Pull WhatsApp media files from the connected device via ADB. Only valid with `--mode adb`. See [Android setup](setup-android.md#pulling-media-via-adb-optional) before using |
-| `--media-staging-dir PATH` | If `--adb-pull-media` | Local directory where ADB-pulled media is staged before archiving. Must be persistent across runs — state is tracked in the archive DB, not in this directory |
+| `--pull-media` | No | Pull WhatsApp media files from the device via ADB. Only valid with `--from-adb`. See [Android setup](setup-android.md#pulling-media-via-adb-optional) |
+| `--staging PATH` | If `--pull-media` | Local directory where ADB-pulled media is staged. Must be persistent across runs |
+| `-o`, `--output PATH` | **Yes** | Destination folder for the archive |
+| `-l`, `--log PATH` | No | Custom log file path. Defaults to `<output>/wab-archiver.log` |
+| `--timezone TZ` | No | [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) for year folders and report timestamps. **Windows users: requires `pip install tzdata`** |
+| `--config PATH` | No | Path to a TOML config file. Auto-detects `config.toml` if omitted |
 | `--dry-run` | No | Simulate the run without copying any files |
-| `--limit N` | No | Cap rows returned per chat type (N/2 from groups, N/2 from 1-to-1). Total rows ≤ N. Useful for test runs |
-| `--since DATE` | No | Only include messages on or after this date (`YYYY-MM-DD`). Combines freely with `--limit` |
-| `--timezone TZ` | No | [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) for year folder assignment and report timestamps (e.g. `Europe/Rome`, `America/New_York`, `UTC`). **Windows users: requires `pip install tzdata`** |
+| `--limit N` | No | Cap rows returned per chat type. Total rows ≤ N. Useful for test runs |
+| `--since DATE` | No | Only include messages on or after this date (`YYYY-MM-DD`) |
+
+### `restore`
+
+Reconstruct the original `Media/` tree from an archive (Android only).
+
+```
+wab-archiver restore -o PATH [-l PATH] [--dry-run] [--config PATH]
+```
+
+### `config`
+
+```
+wab-archiver config generate
+```
+
+Writes `example-config.toml` to the package folder and exits.
 
 ---
 
@@ -124,10 +128,9 @@ usage: python -m wab_archiver [-h]
 #### ADB mode — automatic pull and decrypt (recommended)
 
 ```bash
-python -m wab_archiver \
-  --mode adb \
-  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
-  --wa_root /path/to/WhatsApp/storage \
+wab-archiver archive \
+  --from-adb \
+  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --output /path/to/output \
   --dry-run
 ```
@@ -137,11 +140,11 @@ python -m wab_archiver \
 Use this if you do not use Syncthing and want the archiver to handle everything in one step. See [setup-android.md](setup-android.md#pulling-media-via-adb-optional) for important caveats about speed and reliability.
 
 ```bash
-python -m wab_archiver \
-  --mode adb \
-  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
-  --adb-pull-media \
-  --media-staging-dir /path/to/wa-staging \
+wab-archiver archive \
+  --from-adb \
+  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --pull-media \
+  --staging /path/to/wa-staging \
   --output /path/to/output
 ```
 
@@ -150,9 +153,9 @@ python -m wab_archiver \
 #### Manual — decrypted database
 
 ```bash
-python -m wab_archiver \
+wab-archiver archive \
   --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp/storage \
+  --wa-root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --contacts /path/to/wa_contacts \
   --dry-run
@@ -160,13 +163,13 @@ python -m wab_archiver \
 
 #### Manual — multiple source folders
 
-Use this when media is split across several locations. Repeat `--wa_root` for each source.
+Use this when media is split across several locations. Repeat `--wa-root` for each source.
 
 ```bash
-python -m wab_archiver \
+wab-archiver archive \
   --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/old-archive/WhatsApp \
-  --wa_root /path/to/current-phone/WhatsApp \
+  --wa-root /path/to/old-archive/WhatsApp \
+  --wa-root /path/to/current-phone/WhatsApp \
   --output /path/to/output \
   --dry-run
 ```
@@ -176,10 +179,10 @@ python -m wab_archiver \
 #### Manual — encrypted database (archiver decrypts)
 
 ```bash
-python -m wab_archiver \
+wab-archiver archive \
   --msgstore /path/to/msgstore.db.crypt15 \
-  --e2e 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
-  --wa_root /path/to/WhatsApp/storage \
+  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
+  --wa-root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --dry-run
 ```
@@ -191,8 +194,8 @@ python -m wab_archiver \
 #### Standard flow — unencrypted backup
 
 ```bash
-python -m wab_archiver \
-  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+wab-archiver archive \
+  --ios-backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
   --output /path/to/output \
   --dry-run
 ```
@@ -200,23 +203,23 @@ python -m wab_archiver \
 #### Standard flow — encrypted backup
 
 ```bash
-python -m wab_archiver \
-  --ios_backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
-  --ios_password your_backup_password \
+wab-archiver archive \
+  --ios-backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --ios-password your_backup_password \
   --output /path/to/output \
   --dry-run
 ```
 
-> 💡 `--wa_root` and `--contacts` are not needed. The archiver extracts `ChatStorage.sqlite` and `ContactsV2.sqlite` directly from the backup. `ChatStorage.sqlite` is also saved to the output folder for re-runs.
+> 💡 `--wa-root` and `--contacts` are not needed. The archiver extracts `ChatStorage.sqlite` and `ContactsV2.sqlite` directly from the backup. `ChatStorage.sqlite` is also saved to the output folder for re-runs.
 
 ### Advanced
 
 #### Test run — recent files only
 
 ```bash
-python -m wab_archiver \
+wab-archiver archive \
   --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp/storage \
+  --wa-root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --since 2025-01-01 \
   --limit 100 \
@@ -228,10 +231,10 @@ python -m wab_archiver \
 Only use this mode if you know what you are doing.
 
 ```bash
-python -m wab_archiver \
+wab-archiver archive \
   --msgstore /path/to/ChatStorage.sqlite \
-  --wa_root /path/to/AppDomainGroup-group.net.whatsapp.WhatsApp.shared \
-  --ios_contacts /path/to/ContactsV2.sqlite \
+  --wa-root /path/to/AppDomainGroup-group.net.whatsapp.WhatsApp.shared \
+  --ios-contacts /path/to/ContactsV2.sqlite \
   --output /path/to/output
 ```
 
@@ -244,7 +247,7 @@ python -m wab_archiver \
 | `wab-archiver.log` | Full run log including all copied, skipped, and missing files |
 | `missing_media_report.csv` | Structured report of all media referenced in the DB but not found on disk. Useful for manual recovery from old backups |
 | `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths. One row per path, sortable by `file_count`. Only written when duplicates exist |
-| `source_conflicts_report.csv` | Written when multiple `-wa` roots contain different versions of the same file. Only written when conflicts exist |
+| `source_conflicts_report.csv` | Written when multiple `--wa-root` roots contain different versions of the same file. Only written when conflicts exist |
 | `.wa_media_archiver.db` | SQLite database storing all persistent state: contact folder index, group folder index, and the file archive map. Health checks run automatically on every open. Do not delete unless you want to reset all tracking |
 | `restore_report.csv` | Written by restore mode when issues are encountered. Not written if there are no issues |
 
@@ -257,9 +260,7 @@ Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly i
 > ⚠️ **Android archives only.** iOS media cannot be restored this way.
 
 ```bash
-python -m wab_archiver \
-  --mode restore \
-  --output /path/to/output
+wab-archiver restore --output /path/to/output
 ```
 
 The reconstructed tree is written to `<output>/Media/`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.

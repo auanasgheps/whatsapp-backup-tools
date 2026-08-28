@@ -33,10 +33,10 @@ Archive your WhatsApp media in a human readable format.
 - Safe re-runs: identical files skipped, collisions renamed, never overwritten
 - Duplicate media detection across runs — CSV report of files with identical content at multiple archive paths
 - Missing media CSV report for manual recovery of old or deleted files
-- Multiple Android media source roots — repeat `-wa` to search across several WhatsApp folders (e.g. old archive + current phone). Best copy selected automatically; content conflicts reported separately
+- Multiple Android media source roots — repeat `--wa-root` to search across several WhatsApp folders (e.g. old archive + current phone). Best copy selected automatically; content conflicts reported separately
 - Dry run mode for safe previewing before a full run
 - WhatsApp platform: Android and iOS are both supported. No root or jailbreak are required.
-    - Android: Syncthing is the recommended way to get your media files off the phone. If you prefer not to set that up, `--mode adb --adb-pull-media` can pull them directly over USB — but it is slow and unreliable for large collections (many small files over ADB can take hours and drop mid-transfer). See [docs/archiver/setup-android.md](docs/archiver/setup-android.md).
+    - Android: Syncthing is the recommended way to get your media files off the phone. If you prefer not to set that up, `--from-adb --pull-media` can pull them directly over USB — but it is slow and unreliable for large collections (many small files over ADB can take hours and drop mid-transfer). See [docs/archiver/setup-android.md](docs/archiver/setup-android.md).
     - iOS: reads directly from an iPhone backup, encrypted backups are supported via `wa-crypt-tools`
 - Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
 
@@ -82,7 +82,7 @@ After a successful run, the archive is organised as follows:
 ├── wab-archiver.log
 ├── missing_media_report.csv
 ├── duplicate_media_report.csv
-└── source_conflicts_report.csv  ← only when multiple -wa roots produce conflicting copies
+└── source_conflicts_report.csv  ← only when multiple --wa-root roots produce conflicting copies
 ```
 
 - Files in **Contacts** folders retain their original filename
@@ -96,12 +96,18 @@ After a successful run, the archive is organised as follows:
 ## Quick Start
 
 ### wab-archiver quick start
+Install first (see [docs/prerequisites.md](docs/prerequisites.md)):
+
+```bash
+pip install -e .
+```
+
 Always do a dry run first:
 
 ```bash
-python -m wab_archiver \
+wab-archiver archive \
   --msgstore /path/to/msgstore.db \
-  --wa_root /path/to/WhatsApp/storage \
+  --wa-root /path/to/WhatsApp/storage \
   --output /path/to/output \
   --contacts /path/to/wa_contacts \
   --dry-run
@@ -109,7 +115,7 @@ python -m wab_archiver \
 
 > 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 
-> 💡 Repeat `--wa_root` to search multiple media folders and automatically select the best copy of each file.
+> 💡 Repeat `--wa-root` to search multiple media folders and automatically select the best copy of each file.
 
 See [docs/archiver/](docs/archiver/) for full setup instructions and command reference.
 
@@ -151,7 +157,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 - Stickers are not archived in this version
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
-- **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `--mode restore` on an iOS archive exits with a clear error
+- **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
 
 ---

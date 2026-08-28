@@ -574,8 +574,8 @@ def run_restore_mode(args, logger):
 
 _VALID_CONFIG_KEYS = {
     'output', 'msgstore', 'e2e_key', 'wa_root', 'contacts', 'log',
-    'mode', 'business', 'timezone', 'since', 'ios_backup', 'ios_password', 'ios_contacts',
-    'adb_pull_media', 'media_staging_dir',
+    'business', 'timezone', 'since', 'ios_backup', 'ios_password', 'ios_contacts',
+    'pull_media', 'staging',
 }
 
 _EXAMPLE_CONFIG = """\
@@ -598,14 +598,13 @@ output     = "/path/to/archive"         # required
 
 # contacts = ""
 # log      = ""
-# mode     = ""                         # "adb" or "restore"
 # business = false
 # timezone = ""                         # e.g. Europe/Rome
 # since    = ""                         # e.g. 2024-01-01
 
-# Android — pull media over ADB (slower than Syncthing; see setup-android.md)
-# adb_pull_media    = false
-# media_staging_dir = ""                # persistent folder for pulled media
+# Android — pull via ADB  (wab-archiver archive --from-adb; see setup-android.md)
+# pull_media = false                    # also pull media files (--pull-media)
+# staging    = ""                       # persistent folder for pulled media (--staging)
 
 # iOS
 # ios_backup   = ""
@@ -652,115 +651,27 @@ def _generate_config(script_dir: str):
 # Entry point
 # ---------------------------------------------------------------------------
 
+_KNOWN_COMMANDS = frozenset({'archive', 'restore', 'config'})
+
+
+def _inject_default_archive_command():
+    """
+    Inject 'archive' as the default subcommand when the user passes flags
+    directly without specifying a subcommand (e.g. wab-archiver --wa-root … -o …).
+    """
+    if len(sys.argv) > 1 and sys.argv[1] in ('-h', '--help', '--version'):
+        return
+    first_pos = next((a for a in sys.argv[1:] if not a.startswith('-')), None)
+    if first_pos not in _KNOWN_COMMANDS:
+        sys.argv.insert(1, 'archive')
+
+
 def parse_args() -> argparse.Namespace:
     """Parse and validate command-line arguments."""
-    parser = argparse.ArgumentParser(
-        prog='wab-archiver',
-        description='Archive WhatsApp media into a structured folder hierarchy.',
-        epilog=(
-            'Android: requires msgstore.db or a crypt15 backup + e2e key. '
-            'iOS: pass --ios_backup to read directly from an iPhone backup.'
-        )
-    )
-    parser.add_argument('--version', action='version',
-                        version=f'WhatsApp Backup Tools — Archiver v{_get_version()}')
-    parser.add_argument('--config',
-                        default=None,
-                        metavar='PATH',
-                        help='Path to a TOML config file. '
-                             'Auto-detected as config.toml in the script folder or cwd if present.')
-    parser.add_argument('--generate-config',
-                        action='store_true',
-                        help='Write example-config.toml to the script folder and exit.')
-    parser.add_argument('-msg', '--msgstore',
-                        default='msgstore.db',
-                        help='Path to msgstore.db[.crypt15] or ChatStorage.sqlite '
-                             '(default: current folder). Not needed with --ios_backup.')
-    parser.add_argument('-e2e', '--e2e_key',
-                        help='E2E decryption key for encrypted '
-                             'msgstore.db.crypt15')
-    parser.add_argument('-c', '--contacts',
-                        help='Path to contacts export file (Android ADB format)')
-    parser.add_argument('-wa', '--wa_root',
-                        dest='wa_roots',
-                        action='append',
-                        default=None,
-                        metavar='WA_ROOT',
-                        help='Root path of WhatsApp folder on disk '
-                             '(Android: folder containing Media/; '
-                             'iOS pre-extracted: AppDomainGroup folder). '
-                             'Repeat to search multiple source folders (Android only). '
-                             'Not required with --ios_backup or --mode restore.')
-    parser.add_argument('--ios_backup',
-                        default=None,
-                        metavar='PATH',
-                        help='Path to iPhone backup directory (contains Manifest.db). '
-                             'Mutually exclusive with --wa_root for iOS.')
-    parser.add_argument('--ios_password',
-                        default=None,
-                        metavar='PASSWORD',
-                        help='Password for an encrypted iPhone backup. '
-                             'Only needed when the backup is encrypted.')
-    parser.add_argument('--ios_contacts',
-                        default=None,
-                        metavar='PATH',
-                        help='Path to ContactsV2.sqlite from an iOS backup '
-                             '(optional; auto-extracted from --ios_backup if omitted).')
-    parser.add_argument('--business',
-                        action='store_true',
-                        help='Target WhatsApp Business instead of the regular WhatsApp app. '
-                             'Affects the ADB pull path (Android) and the backup domain (iOS).')
-    parser.add_argument('-o', '--output',
-                        default=None,
-                        help='Output root folder for the archive')
-    parser.add_argument('-l', '--log',
-                        default=None,
-                        help='Log file path '
-                             '(default: <output>/wab-archiver.log)')
-    parser.add_argument('-mode', '--mode',
-                        choices=['adb', 'restore'],
-                        help='adb = pull msgstore and contacts via ADB '
-                             '(use with --adb-pull-media to also pull media files); '
-                             'restore = reconstruct original Media/ tree from archive '
-                             '(Android archives only)')
-    parser.add_argument('--adb-pull-media',
-                        action='store_true',
-                        help='Pull WhatsApp media files from the connected device via ADB. '
-                             'Only valid with --mode adb. Requires --media-staging-dir.')
-    parser.add_argument('--media-staging-dir',
-                        default=None,
-                        metavar='PATH',
-                        help='Persistent local directory where ADB-pulled media is staged '
-                             'before archiving. Created on first run if absent. '
-                             'Required when --adb-pull-media is set.')
-    parser.add_argument('--dry-run',
-                        action='store_true',
-                        help='Simulate the run without copying any files')
-    parser.add_argument('--limit',
-                        type=int,
-                        default=None,
-                        help='Limit the number of rows extracted per query block '
-                             '(e.g. --limit 250 for testing). '
-                             'Omit for a full run.')
-    parser.add_argument('--since',
-                        default=None,
-                        metavar='DATE',
-                        help='Only include messages on or after this date '
-                             '(format: YYYY-MM-DD). Combines with --limit.')
-    parser.add_argument('--timezone',
-                        default=None,
-                        metavar='TZ',
-                        help='IANA timezone for year folders and report timestamps '
-                             '(e.g. Europe/Rome, America/New_York, UTC). '
-                             'Default: machine local time. '
-                             'Windows users: requires pip install tzdata.')
-
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     _cwd = os.getcwd()
 
-    if '--generate-config' in sys.argv:
-        _generate_config(_script_dir)
-
+    # Pre-scan for --config before argparse runs (it may appear anywhere).
     _config_path = None
     for _i, _arg in enumerate(sys.argv[1:], 1):
         if _arg.startswith('--config='):
@@ -769,7 +680,10 @@ def parse_args() -> argparse.Namespace:
         if _arg == '--config' and _i < len(sys.argv) - 1:
             _config_path = sys.argv[_i + 1]
             break
-    if _config_path is None:
+
+    # Auto-detect config.toml (skip for the 'config' subcommand).
+    _is_config_cmd = len(sys.argv) > 1 and sys.argv[1] == 'config'
+    if _config_path is None and not _is_config_cmd:
         _candidates = []
         for d in dict.fromkeys([_script_dir, _cwd]):
             p = os.path.join(d, 'config.toml')
@@ -789,6 +703,8 @@ def parse_args() -> argparse.Namespace:
                 print(f"  {p}", file=sys.stderr)
             sys.exit(1)
 
+    # Load and validate config.
+    _config = {}
     if _config_path:
         if not _config_path.endswith('.toml'):
             print(
@@ -831,30 +747,184 @@ def parse_args() -> argparse.Namespace:
                     file=sys.stderr,
                 )
                 sys.exit(1)
-        parser.set_defaults(**_config)
 
+    # Inject default subcommand so flags can be passed without typing 'archive'.
+    _inject_default_archive_command()
+
+    # -------------------------------------------------------------------------
+    # Build parser
+    # -------------------------------------------------------------------------
+    parser = argparse.ArgumentParser(
+        prog='wab-archiver',
+        description='Archive WhatsApp media into a structured folder hierarchy.',
+    )
+    parser.add_argument('--version', action='version',
+                        version=f'WhatsApp Backup Tools — Archiver v{_get_version()}')
+
+    subs = parser.add_subparsers(dest='command', metavar='command')
+    subs.required = True
+
+    # --- archive (default command) ---
+    archive_p = subs.add_parser(
+        'archive',
+        help='Build or update an archive from a source (default command).',
+        description=(
+            'Archive WhatsApp media from an Android device, iOS backup, or via ADB. '
+            'Exactly one source is required: --wa-root, --ios-backup, or --from-adb.'
+        ),
+    )
+    _src = archive_p.add_mutually_exclusive_group()
+    _src.add_argument(
+        '--wa-root', dest='wa_roots', action='append', default=None, metavar='PATH',
+        help='Root path of WhatsApp folder on disk '
+             '(Android: folder containing Media/; '
+             'iOS pre-extracted: AppDomainGroup folder). '
+             'Repeat to search multiple source folders (Android only).',
+    )
+    _src.add_argument(
+        '--ios-backup', dest='ios_backup', default=None, metavar='PATH',
+        help='Path to iPhone backup directory (contains Manifest.db).',
+    )
+    _src.add_argument(
+        '--from-adb', dest='from_adb', action='store_true',
+        help='Pull msgstore and contacts from a connected Android device via ADB.',
+    )
+    archive_p.add_argument(
+        '--msgstore', default='msgstore.db', metavar='PATH',
+        help='Path to msgstore.db[.crypt15] or ChatStorage.sqlite (default: current folder).',
+    )
+    archive_p.add_argument(
+        '--e2e-key', dest='e2e_key', default=None, metavar='KEY',
+        help='E2E decryption key for encrypted msgstore.db.crypt15.',
+    )
+    archive_p.add_argument(
+        '-c', '--contacts', default=None, metavar='PATH',
+        help='Path to contacts export file (Android ADB format).',
+    )
+    archive_p.add_argument(
+        '--ios-password', dest='ios_password', default=None, metavar='PASSWORD',
+        help='Password for an encrypted iPhone backup.',
+    )
+    archive_p.add_argument(
+        '--ios-contacts', dest='ios_contacts', default=None, metavar='PATH',
+        help='Path to ContactsV2.sqlite from an iOS backup '
+             '(optional; auto-extracted from --ios-backup if omitted).',
+    )
+    archive_p.add_argument(
+        '--business', action='store_true',
+        help='Target WhatsApp Business instead of the regular app. '
+             'Affects the ADB pull path (Android) and backup domain (iOS).',
+    )
+    archive_p.add_argument(
+        '--pull-media', dest='pull_media', action='store_true',
+        help='Pull WhatsApp media files from the device via ADB. '
+             'Only valid with --from-adb. Requires --staging.',
+    )
+    archive_p.add_argument(
+        '--staging', dest='staging', default=None, metavar='PATH',
+        help='Persistent local directory where ADB-pulled media is staged. '
+             'Required with --pull-media.',
+    )
+    archive_p.add_argument(
+        '-o', '--output', default=None, metavar='PATH',
+        help='Output root folder for the archive.',
+    )
+    archive_p.add_argument(
+        '-l', '--log', default=None, metavar='PATH',
+        help='Log file path (default: <output>/wab-archiver.log).',
+    )
+    archive_p.add_argument(
+        '--timezone', default=None, metavar='TZ',
+        help='IANA timezone for year folders and report timestamps '
+             '(e.g. Europe/Rome, America/New_York, UTC). '
+             'Default: machine local time. '
+             'Windows users: requires pip install tzdata.',
+    )
+    archive_p.add_argument(
+        '--config', default=None, metavar='PATH',
+        help='Path to a TOML config file. '
+             'Auto-detected as config.toml in the script folder or cwd if present.',
+    )
+    archive_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Simulate the run without copying any files.',
+    )
+    archive_p.add_argument(
+        '--limit', type=int, default=None, metavar='N',
+        help='Limit the number of rows extracted per query block (e.g. --limit 250 for testing).',
+    )
+    archive_p.add_argument(
+        '--since', default=None, metavar='DATE',
+        help='Only include messages on or after this date (YYYY-MM-DD). Combines with --limit.',
+    )
+    # Apply config defaults to the archive subparser.
+    archive_p.set_defaults(**_config)
+
+    # --- restore ---
+    restore_p = subs.add_parser(
+        'restore',
+        help='Reconstruct the original Media/ tree from an archive (Android only).',
+    )
+    restore_p.add_argument(
+        '-o', '--output', default=None, metavar='PATH',
+        help='Path to the archive to restore.',
+    )
+    restore_p.add_argument(
+        '-l', '--log', default=None, metavar='PATH',
+        help='Log file path.',
+    )
+    restore_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Simulate the restore without copying any files.',
+    )
+    restore_p.add_argument(
+        '--config', default=None, metavar='PATH',
+        help='Path to a TOML config file.',
+    )
+    _restore_config = {k: v for k, v in _config.items() if k in ('output', 'log')}
+    restore_p.set_defaults(**_restore_config)
+
+    # --- config ---
+    config_p = subs.add_parser('config', help='Manage configuration.')
+    config_p.add_argument(
+        'action', choices=['generate'],
+        help='generate: write example-config.toml to the script folder.',
+    )
+
+    # -------------------------------------------------------------------------
+    # Parse
+    # -------------------------------------------------------------------------
     args = parser.parse_args()
 
+    if args.command == 'config':
+        _generate_config(_script_dir)
+        return args  # _generate_config calls sys.exit(0); unreachable
+
+    if args.command == 'restore':
+        if not args.output:
+            restore_p.error("the following arguments are required: -o/--output")
+        return args
+
+    # --- archive validation ---
     if not args.output:
-        parser.error("the following arguments are required: -o/--output")
-    if args.ios_backup and args.wa_roots:
-        parser.error("--ios_backup and --wa_root are mutually exclusive.")
-    if args.ios_backup and args.mode == 'adb':
-        parser.error("--ios_backup and --mode adb are mutually exclusive.")
-    if args.ios_backup and args.contacts:
-        parser.error(
-            "--contacts is for Android ADB exports and cannot be used with --ios_backup. "
+        archive_p.error("the following arguments are required: -o/--output")
+
+    _n_sources = sum([bool(args.wa_roots), bool(args.ios_backup), args.from_adb])
+    if _n_sources == 0:
+        archive_p.error("one of --wa-root, --ios-backup, or --from-adb is required")
+    if _n_sources > 1:
+        archive_p.error("--wa-root, --ios-backup, and --from-adb are mutually exclusive")
+
+    if args.contacts and args.ios_backup:
+        archive_p.error(
+            "--contacts is for Android ADB exports and cannot be used with --ios-backup. "
             "iOS contacts are loaded automatically from the backup (ContactsV2.sqlite). "
-            "Use --ios_contacts to supply a pre-extracted ContactsV2.sqlite instead."
+            "Use --ios-contacts to supply a pre-extracted ContactsV2.sqlite instead."
         )
-    if getattr(args, 'adb_pull_media', False) and args.mode != 'adb':
-        parser.error("--adb-pull-media requires --mode adb.")
-    if getattr(args, 'adb_pull_media', False) and not getattr(args, 'media_staging_dir', None):
-        parser.error("--adb-pull-media requires --media-staging-dir.")
-    if args.mode != 'restore' and not args.ios_backup and not args.wa_roots \
-            and not getattr(args, 'adb_pull_media', False):
-        parser.error("--wa_root / -wa is required unless --ios_backup, --mode restore, "
-                     "or --adb-pull-media")
+    if args.pull_media and not args.from_adb:
+        archive_p.error("--pull-media requires --from-adb.")
+    if args.pull_media and not args.staging:
+        archive_p.error("--pull-media requires --staging.")
 
     return args
 
@@ -862,7 +932,7 @@ def parse_args() -> argparse.Namespace:
 def _warn_network_paths(args: argparse.Namespace, logger: logging.Logger):
     """Warn if output or any wa_root appear to be UNC network share paths."""
     roots = args.wa_roots or []
-    for label, path in [('--output', args.output)] + [('--wa_root', r) for r in roots]:
+    for label, path in [('--output', args.output)] + [('--wa-root', r) for r in roots]:
         if path and (path.startswith('\\\\') or path.startswith('//')):
             logger.warning(
                 f"{label} appears to be a network share ({path}). "
@@ -885,7 +955,7 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
         is_encrypted = backup_reader.detect_encrypted(args.ios_backup, logger)
         if is_encrypted and not args.ios_password:
             logger.error(
-                "Your iPhone backup is encrypted. Re-run with --ios_password <password>."
+                "Your iPhone backup is encrypted. Re-run with --ios-password <password>."
             )
             raise SystemExit(1)
 
@@ -972,7 +1042,7 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
         media_resolver.zero_byte_count = _zero_byte_count
 
     # --- ADB pull ---
-    if args.mode == 'adb':
+    if args.from_adb:
         if not adb_extractor.check_adb(logger):
             raise SystemExit(1)
         if not adb_extractor.check_device_connected(logger):
@@ -985,8 +1055,8 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
         except subprocess.CalledProcessError:
             raise SystemExit(1)
 
-        if getattr(args, 'adb_pull_media', False):
-            staging_dir = args.media_staging_dir
+        if args.pull_media:
+            staging_dir = args.staging
             conn_for_pull = archive_db.open_archive_db(args.output)
             try:
                 pulled, skipped, conflicts = adb_extractor.pull_media(
@@ -1066,7 +1136,7 @@ def check_dependencies(args: argparse.Namespace, logger: logging.Logger):
     import importlib.util
     issues = []
 
-    if getattr(args, 'mode', None) == 'adb' and shutil.which('adb') is None:
+    if getattr(args, 'from_adb', False) and shutil.which('adb') is None:
         issues.append(
             "adb not found on PATH\n"
             "      macOS/Linux: brew install android-platform-tools\n"
@@ -1270,7 +1340,7 @@ def main():
     logger = setup_logging(log_path)
     _warn_network_paths(args, logger)
 
-    if args.mode == 'restore':
+    if args.command == 'restore':
         logger.info(f"=== WhatsApp Backup Tools — Archiver v{_get_version()} started (restore mode) ===")
         if args.dry_run:
             logger.info("*** DRY RUN MODE — no files will be copied ***")
