@@ -1824,6 +1824,112 @@ def create_app(output_root: Path, rescan: bool = False):
                 result["read_known"] = members[0]["read_known"]
             return jsonify(result)
 
+    # ---- API: reaction details -----------------------------------------------
+
+    @app.route("/api/reaction_details/<int:message_id>")
+    def api_reaction_details(message_id):
+        conn = get_wa()
+        if conn is None:
+            return jsonify({"available": False})
+
+        if source_type == "android":
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
+            ).fetchone()
+            if not table_exists:
+                return jsonify({"available": False})
+            rows = conn.execute("""
+                SELECT r.reaction AS emoji,
+                       ao.from_me,
+                       COALESCE(
+                           NULLIF(con_s.display_name, ''),
+                           CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
+                           CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
+                                THEN '+' || COALESCE(j2.user, j.user) END,
+                           ''
+                       ) AS name
+                FROM message_add_on ao
+                JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+                LEFT JOIN jid j ON j._id = ao.sender_jid_row_id
+                LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = ao.sender_jid_row_id
+                LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
+                LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)
+                WHERE ao.parent_message_row_id = ?
+            """, (message_id,)).fetchall()
+            reactors = [
+                {"name": r["name"] or "", "emoji": r["emoji"] or "", "from_me": r["from_me"] or 0}
+                for r in rows
+            ]
+            return jsonify({"available": True, "total": len(reactors), "reactors": reactors})
+
+        else:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
+            ).fetchone()
+            if not table_exists:
+                return jsonify({"available": False})
+
+            row = conn.execute("""
+                SELECT mi.ZRECEIPTINFO, m.ZCHATSESSION AS chat_session_pk
+                FROM ZWAMESSAGEINFO mi
+                JOIN ZWAMESSAGE m ON m.Z_PK = mi.ZMESSAGE
+                WHERE mi.ZMESSAGE = ?
+            """, (message_id,)).fetchone()
+            if not row or not row[0]:
+                return jsonify({"available": False})
+
+            blob = bytes(row[0])
+            raw_reactors = _extract_ios_reactions(blob)
+            if not raw_reactors:
+                return jsonify({"available": True, "total": 0, "reactors": []})
+
+            my_row = conn.execute("""
+                SELECT COALESCE(gm.ZMEMBERJID, m.ZFROMJID) AS me_jid
+                FROM ZWAMESSAGE m
+                LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+                WHERE m.ZCHATSESSION = ? AND m.ZISFROMME = 1
+                LIMIT 1
+            """, (row["chat_session_pk"],)).fetchone()
+            my_phone = None
+            if my_row and my_row["me_jid"]:
+                jid_str = my_row["me_jid"]
+                at = jid_str.find("@")
+                if at > 0:
+                    my_phone = jid_str[:at]
+
+            reactors = []
+            for sender_hex, emoji_char in raw_reactors:
+                try:
+                    raw_bytes = bytes.fromhex(sender_hex)
+                    if len(raw_bytes) > 1:
+                        s = raw_bytes[1:].hex()
+                        lid = s[:-1] if s.endswith("f") else s
+                    else:
+                        lid = sender_hex
+                except ValueError:
+                    lid = sender_hex
+
+                name = None
+                if lid:
+                    nr = conn.execute(
+                        "SELECT full_name FROM _ios_contacts WHERE jid = ?", (f"{lid}@lid",)
+                    ).fetchone()
+                    if nr and nr[0]:
+                        name = nr[0]
+                    else:
+                        nr2 = conn.execute(
+                            "SELECT display_name FROM arch.contacts WHERE number = ?", (lid,)
+                        ).fetchone()
+                        if nr2 and nr2[0]:
+                            name = nr2[0]
+                if not name:
+                    name = f"+{lid}" if lid else ""
+
+                from_me = 1 if (lid and my_phone and lid == my_phone) else 0
+                reactors.append({"name": name, "emoji": emoji_char, "from_me": from_me})
+
+            return jsonify({"available": True, "total": len(reactors), "reactors": reactors})
+
     # ---- API: chat info -------------------------------------------------------
 
     def _group_members_android(conn, chat_id: str) -> list:

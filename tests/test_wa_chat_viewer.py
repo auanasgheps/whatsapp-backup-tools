@@ -2286,3 +2286,206 @@ class TestRecentMessagesRouting:
             "quoted_text", "quoted_sender", "quoted_ts", "reactions"
         }
         assert set(data[0].keys()) == expected_keys
+
+
+# ---------------------------------------------------------------------------
+# Tests: /api/reaction_details endpoint
+# ---------------------------------------------------------------------------
+
+class TestReactionDetailsEndpoint:
+    """Tests for /api/reaction_details/<message_id> — Android and iOS."""
+
+    # ---- Android helpers ----
+
+    def _setup_android(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        wa_conn.executescript("""
+            CREATE TABLE message_add_on (
+                _id                   INTEGER PRIMARY KEY,
+                parent_message_row_id INTEGER,
+                from_me               INTEGER DEFAULT 0,
+                sender_jid_row_id     INTEGER
+            );
+            CREATE TABLE message_add_on_reaction (
+                _id                   INTEGER PRIMARY KEY,
+                message_add_on_row_id INTEGER,
+                reaction              TEXT,
+                sender_timestamp      INTEGER
+            );
+        """)
+        seed_android_db(wa_conn, archive_conn)
+        # from_me reaction on message 1 (no sender_jid_row_id)
+        wa_conn.execute(
+            "INSERT INTO message_add_on (_id, parent_message_row_id, from_me, sender_jid_row_id) "
+            "VALUES (1, 1, 1, NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) "
+            "VALUES (1, '👍', 1700000000100)"
+        )
+        # Alice's reaction on message 1 (sender_jid_row_id=1 → '123456789' → 'Alice')
+        wa_conn.execute(
+            "INSERT INTO message_add_on (_id, parent_message_row_id, from_me, sender_jid_row_id) "
+            "VALUES (2, 1, 0, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) "
+            "VALUES (2, '❤️', 1700000000200)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        return viewer.create_app(tmp_path, rescan=False)
+
+    def test_android_total_and_reactors(self, tmp_path):
+        app = self._setup_android(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/1").get_json()
+        assert data["available"] is True
+        assert data["total"] == 2
+        assert len(data["reactors"]) == 2
+
+    def test_android_from_me_flag(self, tmp_path):
+        app = self._setup_android(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/1").get_json()
+        from_me_reactors = [r for r in data["reactors"] if r["from_me"] == 1]
+        assert len(from_me_reactors) == 1
+        assert from_me_reactors[0]["emoji"] == "👍"
+
+    def test_android_name_resolved_from_contacts(self, tmp_path):
+        app = self._setup_android(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/1").get_json()
+        names = {r["name"] for r in data["reactors"]}
+        assert "Alice" in names
+
+    def test_android_empty_when_no_reactions(self, tmp_path):
+        app = self._setup_android(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/999").get_json()
+        assert data["available"] is True
+        assert data["total"] == 0
+        assert data["reactors"] == []
+
+    def test_android_unavailable_when_no_table(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/1").get_json()
+        assert data["available"] is False
+
+    # ---- iOS helpers ----
+
+    def _setup_ios(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER, ZMESSAGEINFO INTEGER,
+                ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS ZWAMESSAGEINFO (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB
+            );
+            CREATE INDEX IF NOT EXISTS ZWAMESSAGEINFO_ZMESSAGE_INDEX
+                ON ZWAMESSAGEINFO (ZMESSAGE);
+            CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO) VALUES (10, NULL)"
+        )
+        # Message from me to provide my_phone derivation
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
+            "VALUES (1, 10, 1, NULL, 1000, '15550001111@s.whatsapp.net')"
+        )
+        # Two reactors: reactor A (phone_hex "00334142") and reactor B (phone_hex "00334143")
+        blob = _make_zreceipt_blob_with_reactions([
+            ("00334142", "👍".encode("utf-8")),
+            ("00334143", "❤️".encode("utf-8")),
+        ])
+        conn.execute(
+            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (100, 2, ?)",
+            (blob,)
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
+            "VALUES (2, 10, 0, 100, 2000, '15550002222@s.whatsapp.net')"
+        )
+        conn.commit()
+        conn.close()
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+        return viewer.create_app(tmp_path, rescan=False)
+
+    def test_ios_total_and_reactors(self, tmp_path):
+        app = self._setup_ios(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/2").get_json()
+        assert data["available"] is True
+        assert data["total"] == 2
+        assert len(data["reactors"]) == 2
+
+    def test_ios_emoji_preserved(self, tmp_path):
+        app = self._setup_ios(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/2").get_json()
+        emojis = {r["emoji"] for r in data["reactors"]}
+        assert emojis == {"👍", "❤️"}
+
+    def test_ios_unavailable_when_no_blob(self, tmp_path):
+        app = self._setup_ios(tmp_path)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/1").get_json()
+        # Message 1 has no ZMESSAGEINFO row → available: False
+        assert data["available"] is False
+
+    def test_ios_unavailable_when_no_table(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER, ZMESSAGEINFO INTEGER,
+                ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT
+            );
+        """)
+        conn.commit()
+        conn.close()
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/1").get_json()
+        assert data["available"] is False

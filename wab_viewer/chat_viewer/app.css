@@ -388,6 +388,14 @@
       font-size: 12px;
       padding: 1px 5px;
       line-height: 1.4;
+      cursor: pointer;
+    }
+    .rx-details-total {
+      font-weight: 600;
+      padding-bottom: 6px;
+      margin-bottom: 4px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
     }
     .msg-row.sent .rx-badge { background: var(--surface2); color: var(--text); }
 

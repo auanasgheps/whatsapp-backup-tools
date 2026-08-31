@@ -926,6 +926,12 @@
             rxEl2.appendChild(badge);
           });
           if (rxEl2.children.length) {
+            if (msg.msg_id !== undefined) {
+              rxEl2.addEventListener('click', e => {
+                e.stopPropagation();
+                showReactionDetails(msg.msg_id, rxEl2);
+              });
+            }
             const metaIdx = Array.from(bubble.children).indexOf(meta);
             bubble.insertBefore(rxEl2, bubble.children[metaIdx]);
           }
@@ -943,6 +949,12 @@
         });
       }
       if (rxEl.children.length) {
+        if (msg.msg_id !== undefined) {
+          rxEl.addEventListener('click', e => {
+            e.stopPropagation();
+            showReactionDetails(msg.msg_id, rxEl);
+          });
+        }
         bubble.appendChild(rxEl);
       }
     }
@@ -2195,6 +2207,36 @@
     }
     msgDetailsPopup.style.left = left + 'px';
     msgDetailsPopup.style.top = top + 'px';
+  }
+
+  async function showReactionDetails(msgId, anchorEl) {
+    msgDetailsPopup.innerHTML = '<span style="color:var(--text-muted)">Loading…</span>';
+    positionPopup(anchorEl);
+    msgDetailsPopup.classList.add('visible');
+
+    let data;
+    try {
+      const res = await fetch('/api/reaction_details/' + msgId);
+      data = await res.json();
+    } catch (_) {
+      data = { available: false };
+    }
+
+    let html;
+    if (!data.available || !data.reactors || !data.reactors.length) {
+      html = '<span class="msg-details-na">No reaction data available.</span>';
+    } else {
+      const label = data.total === 1 ? '1 reaction' : `${data.total} reactions`;
+      html = `<div class="rx-details-total">${label}</div>`;
+      for (const r of data.reactors) {
+        const name = r.from_me ? 'You' : esc(r.name || '?');
+        html += `<div class="msg-details-row"><span class="msg-details-label">${esc(r.emoji)}</span><span class="msg-details-value">${name}</span></div>`;
+      }
+    }
+
+    msgDetailsPopup.innerHTML = html;
+    positionPopup(anchorEl);
+    msgDetailsPopup.classList.add('visible');
   }
 
   // ---- init ----------------------------------------------------------------
