@@ -1900,32 +1900,28 @@ def create_app(output_root: Path, rescan: bool = False):
             reactors = []
             for sender_hex, emoji_char in raw_reactors:
                 try:
-                    raw_bytes = bytes.fromhex(sender_hex)
-                    if len(raw_bytes) > 1:
-                        s = raw_bytes[1:].hex()
-                        lid = s[:-1] if s.endswith("f") else s
-                    else:
-                        lid = sender_hex
+                    phone = bytes.fromhex(sender_hex).decode('utf-8', errors='ignore').strip('\x00')
                 except ValueError:
-                    lid = sender_hex
+                    phone = ""
 
                 name = None
-                if lid:
+                if phone:
                     nr = conn.execute(
-                        "SELECT full_name FROM _ios_contacts WHERE jid = ?", (f"{lid}@lid",)
+                        "SELECT display_name FROM arch.contacts WHERE number = ?", (phone,)
                     ).fetchone()
                     if nr and nr[0]:
                         name = nr[0]
                     else:
                         nr2 = conn.execute(
-                            "SELECT display_name FROM arch.contacts WHERE number = ?", (lid,)
+                            "SELECT full_name FROM _ios_contacts WHERE jid = ?",
+                            (f"{phone}@s.whatsapp.net",)
                         ).fetchone()
                         if nr2 and nr2[0]:
                             name = nr2[0]
                 if not name:
-                    name = f"+{lid}" if lid else ""
+                    name = f"+{phone}" if phone else ""
 
-                from_me = 1 if (lid and my_phone and lid == my_phone) else 0
+                from_me = 1 if (phone and my_phone and phone == my_phone) else 0
                 reactors.append({"name": name, "emoji": emoji_char, "from_me": from_me})
 
             return jsonify({"available": True, "total": len(reactors), "reactors": reactors})
