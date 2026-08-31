@@ -2489,3 +2489,61 @@ class TestReactionDetailsEndpoint:
         with app.test_client() as client:
             data = client.get("/api/reaction_details/1").get_json()
         assert data["available"] is False
+
+    def test_ios_phone_resolves_to_name(self, tmp_path):
+        """Reactor phone decoded from UTF-8 bytes is resolved via arch.contacts."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        # Phone "41234567890" → UTF-8 bytes → hex for the blob
+        phone = "41234567890"
+        phone_hex = phone.encode("utf-8").hex()
+        conn = sqlite3.connect(str(wa_path))
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER, ZMESSAGEINFO INTEGER,
+                ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS ZWAMESSAGEINFO (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB
+            );
+            CREATE INDEX IF NOT EXISTS ZWAMESSAGEINFO_ZMESSAGE_INDEX
+                ON ZWAMESSAGEINFO (ZMESSAGE);
+            CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT
+            );
+        """)
+        conn.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO) VALUES (10, NULL)")
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
+            "VALUES (1, 10, 1, NULL, 1000, '99887766@s.whatsapp.net')"
+        )
+        blob = _make_zreceipt_blob_with_reactions([(phone_hex, "👍".encode("utf-8"))])
+        conn.execute(
+            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (100, 2, ?)", (blob,)
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
+            "VALUES (2, 10, 0, 100, 2000, '41234567890@s.whatsapp.net')"
+        )
+        conn.commit()
+        conn.close()
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES (?, 'Contacts', ?)",
+            (phone, "Bob")
+        )
+        archive_conn.commit()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/2").get_json()
+        assert data["available"] is True
+        assert data["total"] == 1
+        assert data["reactors"][0]["name"] == "Bob"
+        assert data["reactors"][0]["emoji"] == "👍"
