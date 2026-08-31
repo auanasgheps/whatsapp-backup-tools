@@ -2490,6 +2490,74 @@ class TestReactionDetailsEndpoint:
             data = client.get("/api/reaction_details/1").get_json()
         assert data["available"] is False
 
+    def test_ios_lid_resolves_to_name(self, tmp_path):
+        """Reactor stored as ASCII-hex LID (e.g. '2AB0ADF3...') resolves via _ios_contacts @lid lookup."""
+        lid_upper = "2AB0ADF3138AE2C7B832"
+        lid_lower = lid_upper.lower()
+        # In the blob, the LID is stored as ASCII bytes of the uppercase hex string
+        phone_hex_str = lid_upper.encode("utf-8").hex()
+
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        contacts_v2_path = tmp_path / "ContactsV2.sqlite"
+
+        # Build minimal ContactsV2.sqlite so _ios_contacts is populated
+        cv_conn = sqlite3.connect(str(contacts_v2_path))
+        cv_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ZWAADDRESSBOOKCONTACT (
+                Z_PK INTEGER PRIMARY KEY, ZLID TEXT, ZWHATSAPPID TEXT, ZFULLNAME TEXT
+            );
+        """)
+        cv_conn.execute(
+            "INSERT INTO ZWAADDRESSBOOKCONTACT (ZLID, ZWHATSAPPID, ZFULLNAME) VALUES (?, NULL, ?)",
+            (f"{lid_lower}@lid", "Carol")
+        )
+        cv_conn.commit()
+        cv_conn.close()
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER);
+            CREATE TABLE IF NOT EXISTS ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER, ZMESSAGEINFO INTEGER,
+                ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS ZWAMESSAGEINFO (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB
+            );
+            CREATE INDEX IF NOT EXISTS ZWAMESSAGEINFO_ZMESSAGE_INDEX ON ZWAMESSAGEINFO (ZMESSAGE);
+            CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+        """)
+        conn.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO) VALUES (10, 1)")
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
+            "VALUES (1, 10, 1, NULL, 1000, '99887766@s.whatsapp.net')"
+        )
+        blob = _make_zreceipt_blob_with_reactions([(phone_hex_str, "❤️".encode("utf-8"))])
+        conn.execute(
+            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (100, 2, ?)", (blob,)
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
+            "VALUES (2, 10, 0, 100, 2000, NULL)"
+        )
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/2").get_json()
+        assert data["available"] is True
+        assert data["total"] == 1
+        assert data["reactors"][0]["name"] == "Carol"
+        assert data["reactors"][0]["emoji"] == "❤️"
+
     def test_ios_phone_resolves_to_name(self, tmp_path):
         """Reactor phone decoded from UTF-8 bytes is resolved via arch.contacts."""
         wa_path = tmp_path / "ChatStorage.sqlite"
