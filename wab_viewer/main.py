@@ -294,6 +294,45 @@ def _extract_ios_reactions(receipt_bytes: bytes) -> list:
     return []
 
 
+def _extract_ios_reaction_reactors(receipt_bytes: bytes) -> list:
+    """Extract per-reactor details from a ZRECEIPTINFO reaction group (field 7).
+
+    Returns a list of dicts: {"phone": str|None, "lid": str|None, "emoji": str}.
+
+    The reactor's identity is carried by a sub-field ending '@s.whatsapp.net'
+    (phone JID) or '@lid' (LID JID). Recent group reactions use the LID form,
+    which resolves to a name via the same push-name chain as group message
+    senders. Reactor sub-field 1 is an opaque per-reaction token that maps to
+    nothing in the export and must NOT be used as identity. Entries with neither
+    JID are the current user's own reactions (identity is implicit).
+    """
+    out = []
+    for f, w, v in _parse_protobuf(receipt_bytes):
+        if f == 7 and w == "len":
+            for ef, ew, ev in _parse_protobuf(v):
+                if ew != "len":
+                    continue
+                _, emojis = _parse_reactor_entry(ev)
+                if not emojis:
+                    continue
+                phone = None
+                lid = None
+                for sf, sw, sv in _parse_protobuf(ev):
+                    if sw != "len":
+                        continue
+                    b = bytes(sv)
+                    if b.endswith(b"@s.whatsapp.net"):
+                        phone = b.decode("utf-8", errors="ignore").split("@")[0]
+                    elif b.endswith(b"@lid"):
+                        lid = b.decode("utf-8", errors="ignore")
+                emoji_char = "".join(
+                    bytes.fromhex(h).decode("utf-8", errors="ignore") for h in emojis
+                )
+                out.append({"phone": phone, "lid": lid, "emoji": emoji_char})
+            return out
+    return []
+
+
 def _ios_reactions(wa_conn: sqlite3.Connection,
                    chat_id: str,
                    msg_ids: list) -> dict:
@@ -1879,10 +1918,11 @@ def create_app(output_root: Path, rescan: bool = False):
                 return jsonify({"available": False})
 
             blob = bytes(row[0])
-            raw_reactors = _extract_ios_reactions(blob)
+            raw_reactors = _extract_ios_reaction_reactors(blob)
             if not raw_reactors:
                 return jsonify({"available": True, "total": 0, "reactors": []})
 
+            # Resolve "me" from a sent message in this chat, and the 1-to-1 partner.
             my_row = conn.execute("""
                 SELECT COALESCE(gm.ZMEMBERJID, m.ZFROMJID) AS me_jid
                 FROM ZWAMESSAGE m
@@ -1892,47 +1932,70 @@ def create_app(output_root: Path, rescan: bool = False):
             """, (row["chat_session_pk"],)).fetchone()
             my_phone = None
             if my_row and my_row["me_jid"]:
-                jid_str = my_row["me_jid"]
-                at = jid_str.find("@")
+                at = my_row["me_jid"].find("@")
                 if at > 0:
-                    my_phone = jid_str[:at]
+                    my_phone = my_row["me_jid"][:at]
+
+            def _resolve_number(num):
+                r = conn.execute(
+                    "SELECT full_name FROM _ios_contacts WHERE jid = ?",
+                    (f"{num}@s.whatsapp.net",)
+                ).fetchone()
+                if r and r[0]:
+                    return r[0]
+                r = conn.execute(
+                    "SELECT display_name FROM arch.contacts WHERE number = ?", (num,)
+                ).fetchone()
+                if r and r[0]:
+                    return r[0]
+                return None
+
+            def _resolve_lid(lid_jid):
+                # Same chain the message-sender query uses for @lid group members:
+                # ContactsV2 full name, then chat-session partner name, then the
+                # broadcast push name keyed by the LID.
+                r = conn.execute(
+                    "SELECT full_name FROM _ios_contacts WHERE jid = ?", (lid_jid,)
+                ).fetchone()
+                if r and r[0]:
+                    return r[0]
+                try:
+                    r = conn.execute(
+                        "SELECT ZPARTNERNAME FROM ZWACHATSESSION WHERE ZCONTACTJID = ? "
+                        "AND ZPARTNERNAME IS NOT NULL AND ZPARTNERNAME != '' LIMIT 1",
+                        (lid_jid,)
+                    ).fetchone()
+                    if r and r[0]:
+                        return r[0]
+                    r = conn.execute(
+                        "SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ? "
+                        "AND ZPUSHNAME IS NOT NULL AND ZPUSHNAME != '' LIMIT 1",
+                        (lid_jid,)
+                    ).fetchone()
+                    if r and r[0]:
+                        return r[0]
+                except sqlite3.OperationalError as e:
+                    if "no such table" not in str(e).lower():
+                        raise
+                return None
 
             reactors = []
-            for sender_hex, emoji_char in raw_reactors:
-                try:
-                    identifier = bytes.fromhex(sender_hex).decode('utf-8', errors='ignore').strip('\x00')
-                except ValueError:
-                    identifier = ""
-
-                name = None
-                if identifier:
-                    lid = identifier.lower()
-                    # LID lookup (new-style group/contact identifiers)
-                    nr = conn.execute(
-                        "SELECT full_name FROM _ios_contacts WHERE jid = ?", (f"{lid}@lid",)
-                    ).fetchone()
-                    if nr and nr[0]:
-                        name = nr[0]
-                    else:
-                        # Phone number lookup via ZWHATSAPPID
-                        nr2 = conn.execute(
-                            "SELECT full_name FROM _ios_contacts WHERE jid = ?",
-                            (f"{identifier}@s.whatsapp.net",)
-                        ).fetchone()
-                        if nr2 and nr2[0]:
-                            name = nr2[0]
-                        else:
-                            nr3 = conn.execute(
-                                "SELECT display_name FROM arch.contacts WHERE number = ?",
-                                (identifier,)
-                            ).fetchone()
-                            if nr3 and nr3[0]:
-                                name = nr3[0]
-                if not name:
-                    name = f"+{identifier}" if identifier else ""
-
-                from_me = 1 if (identifier and my_phone and identifier == my_phone) else 0
-                reactors.append({"name": name, "emoji": emoji_char, "from_me": from_me})
+            for rr in raw_reactors:
+                emoji_char = rr["emoji"]
+                phone = rr["phone"]
+                lid = rr["lid"]
+                if (not phone and not lid) or (phone and my_phone and phone == my_phone):
+                    # Own reaction: WhatsApp stores no reactor JID for the DB owner.
+                    reactors.append({"name": "", "emoji": emoji_char, "from_me": 1})
+                elif phone:
+                    name = _resolve_number(phone) or f"+{phone}"
+                    reactors.append({"name": name, "emoji": emoji_char, "from_me": 0})
+                else:
+                    # @lid reactor (recent group reactions). Resolves via the same
+                    # push-name chain as group message senders; "Unknown" only when
+                    # the LID is absent from every name source in the export.
+                    name = _resolve_lid(lid) or "Unknown"
+                    reactors.append({"name": name, "emoji": emoji_char, "from_me": 0})
 
             return jsonify({"available": True, "total": len(reactors), "reactors": reactors})
 
