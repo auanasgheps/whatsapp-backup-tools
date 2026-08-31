@@ -138,11 +138,11 @@ class TestUniqueGroupName:
 
 class TestBuildQuery:
     def test_documents_included(self):
-        query = android_handler.build_query(None, None)
+        query = android_handler.build_query(None, None, False)
         assert "Media/WhatsApp Documents/%" in query
 
     def test_all_media_types_present(self):
-        query = android_handler.build_query(None, None)
+        query = android_handler.build_query(None, None, False)
         for path in [
             "Media/WhatsApp Images/%",
             "Media/WhatsApp Video/%",
@@ -155,27 +155,49 @@ class TestBuildQuery:
             assert path in query, f"Missing from query: {path}"
 
     def test_limit_clause_included(self):
-        query = android_handler.build_query(limit=100, since_ms=None)
+        query = android_handler.build_query(limit=100, since_ms=None, hd_dedup=False)
         assert "LIMIT 50" in query  # N//2 per block
 
     def test_no_limit_when_none(self):
-        query = android_handler.build_query(limit=None, since_ms=None)
+        query = android_handler.build_query(limit=None, since_ms=None, hd_dedup=False)
         assert "LIMIT" not in query
 
     def test_since_clause_included(self):
-        query = android_handler.build_query(limit=None, since_ms=1700000000000)
+        query = android_handler.build_query(limit=None, since_ms=1700000000000, hd_dedup=False)
         assert "1700000000000" in query
 
     def test_both_union_blocks_have_documents(self):
-        query = android_handler.build_query(None, None)
+        query = android_handler.build_query(None, None, False)
         # 2 occurrences in WHERE clauses + 2 in CASE WHEN guards = 4
         assert query.count("Media/WhatsApp Documents/%") == 4
 
     def test_limit_applies_to_combined_result(self):
         # LIMIT N//2 must appear twice (once per block), not on the outer wrapper
-        query = android_handler.build_query(limit=50, since_ms=None)
+        query = android_handler.build_query(limit=50, since_ms=None, hd_dedup=False)
         assert query.count("LIMIT 25") == 2
         assert not query.strip().endswith("LIMIT 50")
+
+    def test_hd_dedup_injects_not_exists(self):
+        query = android_handler.build_query(None, None, True)
+        assert query.count("NOT EXISTS") == 2  # one per block
+        assert "association_type IN (12, 7)" in query
+
+    def test_hd_dedup_false_excludes_not_exists(self):
+        query = android_handler.build_query(None, None, False)
+        assert "NOT EXISTS" not in query
+
+    def test_check_hd_association_returns_true_when_table_exists(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE message_association (id INTEGER)")
+        result = android_handler._check_hd_association(conn.cursor(), logging.getLogger())
+        conn.close()
+        assert result is True
+
+    def test_check_hd_association_returns_false_when_table_absent(self):
+        conn = sqlite3.connect(":memory:")
+        result = android_handler._check_hd_association(conn.cursor(), logging.getLogger())
+        conn.close()
+        assert result is False
 
     def test_group_subjects_query_has_no_date_filter(self):
         query = android_handler.build_group_subjects_query()
