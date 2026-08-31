@@ -1900,28 +1900,38 @@ def create_app(output_root: Path, rescan: bool = False):
             reactors = []
             for sender_hex, emoji_char in raw_reactors:
                 try:
-                    phone = bytes.fromhex(sender_hex).decode('utf-8', errors='ignore').strip('\x00')
+                    identifier = bytes.fromhex(sender_hex).decode('utf-8', errors='ignore').strip('\x00')
                 except ValueError:
-                    phone = ""
+                    identifier = ""
 
                 name = None
-                if phone:
+                if identifier:
+                    lid = identifier.lower()
+                    # LID lookup (new-style group/contact identifiers)
                     nr = conn.execute(
-                        "SELECT display_name FROM arch.contacts WHERE number = ?", (phone,)
+                        "SELECT full_name FROM _ios_contacts WHERE jid = ?", (f"{lid}@lid",)
                     ).fetchone()
                     if nr and nr[0]:
                         name = nr[0]
                     else:
+                        # Phone number lookup via ZWHATSAPPID
                         nr2 = conn.execute(
                             "SELECT full_name FROM _ios_contacts WHERE jid = ?",
-                            (f"{phone}@s.whatsapp.net",)
+                            (f"{identifier}@s.whatsapp.net",)
                         ).fetchone()
                         if nr2 and nr2[0]:
                             name = nr2[0]
+                        else:
+                            nr3 = conn.execute(
+                                "SELECT display_name FROM arch.contacts WHERE number = ?",
+                                (identifier,)
+                            ).fetchone()
+                            if nr3 and nr3[0]:
+                                name = nr3[0]
                 if not name:
-                    name = f"+{phone}" if phone else ""
+                    name = f"+{identifier}" if identifier else ""
 
-                from_me = 1 if (phone and my_phone and phone == my_phone) else 0
+                from_me = 1 if (identifier and my_phone and identifier == my_phone) else 0
                 reactors.append({"name": name, "emoji": emoji_char, "from_me": from_me})
 
             return jsonify({"available": True, "total": len(reactors), "reactors": reactors})
