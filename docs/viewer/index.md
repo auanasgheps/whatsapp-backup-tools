@@ -72,3 +72,9 @@ The server binds to `127.0.0.1` by default — it is not accessible from other m
 **Text messages are missing**
 
 - The source WA database is required to show text-only messages. Media messages with captions will show the caption but not text-only messages.
+
+## Known Limitations
+
+- **Profile pictures are not displayed.** On Android this requires extracting `wa.db` (not yet implemented). On iOS no local image data is available in the backup.
+- **iOS read timestamps absent for recent messages.** WhatsApp stopped storing read timestamps on-device around June 2026 — they are fetched live from servers instead. When a message is confirmed as read but no timestamp is on-device, the viewer shows "Read (time not stored)".
+- **Played receipts are not shown** for voice messages and video messages. The timing data is encoded in the receipt protobuf but has not been verified against ground-truth data across both platforms, so it is intentionally omitted for now.

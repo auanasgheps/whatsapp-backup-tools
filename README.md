@@ -155,10 +155,17 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ## Known Limitations
 
+### Archiver
+
 - Stickers are not archived in this version
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
+- **iOS HD media duplication.** When photos or videos are shared in HD quality on iOS, WhatsApp stores both a standard-quality preview and the HD download as independent rows with no linking data. Both versions are archived. On Android the low-quality copy is suppressed automatically when the HD version is present
+
+### Viewer
+
+See [viewer known limitations](docs/viewer/index.md#known-limitations).
 
 ---
 
