@@ -1237,7 +1237,8 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             android_handler.validate_wa_root(args.wa_roots, logger)
             number_map = android_handler.build_number_map(cursor, logger)
 
-            query = android_handler.build_query(args.limit, since_ms)
+            hd_dedup = android_handler._check_hd_association(cursor, logger)
+            query = android_handler.build_query(args.limit, since_ms, hd_dedup)
             group_subjects = dict(
                 cursor.execute(android_handler.build_group_subjects_query()).fetchall()
             )

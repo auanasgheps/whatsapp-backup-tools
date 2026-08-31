@@ -26,6 +26,18 @@ _MEDIA_SUBFOLDERS = {
 }
 
 
+def _check_hd_association(cursor: sqlite3.Cursor, logger: logging.Logger) -> bool:
+    """Return True if message_association exists and supports HD dedup (types 12 and 7)."""
+    tables = {row[0] for row in cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    if 'message_association' not in tables:
+        logger.debug("message_association table absent — HD dedup disabled.")
+        return False
+    logger.debug("message_association table found — HD dedup enabled.")
+    return True
+
+
 def validate_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
     """Abort with a clear error if any required table or column is missing."""
     tables = {row[0] for row in cursor.execute(
@@ -154,7 +166,7 @@ def build_group_subjects_query() -> str:
     """
 
 
-def build_query(limit: int | None, since_ms: int | None) -> str:
+def build_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> str:
     """
     Build the main media extraction query.
     If limit is provided, it is split evenly between the group chats and
@@ -162,9 +174,19 @@ def build_query(limit: int | None, since_ms: int | None) -> str:
     represented. Total rows returned is at most N.
     If since_ms is provided, only messages at or after that timestamp
     (milliseconds) are included.
+    If hd_dedup is True, LQ parent rows are excluded when an HD child with a
+    valid file_path exists (requires message_association table).
     """
     block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
     since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
+    hd_dedup_clause = """
+        AND NOT EXISTS (
+            SELECT 1 FROM message_association ma
+            JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
+            WHERE ma.parent_message_row_id = message_media.message_row_id
+              AND ma.association_type IN (12, 7)
+              AND mm_hd.file_path IS NOT NULL
+        )""" if hd_dedup else ""
 
     return f"""
 SELECT * FROM (
@@ -203,6 +225,7 @@ SELECT * FROM (
         )
         AND chat.subject IS NOT NULL
         {since_clause}
+        {hd_dedup_clause}
         {block_limit_clause}
     )
 
@@ -237,6 +260,7 @@ SELECT * FROM (
         )
         AND chat.subject IS NULL
         {since_clause}
+        {hd_dedup_clause}
         {block_limit_clause}
     )
 )
