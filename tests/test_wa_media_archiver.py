@@ -2,6 +2,8 @@
 Tests for wab_archiver
 """
 
+import argparse
+import hashlib
 import logging
 import os
 import plistlib
@@ -25,6 +27,7 @@ import wab_archiver.backup_reader as br
 import wab_archiver.android_handler as android_handler
 import wab_archiver.adb_extractor as adb
 import wab_archiver.archive_db as arc
+import shared.source_detection as sd
 
 
 # ---------------------------------------------------------------------------
@@ -2190,3 +2193,746 @@ class TestConfigNormalise:
         with patch("sys.argv", ["wa", "--config", str(cfg)]):
             with pytest.raises(SystemExit):
                 wa.parse_args()
+
+
+# ===========================================================================
+# shared.source_detection
+# ===========================================================================
+
+class TestSourceDetection:
+    def test_android_detected(self, tmp_path):
+        (tmp_path / "msgstore.db").touch()
+        source_type, db_path = sd.detect_source(str(tmp_path))
+        assert source_type == "android"
+        assert db_path == str(tmp_path / "msgstore.db")
+
+    def test_ios_detected(self, tmp_path):
+        (tmp_path / "ChatStorage.sqlite").touch()
+        source_type, db_path = sd.detect_source(str(tmp_path))
+        assert source_type == "ios"
+        assert db_path == str(tmp_path / "ChatStorage.sqlite")
+
+    def test_android_wins_when_both_present(self, tmp_path):
+        (tmp_path / "msgstore.db").touch()
+        (tmp_path / "ChatStorage.sqlite").touch()
+        source_type, _ = sd.detect_source(str(tmp_path))
+        assert source_type == "android"
+
+    def test_returns_none_when_neither(self, tmp_path):
+        assert sd.detect_source(str(tmp_path)) == (None, None)
+
+
+# ===========================================================================
+# adb_extractor: get_device_serial
+# ===========================================================================
+
+class TestGetDeviceSerial:
+    def test_returns_serial(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"emulator-5554\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            assert adb.get_device_serial(logger) == "emulator-5554"
+
+    def test_nonzero_returncode_raises(self, logger):
+        mock = MagicMock(returncode=1, stdout=b"", stderr=b"no device")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError):
+                adb.get_device_serial(logger)
+
+    def test_empty_output_raises(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError):
+                adb.get_device_serial(logger)
+
+    def test_unknown_output_raises(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"unknown\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError):
+                adb.get_device_serial(logger)
+
+
+# ===========================================================================
+# adb_extractor: probe_md5_binary
+# ===========================================================================
+
+class TestProbeMd5Binary:
+    def test_md5sum_found(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"/usr/bin/md5sum\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            assert adb.probe_md5_binary(logger) == "md5sum"
+
+    def test_md5_found(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"/usr/bin/md5\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            assert adb.probe_md5_binary(logger) == "md5"
+
+    def test_neither_found_raises(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError):
+                adb.probe_md5_binary(logger)
+
+
+# ===========================================================================
+# adb_extractor: _run_adb
+# ===========================================================================
+
+class TestRunAdb:
+    def test_success_returns_result(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock), \
+             patch("wab_archiver.adb_extractor.time.sleep"):
+            result = adb._run_adb(["adb", "pull", "/remote", "/local"], logger)
+        assert result is mock
+
+    def test_transient_error_retries_and_succeeds(self, logger):
+        first = MagicMock(returncode=1, stdout=b"", stderr=b"error: closed")
+        second = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run",
+                   side_effect=[first, second]) as mock_run, \
+             patch("wab_archiver.adb_extractor.time.sleep"):
+            result = adb._run_adb(["adb", "test"], logger)
+        assert mock_run.call_count == 2
+        assert result is second
+
+    def test_non_transient_error_raises_immediately(self, logger):
+        mock = MagicMock(returncode=1, stdout=b"", stderr=b"fatal: something")
+        with patch("wab_archiver.adb_extractor.subprocess.run",
+                   return_value=mock) as mock_run, \
+             patch("wab_archiver.adb_extractor.time.sleep"):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb._run_adb(["adb", "test"], logger)
+        assert mock_run.call_count == 1
+
+    def test_timeout_retries_then_raises(self, logger):
+        with patch("wab_archiver.adb_extractor.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("adb", 120)) as mock_run, \
+             patch("wab_archiver.adb_extractor.time.sleep"):
+            with pytest.raises(RuntimeError):
+                adb._run_adb(["adb", "test"], logger)
+        assert mock_run.call_count == adb._ADB_RETRIES + 1
+
+    def test_transient_exhausted_raises(self, logger):
+        mock = MagicMock(returncode=1, stdout=b"", stderr=b"error: closed")
+        with patch("wab_archiver.adb_extractor.subprocess.run",
+                   return_value=mock) as mock_run, \
+             patch("wab_archiver.adb_extractor.time.sleep"):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb._run_adb(["adb", "test"], logger)
+        assert mock_run.call_count == adb._ADB_RETRIES + 1
+
+
+# ===========================================================================
+# adb_extractor: _classify_adb_error
+# ===========================================================================
+
+class TestClassifyAdbError:
+    def test_path_not_found(self):
+        assert adb._classify_adb_error("'/path/foo' does not exist") == "Remote path not found"
+
+    def test_permission_denied(self):
+        result = adb._classify_adb_error("Permission denied")
+        assert "Permission denied" in result
+
+    def test_open_failed(self):
+        result = adb._classify_adb_error("open failed: /path: Operation not permitted")
+        assert "Permission denied" in result
+
+    def test_device_offline(self):
+        result = adb._classify_adb_error("error: device offline")
+        assert "offline" in result or "Disconnected" in result
+
+    def test_disk_full(self):
+        assert adb._classify_adb_error("No space left on device") == "Host disk is full"
+
+    def test_unknown_falls_back_to_stripped_stderr(self):
+        assert adb._classify_adb_error("  some random error  ") == "some random error"
+
+
+# ===========================================================================
+# adb_extractor: enumerate_remote_files
+# ===========================================================================
+
+class TestEnumerateRemoteFiles:
+    def test_parses_path_and_size(self, logger):
+        stdout = b"/storage/WA/Media/img.jpg\t12345\n"
+        with patch("wab_archiver.adb_extractor._run_adb",
+                   return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert entries == [("/storage/WA/Media/img.jpg", 12345)]
+
+    def test_multiple_files(self, logger):
+        stdout = (b"/storage/WA/Media/img.jpg\t12345\n"
+                  b"/storage/WA/Media/vid.mp4\t67890\n")
+        with patch("wab_archiver.adb_extractor._run_adb",
+                   return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert len(entries) == 2
+        assert entries[1] == ("/storage/WA/Media/vid.mp4", 67890)
+
+    def test_skips_permission_denied_lines(self, logger):
+        stdout = (b"/storage/WA/Media/img.jpg\t12345\n"
+                  b"/storage/WA/restricted: Permission denied\n")
+        with patch("wab_archiver.adb_extractor._run_adb",
+                   return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert entries == [("/storage/WA/Media/img.jpg", 12345)]
+
+    def test_skips_unparseable_lines(self, logger):
+        stdout = (b"badline\n"
+                  b"/storage/WA/Media/img.jpg\t12345\n")
+        with patch("wab_archiver.adb_extractor._run_adb",
+                   return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert entries == [("/storage/WA/Media/img.jpg", 12345)]
+
+
+# ===========================================================================
+# adb_extractor: _remote_md5
+# ===========================================================================
+
+_EMPTY_MD5_HEX = "d41d8cd98f00b204e9800998ecf8427e"
+
+
+class TestRemoteMd5:
+    def test_md5sum_format(self, logger):
+        stdout = f"{_EMPTY_MD5_HEX}  /path/file\n".encode()
+        with patch("wab_archiver.adb_extractor._run_adb",
+                   return_value=MagicMock(stdout=stdout)):
+            result = adb._remote_md5("/path/file", "md5sum", logger)
+        assert result == bytes.fromhex(_EMPTY_MD5_HEX)
+
+    def test_md5_format(self, logger):
+        # "<name>: <hash>" format produced by older md5 binaries on non-absolute paths
+        stdout = f"img.jpg: {_EMPTY_MD5_HEX}\n".encode()
+        with patch("wab_archiver.adb_extractor._run_adb",
+                   return_value=MagicMock(stdout=stdout)):
+            result = adb._remote_md5("img.jpg", "md5", logger)
+        assert result == bytes.fromhex(_EMPTY_MD5_HEX)
+
+
+# ===========================================================================
+# adb_extractor: _staging_path
+# ===========================================================================
+
+class TestStagingPath:
+    def test_strips_prefix_and_joins(self):
+        result = adb._staging_path(
+            "/storage/WA/Media/img.jpg",
+            "/storage/WA/Media",
+            "/tmp/stage",
+        )
+        assert result == os.path.join("/tmp/stage", "img.jpg")
+
+    def test_nested_subdir(self):
+        result = adb._staging_path(
+            "/storage/WA/Media/WhatsApp Images/img.jpg",
+            "/storage/WA/Media",
+            "/tmp/stage",
+        )
+        assert result == os.path.join("/tmp/stage", "WhatsApp Images", "img.jpg")
+
+
+# ===========================================================================
+# adb_extractor: write_adb_conflicts_report
+# ===========================================================================
+
+class TestWriteAdbConflictsReport:
+    def test_no_conflicts_no_file(self, tmp_path, logger):
+        report = str(tmp_path / "conflicts.csv")
+        adb.write_adb_conflicts_report(report, [], logger)
+        assert not os.path.exists(report)
+
+    def test_conflicts_written_as_csv(self, tmp_path, logger):
+        report = str(tmp_path / "conflicts.csv")
+        conflicts = [{
+            'remote_path': '/storage/WA/Media/img.jpg',
+            'remote_md5': 'aabbccdd',
+            'archived_md5': '11223344',
+        }]
+        adb.write_adb_conflicts_report(report, conflicts, logger)
+        assert os.path.exists(report)
+        content = open(report, encoding='utf-8').read()
+        assert 'remote_path' in content
+        assert '/storage/WA/Media/img.jpg' in content
+        assert 'aabbccdd' in content
+
+
+# ===========================================================================
+# adb_extractor: pull_media
+# ===========================================================================
+
+class TestPullMedia:
+    def _make_conn(self, tmp_path):
+        return arc.open_archive_db(str(tmp_path))
+
+    def test_nothing_to_pull_returns_zeros(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        with patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"), \
+             patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"), \
+             patch("wab_archiver.adb_extractor.enumerate_remote_files", return_value=[]):
+            pulled, skipped, conflicts = adb.pull_media(
+                str(tmp_path / "stage"), False, conn, logger
+            )
+        assert pulled == 0
+        assert skipped == 0
+        assert conflicts == []
+
+    def test_already_done_file_skipped(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        remote_path = "/storage/WA/Media/img.jpg"
+        arc.upsert_adb_pull_state(conn, remote_path, "serial-1", "done")
+        with patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"), \
+             patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"), \
+             patch("wab_archiver.adb_extractor.enumerate_remote_files",
+                   return_value=[(remote_path, 1024)]):
+            pulled, skipped, conflicts = adb.pull_media(
+                str(tmp_path / "stage"), False, conn, logger
+            )
+        assert pulled == 0
+        assert skipped == 1
+        assert conflicts == []
+
+    def test_new_file_pulled_marks_done(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/img.jpg"
+        stage_dir = str(tmp_path / "stage")
+        remote_size = 100
+        local = adb._staging_path(remote_path, adb._WA_MEDIA_ROOT, stage_dir)
+
+        def _fake_run_adb(cmd, logger):
+            if cmd[1] == 'pull':
+                os.makedirs(os.path.dirname(local), exist_ok=True)
+                with open(local, 'wb') as f:
+                    f.write(b'\x00' * remote_size)
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        with patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"), \
+             patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"), \
+             patch("wab_archiver.adb_extractor.enumerate_remote_files",
+                   return_value=[(remote_path, remote_size)]), \
+             patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb):
+            pulled, skipped, conflicts = adb.pull_media(
+                stage_dir, False, conn, logger
+            )
+
+        assert pulled == 1
+        assert skipped == 0
+        assert conflicts == []
+        assert remote_path in arc.get_adb_done_paths(conn, "serial-1")
+
+
+# ===========================================================================
+# wab_archiver.main: setup_logging
+# ===========================================================================
+
+class TestSetupLogging:
+    @pytest.fixture(autouse=True)
+    def _clear_handlers(self):
+        logging.getLogger('wab_archiver').handlers.clear()
+        yield
+        logging.getLogger('wab_archiver').handlers.clear()
+
+    def test_creates_file_and_stream_handlers(self, tmp_path):
+        log = wa.setup_logging(str(tmp_path / 'app.log'))
+        assert len(log.handlers) == 2
+        handler_types = {type(h).__name__ for h in log.handlers}
+        assert 'FileHandler' in handler_types
+        assert 'StreamHandler' in handler_types
+
+    def test_file_handler_targets_correct_path(self, tmp_path):
+        log = wa.setup_logging(str(tmp_path / 'app.log'))
+        file_handlers = [h for h in log.handlers if isinstance(h, logging.FileHandler)]
+        assert len(file_handlers) == 1
+        assert file_handlers[0].baseFilename.endswith('app.log')
+
+    def test_second_call_does_not_add_handlers(self, tmp_path):
+        wa.setup_logging(str(tmp_path / 'app.log'))
+        wa.setup_logging(str(tmp_path / 'app.log'))
+        assert len(logging.getLogger('wab_archiver').handlers) == 2
+
+
+# ===========================================================================
+# wab_archiver.main: _build_missing_row (1-to-1 else branch)
+# ===========================================================================
+
+class TestBuildMissingRow:
+    def test_1on1_known_sender(self):
+        contacts = {'441234': 'Alice'}
+        row = wa._build_missing_row(
+            msg_id=1, timestamp=1705276800000, file_path='img.jpg',
+            mime_type='image/jpeg', chat_subject=None, sender='441234',
+            key_from_me=0, message_url=None, media_name=None,
+            contacts=contacts, number_map={},
+        )
+        assert row['chat_name'] == 'Alice'
+        assert row['sender'] == 'Alice'
+
+    def test_1on1_null_sender_unknown(self):
+        row = wa._build_missing_row(
+            msg_id=1, timestamp=None, file_path=None,
+            mime_type=None, chat_subject=None, sender=None,
+            key_from_me=0, message_url=None, media_name=None,
+            contacts={}, number_map={},
+        )
+        assert row['chat_name'] == 'Unknown'
+        assert row['sender'] == 'Unknown'
+
+
+# ===========================================================================
+# wab_archiver.main: _route_contact (contact_index fallback)
+# ===========================================================================
+
+class TestRouteContact:
+    def test_falls_back_to_contact_index(self, tmp_path):
+        contact_index = {'441234': ('Alice (00441234)', 'Alice')}
+        dest_dir, filename = wa._route_contact(
+            sender='441234', key_from_me=0, contacts={}, number_map={},
+            filename='img.jpg', year='2024',
+            output_root=str(tmp_path), contact_index=contact_index,
+        )
+        assert 'Alice' in dest_dir
+        assert filename == 'img.jpg'
+
+
+# ===========================================================================
+# wab_archiver.main: _copy_or_skip (error/edge branches)
+# ===========================================================================
+
+class TestCopyOrSkip:
+    def test_dry_run_identical_file_returns_skip(self, tmp_path, logger):
+        src = tmp_path / 'src.jpg'
+        src.write_bytes(b'test content')
+        dest_path = tmp_path / 'dest.jpg'
+        dest_path.write_bytes(b'test content')
+        result = wa._copy_or_skip(
+            str(src), str(dest_path), str(tmp_path / 'dest_dir'),
+            'original/path.jpg', 1705276800000, str(tmp_path),
+            dry_run=True, logger=logger, cursor=None,
+        )
+        assert result == (0, 1, 0)
+
+    def test_existing_identical_with_cursor_records_archived(self, tmp_path, logger):
+        src = tmp_path / 'src.jpg'
+        src.write_bytes(b'test content')
+        dest_dir = tmp_path / 'Contacts' / 'Alice'
+        dest_dir.mkdir(parents=True)
+        dest_path = dest_dir / 'dest.jpg'
+        dest_path.write_bytes(b'test content')
+        conn = arc.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+        result = wa._copy_or_skip(
+            str(src), str(dest_path), str(dest_dir),
+            'original/path.jpg', 1705276800000, str(tmp_path),
+            dry_run=False, logger=logger, cursor=cursor,
+        )
+        conn.commit()
+        assert result == (0, 1, 0)
+        rows = conn.execute("SELECT * FROM archive_copies").fetchall()
+        assert len(rows) == 1
+        conn.close()
+
+    def test_copy_error_returns_warning(self, tmp_path, logger):
+        src = tmp_path / 'src.jpg'
+        src.write_bytes(b'test content')
+        dest_path = tmp_path / 'out' / 'dest.jpg'
+        with patch("wab_archiver.main.shutil.copy", side_effect=IOError("disk full")):
+            result = wa._copy_or_skip(
+                str(src), str(dest_path), str(dest_path.parent),
+                'original/path.jpg', 1705276800000, str(tmp_path),
+                dry_run=False, logger=logger, cursor=None,
+            )
+        assert result == (0, 0, 1)
+
+    def test_set_file_times_oserror_does_not_fail(self, tmp_path, logger):
+        src = tmp_path / 'src.jpg'
+        src.write_bytes(b'test content')
+        dest_path = tmp_path / 'out' / 'dest.jpg'
+        with patch("wab_archiver.main.set_file_times", side_effect=OSError("no access")):
+            result = wa._copy_or_skip(
+                str(src), str(dest_path), str(dest_path.parent),
+                'original/path.jpg', 1705276800000, str(tmp_path),
+                dry_run=False, logger=logger, cursor=None,
+            )
+        assert result == (1, 0, 0)
+        assert dest_path.exists()
+
+
+# ===========================================================================
+# wab_archiver.main: process_rows progress log
+# ===========================================================================
+
+class TestProcessRowsProgress:
+    def test_progress_logged_at_1000_rows(self, tmp_path):
+        rows = [
+            (i, 1705276800000, None, None, '42', 'Group', '111', 0, None, None)
+            for i in range(1001)
+        ]
+        mock_logger = MagicMock()
+        info_calls = []
+        mock_logger.info.side_effect = lambda msg, *a, **kw: info_calls.append(str(msg))
+        wa.process_rows(
+            rows, total=1001, contacts={}, number_map={},
+            folder_index={}, group_index={},
+            media_resolver=lambda fp: fp,
+            output_root=str(tmp_path), logger=mock_logger, dry_run=True,
+        )
+        assert any('Progress: 1000/' in m for m in info_calls)
+
+
+# ===========================================================================
+# wab_archiver.main: _inject_default_archive_command
+# ===========================================================================
+
+class TestInjectDefaultArchiveCommand:
+    def test_help_flag_not_injected(self):
+        with patch("sys.argv", ['prog', '--help']):
+            wa._inject_default_archive_command()
+            assert sys.argv[1] == '--help'
+
+    def test_no_command_injects_archive(self):
+        with patch("sys.argv", ['prog', '--wa-root', '/wa']):
+            wa._inject_default_archive_command()
+            assert sys.argv[1] == 'archive'
+
+
+# ===========================================================================
+# wab_archiver.main: parse_args — uncovered validation branches
+# ===========================================================================
+
+class TestParseArgsValidationExtra:
+    @staticmethod
+    def _toml_path(p):
+        return str(p).replace('\\', '/')
+
+    def test_non_toml_config_exits(self, capsys):
+        with patch("sys.argv", ['wa', '--config=cfg.json']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+        assert 'toml' in capsys.readouterr().err.lower()
+
+    def test_since_native_date_normalised(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        cfg.write_bytes(b'output = "/tmp"\nwa_root = "/wa"\nsince = 2024-01-01\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.since == "2024-01-01"
+
+    def test_wa_root_wrong_type_exits(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        cfg.write_text(f'output = "{out}"\nwa_root = 42\n', encoding='utf-8')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_config_command_exits(self):
+        with patch("sys.argv", ['wa', 'config', 'generate']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_restore_without_output_exits(self):
+        with patch("sys.argv", ['wa', 'restore']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_contacts_with_ios_backup_exits(self, tmp_path):
+        with patch("sys.argv", ['wa', 'archive', '-o', str(tmp_path),
+                                 '--ios-backup', '/backup', '--contacts', '/contacts']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_pull_media_without_staging_exits(self, tmp_path):
+        with patch("sys.argv", ['wa', 'archive', '-o', str(tmp_path),
+                                 '--from-adb', '--pull-media']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+
+# ===========================================================================
+# wab_archiver.main: _warn_network_paths
+# ===========================================================================
+
+class TestWarnNetworkPaths:
+    def test_unc_output_warns(self):
+        args = argparse.Namespace(output='\\\\server\\share', wa_roots=[])
+        mock_logger = MagicMock()
+        wa._warn_network_paths(args, mock_logger)
+        assert mock_logger.warning.called
+
+    def test_unc_wa_root_warns(self):
+        args = argparse.Namespace(output='/tmp/out', wa_roots=['\\\\nas\\wa'])
+        mock_logger = MagicMock()
+        wa._warn_network_paths(args, mock_logger)
+        assert mock_logger.warning.called
+
+    def test_normal_paths_no_warning(self):
+        args = argparse.Namespace(output='/tmp/out', wa_roots=['/wa/media'])
+        mock_logger = MagicMock()
+        wa._warn_network_paths(args, mock_logger)
+        mock_logger.warning.assert_not_called()
+
+
+# ===========================================================================
+# wab_archiver.main: check_dependencies — tzdata (Windows-only)
+# ===========================================================================
+
+class TestCheckDependenciesTzdata:
+    def test_tzdata_missing_on_windows_raises(self, logger):
+        args = argparse.Namespace(
+            from_adb=False, e2e_key=None, ios_password=None,
+            timezone='Europe/Berlin',
+        )
+        with patch("wab_archiver.main.sys.platform", "win32"), \
+             patch("importlib.util.find_spec", return_value=None):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
+
+# ===========================================================================
+# wab_archiver.main: run_restore_mode
+# ===========================================================================
+
+def _restore_args(tmp_path, dry_run=False):
+    return argparse.Namespace(output=str(tmp_path), dry_run=dry_run)
+
+
+def _seed_archive(tmp_path, original_path, archive_rel, content=b'test data'):
+    """Insert DB row and write the archive copy file."""
+    conn = arc.open_archive_db(str(tmp_path))
+    md5 = hashlib.md5(content).digest()
+    cur = conn.cursor()
+    arc.record_file_archived(cur, original_path, md5, archive_rel, len(content))
+    conn.commit()
+    conn.close()
+    archive_file = tmp_path.joinpath(*archive_rel.split('/'))
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_bytes(content)
+    return archive_file
+
+
+class TestRunRestoreMode:
+    def test_empty_archive_exits(self, tmp_path, logger):
+        arc.open_archive_db(str(tmp_path)).close()
+        with pytest.raises(SystemExit):
+            wa.run_restore_mode(_restore_args(tmp_path), logger)
+
+    def test_ios_only_exits(self, tmp_path, logger):
+        _seed_archive(tmp_path, 'Message/foo.jpg',
+                      'Contacts/Alice/2024/Received/foo.jpg')
+        with pytest.raises(SystemExit):
+            wa.run_restore_mode(_restore_args(tmp_path), logger)
+
+    def test_ios_and_android_warns(self, tmp_path):
+        _seed_archive(tmp_path, 'Media/WhatsApp Images/img.jpg',
+                      'Contacts/Alice/2024/Received/img.jpg')
+        _seed_archive(tmp_path, 'Message/ios.jpg',
+                      'Contacts/Alice/2024/Received/ios.jpg')
+        mock_logger = MagicMock()
+        wa.run_restore_mode(_restore_args(tmp_path), mock_logger)
+        assert mock_logger.warning.called
+
+    def test_happy_path_restores_file(self, tmp_path, logger):
+        _seed_archive(tmp_path, 'Media/WhatsApp Images/img.jpg',
+                      'Contacts/Alice/2024/Received/img.jpg')
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        dest = tmp_path / 'Media' / 'WhatsApp Images' / 'img.jpg'
+        assert dest.exists()
+
+    def test_dry_run_does_not_copy(self, tmp_path, logger):
+        _seed_archive(tmp_path, 'Media/WhatsApp Images/img.jpg',
+                      'Contacts/Alice/2024/Received/img.jpg')
+        wa.run_restore_mode(_restore_args(tmp_path, dry_run=True), logger)
+        dest = tmp_path / 'Media' / 'WhatsApp Images' / 'img.jpg'
+        assert not dest.exists()
+
+    def test_unrestorable_no_archive_copy(self, tmp_path, logger):
+        # DB row exists but the archive file is absent from disk
+        conn = arc.open_archive_db(str(tmp_path))
+        md5 = hashlib.md5(b'x').digest()
+        arc.record_file_archived(conn.cursor(), 'Media/img.jpg', md5,
+                                 'Contacts/Alice/2024/Received/img.jpg', 1)
+        conn.commit()
+        conn.close()
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        report = tmp_path / 'restore_report.csv'
+        assert report.exists()
+        assert 'unrestorable' in report.read_text(encoding='utf-8')
+
+    def test_already_restored_skipped(self, tmp_path, logger):
+        content = b'same content'
+        _seed_archive(tmp_path, 'Media/WhatsApp Images/img.jpg',
+                      'Contacts/Alice/2024/Received/img.jpg', content)
+        dest = tmp_path / 'Media' / 'WhatsApp Images' / 'img.jpg'
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        report = tmp_path / 'restore_report.csv'
+        assert not report.exists()
+
+    def test_collision_skipped(self, tmp_path, logger):
+        _seed_archive(tmp_path, 'Media/WhatsApp Images/img.jpg',
+                      'Contacts/Alice/2024/Received/img.jpg', b'archive content')
+        dest = tmp_path / 'Media' / 'WhatsApp Images' / 'img.jpg'
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b'different content')
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        report = tmp_path / 'restore_report.csv'
+        assert report.exists()
+        assert 'collision_skipped' in report.read_text(encoding='utf-8')
+
+    def test_copy_error_writes_report(self, tmp_path, logger):
+        _seed_archive(tmp_path, 'Media/WhatsApp Images/img.jpg',
+                      'Contacts/Alice/2024/Received/img.jpg')
+        with patch("wab_archiver.main.shutil.copy2", side_effect=IOError("disk full")):
+            wa.run_restore_mode(_restore_args(tmp_path), logger)
+        report = tmp_path / 'restore_report.csv'
+        assert report.exists()
+        assert 'error:' in report.read_text(encoding='utf-8')
+
+
+# ===========================================================================
+# wab_archiver.main: main()
+# ===========================================================================
+
+class TestMain:
+    def _args(self, tmp_path, command='archive', dry_run=False):
+        return argparse.Namespace(
+            command=command, dry_run=dry_run,
+            output=str(tmp_path), log=None, wa_roots=[],
+        )
+
+    def test_dispatches_to_forward_mode(self, tmp_path):
+        args = self._args(tmp_path, command='archive')
+        with patch("wab_archiver.main.parse_args", return_value=args), \
+             patch("wab_archiver.main.setup_logging", return_value=MagicMock()), \
+             patch("wab_archiver.main._warn_network_paths"), \
+             patch("wab_archiver.main.run_forward_mode") as mock_fwd, \
+             patch("wab_archiver.main.run_restore_mode") as mock_rst:
+            wa.main()
+        mock_fwd.assert_called_once()
+        mock_rst.assert_not_called()
+
+    def test_dispatches_to_restore_mode(self, tmp_path):
+        args = self._args(tmp_path, command='restore')
+        with patch("wab_archiver.main.parse_args", return_value=args), \
+             patch("wab_archiver.main.setup_logging", return_value=MagicMock()), \
+             patch("wab_archiver.main._warn_network_paths"), \
+             patch("wab_archiver.main.run_forward_mode") as mock_fwd, \
+             patch("wab_archiver.main.run_restore_mode") as mock_rst:
+            wa.main()
+        mock_rst.assert_called_once()
+        mock_fwd.assert_not_called()
+
+    def test_dry_run_logged(self, tmp_path):
+        args = self._args(tmp_path, command='archive', dry_run=True)
+        mock_logger = MagicMock()
+        with patch("wab_archiver.main.parse_args", return_value=args), \
+             patch("wab_archiver.main.setup_logging", return_value=mock_logger), \
+             patch("wab_archiver.main._warn_network_paths"), \
+             patch("wab_archiver.main.run_forward_mode"), \
+             patch("wab_archiver.main.run_restore_mode"):
+            wa.main()
+        info_msgs = [str(c) for c in mock_logger.info.call_args_list]
+        assert any('DRY RUN' in m for m in info_msgs)
