@@ -206,7 +206,7 @@ def enumerate_remote_files(wa_media_root: str, logger) -> list:
     """Return list of (remote_path, size_bytes) for all files under wa_media_root."""
     logger.info(f"Enumerating remote files under {wa_media_root}...")
     result = _run_adb(
-        ['adb', 'shell', f'find {wa_media_root} -type f -printf "%p\\t%s\\n"'],
+        ['adb', 'shell', f'find "{wa_media_root}" -type f -printf "%p\\t%s\\n"'],
         logger,
     )
     entries = []
@@ -366,6 +366,13 @@ def pull_media(staging_dir: str, business: bool,
         if not os.path.exists(local):
             logger.error(
                 f"ADB pull reported success but file not found locally: {local}"
+            )
+            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            continue
+        if os.path.getsize(local) != remote_size:
+            logger.warning(
+                f"Pulled file is truncated (expected {remote_size} B, "
+                f"got {os.path.getsize(local)} B): {remote_path}"
             )
             _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
             continue

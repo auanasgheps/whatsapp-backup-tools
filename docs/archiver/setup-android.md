@@ -67,17 +67,17 @@ wab-archiver archive \
 
 > ⚠️ On first run, every file is transferred — if you have many gigabytes of media, expect this to take hours. Voice messages and other small files are the bottleneck: ADB spawns a new subprocess per file, making transfers very slow per unit of data.
 
-**Hybrid workflow:** If you already have a manual copy of your media (via MTP/cable), archive it first without `--pull-media`:
+**Hybrid workflow:** If you already have a manual copy of your media (via MTP/cable), archive it first using `--wa-root` — without `--from-adb`:
 
 ```bash
 wab-archiver archive \
-  --from-adb \
-  --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --wa-root /path/to/existing-WhatsApp \
   --output /path/to/output
 ```
 
-This populates the archive DB with all your existing files. From the next run onward, switch to `--pull-media` — the archiver will skip everything already archived and only pull new files.
+This populates the archive DB with all your existing files. From the next run onward, switch to `--from-adb --pull-media` — the archiver will skip everything already archived and only pull new files.
+
+> Note: `--from-adb` and `--wa-root` are mutually exclusive and cannot be combined in a single invocation.
 
 ### Multiple Source Folders
 

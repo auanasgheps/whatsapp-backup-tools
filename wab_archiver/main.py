@@ -10,6 +10,7 @@ if sys.version_info < (3, 11):
 
 import atexit
 import argparse
+import io
 import contextlib
 import csv
 import logging
@@ -661,8 +662,7 @@ def _inject_default_archive_command():
     """
     if len(sys.argv) > 1 and sys.argv[1] in ('-h', '--help', '--version'):
         return
-    first_pos = next((a for a in sys.argv[1:] if not a.startswith('-')), None)
-    if first_pos not in _KNOWN_COMMANDS:
+    if len(sys.argv) == 1 or sys.argv[1] not in _KNOWN_COMMANDS:
         sys.argv.insert(1, 'archive')
 
 
@@ -982,7 +982,7 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
         platform = None
 
         _conflict_rows = []
-        _root_hits = {root: 0 for root in args.wa_roots}
+        _root_hits = {root: 0 for root in (args.wa_roots or [])}
         _zero_byte_count = [0]
 
         def _multi_root_resolver(fp):
@@ -998,7 +998,8 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
             if not valid:
                 return os.path.join(args.wa_roots[0], *rel_parts)
             if len(valid) == 1:
-                _root_hits[_owning_root(valid[0])] += 1
+                _k = _owning_root(valid[0])
+                _root_hits[_k] = _root_hits.get(_k, 0) + 1
                 return valid[0]
             valid.sort(key=os.path.getsize, reverse=True)
             top_size = os.path.getsize(valid[0])
@@ -1010,7 +1011,8 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
                 md5s = [file_md5(c) for c in valid]
                 if len(set(md5s)) == 1:
                     chosen = valid[0]
-                    _root_hits[_owning_root(chosen)] += 1
+                    _k = _owning_root(chosen)
+                    _root_hits[_k] = _root_hits.get(_k, 0) + 1
                     return chosen
                 chosen = valid[0]
                 reason = 'same_size_first_root'
@@ -1025,7 +1027,8 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
             logger.warning(
                 f"CONFLICT {fp} — {reason}, using: {chosen}"
             )
-            _root_hits[_owning_root(chosen)] += 1
+            _k = _owning_root(chosen)
+            _root_hits[_k] = _root_hits.get(_k, 0) + 1
             return chosen
 
         def _owning_root(path):
@@ -1084,7 +1087,7 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
     if args.msgstore.endswith('.crypt15'):
         if not args.e2e_key:
             logger.error(
-                "Encrypted msgstore detected but no --e2e_key provided. "
+                "Encrypted msgstore detected but no --e2e-key provided. "
                 "Exiting."
             )
             raise SystemExit(1)
@@ -1100,13 +1103,13 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
             raise SystemExit(1)
 
         with open(args.msgstore, 'rb') as msg:
-            db_file = DatabaseFactory.from_file(msg)
             raw = msg.read()
+        db_file = DatabaseFactory.from_file(io.BytesIO(raw))
         key = KeyFactory.new(args.e2e_key)
         if key is None:
             logger.error(
                 f"Could not load decryption key from: {args.e2e_key}\n"
-                "  Make sure --e2e_key points to a valid WhatsApp key file."
+                "  Make sure --e2e-key points to a valid WhatsApp key file."
             )
             raise SystemExit(1)
         try:
@@ -1207,7 +1210,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
         logger.info(f"SINCE filter active: on or after {args.since}.")
     if args.limit:
         logger.info(f"LIMIT active: {args.limit // 2} rows per chat type "
-                    f"({args.limit} max total rows).")
+                    f"({(args.limit // 2) * 2} max total rows).")
 
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()

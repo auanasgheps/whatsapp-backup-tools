@@ -86,7 +86,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH | --from-adb]
 | `--ios-password PASSWORD` | No | Password for an encrypted iPhone backup |
 | `--ios-contacts PATH` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios-backup` if omitted |
 | `--business` | No | Target **WhatsApp Business** instead of the regular WhatsApp app |
-| `--pull-media` | No | Pull WhatsApp media files from the device via ADB. Only valid with `--from-adb`. See [Android setup](setup-android.md#pulling-media-via-adb-optional) |
+| `--pull-media` | No | Pull WhatsApp media files from the device via ADB. Only valid with `--from-adb`. See [Android setup](setup-android.md#adb-pull-media-optional) |
 | `--staging PATH` | If `--pull-media` | Local directory where ADB-pulled media is staged. Must be persistent across runs |
 | `-o`, `--output PATH` | **Yes** | Destination folder for the archive |
 | `-l`, `--log PATH` | No | Custom log file path. Defaults to `<output>/wab-archiver.log` |
@@ -138,7 +138,7 @@ wab-archiver archive \
 
 #### ADB mode — also pull media over USB
 
-Use this if you do not use Syncthing and want the archiver to handle everything in one step. See [setup-android.md](setup-android.md#pulling-media-via-adb-optional) for important caveats about speed and reliability.
+Use this if you do not use Syncthing and want the archiver to handle everything in one step. See [setup-android.md](setup-android.md#adb-pull-media-optional) for important caveats about speed and reliability.
 
 ```bash
 wab-archiver archive \

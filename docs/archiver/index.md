@@ -31,7 +31,7 @@ wab-archiver archive \
   --dry-run
 ```
 
-To also pull media files over ADB (instead of using Syncthing or a manual copy), add `--pull-media --staging /path/to/staging`. See [Android setup](setup-android.md#pulling-media-via-adb-optional) for details.
+To also pull media files over ADB (instead of using Syncthing or a manual copy), add `--pull-media --staging /path/to/staging`. See [Android setup](setup-android.md#adb-pull-media-optional) for details.
 
 ### iOS — read directly from an iPhone backup
 

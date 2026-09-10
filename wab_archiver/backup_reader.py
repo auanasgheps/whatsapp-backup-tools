@@ -34,7 +34,7 @@ def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
     """
     if not os.path.isdir(backup_dir):
         logger.error(
-            f"--ios_backup path does not exist or is not a directory: {backup_dir}"
+            f"--ios-backup path does not exist or is not a directory: {backup_dir}"
         )
         raise SystemExit(1)
 
@@ -44,7 +44,7 @@ def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
         if not os.path.isfile(manifest_path):
             logger.error(
                 f"Neither Info.plist nor Manifest.plist found in: {backup_dir}\n"
-                f"  Make sure --ios_backup points to the backup directory "
+                f"  Make sure --ios-backup points to the backup directory "
                 f"(the folder that contains Manifest.db)."
             )
             raise SystemExit(1)
@@ -57,6 +57,9 @@ def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
             data = plistlib.load(f)
     except PermissionError:
         _raise_macos_fda_error(plist_path, logger)
+    except plistlib.InvalidFileException as e:
+        logger.error(f"Could not read {plist_path}: {e}\n  The file may be corrupt.")
+        raise SystemExit(1)
 
     # Manifest.plist uses 'IsEncrypted'; Info.plist does not carry this flag.
     # If we only have Info.plist, fall back to checking Manifest.plist if present.
@@ -69,6 +72,9 @@ def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
                     manifest_data = plistlib.load(f)
             except PermissionError:
                 _raise_macos_fda_error(manifest_path, logger)
+            except plistlib.InvalidFileException as e:
+                logger.error(f"Could not read {manifest_path}: {e}\n  The file may be corrupt.")
+                raise SystemExit(1)
             is_encrypted = manifest_data.get('IsEncrypted', False)
 
     return bool(is_encrypted)
@@ -86,7 +92,7 @@ def build_manifest_map(backup_dir: str,
     """
     if not os.path.isdir(backup_dir):
         logger.error(
-            f"--ios_backup path does not exist or is not a directory: {backup_dir}"
+            f"--ios-backup path does not exist or is not a directory: {backup_dir}"
         )
         raise SystemExit(1)
 
@@ -94,7 +100,7 @@ def build_manifest_map(backup_dir: str,
     if not os.path.isfile(manifest_db):
         logger.error(
             f"Manifest.db not found in: {backup_dir}\n"
-            f"  Make sure --ios_backup points to the backup root directory."
+            f"  Make sure --ios-backup points to the backup root directory."
         )
         raise SystemExit(1)
 
@@ -183,7 +189,7 @@ def extract_plaintext(backup_dir: str,
         logger.warning(
             f"Manifest map is empty — no WhatsApp files found in the backup at: "
             f"{backup_dir}\n"
-            f"  Make sure --ios_backup points to the backup root directory "
+            f"  Make sure --ios-backup points to the backup root directory "
             f"(the folder that contains Manifest.db), and that the backup "
             f"includes WhatsApp data."
         )
@@ -239,7 +245,7 @@ def extract_encrypted(backup_dir: str,
         backup = EncryptedBackup(backup_directory=backup_dir, passphrase=passphrase)
         backup.test_decryption()
     except ValueError as e:
-        logger.error(f"Failed to unlock backup: {e}\n  Check that --ios_password is correct.")
+        logger.error(f"Failed to unlock backup: {e}\n  Check that --ios-password is correct.")
         raise SystemExit(1)
 
     # Use a tight domain pattern that targets exactly one app.

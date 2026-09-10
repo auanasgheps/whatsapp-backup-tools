@@ -161,7 +161,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ### Archiver
 
-- Stickers are not archived in this version
+- Stickers are not currently archived
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders

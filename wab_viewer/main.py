@@ -1222,14 +1222,17 @@ def create_app(output_root: Path, rescan: bool = False):
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
 
     # Build _ANDROID_SELECT based on whether message_add_on tables exist
-    _tmp_wa = sqlite3.connect(str(wa_db_path))
-    has_reactions = _tmp_wa.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
-    ).fetchone() is not None
-    has_ios_reactions = _tmp_wa.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
-    ).fetchone() is not None
-    _tmp_wa.close()
+    has_reactions = False
+    has_ios_reactions = False
+    if wa_db_path is not None:
+        _tmp_wa = sqlite3.connect(str(wa_db_path))
+        has_reactions = _tmp_wa.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
+        ).fetchone() is not None
+        has_ios_reactions = _tmp_wa.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
+        ).fetchone() is not None
+        _tmp_wa.close()
 
     globals()['_ANDROID_SELECT'] = f"""
     SELECT
@@ -1427,8 +1430,6 @@ def create_app(output_root: Path, rescan: bool = False):
                     rx_map = {r["msg_id"]: r["reactions"] for r in rx_cache}
                     for row in rows:
                         row["reactions"] = rx_map.get(row["msg_id"])
-                elif rows:
-                    rows = [dict(r) for r in rows]
                 return jsonify(rows)
 
         conn = get_wa()
@@ -1558,7 +1559,7 @@ def create_app(output_root: Path, rescan: bool = False):
             chat_params + [ts, half]
         ).fetchall()
 
-        combined = list(reversed(before_rows)) + list(after_rows)
+        combined = [dict(r) for r in reversed(before_rows)] + [dict(r) for r in after_rows]
         if source_type == "android" and combined and has_reactions:
             _resolve_and_cache_reactions(source_type, conn, get_archive(), combined)
         elif source_type == "ios" and combined and has_ios_reactions:
@@ -2309,11 +2310,13 @@ def create_app(output_root: Path, rescan: bool = False):
             if prefix is None:
                 return jsonify({"bytes": 0})
 
+            safe_prefix = prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             paths = [
                 r["archive_path"]
                 for r in archive_conn.execute(
-                    "SELECT archive_path FROM archive_copies WHERE archive_path LIKE ?",
-                    (prefix + "%",),
+                    "SELECT archive_path FROM archive_copies"
+                    " WHERE archive_path LIKE ? ESCAPE '\\'",
+                    (safe_prefix + "%",),
                 ).fetchall()
             ]
         finally:
@@ -2578,7 +2581,8 @@ def main():
     print(f"[wab_viewer] Starting server at {url}")
     print(f"[wab_viewer] Press Ctrl+C to stop")
 
-    webbrowser.open(url)
+    browser_url = f"http://127.0.0.1:{args.port}"
+    webbrowser.open(browser_url)
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
 
