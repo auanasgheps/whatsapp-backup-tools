@@ -65,13 +65,13 @@ def validate_ios_wa_root(wa_root: str, logger: logging.Logger):
     Used only in pre-extracted mode (--wa_root without --ios_backup).
     """
     if not os.path.isdir(wa_root):
-        logger.error(f"--wa_root does not exist or is not a directory: {wa_root}")
+        logger.error(f"--wa-root does not exist or is not a directory: {wa_root}")
         raise SystemExit(1)
 
     message_dir = os.path.join(wa_root, 'Message')
     if not os.path.isdir(message_dir):
         logger.error(
-            f"--wa_root has no Message/ subfolder: {wa_root}\n"
+            f"--wa-root has no Message/ subfolder: {wa_root}\n"
             f"  For iOS pre-extracted mode, pass the "
             f"AppDomainGroup-group.net.whatsapp.WhatsApp.shared folder."
         )

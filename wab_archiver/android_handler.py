@@ -74,7 +74,7 @@ def validate_wa_root(wa_roots: list, logger: logging.Logger):
     any_valid = False
     for wa_root in wa_roots:
         if not os.path.isdir(wa_root):
-            logger.error(f"--wa_root does not exist or is not a directory: {wa_root}")
+            logger.error(f"--wa-root does not exist or is not a directory: {wa_root}")
             continue
 
         media_dir = os.path.join(wa_root, 'Media')
@@ -87,7 +87,7 @@ def validate_wa_root(wa_roots: list, logger: logging.Logger):
                         "pass the WhatsApp/ folder that contains Media/ instead.")
             else:
                 hint = "Expected structure: <wa_root>/Media/WhatsApp Images/ etc."
-            logger.error(f"--wa_root has no Media/ subfolder: {wa_root}\n  {hint}")
+            logger.error(f"--wa-root has no Media/ subfolder: {wa_root}\n  {hint}")
             continue
 
         found = [s for s in _MEDIA_SUBFOLDERS if os.path.isdir(os.path.join(media_dir, s))]
@@ -99,7 +99,7 @@ def validate_wa_root(wa_roots: list, logger: logging.Logger):
         any_valid = True
 
     if not any_valid:
-        logger.error("No valid --wa_root found. Aborting.")
+        logger.error("No valid --wa-root found. Aborting.")
         raise SystemExit(1)
 
 
@@ -288,7 +288,7 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
         logger.warning(
             "Contacts file was read but no WhatsApp contacts were found. "
             "Folder names will show raw phone numbers.\n"
-            "  If using --mode adb, check that the device contacts permission is granted."
+            "  If using --from-adb, check that the device contacts permission is granted."
         )
     else:
         logger.info(f"Loaded {len(contacts)} Android contacts.")

@@ -30,6 +30,9 @@ wab-viewer ./output --host 0.0.0.0
 
 # Rebuild the cache
 wab-viewer ./output --rescan
+
+# Check the installed version
+wab-viewer --version
 ```
 
 ## How It Works

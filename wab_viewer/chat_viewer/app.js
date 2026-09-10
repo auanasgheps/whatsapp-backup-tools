@@ -932,8 +932,7 @@
                 showReactionDetails(msg.msg_id, rxEl2);
               });
             }
-            const metaIdx = Array.from(bubble.children).indexOf(meta);
-            bubble.insertBefore(rxEl2, bubble.children[metaIdx]);
+            bubble.appendChild(rxEl2);
           }
         }
       } else {
