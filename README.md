@@ -104,6 +104,8 @@ pip install -e .
 
 Always do a dry run first:
 
+> 💡 Without `pip install -e .`, use `python -m wab_archiver` instead of `wab-archiver`.
+
 ```bash
 wab-archiver archive \
   --msgstore /path/to/msgstore.db \
@@ -125,8 +127,10 @@ First, run wab-archiver to create the archive. Then:
 
 ```bash
 pip install flask
-python -m wab_viewer /path/to/archive
+wab-viewer /path/to/archive
 ```
+
+> 💡 Without `pip install -e .`, use `python -m wab_viewer` instead of `wab-viewer`.
 
 Opens in your browser at `http://127.0.0.1:5000`. See [docs/viewer/](docs/viewer/) for full usage.
 

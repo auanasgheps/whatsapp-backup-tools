@@ -32,6 +32,7 @@ output     = "/path/to/archive"
 # since     = ""          # e.g. 2024-01-01
 
 # Android — pull via ADB (wab-archiver archive --from-adb; see setup-android.md)
+# from_adb  = false
 # pull_media = false
 # staging    = ""         # persistent folder for pulled media
 
@@ -249,6 +250,7 @@ wab-archiver archive \
 | `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths. One row per path, sortable by `file_count`. Only written when duplicates exist |
 | `source_conflicts_report.csv` | Written when multiple `--wa-root` roots contain different versions of the same file. Only written when conflicts exist |
 | `.wa_media_archiver.db` | SQLite database storing all persistent state: contact folder index, group folder index, and the file archive map. Health checks run automatically on every open. Do not delete unless you want to reset all tracking |
+| `adb_conflicts_report.csv` | Written when `--pull-media` finds a file with the same name but different content on the device vs the archive. Only written when conflicts exist; resolve manually |
 | `restore_report.csv` | Written by restore mode when issues are encountered. Not written if there are no issues |
 
 ---
