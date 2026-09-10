@@ -11,20 +11,25 @@ pip install flask
 ## Usage
 
 ```bash
-python -m wab_viewer /path/to/archive
+wab-viewer /path/to/archive
 ```
+
+> 💡 If you haven't installed the package (`pip install -e .`), use `python -m wab_viewer` instead of `wab-viewer`.
 
 The viewer opens your browser at `http://127.0.0.1:5000`. Use `--rescan` to force a cache rebuild.
 
 ```bash
 # Example
-python -m wab_viewer ./output
+wab-viewer ./output
 
 # Custom port
-python -m wab_viewer ./output --port 8080
+wab-viewer ./output --port 8080
+
+# Expose on the local network (accessible from other devices)
+wab-viewer ./output --host 0.0.0.0
 
 # Rebuild the cache
-python -m wab_viewer ./output --rescan
+wab-viewer ./output --rescan
 ```
 
 ## How It Works
@@ -55,7 +60,7 @@ The cache is rebuilt automatically when:
 
 ## Privacy
 
-The server binds to `127.0.0.1` by default — it is not accessible from other machines on your network. No data leaves your machine.
+The server binds to `127.0.0.1` by default — it is not accessible from other machines on your network. No data leaves your machine. To access the viewer from another device on your LAN, pass `--host 0.0.0.0` (make sure your firewall allows the port).
 
 ## Troubleshooting
 

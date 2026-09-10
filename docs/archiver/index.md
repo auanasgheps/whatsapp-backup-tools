@@ -6,6 +6,8 @@ Organise your WhatsApp media into a structured archive.
 
 Always do a dry run first:
 
+> 💡 Without `pip install -e .`, use `python -m wab_archiver` instead of `wab-archiver`.
+
 ```bash
 wab-archiver archive \
   --msgstore /path/to/msgstore.db \
