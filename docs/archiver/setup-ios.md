@@ -69,7 +69,7 @@ wab-archiver archive \
 
 > 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 
-Contacts are automatically extracted from the backup. `ChatStorage.sqlite` is also saved to the output folder for re-runs.
+Contacts and auxiliary databases (`ChatStorage.sqlite`, `ContactsV2.sqlite`, `ExtChatDatabase.sqlite`, `MessagingInfraDatabase.sqlite`, `LID.sqlite`, `Labels.sqlite`, `CallHistory.sqlite`) are automatically extracted from the backup and saved to the `Whatsapp Databases` subfolder in the output folder for re-runs and viewer use.
 
 ---
 

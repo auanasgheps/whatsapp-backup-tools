@@ -7,6 +7,8 @@ import shutil
 import sqlite3
 import tempfile
 
+from shared.source_detection import WA_DATABASES_DIR_NAME
+
 # ==============================================================================
 # backup_reader.py — iPhone backup format parsing
 # Knows nothing about WhatsApp schema; handles only the backup file structure.
@@ -14,6 +16,49 @@ import tempfile
 
 _WA_DOMAIN          = 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared'
 _WA_BUSINESS_DOMAIN = 'AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared'
+
+_IOS_AUXILIARY_DATABASES: list[tuple[list[str], str]] = [
+    (['ExtChatDB/ExtChatDatabase.sqlite', 'ExtChatDatabase.sqlite'], 'ExtChatDatabase.sqlite'),
+    (['MessagingInfraDB_v2/MessagingInfraDatabase.sqlite', 'MessagingInfraDB/MessagingInfraDatabase.sqlite', 'MessagingInfraDatabase.sqlite'], 'MessagingInfraDatabase.sqlite'),
+    (['LID.sqlite'], 'LID.sqlite'),
+    (['CallHistory.sqlite'], 'CallHistory.sqlite'),
+    (['Labels.sqlite'], 'Labels.sqlite'),
+]
+
+
+def _extract_auxiliary_databases_unencrypted(manifest_map: dict[str, str], output_dir: str, logger: logging.Logger) -> None:
+    """Extract optional auxiliary iOS databases if present in the backup manifest."""
+    for candidates, target_name in _IOS_AUXILIARY_DATABASES:
+        found_path = None
+        for cand in candidates:
+            if cand in manifest_map:
+                found_path = cand
+                break
+        if found_path is not None:
+            logger.info(f"Extracting {target_name} from backup...")
+            tmp = extract_to_temp(manifest_map, found_path, logger)
+            _save_db_to_output(tmp, output_dir, target_name, logger)
+            os.unlink(tmp)
+
+
+def _extract_auxiliary_databases_encrypted(backup, domain_like: str, output_dir: str, logger: logging.Logger) -> None:
+    """Decrypt optional auxiliary iOS databases if present in the encrypted backup."""
+    for candidates, target_name in _IOS_AUXILIARY_DATABASES:
+        extracted = False
+        for cand in candidates:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite')
+            tmp.close()
+            try:
+                backup.extract_file(relative_path=cand, domain_like=domain_like, output_filename=tmp.name)
+                _save_db_to_output(tmp.name, output_dir, target_name, logger)
+                os.unlink(tmp.name)
+                logger.info(f"Decrypted {target_name}.")
+                extracted = True
+                break
+            except FileNotFoundError:
+                os.unlink(tmp.name)
+        if not extracted:
+            logger.debug(f"{target_name} not found in encrypted backup.")
 
 
 def _raise_macos_fda_error(path: str, logger: logging.Logger) -> None:
@@ -196,9 +241,10 @@ def extract_plaintext(backup_dir: str,
     else:
         logger.info(f"Manifest map built: {len(manifest_map)} WhatsApp file(s).")
 
+    db_output_dir = os.path.join(output_dir, WA_DATABASES_DIR_NAME)
     logger.info("Extracting ChatStorage.sqlite from backup...")
     tmp_db = extract_to_temp(manifest_map, 'ChatStorage.sqlite', logger)
-    msgstore_path = _save_db_to_output(tmp_db, output_dir, 'ChatStorage.sqlite', logger)
+    msgstore_path = _save_db_to_output(tmp_db, db_output_dir, 'ChatStorage.sqlite', logger)
     os.unlink(tmp_db)
 
     ios_contacts_path = ios_contacts_override
@@ -206,10 +252,12 @@ def extract_plaintext(backup_dir: str,
         if manifest_map.get('ContactsV2.sqlite'):
             logger.info("Extracting ContactsV2.sqlite from backup...")
             tmp_contacts = extract_to_temp(manifest_map, 'ContactsV2.sqlite', logger)
-            ios_contacts_path = _save_db_to_output(tmp_contacts, output_dir, 'ContactsV2.sqlite', logger)
+            ios_contacts_path = _save_db_to_output(tmp_contacts, db_output_dir, 'ContactsV2.sqlite', logger)
             os.unlink(tmp_contacts)
         else:
             logger.warning("ContactsV2.sqlite not found in backup; proceeding without contacts.")
+
+    _extract_auxiliary_databases_unencrypted(manifest_map, db_output_dir, logger)
 
     return manifest_map, msgstore_path, ios_contacts_path
 
@@ -255,6 +303,7 @@ def extract_encrypted(backup_dir: str,
     domain_like = f"%{_domain.split('-', 1)[1]}%"
 
     os.makedirs(output_dir, exist_ok=True)
+    db_output_dir = os.path.join(output_dir, WA_DATABASES_DIR_NAME)
 
     # --- ChatStorage.sqlite ---
     logger.info("Decrypting ChatStorage.sqlite...")
@@ -271,7 +320,7 @@ def extract_encrypted(backup_dir: str,
         )
         os.unlink(tmp_db.name)
         raise SystemExit(1)
-    msgstore_path = _save_db_to_output(tmp_db.name, output_dir, 'ChatStorage.sqlite', logger)
+    msgstore_path = _save_db_to_output(tmp_db.name, db_output_dir, 'ChatStorage.sqlite', logger)
     os.unlink(tmp_db.name)
 
     # --- ContactsV2.sqlite ---
@@ -283,12 +332,14 @@ def extract_encrypted(backup_dir: str,
             backup.extract_file(relative_path='ContactsV2.sqlite',
                                 domain_like=domain_like,
                                 output_filename=tmp_contacts.name)
-            ios_contacts_path = _save_db_to_output(tmp_contacts.name, output_dir, 'ContactsV2.sqlite', logger)
+            ios_contacts_path = _save_db_to_output(tmp_contacts.name, db_output_dir, 'ContactsV2.sqlite', logger)
             os.unlink(tmp_contacts.name)
             logger.info("Decrypted ContactsV2.sqlite.")
         except FileNotFoundError:
             logger.warning("ContactsV2.sqlite not found in encrypted backup; proceeding without contacts.")
             os.unlink(tmp_contacts.name)
+
+    _extract_auxiliary_databases_encrypted(backup, domain_like, db_output_dir, logger)
 
     # --- Lazy media resolver ---
     # Decrypt each media file on demand, caching in a temp dir.
