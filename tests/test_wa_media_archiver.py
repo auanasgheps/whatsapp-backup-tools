@@ -519,7 +519,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, 'nojid');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert len(rows) == 1
         sender = rows[0][6]  # sender column
         assert sender == 'nojid'
@@ -531,7 +531,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert len(rows) == 1
         sender = rows[0][6]  # sender column
         assert sender == 'nojid'
@@ -544,7 +544,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert rows[0][6] == '447700900123'
 
     def test_1to1_sender_normal_jid_strips_at_suffix(self):
@@ -554,7 +554,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert rows[0][6] == '447700900456'
 
     def test_status_media_excluded_from_group_query(self):
@@ -565,7 +565,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert len(rows) == 0
 
     def test_status_media_excluded_from_1to1_query(self):
@@ -575,7 +575,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Media/393384259462@status/6/d/photo.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert len(rows) == 0
 
 
@@ -719,7 +719,7 @@ class TestExtractPlaintext:
         assert 'ChatStorage.sqlite' in manifest_map
         assert 'Message/Media/WhatsApp Images/IMG001.jpg' in manifest_map
         assert os.path.isfile(msgstore_path)
-        assert msgstore_path == str(output_dir / 'ChatStorage.sqlite')
+        assert msgstore_path == str(output_dir / 'Whatsapp Databases' / 'ChatStorage.sqlite')
 
     def test_contacts_none_when_not_in_backup(self, tmp_path, logger):
         backup_dir = self._make_backup(tmp_path / 'backup')
@@ -741,9 +741,10 @@ class TestExtractPlaintext:
     def test_overwrite_warning_logged(self, tmp_path, logger):
         backup_dir = self._make_backup(tmp_path / 'backup')
         output_dir = tmp_path / 'output'
-        output_dir.mkdir()
+        db_dir = output_dir / 'Whatsapp Databases'
+        db_dir.mkdir(parents=True, exist_ok=True)
         # Pre-create the DB file so overwrite warning fires
-        (output_dir / 'ChatStorage.sqlite').write_bytes(b'OLD')
+        (db_dir / 'ChatStorage.sqlite').write_bytes(b'OLD')
         import unittest.mock as mock
         with mock.patch.object(logger, 'warning') as mock_warn:
             br.extract_plaintext(str(backup_dir), str(output_dir), None, False, logger)
@@ -804,8 +805,8 @@ class TestExtractEncrypted:
             )
 
         assert os.path.isfile(msgstore_path)
-        assert msgstore_path == str(output_dir / 'ChatStorage.sqlite')
-        assert contacts_path is not None
+        assert msgstore_path == str(output_dir / 'Whatsapp Databases' / 'ChatStorage.sqlite')
+        assert contacts_path == str(output_dir / 'Whatsapp Databases' / 'ContactsV2.sqlite')
         # Resolver decrypts on demand
         media_path = resolver('Message/Media/WhatsApp Images/IMG001.jpg')
         assert media_path is not None
@@ -2221,6 +2222,23 @@ class TestSourceDetection:
     def test_returns_none_when_neither(self, tmp_path):
         assert sd.detect_source(str(tmp_path)) == (None, None)
 
+    def test_android_detected_in_whatsapp_databases_subfolder(self, tmp_path):
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir()
+        (db_dir / "msgstore.db").touch()
+        source_type, db_path = sd.detect_source(str(tmp_path))
+        assert source_type == "android"
+        assert db_path == str(db_dir / "msgstore.db")
+
+    def test_ios_detected_in_whatsapp_databases_subfolder(self, tmp_path):
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir()
+        (db_dir / "ChatStorage.sqlite").touch()
+        source_type, db_path = sd.detect_source(str(tmp_path))
+        assert source_type == "ios"
+        assert db_path == str(db_dir / "ChatStorage.sqlite")
+
+
 
 # ===========================================================================
 # adb_extractor: get_device_serial
@@ -2936,3 +2954,238 @@ class TestMain:
             wa.main()
         info_msgs = [str(c) for c in mock_logger.info.call_args_list]
         assert any('DRY RUN' in m for m in info_msgs)
+
+
+# ===========================================================================
+# iOS Auxiliary Database Extraction & HD Deduplication Tests
+# ===========================================================================
+
+class TestIosAuxiliaryDatabaseExtraction:
+    def test_extract_auxiliary_databases_unencrypted(self, tmp_path):
+        import logging
+        from wab_archiver import backup_reader as br
+
+        fake_ext = tmp_path / "fake_ext.sqlite"
+        fake_infra = tmp_path / "fake_infra.sqlite"
+        fake_lid = tmp_path / "fake_lid.sqlite"
+        fake_ext.write_bytes(b"EXT_DATA")
+        fake_infra.write_bytes(b"INFRA_DATA")
+        fake_lid.write_bytes(b"LID_DATA")
+
+        manifest_map = {
+            "ExtChatDB/ExtChatDatabase.sqlite": str(fake_ext),
+            "MessagingInfraDB_v2/MessagingInfraDatabase.sqlite": str(fake_infra),
+            "LID.sqlite": str(fake_lid),
+        }
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        logger = logging.getLogger("test_aux_extract")
+
+        br._extract_auxiliary_databases_unencrypted(manifest_map, str(output_dir), logger)
+
+        assert (output_dir / "ExtChatDatabase.sqlite").read_bytes() == b"EXT_DATA"
+        assert (output_dir / "MessagingInfraDatabase.sqlite").read_bytes() == b"INFRA_DATA"
+        assert (output_dir / "LID.sqlite").read_bytes() == b"LID_DATA"
+
+    def test_extract_auxiliary_databases_missing_is_graceful(self, tmp_path):
+        import logging
+        from wab_archiver import backup_reader as br
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        logger = logging.getLogger("test_aux_missing")
+
+        br._extract_auxiliary_databases_unencrypted({}, str(output_dir), logger)
+
+        assert not (output_dir / "ExtChatDatabase.sqlite").exists()
+        assert not (output_dir / "MessagingInfraDatabase.sqlite").exists()
+
+
+class TestIosHdDeduplication:
+    def test_find_ios_ext_db(self, tmp_path):
+        from wab_archiver import ios_handler as ios
+
+        d1 = tmp_path / "d1"
+        d1.mkdir()
+        assert ios.find_ios_ext_db([str(d1)]) is None
+
+        # Test nested ExtChatDB folder
+        nested = d1 / "ExtChatDB"
+        nested.mkdir()
+        nested_file = nested / "ExtChatDatabase.sqlite"
+        nested_file.touch()
+        assert ios.find_ios_ext_db([str(d1)]) == str(nested_file)
+
+        # Test flat folder
+        d2 = tmp_path / "d2"
+        d2.mkdir()
+        flat_file = d2 / "ExtChatDatabase.sqlite"
+        flat_file.touch()
+        assert ios.find_ios_ext_db([str(d2)]) == str(flat_file)
+
+    def test_check_ios_hd_association(self, tmp_path):
+        import logging
+        from wab_archiver import ios_handler as ios
+
+        logger = logging.getLogger("test_hd_assoc")
+        ext_path = tmp_path / "ExtChatDatabase.sqlite"
+        ext_conn = sqlite3.connect(str(ext_path))
+        ext_conn.execute("CREATE TABLE message_parent_association (stanza_id TEXT, parent_stanza_id TEXT, type INTEGER)")
+        ext_conn.execute("INSERT INTO message_parent_association VALUES ('child1', 'parent1', 10)")
+        ext_conn.commit()
+        ext_conn.close()
+
+        main_conn = sqlite3.connect(":memory:")
+        cursor = main_conn.cursor()
+
+        # Valid association found
+        assert ios.check_ios_hd_association(cursor, str(ext_path), logger) is True
+
+        # Non-existent file
+        assert ios.check_ios_hd_association(cursor, str(tmp_path / "nonexistent.sqlite"), logger) is False
+
+    def test_build_ios_query_hd_dedup_clause(self):
+        from wab_archiver import ios_handler as ios
+
+        query_no_dedup = ios.build_ios_query(None, None, False)
+        assert "ext.message_parent_association" not in query_no_dedup
+
+        query_with_dedup = ios.build_ios_query(None, None, True)
+        assert "ext.message_parent_association" in query_with_dedup
+        assert "mpa.type IN (10, 5)" in query_with_dedup
+
+    def test_ios_hd_dedup_execution(self, tmp_path):
+        from wab_archiver import ios_handler as ios
+
+        main_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        main_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZPARTNERNAME TEXT, ZCONTACTJID TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
+                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
+                ZPUSHNAME TEXT, ZSTANZAID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 1, 'Group 1', NULL);
+            -- Parent message (LQ)
+            INSERT INTO ZWAMEDIAITEM VALUES (10, 'lq.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 1000.0, 0, 1, 10, NULL, 'User1', 'STANZA_LQ');
+
+            -- Child message (HD)
+            INSERT INTO ZWAMEDIAITEM VALUES (11, 'hd.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE VALUES (101, 1001.0, 0, 1, 11, NULL, 'User1', 'STANZA_HD');
+        """)
+
+        ext_conn = sqlite3.connect(str(tmp_path / "ExtChatDatabase.sqlite"))
+        ext_conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+            INSERT INTO message_parent_association VALUES ('STANZA_HD', 'STANZA_LQ', 10, 1, 'group1@g.us');
+        """)
+        ext_conn.close()
+
+        main_conn.execute("ATTACH DATABASE ? AS ext", (str(tmp_path / "ExtChatDatabase.sqlite"),))
+
+        # Without dedup: both rows returned
+        rows_no_dedup = main_conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        assert len(rows_no_dedup) == 2
+
+        # With dedup: only the HD row returned (LQ parent filtered out)
+        rows_dedup = main_conn.execute(ios.build_ios_query(None, None, True)).fetchall()
+        assert len(rows_dedup) == 1
+        assert rows_dedup[0][0] == 101  # HD message ID
+        assert rows_dedup[0][2] == "Message/hd.jpg"
+
+    def test_run_forward_mode_ios(self, tmp_path, logger):
+        from wab_archiver.main import run_forward_mode, parse_args
+
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
+                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
+                ZPUSHNAME TEXT, ZSTANZAID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
+        """)
+        conn.close()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        (wa_root / "Message").mkdir()
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with patch("sys.argv", [
+            "wab-archiver", "archive",
+            "--msgstore", str(db_path),
+            "--wa-root", str(wa_root),
+            "--output", str(output_dir),
+            "--dry-run"
+        ]):
+            args = parse_args()
+        run_forward_mode(args, logger)
+
+    def test_run_forward_mode_ios_with_ext_db(self, tmp_path, logger):
+        from wab_archiver.main import run_forward_mode, parse_args
+
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
+                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
+                ZPUSHNAME TEXT, ZSTANZAID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
+        """)
+        conn.close()
+
+        ext_db = tmp_path / "ExtChatDatabase.sqlite"
+        conn = sqlite3.connect(str(ext_db))
+        conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+            INSERT INTO message_parent_association VALUES ('HD1', 'LQ1', 10, 1, 'chat@s.whatsapp.net');
+        """)
+        conn.close()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        (wa_root / "Message").mkdir()
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with patch("sys.argv", [
+            "wab-archiver", "archive",
+            "--msgstore", str(db_path),
+            "--wa-root", str(wa_root),
+            "--output", str(output_dir),
+            "--dry-run"
+        ]):
+            args = parse_args()
+        run_forward_mode(args, logger)
+
+

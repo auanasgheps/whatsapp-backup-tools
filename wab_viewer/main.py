@@ -496,12 +496,14 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
 
 
 def _detect_source_db(output_root: Path):
-    msgstore = output_root / "msgstore.db"
-    chat_storage = output_root / "ChatStorage.sqlite"
-    if msgstore.exists():
-        return ("android", str(msgstore))
-    if chat_storage.exists():
-        return ("ios", str(chat_storage))
+    wa_db_dir = output_root / "Whatsapp Databases"
+    for base in (wa_db_dir, output_root):
+        msgstore = base / "msgstore.db"
+        chat_storage = base / "ChatStorage.sqlite"
+        if msgstore.exists():
+            return ("android", str(msgstore))
+        if chat_storage.exists():
+            return ("ios", str(chat_storage))
     return (None, None)
 
 
@@ -1101,6 +1103,84 @@ def _ios_read_without_timestamp(msg_status: int, read_ts) -> bool:
     return msg_status == 8 and read_ts is None
 
 
+def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> list[dict]:
+    """Group per-device receipt rows from infra.receipt_device by user_jid."""
+    by_user: dict[str, dict] = {}
+    for row in infra_rows:
+        ujid = row["user_jid"]
+        if not ujid:
+            continue
+        deliv = row["delivered_timestamp"]
+        read = row["read_timestamp"]
+        played = row["played_timestamp"]
+
+        if ujid not in by_user:
+            by_user[ujid] = {
+                "delivered_sec": deliv,
+                "read_sec": read,
+                "played_sec": played,
+            }
+        else:
+            entry = by_user[ujid]
+            if deliv is not None:
+                entry["delivered_sec"] = min(entry["delivered_sec"], deliv) if entry["delivered_sec"] is not None else deliv
+            if read is not None:
+                entry["read_sec"] = min(entry["read_sec"], read) if entry["read_sec"] is not None else read
+            if played is not None:
+                entry["played_sec"] = min(entry["played_sec"], played) if entry["played_sec"] is not None else played
+
+    if not is_group:
+        delivered_secs = [d["delivered_sec"] for d in by_user.values() if d["delivered_sec"] is not None]
+        read_secs = [d["read_sec"] for d in by_user.values() if d["read_sec"] is not None]
+        played_secs = [d["played_sec"] for d in by_user.values() if d["played_sec"] is not None]
+        if not delivered_secs and not read_secs and not played_secs:
+            return []
+        deliv_ts = min(delivered_secs) * 1000 if delivered_secs else None
+        read_ts = min(read_secs) * 1000 if read_secs else None
+        played_ts = min(played_secs) * 1000 if played_secs else None
+        return [{
+            "name": "",
+            "jid": "",
+            "delivered_ts": deliv_ts,
+            "read_ts": read_ts,
+            "played_ts": played_ts,
+            "read_known": read_ts is not None,
+        }]
+
+    members = []
+    for ujid, data in by_user.items():
+        name = None
+        c_row = conn.execute("SELECT full_name FROM _ios_contacts WHERE jid = ?", (ujid,)).fetchone()
+        if c_row and c_row[0]:
+            name = c_row[0]
+        else:
+            prefix = ujid.split("@")[0]
+            c_row2 = conn.execute("SELECT full_name FROM _ios_contacts WHERE jid = ?", (prefix,)).fetchone()
+            if c_row2 and c_row2[0]:
+                name = c_row2[0]
+            else:
+                p_row = conn.execute("SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ?", (ujid,)).fetchone()
+                if p_row and p_row[0]:
+                    name = p_row[0]
+                else:
+                    name = prefix
+
+        jid_clean = ujid.split("@")[0]
+        deliv_ts = data["delivered_sec"] * 1000 if data["delivered_sec"] is not None else None
+        read_ts = data["read_sec"] * 1000 if data["read_sec"] is not None else None
+        played_ts = data["played_sec"] * 1000 if data["played_sec"] is not None else None
+
+        members.append({
+            "name": name or jid_clean or "",
+            "jid": jid_clean,
+            "delivered_ts": deliv_ts,
+            "read_ts": read_ts,
+            "played_ts": played_ts,
+            "read_known": read_ts is not None,
+        })
+    return members
+
+
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -1155,11 +1235,26 @@ def create_app(output_root: Path, rescan: bool = False):
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS _jid_map_resolved_lid ON _jid_map_resolved(lid_row_id)")
             if source_type == "ios":
-                contacts_v2 = Path(wa_db_path).parent / "ContactsV2.sqlite"
-                if contacts_v2.exists():
+                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT, full_name TEXT)")
+
+                def _find_ios_db(rel_path: str) -> Path | None:
+                    db_p = Path(wa_db_path)
+                    candidates = [
+                        db_p.parent / rel_path,
+                        db_p.parent / "Whatsapp Databases" / rel_path,
+                        db_p.parent.parent / "Whatsapp Databases" / rel_path,
+                        db_p.parent.parent / rel_path,
+                    ]
+                    for cand in candidates:
+                        if cand.is_file():
+                            return cand
+                    return None
+
+                contacts_v2 = _find_ios_db("ContactsV2.sqlite")
+                if contacts_v2:
                     conn.execute("ATTACH DATABASE ? AS cv", (str(contacts_v2),))
                     conn.execute("""
-                        CREATE TEMP TABLE IF NOT EXISTS _ios_contacts AS
+                        INSERT INTO _ios_contacts (jid, full_name)
                         SELECT ZLID AS jid, ZFULLNAME AS full_name
                             FROM cv.ZWAADDRESSBOOKCONTACT
                             WHERE ZLID IS NOT NULL AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''
@@ -1168,13 +1263,33 @@ def create_app(output_root: Path, rescan: bool = False):
                             FROM cv.ZWAADDRESSBOOKCONTACT
                             WHERE ZWHATSAPPID IS NOT NULL AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''
                     """)
-                else:
-                    conn.execute(
-                        "CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT, full_name TEXT)"
-                    )
+                lid_db = _find_ios_db("LID.sqlite")
+                if lid_db:
+                    conn.execute("ATTACH DATABASE ? AS lid_db", (str(lid_db),))
+                    conn.execute("""
+                        INSERT INTO _ios_contacts (jid, full_name)
+                        SELECT ZIDENTIFIER AS jid, '+' || ZPHONENUMBER AS full_name
+                        FROM lid_db.ZWAZACCOUNT
+                        WHERE ZIDENTIFIER IS NOT NULL
+                          AND ZPHONENUMBER IS NOT NULL
+                          AND ZPHONENUMBER != ''
+                          AND ZIDENTIFIER NOT IN (SELECT jid FROM _ios_contacts)
+                        UNION ALL
+                        SELECT SUBSTR(ZIDENTIFIER, 1, INSTR(ZIDENTIFIER, '@') - 1) AS jid, '+' || ZPHONENUMBER AS full_name
+                        FROM lid_db.ZWAZACCOUNT
+                        WHERE ZIDENTIFIER LIKE '%@lid'
+                          AND ZPHONENUMBER IS NOT NULL
+                          AND ZPHONENUMBER != ''
+                          AND SUBSTR(ZIDENTIFIER, 1, INSTR(ZIDENTIFIER, '@') - 1) NOT IN (SELECT jid FROM _ios_contacts)
+                    """)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS _ios_contacts_jid ON _ios_contacts(jid)"
                 )
+                infra_db = _find_ios_db("MessagingInfraDatabase.sqlite")
+                if not infra_db:
+                    infra_db = _find_ios_db("MessagingInfraDB_v2/MessagingInfraDatabase.sqlite")
+                if infra_db:
+                    conn.execute("ATTACH DATABASE ? AS infra", (str(infra_db),))
             _wa_local.conn = conn
         return conn
 
@@ -1811,32 +1926,61 @@ def create_app(output_root: Path, rescan: bool = False):
 
         else:
             table_exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
             ).fetchone()
             if not table_exists:
                 return jsonify({"available": False})
 
+            cols = {r[1] for r in conn.execute("PRAGMA table_info('ZWAMESSAGE')").fetchall()}
+            status_col = "m.ZMESSAGESTATUS" if "ZMESSAGESTATUS" in cols else "NULL"
+            stanza_col = "m.ZSTANZAID" if "ZSTANZAID" in cols else "NULL"
+
             row = conn.execute(
-                """SELECT mi.ZRECEIPTINFO,
+                f"""SELECT mi.ZRECEIPTINFO,
                           cs.ZGROUPINFO IS NOT NULL AS is_group,
                           CAST(m.ZMESSAGEDATE + 978307200 AS INTEGER) AS msg_ts_s,
                           m.ZCHATSESSION AS chat_session_pk,
-                          m.ZMESSAGESTATUS AS msg_status
-                   FROM ZWAMESSAGEINFO mi
-                   JOIN ZWAMESSAGE m ON m.Z_PK = mi.ZMESSAGE
+                          {status_col} AS msg_status,
+                          {stanza_col} AS stanza_id
+                   FROM ZWAMESSAGE m
+                   LEFT JOIN ZWAMESSAGEINFO mi ON mi.ZMESSAGE = m.Z_PK
                    JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
-                   WHERE mi.ZMESSAGE = ?""",
+                   WHERE m.Z_PK = ?""",
                 (message_id,)
             ).fetchone()
-            if not row or not row[0]:
+            if not row:
                 return jsonify({"available": False})
 
-            blob = bytes(row[0])
-            members = _parse_ios_receipt_blob(
-                blob, conn, is_group=bool(row[1]), msg_ts_s=row[2] or 0
-            )
+            is_group = bool(row["is_group"])
+            members = []
 
-            if bool(row[1]) and members:
+            has_receipt_device = False
+            try:
+                conn.execute("SELECT 1 FROM infra.receipt_device LIMIT 1")
+                has_receipt_device = True
+            except sqlite3.OperationalError:
+                has_receipt_device = False
+
+            if has_receipt_device and row["stanza_id"]:
+                infra_rows = conn.execute(
+                    """SELECT user_jid, device_id, delivered_timestamp, read_timestamp, played_timestamp
+                       FROM infra.receipt_device
+                       WHERE stanza_id = ?""",
+                    (row["stanza_id"],)
+                ).fetchall()
+                if infra_rows:
+                    members = _parse_ios_receipt_device_rows(infra_rows, conn, is_group)
+
+            if not members and row["ZRECEIPTINFO"]:
+                blob = bytes(row["ZRECEIPTINFO"])
+                members = _parse_ios_receipt_blob(
+                    blob, conn, is_group=is_group, msg_ts_s=row["msg_ts_s"] or 0
+                )
+
+            if not members and not row["ZRECEIPTINFO"]:
+                return jsonify({"available": False})
+
+            if is_group and members:
                 known_jids = {
                     r[0].split("@")[0]
                     for r in conn.execute(
@@ -1850,18 +1994,16 @@ def create_app(output_root: Path, rescan: bool = False):
                 }
                 members = [m for m in members if m["jid"] in known_jids]
 
-            # iOS stopped persisting per-recipient read timestamps for recent
-            # messages (~mid-2026), but the aggregate ZMESSAGESTATUS still records
-            # the read state. Surface it as read-without-time so the UI can
-            # distinguish it from a genuinely unread message.
             for m in members:
-                m["read_known"] = _ios_read_without_timestamp(row["msg_status"], m["read_ts"])
+                if m.get("read_known") is None:
+                    m["read_known"] = _ios_read_without_timestamp(row["msg_status"], m.get("read_ts"))
 
             result = {"available": True, "members": members}
             if len(members) == 1:
-                result["delivered_ts"] = members[0]["delivered_ts"]
-                result["read_ts"] = members[0]["read_ts"]
-                result["read_known"] = members[0]["read_known"]
+                result["delivered_ts"] = members[0].get("delivered_ts")
+                result["read_ts"] = members[0].get("read_ts")
+                result["played_ts"] = members[0].get("played_ts")
+                result["read_known"] = members[0].get("read_known")
             return jsonify(result)
 
     # ---- API: reaction details -----------------------------------------------

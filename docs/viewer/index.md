@@ -69,7 +69,7 @@ The server binds to `127.0.0.1` by default — it is not accessible from other m
 
 **No chats appear in the sidebar**
 
-- Verify `msgstore.db` (Android) or `ChatStorage.sqlite` (iOS) is in the output directory alongside `.wa_media_archiver.db`
+- Verify `msgstore.db` (Android) or `ChatStorage.sqlite` (iOS) is in the `Whatsapp Databases` subfolder (or directly in the output directory) alongside `.wa_media_archiver.db`
 - Run with `--rescan` to force a cache rebuild and check the console output for warnings
 
 **Media files return 404**
@@ -84,5 +84,4 @@ The server binds to `127.0.0.1` by default — it is not accessible from other m
 ## Known Limitations
 
 - **Profile pictures are not displayed.** On Android this requires extracting `wa.db` (not yet implemented). On iOS no local image data is available in the backup.
-- **iOS read timestamps absent for recent messages.** WhatsApp stopped storing read timestamps on-device around June 2026 — they are fetched live from servers instead. When a message is confirmed as read but no timestamp is on-device, the viewer shows "Read (time not stored)".
-- **Played receipts are not shown** for voice messages and video messages. The timing data is encoded in the receipt protobuf but has not been verified against ground-truth data across both platforms, so it is intentionally omitted for now.
+- **iOS read and played receipts require `MessagingInfraDatabase.sqlite`.** On modern iOS backups (v2.24+), delivery, read, and voice message played timestamps are read directly from `MessagingInfraDatabase.sqlite`. For older backups or messages not recorded in it (such as those sent via web or companion devices), the viewer falls back to `ChatStorage.sqlite`'s `ZRECEIPTINFO`, which shows "Read (time not stored)" when a read state is confirmed without a timestamp.

@@ -1124,7 +1124,9 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
             output_file = zlib.decompress(decrypted)
         except zlib.error:
             output_file = decrypted
-        args.msgstore = os.path.join(args.output, 'msgstore.db')
+        db_dir = os.path.join(args.output, "Whatsapp Databases")
+        os.makedirs(db_dir, exist_ok=True)
+        args.msgstore = os.path.join(db_dir, 'msgstore.db')
         if os.path.exists(args.msgstore):
             logger.warning(f"Overwriting existing {args.msgstore} with decrypted database.")
         with open(args.msgstore, 'wb') as out:
@@ -1230,7 +1232,17 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             for key, name in pushname_map.items():
                 contacts.setdefault(key, name)
 
-            query = ios_handler.build_ios_query(args.limit, since_ms)
+            candidate_dirs = [
+                os.path.join(args.output, "Whatsapp Databases"),
+                args.output,
+                os.path.dirname(os.path.abspath(args.msgstore)),
+            ]
+            if args.wa_roots:
+                candidate_dirs.extend(args.wa_roots)
+            ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
+            hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
+
+            query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup)
             group_subjects = dict(
                 cursor.execute(ios_handler.build_ios_group_subjects_query()).fetchall()
             )

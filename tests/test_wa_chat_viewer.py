@@ -227,6 +227,23 @@ class TestDetectSourceDb:
         assert typ is None
         assert path is None
 
+    def test_android_detected_in_whatsapp_databases(self, tmp_path):
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir()
+        (db_dir / "msgstore.db").touch()
+        typ, path = viewer._detect_source_db(tmp_path)
+        assert typ == "android"
+        assert path == str(db_dir / "msgstore.db")
+
+    def test_ios_detected_in_whatsapp_databases(self, tmp_path):
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir()
+        (db_dir / "ChatStorage.sqlite").touch()
+        typ, path = viewer._detect_source_db(tmp_path)
+        assert typ == "ios"
+        assert path == str(db_dir / "ChatStorage.sqlite")
+
+
 
 # ---------------------------------------------------------------------------
 # Tests: cache schema
@@ -2678,3 +2695,239 @@ class TestReactionDetailsEndpoint:
         assert data["available"] is True
         assert data["reactors"][0]["name"] == "Unknown"
         assert data["reactors"][0]["from_me"] == 0
+
+
+# ===========================================================================
+# iOS MessagingInfraDatabase & LID.sqlite Tests
+# ===========================================================================
+
+class TestIosReceiptDeviceParser:
+    def test_1to1_receipt_device_timestamps_converted_to_ms(self):
+        class _MockConn:
+            def execute(self, sql, params=None):
+                class _Row:
+                    def fetchone(self):
+                        return None
+                return _Row()
+
+        infra_rows = [
+            {
+                "user_jid": "15550002222@s.whatsapp.net",
+                "device_id": 0,
+                "delivered_timestamp": 1700000010,
+                "read_timestamp": 1700000050,
+                "played_timestamp": 1700000080,
+            },
+            {
+                "user_jid": "15550002222@s.whatsapp.net",
+                "device_id": 1,
+                "delivered_timestamp": 1700000015,
+                "read_timestamp": None,
+                "played_timestamp": None,
+            },
+        ]
+
+        members = viewer._parse_ios_receipt_device_rows(infra_rows, _MockConn(), is_group=False)
+        assert len(members) == 1
+        entry = members[0]
+        assert entry["delivered_ts"] == 1700000010 * 1000
+        assert entry["read_ts"] == 1700000050 * 1000
+        assert entry["played_ts"] == 1700000080 * 1000
+        assert entry["read_known"] is True
+
+    def test_group_receipt_device_resolves_names(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE _ios_contacts (jid TEXT, full_name TEXT)")
+        conn.execute("INSERT INTO _ios_contacts VALUES ('15550002222@s.whatsapp.net', 'Alice')")
+        conn.execute("CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT)")
+        conn.execute("INSERT INTO ZWAPROFILEPUSHNAME VALUES ('15550003333@s.whatsapp.net', 'Bob')")
+
+        infra_rows = [
+            {
+                "user_jid": "15550002222@s.whatsapp.net",
+                "device_id": 0,
+                "delivered_timestamp": 1700000010,
+                "read_timestamp": 1700000050,
+                "played_timestamp": None,
+            },
+            {
+                "user_jid": "15550003333@s.whatsapp.net",
+                "device_id": 0,
+                "delivered_timestamp": 1700000012,
+                "read_timestamp": None,
+                "played_timestamp": None,
+            },
+        ]
+
+        members = viewer._parse_ios_receipt_device_rows(infra_rows, conn, is_group=True)
+        assert len(members) == 2
+        m_map = {m["jid"]: m for m in members}
+        assert m_map["15550002222"]["name"] == "Alice"
+        assert m_map["15550002222"]["read_ts"] == 1700000050 * 1000
+        assert m_map["15550003333"]["name"] == "Bob"
+        assert m_map["15550003333"]["read_ts"] is None
+
+
+class TestIosLidDatabaseResolution:
+    def test_lid_db_resolves_unknown_lid_to_phone(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        lid_path = tmp_path / "LID.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        # 1. ChatStorage
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEINFO INTEGER, ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER
+            );
+            CREATE TABLE ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, '99@g.us', 'Test Group');
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 1, NULL, 1000, '15550001111@s.whatsapp.net', NULL);
+        """)
+
+        # Reaction from @lid user not in ContactsV2
+        lid_val = "999888777666555"
+        blob = _make_ios_reaction_blob([
+            {"token": "3AB0BA8A4CA7122CA06A", "lid": lid_val, "emoji": "🎉".encode("utf-8")},
+        ])
+        conn.execute("INSERT INTO ZWAMESSAGEINFO VALUES (100, 2, ?)", (blob,))
+        conn.execute("INSERT INTO ZWAMESSAGE VALUES (2, 10, 0, 100, 2000, '15550002222@s.whatsapp.net', NULL)")
+        conn.commit()
+        conn.close()
+
+        # 2. LID.sqlite mapping lid_val to phone number
+        lid_conn = sqlite3.connect(str(lid_path))
+        lid_conn.executescript(f"""
+            CREATE TABLE ZWAZACCOUNT (
+                Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER VARCHAR, ZPHONENUMBER VARCHAR
+            );
+            INSERT INTO ZWAZACCOUNT (Z_PK, ZIDENTIFIER, ZPHONENUMBER)
+            VALUES (1, '{lid_val}@lid', '15553334444');
+        """)
+        lid_conn.commit()
+        lid_conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/reaction_details/2").get_json()
+
+        assert data["available"] is True
+        assert data["reactors"][0]["name"] == "+15553334444"
+
+
+class TestIosMessageReceiptsApi:
+    def test_message_receipts_from_messaging_infra_db(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        infra_path = tmp_path / "MessagingInfraDatabase.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        # ChatStorage
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE INTEGER, ZSTANZAID TEXT, ZMESSAGESTATUS INTEGER
+            );
+            CREATE TABLE ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB);
+
+            INSERT INTO ZWACHATSESSION VALUES (1, NULL, '15550002222@s.whatsapp.net', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (10, 1, 1, 1000, 'STANZA_123', 8);
+        """)
+        conn.commit()
+        conn.close()
+
+        # MessagingInfraDatabase
+        infra_conn = sqlite3.connect(str(infra_path))
+        infra_conn.executescript("""
+            CREATE TABLE receipt_device (
+                _id INTEGER PRIMARY KEY, stanza_id TEXT, chat_jid TEXT, user_jid TEXT,
+                device_id INTEGER, send_timestamp LONG_INT, delivered_timestamp LONG_INT,
+                read_timestamp LONG_INT, played_timestamp LONG_INT, device_version INTEGER
+            );
+            INSERT INTO receipt_device VALUES (
+                1, 'STANZA_123', '15550002222@s.whatsapp.net', '15550002222@s.whatsapp.net',
+                0, 1700000000, 1700000005, 1700000045, 1700000060, 1
+            );
+        """)
+        infra_conn.commit()
+        infra_conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/message_receipts/10")
+            data = resp.get_json()
+
+        assert data["available"] is True
+        assert data["delivered_ts"] == 1700000005 * 1000
+        assert data["read_ts"] == 1700000045 * 1000
+        assert data["played_ts"] == 1700000060 * 1000
+        assert data["read_known"] is True
+
+    def test_message_receipts_from_messaging_infra_db_in_whatsapp_databases(self, tmp_path):
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir()
+        wa_path = db_dir / "ChatStorage.sqlite"
+        infra_path = db_dir / "MessagingInfraDatabase.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        # ChatStorage
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE INTEGER, ZSTANZAID TEXT, ZMESSAGESTATUS INTEGER
+            );
+            CREATE TABLE ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB);
+
+            INSERT INTO ZWACHATSESSION VALUES (1, NULL, '15550002222@s.whatsapp.net', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (10, 1, 1, 1000, 'STANZA_123', 8);
+        """)
+        conn.commit()
+        conn.close()
+
+        # MessagingInfraDatabase
+        infra_conn = sqlite3.connect(str(infra_path))
+        infra_conn.executescript("""
+            CREATE TABLE receipt_device (
+                _id INTEGER PRIMARY KEY, stanza_id TEXT, chat_jid TEXT, user_jid TEXT,
+                device_id INTEGER, send_timestamp LONG_INT, delivered_timestamp LONG_INT,
+                read_timestamp LONG_INT, played_timestamp LONG_INT, device_version INTEGER
+            );
+            INSERT INTO receipt_device VALUES (
+                1, 'STANZA_123', '15550002222@s.whatsapp.net', '15550002222@s.whatsapp.net',
+                0, 1700000000, 1700000005, 1700000045, 1700000060, 1
+            );
+        """)
+        infra_conn.commit()
+        infra_conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/message_receipts/10")
+            data = resp.get_json()
+
+        assert data["available"] is True
+        assert data["delivered_ts"] == 1700000005 * 1000
+        assert data["read_ts"] == 1700000045 * 1000
+        assert data["played_ts"] == 1700000060 * 1000
+        assert data["read_known"] is True
+

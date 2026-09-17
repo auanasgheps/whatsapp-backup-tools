@@ -97,7 +97,54 @@ def build_ios_group_subjects_query() -> str:
     """
 
 
-def build_ios_query(limit: int | None, since_ms: int | None) -> str:
+def find_ios_ext_db(candidate_dirs: list[str]) -> str | None:
+    """Find ExtChatDatabase.sqlite in candidate directories."""
+    for d in candidate_dirs:
+        if not d:
+            continue
+        p1 = os.path.join(d, "ExtChatDatabase.sqlite")
+        if os.path.isfile(p1):
+            return p1
+        p2 = os.path.join(d, "Whatsapp Databases", "ExtChatDatabase.sqlite")
+        if os.path.isfile(p2):
+            return p2
+        p3 = os.path.join(d, "ExtChatDB", "ExtChatDatabase.sqlite")
+        if os.path.isfile(p3):
+            return p3
+    return None
+
+
+def check_ios_hd_association(cursor: sqlite3.Cursor,
+                             ext_db_path: str | None,
+                             logger: logging.Logger) -> bool:
+    """
+    Check if ExtChatDatabase is available and has HD media associations (types 10 or 5).
+    Attaches the database as 'ext' to the cursor connection if valid.
+    """
+    if not ext_db_path or not os.path.isfile(ext_db_path):
+        return False
+
+    try:
+        cursor.execute("ATTACH DATABASE ? AS ext", (ext_db_path,))
+        table_row = cursor.execute(
+            "SELECT 1 FROM ext.sqlite_master WHERE type='table' AND name='message_parent_association'"
+        ).fetchone()
+        if not table_row:
+            return False
+
+        has_hd = cursor.execute(
+            "SELECT 1 FROM ext.message_parent_association WHERE type IN (10, 5) LIMIT 1"
+        ).fetchone()
+        if has_hd:
+            logger.info("Found ExtChatDatabase with HD media associations. HD deduplication enabled.")
+            return True
+        return False
+    except sqlite3.OperationalError as e:
+        logger.debug(f"Could not inspect ExtChatDatabase ({e}); proceeding without HD deduplication.")
+        return False
+
+
+def build_ios_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> str:
     """
     Main iOS media extraction query. Returns the same 10 columns as the Android
     query so process_rows() is unchanged.
@@ -120,6 +167,16 @@ def build_ios_query(limit: int | None, since_ms: int | None) -> str:
         since_clause = f"AND m.ZMESSAGEDATE >= {ios_since}"
     else:
         since_clause = ""
+
+    hd_dedup_clause = """
+        AND NOT EXISTS (
+            SELECT 1 FROM ext.message_parent_association mpa
+            JOIN ZWAMESSAGE m_hd ON m_hd.ZSTANZAID = mpa.stanza_id
+            JOIN ZWAMEDIAITEM mi_hd ON mi_hd.Z_PK = m_hd.ZMEDIAITEM
+            WHERE mpa.parent_stanza_id = m.ZSTANZAID
+              AND mpa.type IN (10, 5)
+              AND mi_hd.ZMEDIALOCALPATH IS NOT NULL
+        )""" if hd_dedup else ""
 
     return f"""
 SELECT * FROM (
@@ -151,6 +208,7 @@ SELECT * FROM (
           AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
           AND cs.ZPARTNERNAME IS NOT NULL
           {since_clause}
+          {hd_dedup_clause}
         {block_limit_clause}
     )
 
@@ -179,6 +237,7 @@ SELECT * FROM (
           AND mi.ZMEDIALOCALPATH IS NOT NULL
           AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
           {since_clause}
+          {hd_dedup_clause}
         {block_limit_clause}
     )
 )
