@@ -619,9 +619,63 @@ def _fts_android_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connectio
     _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
 
 
+_IOS_HD_DEDUP_CLAUSE = """
+    AND NOT EXISTS (
+        SELECT 1 FROM ext.message_parent_association mpa
+        JOIN ZWAMESSAGE m_hd ON m_hd.ZSTANZAID = mpa.stanza_id
+        JOIN ZWAMEDIAITEM mi_hd ON mi_hd.Z_PK = m_hd.ZMEDIAITEM
+        WHERE mpa.parent_stanza_id = m.ZSTANZAID
+          AND mpa.type IN (10, 5)
+          AND mi_hd.ZMEDIALOCALPATH IS NOT NULL
+    )
+"""
+
+
+def _find_ios_db(wa_db_path: str, rel_path: str, output_root: Path | None) -> Path | None:
+    db_p = Path(wa_db_path)
+    candidates = [
+        db_p.parent / rel_path,
+        db_p.parent / "Whatsapp Databases" / rel_path,
+        db_p.parent.parent / "Whatsapp Databases" / rel_path,
+        db_p.parent.parent / rel_path,
+        db_p.parent / "ExtChatDB" / rel_path,
+    ]
+    if output_root is not None:
+        candidates.extend([
+            output_root / "Whatsapp Databases" / rel_path,
+            output_root / rel_path,
+            output_root / "ExtChatDB" / rel_path,
+        ])
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _check_ios_hd_association(wa_db_path: str, ext_db_path: Path | None) -> bool:
+    if ext_db_path is None or not ext_db_path.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(wa_db_path)
+        conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db_path),))
+        has_table = conn.execute(
+            "SELECT 1 FROM ext.sqlite_master WHERE type='table' AND name='message_parent_association'"
+        ).fetchone()
+        if not has_table:
+            conn.close()
+            return False
+        has_hd = conn.execute(
+            "SELECT 1 FROM ext.message_parent_association WHERE type IN (10, 5) LIMIT 1"
+        ).fetchone()
+        conn.close()
+        return bool(has_hd)
+    except sqlite3.OperationalError:
+        return False
+
+
 def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
-                  chat_id: str, on_progress=None):
-    cursor = wa_conn.execute("""
+                  chat_id: str, on_progress, hd_clause: str):
+    sql = f"""
         SELECT
             m.Z_PK                                                      AS rowid,
             CAST(m.ZCHATSESSION AS TEXT)                               AS chat_id,
@@ -635,8 +689,10 @@ def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
         LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
         LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
         WHERE CAST(m.ZCHATSESSION AS TEXT) = ?
+          {hd_clause}
         ORDER BY m.ZMESSAGEDATE ASC
-    """, (chat_id,))
+    """
+    cursor = wa_conn.execute(sql, (chat_id,))
     _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
 
 
@@ -647,7 +703,17 @@ def _build_fts_chat(cache_conn: sqlite3.Connection, source_type: str, wa_db_path
     if source_type == "android":
         _fts_android_chat(wa_conn, cache_conn, chat_id, chat_type, on_progress=on_progress)
     else:
-        _fts_ios_chat(wa_conn, cache_conn, chat_id, on_progress=on_progress)
+        ext_db = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", None)
+        if not ext_db:
+            ext_db = _find_ios_db(wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", None)
+        has_ios_hd = _check_ios_hd_association(wa_db_path, ext_db)
+        hd_clause = _IOS_HD_DEDUP_CLAUSE if has_ios_hd else ""
+        if has_ios_hd and ext_db:
+            try:
+                wa_conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db),))
+            except sqlite3.OperationalError:
+                hd_clause = ""
+        _fts_ios_chat(wa_conn, cache_conn, chat_id, on_progress, hd_clause)
     wa_conn.close()
     cache_conn.execute(
         "INSERT OR IGNORE INTO indexed_chats (chat_id, chat_type) VALUES (?, ?)",
@@ -839,12 +905,22 @@ _IOS_SELECT = f"""
           ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
 """
 
-_IOS_FILTER = """
+_BASE_IOS_FILTER = """
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
         OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
     )
 """
+
+_BASE_IOS_FILTER_TS = """
+    AND (
+        (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+    )
+"""
+
+_IOS_FILTER = _BASE_IOS_FILTER
+_IOS_FILTER_TS = _BASE_IOS_FILTER_TS
 
 _ANDROID_TS = "COALESCE(m.timestamp, 0)"
 _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
@@ -855,12 +931,7 @@ _ANDROID_FILTER_TS = """
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND mm.file_path IS NOT NULL)
     )
 """
-_IOS_FILTER_TS = """
-    AND (
-        (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
-    )
-"""
+
 _ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type = 0)"
 _IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
 
@@ -1217,6 +1288,20 @@ def create_app(output_root: Path, rescan: bool = False):
 
         _wa_local = threading.local()
 
+        has_ios_hd = False
+        if source_type == "ios" and wa_db_path is not None:
+            ext_db_init = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", output_root)
+            if not ext_db_init:
+                ext_db_init = _find_ios_db(wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", output_root)
+            has_ios_hd = _check_ios_hd_association(wa_db_path, ext_db_init)
+
+        if has_ios_hd:
+            globals()['_IOS_FILTER'] = _BASE_IOS_FILTER + _IOS_HD_DEDUP_CLAUSE
+            globals()['_IOS_FILTER_TS'] = _BASE_IOS_FILTER_TS + _IOS_HD_DEDUP_CLAUSE
+        else:
+            globals()['_IOS_FILTER'] = _BASE_IOS_FILTER
+            globals()['_IOS_FILTER_TS'] = _BASE_IOS_FILTER_TS
+
     def get_wa():
         if source_type is None:
             return None
@@ -1237,20 +1322,7 @@ def create_app(output_root: Path, rescan: bool = False):
             if source_type == "ios":
                 conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT, full_name TEXT)")
 
-                def _find_ios_db(rel_path: str) -> Path | None:
-                    db_p = Path(wa_db_path)
-                    candidates = [
-                        db_p.parent / rel_path,
-                        db_p.parent / "Whatsapp Databases" / rel_path,
-                        db_p.parent.parent / "Whatsapp Databases" / rel_path,
-                        db_p.parent.parent / rel_path,
-                    ]
-                    for cand in candidates:
-                        if cand.is_file():
-                            return cand
-                    return None
-
-                contacts_v2 = _find_ios_db("ContactsV2.sqlite")
+                contacts_v2 = _find_ios_db(wa_db_path, "ContactsV2.sqlite", output_root)
                 if contacts_v2:
                     conn.execute("ATTACH DATABASE ? AS cv", (str(contacts_v2),))
                     conn.execute("""
@@ -1263,7 +1335,7 @@ def create_app(output_root: Path, rescan: bool = False):
                             FROM cv.ZWAADDRESSBOOKCONTACT
                             WHERE ZWHATSAPPID IS NOT NULL AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''
                     """)
-                lid_db = _find_ios_db("LID.sqlite")
+                lid_db = _find_ios_db(wa_db_path, "LID.sqlite", output_root)
                 if lid_db:
                     conn.execute("ATTACH DATABASE ? AS lid_db", (str(lid_db),))
                     conn.execute("""
@@ -1285,11 +1357,19 @@ def create_app(output_root: Path, rescan: bool = False):
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS _ios_contacts_jid ON _ios_contacts(jid)"
                 )
-                infra_db = _find_ios_db("MessagingInfraDatabase.sqlite")
+                infra_db = _find_ios_db(wa_db_path, "MessagingInfraDatabase.sqlite", output_root)
                 if not infra_db:
-                    infra_db = _find_ios_db("MessagingInfraDB_v2/MessagingInfraDatabase.sqlite")
+                    infra_db = _find_ios_db(wa_db_path, "MessagingInfraDB_v2/MessagingInfraDatabase.sqlite", output_root)
                 if infra_db:
                     conn.execute("ATTACH DATABASE ? AS infra", (str(infra_db),))
+                ext_db = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", output_root)
+                if not ext_db:
+                    ext_db = _find_ios_db(wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", output_root)
+                if ext_db:
+                    try:
+                        conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db),))
+                    except sqlite3.OperationalError:
+                        pass
             _wa_local.conn = conn
         return conn
 

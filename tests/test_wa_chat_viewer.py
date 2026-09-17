@@ -2931,3 +2931,356 @@ class TestIosMessageReceiptsApi:
         assert data["played_ts"] == 1700000060 * 1000
         assert data["read_known"] is True
 
+
+class TestIosHdDeduplication:
+    def test_ios_hd_dedup_filters_lq_parent_when_ext_db_present(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        ext_path = tmp_path / "ExtChatDatabase.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        # ChatStorage
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            -- Parent message (LQ)
+            INSERT INTO ZWAMEDIAITEM VALUES (20, 'Media/lq.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 10, 0, 1000.0, 'STANZA_LQ', 1, 20, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+
+            -- Child message (HD)
+            INSERT INTO ZWAMEDIAITEM VALUES (21, 'Media/hd.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (101, 10, 0, 1001.0, 'STANZA_HD', 1, 21, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        # ExtChatDatabase with HD association (type 10)
+        ext_conn = sqlite3.connect(str(ext_path))
+        ext_conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+            INSERT INTO message_parent_association VALUES ('STANZA_HD', 'STANZA_LQ', 10, 1, 'group1@g.us');
+        """)
+        ext_conn.commit()
+        ext_conn.close()
+
+        # Archive DB: only the HD file was archived
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) "
+            "VALUES ('Message/Media/hd.jpg', 'photos/hd.jpg')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=group")
+            messages = resp.get_json()
+
+        # Only the HD message should be returned, LQ parent filtered out
+        assert len(messages) == 1
+        assert messages[0]["msg_id"] == 101
+        assert messages[0]["archive_path"] == "photos/hd.jpg"
+
+    def test_ios_hd_dedup_in_subfolder(self, tmp_path):
+        wa_dir = tmp_path / "Whatsapp Databases"
+        wa_dir.mkdir()
+        wa_path = wa_dir / "ChatStorage.sqlite"
+        ext_path = wa_dir / "ExtChatDatabase.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAMEDIAITEM VALUES (20, 'Media/lq.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 10, 0, 1000.0, 'STANZA_LQ', 1, 20, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+
+            INSERT INTO ZWAMEDIAITEM VALUES (21, 'Media/hd.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (101, 10, 0, 1001.0, 'STANZA_HD', 1, 21, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        ext_conn = sqlite3.connect(str(ext_path))
+        ext_conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+            INSERT INTO message_parent_association VALUES ('STANZA_HD', 'STANZA_LQ', 10, 1, 'group1@g.us');
+        """)
+        ext_conn.commit()
+        ext_conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) "
+            "VALUES ('Message/Media/hd.jpg', 'photos/hd.jpg')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=group")
+            messages = resp.get_json()
+
+        assert len(messages) == 1
+        assert messages[0]["msg_id"] == 101
+
+    def test_ios_hd_dedup_keeps_both_when_ext_db_absent(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAMEDIAITEM VALUES (20, 'Media/lq.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 10, 0, 1000.0, 'STANZA_LQ', 1, 20, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+
+            INSERT INTO ZWAMEDIAITEM VALUES (21, 'Media/hd.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (101, 10, 0, 1001.0, 'STANZA_HD', 1, 21, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=group")
+            messages = resp.get_json()
+
+        # Both returned when ExtChatDatabase is absent
+        assert len(messages) == 2
+
+    def test_ios_fts_indexing_excludes_lq_parent(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        ext_path = tmp_path / "ExtChatDatabase.sqlite"
+        cache_path = tmp_path / ".wa_viewer.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZTEXT TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAMEDIAITEM VALUES (20, 'Media/lq.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 10, 1000.0, 'STANZA_LQ', 1, 20, 'Photo 1');
+
+            INSERT INTO ZWAMEDIAITEM VALUES (21, 'Media/hd.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (101, 10, 1001.0, 'STANZA_HD', 1, 21, 'Photo 1 HD');
+        """)
+        conn.commit()
+        conn.close()
+
+        ext_conn = sqlite3.connect(str(ext_path))
+        ext_conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+            INSERT INTO message_parent_association VALUES ('STANZA_HD', 'STANZA_LQ', 10, 1, 'group1@g.us');
+        """)
+        ext_conn.commit()
+        ext_conn.close()
+
+        cache_conn = make_cache_db(cache_path)
+        viewer._build_fts_chat(cache_conn, "ios", str(wa_path), "10", "group", None)
+
+        indexed = cache_conn.execute("SELECT rowid FROM message_index").fetchall()
+        rowids = [r["rowid"] for r in indexed]
+        assert 101 in rowids
+        assert 100 not in rowids
+        cache_conn.close()
+
+    def test_ios_hd_dedup_album_multiple_photos(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        ext_path = tmp_path / "ExtChatDatabase.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+        """)
+        ext_conn = sqlite3.connect(str(ext_path))
+        ext_conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+        """)
+        archive_conn = make_archive_db(archive_path)
+
+        for i in range(5):
+            lq_pk = 100 + i
+            hd_pk = 200 + i
+            lq_mi = 10 + i
+            hd_mi = 30 + i
+            lq_stanza = f"LQ_STANZA_{i}"
+            hd_stanza = f"HD_STANZA_{i}"
+            lq_file = f"Media/lq_{i}.jpg"
+            hd_file = f"Media/hd_{i}.jpg"
+
+            conn.execute("INSERT INTO ZWAMEDIAITEM VALUES (?, ?, NULL)", (lq_mi, lq_file))
+            conn.execute("INSERT INTO ZWAMESSAGE VALUES (?, 10, 0, ?, ?, 1, ?, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net')",
+                         (lq_pk, 1000.0 + i, lq_stanza, lq_mi))
+
+            conn.execute("INSERT INTO ZWAMEDIAITEM VALUES (?, ?, NULL)", (hd_mi, hd_file))
+            conn.execute("INSERT INTO ZWAMESSAGE VALUES (?, 10, 0, ?, ?, 1, ?, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net')",
+                         (hd_pk, 1000.0 + i + 0.1, hd_stanza, hd_mi))
+
+            ext_conn.execute("INSERT INTO message_parent_association VALUES (?, ?, 10, ?, 'group1@g.us')",
+                             (hd_stanza, lq_stanza, i))
+
+            archive_conn.execute("INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
+                                 (f"Message/{hd_file}", f"photos/{hd_file}"))
+
+        conn.commit()
+        conn.close()
+        ext_conn.commit()
+        ext_conn.close()
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=group")
+            messages = resp.get_json()
+
+        # Should return exactly 5 HD messages, none of the 5 LQ preview rows
+        assert len(messages) == 5
+        for m in messages:
+            assert m["msg_id"] >= 200
+            assert m["archive_path"] is not None
+
+    def test_ios_hd_dedup_gallery_counts_and_missing(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        ext_path = tmp_path / "ExtChatDatabase.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            -- Parent message (LQ) - NOT in archive_copies
+            INSERT INTO ZWAMEDIAITEM VALUES (20, 'Media/lq.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 10, 0, 1000.0, 'STANZA_LQ', 1, 20, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+
+            -- Child message (HD) - in archive_copies
+            INSERT INTO ZWAMEDIAITEM VALUES (21, 'Media/hd.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (101, 10, 0, 1001.0, 'STANZA_HD', 1, 21, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+
+            -- Independent genuinely missing message - NOT in archive_copies
+            INSERT INTO ZWAMEDIAITEM VALUES (22, 'Media/missing.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (102, 10, 0, 1002.0, 'STANZA_MISSING', 1, 22, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        ext_conn = sqlite3.connect(str(ext_path))
+        ext_conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+            INSERT INTO message_parent_association VALUES ('STANZA_HD', 'STANZA_LQ', 10, 1, 'group1@g.us');
+        """)
+        ext_conn.commit()
+        ext_conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) "
+            "VALUES ('Message/Media/hd.jpg', 'photos/hd.jpg')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            count_resp = client.get("/api/media/count?chat_id=10&chat_type=group")
+            counts = count_resp.get_json()
+
+            gallery_resp = client.get("/api/media?chat_id=10&chat_type=group")
+            gallery = gallery_resp.get_json()
+
+        # Deduplication check:
+        # - Total is 2 (1 HD photo + 1 genuine missing photo, LQ parent excluded)
+        # - Archived is 1 (the HD photo)
+        # - Missing is 1 (the genuine missing photo, NOT inflated by the LQ duplicate)
+        assert counts["total"] == 2
+        assert counts["archived"] == 1
+        assert counts["by_type"]["image"]["count"] == 2
+        assert counts["by_type"]["image"]["missing"] == 1
+
+        # Gallery grid only returns the archived HD photo
+        assert len(gallery) == 1
+        assert gallery[0]["msg_id"] == 101
+        assert gallery[0]["archive_path"] == "photos/hd.jpg"
+
+
+
+
