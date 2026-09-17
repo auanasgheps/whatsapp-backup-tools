@@ -1865,6 +1865,40 @@ class TestHtmlTemplate:
         )
 
 
+class TestReactionsFrontendLayout:
+    def test_reactions_css_corner_alignment(self):
+        """Reactions must be anchored on the receiver's corner:
+        sent (from-me) -> right, recv (from-them) -> left."""
+        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        sent_match = re.search(r"\.msg-row\.sent\s+\.msg-reactions\s*\{([^}]+)\}", css)
+        assert sent_match, ".msg-row.sent .msg-reactions rule missing in app.css"
+        assert "right:" in sent_match.group(1), ".msg-row.sent .msg-reactions must align right"
+
+        recv_match = re.search(r"\.msg-row\.recv\s+\.msg-reactions\s*\{([^}]+)\}", css)
+        assert recv_match, ".msg-row.recv .msg-reactions rule missing in app.css"
+        assert "left:" in recv_match.group(1), ".msg-row.recv .msg-reactions must align left"
+
+    def test_reactions_css_no_split_badge(self):
+        """app.css must not contain opposite-corner split rules (rx-badge-2)."""
+        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+        assert "rx-badge-2" not in css, "Obsolete rx-badge-2 rule still found in app.css"
+
+    def test_reactions_js_no_split_logic(self):
+        """app.js must not split reactions into rx-badge-2."""
+        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "rx-badge-2" not in js, "Obsolete rx-badge-2 logic still found in app.js"
+
+    def test_reactions_js_marks_has_reactions(self):
+        """app.js must add 'has-reactions' class to message rows with reactions."""
+        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "has-reactions" in js
+
+
 # ---------------------------------------------------------------------------
 # Tests: /api/chat-info and /api/chat-info/media-size
 # ---------------------------------------------------------------------------

@@ -371,25 +371,29 @@
     .msg-row.recv .msg-meta { color: var(--bubble-meta); }
 
     .msg-reactions {
-      display: flex; flex-wrap: wrap; gap: 3px;
-      margin-top: 2px; padding: 0;
-    }
-    .msg-row.sent .msg-reactions { justify-content: flex-end; }
-    .msg-row.recv .msg-reactions { justify-content: flex-start; }
-    /* Second reactions row (iOS only) — opposite corner */
-    .msg-row.sent .rx-badge-2 { justify-content: flex-start; }
-    .msg-row.recv .rx-badge-2 { justify-content: flex-end; }
-    .rx-badge {
-      display: inline-flex; align-items: center;
-      background: rgba(255,255,255,0.9);
-      color: #000;
-      border: 1px solid rgba(0,0,0,0.12);
-      border-radius: 10px;
-      font-size: 12px;
-      padding: 1px 5px;
+      position: absolute;
+      bottom: -10px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1px 6px;
+      font-size: 11px;
       line-height: 1.4;
       cursor: pointer;
+      z-index: 2;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+      user-select: none;
+      white-space: nowrap;
     }
+    .msg-row.sent .msg-reactions { right: 8px; }
+    .msg-row.recv .msg-reactions { left: 8px; }
+    .msg-row.has-reactions { margin-bottom: 12px; }
+    .msg-row.has-reactions .msg-bubble { min-width: 64px; }
+    .rx-count { font-size: 11px; opacity: 0.85; margin-left: 2px; }
     .rx-details-total {
       font-weight: 600;
       padding-bottom: 6px;
@@ -397,7 +401,6 @@
       border-bottom: 1px solid var(--border);
       color: var(--text);
     }
-    .msg-row.sent .rx-badge { background: var(--surface2); color: var(--text); }
 
     .msg-media { border-radius: 4px; overflow: hidden; max-width: 100%; }
     .msg-media img, .msg-media video { display: block; max-width: 320px; max-height: 300px; width: 100%; height: auto; cursor: pointer; }
