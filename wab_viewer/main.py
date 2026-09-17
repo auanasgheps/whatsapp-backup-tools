@@ -1330,12 +1330,21 @@ def create_app(output_root: Path, rescan: bool = False):
             conn.execute("PRAGMA temp_store = MEMORY")
             conn.execute("ATTACH DATABASE ? AS arch", (str(archive_db_path),))
             if source_type == "android":
-                conn.execute("""
-                    CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved AS
-                    SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                    FROM jid_map GROUP BY lid_row_id
-                """)
-                conn.execute("CREATE INDEX IF NOT EXISTS _jid_map_resolved_lid ON _jid_map_resolved(lid_row_id)")
+                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)")
+                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _lid_map_resolved (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)")
+                try:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                        SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                        FROM jid_map GROUP BY lid_row_id
+                    """)
+                    conn.execute("""
+                        INSERT OR IGNORE INTO _lid_map_resolved (jid_row_id, lid_row_id)
+                        SELECT jid_row_id, MIN(lid_row_id) AS lid_row_id
+                        FROM jid_map GROUP BY jid_row_id
+                    """)
+                except sqlite3.OperationalError:
+                    pass
             if source_type == "ios":
                 conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT PRIMARY KEY, full_name TEXT, phone_number TEXT)")
 
@@ -1592,18 +1601,39 @@ def create_app(output_root: Path, rescan: bool = False):
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
 
-    # Build _ANDROID_SELECT based on whether message_add_on tables exist
+    # Build _ANDROID_SELECT based on whether message_add_on and lid_display_name tables exist
     has_reactions = False
     has_ios_reactions = False
+    has_lid_dn = False
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
-        has_reactions = _tmp_wa.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
-        ).fetchone() is not None
-        has_ios_reactions = _tmp_wa.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
-        ).fetchone() is not None
+        _wa_tables = {r[0] for r in _tmp_wa.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        has_reactions = "message_add_on" in _wa_tables
+        has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
+        has_lid_dn = "lid_display_name" in _wa_tables
         _tmp_wa.close()
+
+    ldn_select_joins = """
+    LEFT JOIN _lid_map_resolved jm_lid_s ON jm_lid_s.jid_row_id = m.sender_jid_row_id
+    LEFT JOIN lid_display_name ldn_s_direct ON ldn_s_direct.lid_row_id = m.sender_jid_row_id
+    LEFT JOIN lid_display_name ldn_s_mapped ON ldn_s_mapped.lid_row_id = jm_lid_s.lid_row_id
+
+    LEFT JOIN _lid_map_resolved jm_lid_sq ON jm_lid_sq.jid_row_id = mq.sender_jid_row_id
+    LEFT JOIN lid_display_name ldn_sq_direct ON ldn_sq_direct.lid_row_id = mq.sender_jid_row_id
+    LEFT JOIN lid_display_name ldn_sq_mapped ON ldn_sq_mapped.lid_row_id = jm_lid_sq.lid_row_id
+""" if has_lid_dn else ""
+
+    ldn_sender_arm = """
+            NULLIF(ldn_s_direct.display_name, ''),
+            NULLIF(ldn_s_mapped.display_name, ''),
+""" if has_lid_dn else ""
+
+    ldn_quoted_sender_arm = """
+                 NULLIF(ldn_sq_direct.display_name, ''),
+                 NULLIF(ldn_sq_mapped.display_name, ''),
+""" if has_lid_dn else ""
 
     globals()['_ANDROID_SELECT'] = f"""
     SELECT
@@ -1616,6 +1646,7 @@ def create_app(output_root: Path, rescan: bool = False):
             CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
             CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
                  THEN '+' || COALESCE(j2.user, j.user) END,
+            {ldn_sender_arm}
             ''
         )                                                            AS sender,
         m.from_me,
@@ -1634,7 +1665,9 @@ def create_app(output_root: Path, rescan: bool = False):
         CASE WHEN mq.from_me = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
-                 CASE WHEN jq.user IS NOT NULL THEN '+' || jq.user END,
+                 CASE WHEN COALESCE(jq2.user, jq.user) IS NOT NULL
+                      THEN '+' || COALESCE(jq2.user, jq.user) END,
+                 {ldn_quoted_sender_arm}
                  '') END                                             AS quoted_sender,
         COALESCE(mq.timestamp, 0)                                    AS quoted_ts
     FROM message m
@@ -1645,8 +1678,11 @@ def create_app(output_root: Path, rescan: bool = False):
     {_ANDROID_JID_MAP}
     LEFT JOIN message_quoted mq ON mq.message_row_id = m._id
     LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id
+    LEFT JOIN _jid_map_resolved jmq ON jmq.lid_row_id = mq.sender_jid_row_id
+    LEFT JOIN jid jq2 ON jq2._id = jmq.jid_row_id
+    {ldn_select_joins}
     LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
-    LEFT JOIN arch.contacts con_sq ON con_sq.number = jq.user
+    LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)
     LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
 """
 
@@ -2271,12 +2307,20 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify({"available": False})
 
         if source_type == "android":
-            table_exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
-            ).fetchone()
-            if not table_exists:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "message_add_on" not in tables:
                 return jsonify({"available": False})
-            rows = conn.execute("""
+            has_lid_dn = "lid_display_name" in tables
+            ldn_rx_join = """
+                LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = ao.sender_jid_row_id
+                LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = ao.sender_jid_row_id
+                LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
+            """ if has_lid_dn else ""
+            ldn_rx_arm = """
+                           NULLIF(ldn_direct.display_name, ''),
+                           NULLIF(ldn_mapped.display_name, ''),
+            """ if has_lid_dn else ""
+            rows = conn.execute(f"""
                 SELECT r.reaction AS emoji,
                        ao.from_me,
                        COALESCE(
@@ -2284,6 +2328,7 @@ def create_app(output_root: Path, rescan: bool = False):
                            CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
                            CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
                                 THEN '+' || COALESCE(j2.user, j.user) END,
+                           {ldn_rx_arm}
                            ''
                        ) AS name
                 FROM message_add_on ao
@@ -2291,6 +2336,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j ON j._id = ao.sender_jid_row_id
                 LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = ao.sender_jid_row_id
                 LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
+                {ldn_rx_join}
                 LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)
                 WHERE ao.parent_message_row_id = ?
             """, (message_id,)).fetchall()
@@ -2405,39 +2451,99 @@ def create_app(output_root: Path, rescan: bool = False):
     # ---- API: chat info -------------------------------------------------------
 
     def _group_members_android(conn, chat_id: str) -> list:
-        jid_cols = {r["name"] for r in conn.execute("PRAGMA table_info(jid)").fetchall()}
+        # Note on Android WhatsApp: User-chosen friendly push names (wa_name) reside
+        # in /data/data/com.whatsapp/databases/wa.db (table wa_contacts). Extracting wa.db
+        # requires root privileges on the device, which is not implemented in the Viewer.
+        # In standard msgstore.db backups, lid_display_name only contains Meta's privacy-masked
+        # phone strings (e.g. +39••••••••04), so unsaved members resolve to their real phone number
+        # when mapped via jid_map, falling back to lid_display_name only if completely unmapped.
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        jid_cols = {r["name"] for r in conn.execute("PRAGMA table_info(jid)").fetchall()} if "jid" in tables else set()
         has_server = "server" in jid_cols
         has_raw_string = "raw_string" in jid_cols
+        has_lid_dn = "lid_display_name" in tables
+        has_gpu = "group_participant_user" in tables
         j_phone_fallback = "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END" if has_server else "j.user"
-        join_gp_jid = "j_gp.raw_string = gp.jid" if has_raw_string else "j_gp.user = NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')"
-        gjid_pred = "gp.gjid = (SELECT j.raw_string FROM jid j WHERE j._id = c.jid_row_id)" if has_raw_string else "1=1"
 
-        try:
-            rows = conn.execute(f"""
-                SELECT
+        ldn_arm = """
+            NULLIF(ldn_direct.display_name, ''),
+            NULLIF(ldn_mapped.display_name, ''),
+        """ if has_lid_dn else ""
+
+        # 1. Modern WhatsApp: group_participant_user
+        if has_gpu:
+            try:
+                phone_expr_gpu = """
                     COALESCE(
                         j_phone.user,
-                        CASE WHEN gp.jid NOT LIKE '%@lid'
-                             THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
-                        END,
-                        ''
-                    ) AS number,
+                        CASE WHEN j_user.server = 's.whatsapp.net' THEN j_user.user END
+                    )
+                """ if has_server else "COALESCE(j_phone.user, j_user.user)"
+                ldn_gpu_join = """
+                    LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = gpu.user_jid_row_id
+                    LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = gpu.user_jid_row_id
+                    LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
+                """ if has_lid_dn else ""
+
+                rows = conn.execute(f"""
+                    SELECT
+                        COALESCE({phone_expr_gpu}, '') AS number,
+                        CASE WHEN j_user.raw_string = 'lid_me' THEN 'You'
+                             ELSE COALESCE(
+                                 NULLIF(con.display_name, ''),
+                                 NULLIF(con_lid.display_name, ''),
+                                 CASE WHEN {phone_expr_gpu} IS NOT NULL
+                                      THEN '+' || {phone_expr_gpu}
+                                 END,
+                                 {ldn_arm}
+                                 'Unknown'
+                             )
+                        END AS name
+                    FROM group_participant_user gpu
+                    JOIN chat c ON c._id = CAST(? AS INTEGER)
+                    JOIN jid j_user ON j_user._id = gpu.user_jid_row_id
+                    LEFT JOIN _jid_map_resolved jm_phone ON jm_phone.lid_row_id = gpu.user_jid_row_id
+                    LEFT JOIN jid j_phone ON j_phone._id = jm_phone.jid_row_id
+                    {ldn_gpu_join}
+                    LEFT JOIN arch.contacts con ON con.number = {phone_expr_gpu}
+                    LEFT JOIN arch.contacts con_lid ON con_lid.number = j_user.user
+                    WHERE gpu.group_jid_row_id = c.jid_row_id
+                    ORDER BY name
+                """, (chat_id,)).fetchall()
+                if rows:
+                    return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower() and "no such column" not in str(e).lower():
+                    raise
+
+        # 2. Legacy WhatsApp: group_participants
+        join_gp_jid = "j_gp.raw_string = gp.jid" if has_raw_string else "j_gp.user = NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')"
+        gjid_pred = "gp.gjid = (SELECT j.raw_string FROM jid j WHERE j._id = c.jid_row_id)" if has_raw_string else "1=1"
+        try:
+            phone_expr_gp = """
+                COALESCE(
+                    j_phone.user,
+                    CASE WHEN gp.jid NOT LIKE '%@lid'
+                         THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
+                    END
+                )
+            """
+            ldn_gp_join = """
+                LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = j_gp._id
+                LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = j_gp._id
+                LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
+            """ if has_lid_dn else ""
+
+            rows = conn.execute(f"""
+                SELECT
+                    COALESCE({phone_expr_gp}, '') AS number,
                     COALESCE(
                         NULLIF(con.display_name, ''),
                         NULLIF(con_lid.display_name, ''),
-                        CASE WHEN COALESCE(
-                            j_phone.user,
-                            CASE WHEN gp.jid NOT LIKE '%@lid'
-                                 THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
-                            END
-                        ) IS NOT NULL
-                        THEN '+' || COALESCE(
-                            j_phone.user,
-                            CASE WHEN gp.jid NOT LIKE '%@lid'
-                                 THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
-                            END
-                        )
+                        CASE WHEN {phone_expr_gp} IS NOT NULL
+                             THEN '+' || {phone_expr_gp}
                         END,
+                        {ldn_arm}
                         'Unknown'
                     ) AS name
                 FROM group_participants gp
@@ -2445,15 +2551,9 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j_gp ON {join_gp_jid}
                 LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = j_gp._id
                 LEFT JOIN jid j_phone ON j_phone._id = jm.jid_row_id
-                LEFT JOIN arch.contacts con
-                       ON con.number = COALESCE(
-                           j_phone.user,
-                           CASE WHEN gp.jid NOT LIKE '%@lid'
-                                THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
-                           END
-                       )
-                LEFT JOIN arch.contacts con_lid
-                       ON con_lid.number = j_gp.user
+                {ldn_gp_join}
+                LEFT JOIN arch.contacts con ON con.number = {phone_expr_gp}
+                LEFT JOIN arch.contacts con_lid ON con_lid.number = j_gp.user
                 WHERE {gjid_pred}
                   AND gp.jid != ''
                 ORDER BY name
@@ -2463,25 +2563,25 @@ def create_app(output_root: Path, rescan: bool = False):
         except sqlite3.OperationalError as e:
             if "no such table" not in str(e).lower() and "no such column" not in str(e).lower():
                 raise
+
+        # 3. Fallback: message history
+        ldn_msg_join = """
+            LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = m.sender_jid_row_id
+            LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id
+            LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
+        """ if has_lid_dn else ""
+        phone_expr_msg = f"COALESCE(j2.user, {j_phone_fallback})"
+
         rows = conn.execute(f"""
             SELECT DISTINCT
-                COALESCE(
-                    j2.user,
-                    {j_phone_fallback},
-                    ''
-                ) AS number,
+                COALESCE({phone_expr_msg}, '') AS number,
                 COALESCE(
                     NULLIF(con.display_name, ''),
                     NULLIF(con_lid.display_name, ''),
-                    CASE WHEN COALESCE(
-                        j2.user,
-                        {j_phone_fallback}
-                    ) IS NOT NULL
-                    THEN '+' || COALESCE(
-                        j2.user,
-                        {j_phone_fallback}
-                    )
+                    CASE WHEN {phone_expr_msg} IS NOT NULL
+                         THEN '+' || {phone_expr_msg}
                     END,
+                    {ldn_arm}
                     'Unknown'
                 ) AS name
             FROM message m
@@ -2489,10 +2589,8 @@ def create_app(output_root: Path, rescan: bool = False):
             LEFT JOIN jid j ON j._id = m.sender_jid_row_id
             LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = m.sender_jid_row_id
             LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
-            LEFT JOIN arch.contacts con ON con.number = COALESCE(
-                j2.user,
-                {j_phone_fallback}
-            )
+            {ldn_msg_join}
+            LEFT JOIN arch.contacts con ON con.number = {phone_expr_msg}
             LEFT JOIN arch.contacts con_lid ON con_lid.number = j.user
             WHERE m.chat_row_id = CAST(? AS INTEGER)
               AND m.from_me = 0
@@ -2738,6 +2836,8 @@ def create_app(output_root: Path, rescan: bool = False):
                         j_fallback = "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END" if "server" in jid_cols else "j.user"
 
                         has_jid_map = "jid_map" in tables
+                        has_lid_dn = "lid_display_name" in tables
+
                         jm_join = """
                             LEFT JOIN (
                                 SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
@@ -2747,10 +2847,32 @@ def create_app(output_root: Path, rescan: bool = False):
                         """ if has_jid_map else ""
                         creator_expr = f"COALESCE(j_real.user, {j_fallback})" if has_jid_map else j_fallback
 
+                        ldn_creator_join = """
+                            LEFT JOIN (
+                                SELECT jid_row_id, MIN(lid_row_id) AS lid_row_id
+                                FROM jid_map GROUP BY jid_row_id
+                            ) jm_lid ON jm_lid.jid_row_id = m.sender_jid_row_id
+                            LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id
+                            LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
+                        """ if has_lid_dn and has_jid_map else (
+                            "LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id" if has_lid_dn else ""
+                        )
+                        ldn_creator_arm = """
+                            NULLIF(ldn_direct.display_name, ''),
+                            NULLIF(ldn_mapped.display_name, ''),
+                        """ if has_lid_dn and has_jid_map else (
+                            "NULLIF(ldn_direct.display_name, '')," if has_lid_dn else ""
+                        )
+
                         cre_row = conn.execute(f"""
                             SELECT c.created_timestamp,
                                    {creator_expr} AS creator,
-                                   NULLIF(con.display_name, '') AS creator_name
+                                   COALESCE(
+                                       NULLIF(con.display_name, ''),
+                                       CASE WHEN {creator_expr} IS NOT NULL THEN '+' || {creator_expr} END,
+                                       {ldn_creator_arm}
+                                       ''
+                                   ) AS creator_name
                             FROM chat c
                             LEFT JOIN message m
                                    ON m.chat_row_id = c._id
@@ -2758,6 +2880,7 @@ def create_app(output_root: Path, rescan: bool = False):
                                   AND m.message_type = 7
                             LEFT JOIN jid j ON j._id = m.sender_jid_row_id
                             {jm_join}
+                            {ldn_creator_join}
                             LEFT JOIN arch.contacts con ON con.number = {creator_expr}
                             WHERE c._id = CAST(? AS INTEGER)
                             LIMIT 1

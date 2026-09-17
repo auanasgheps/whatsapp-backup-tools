@@ -2746,9 +2746,11 @@ class TestParseArgsValidationExtra:
                 wa.parse_args()
 
     def test_config_command_exits(self):
-        with patch("sys.argv", ['wa', 'config', 'generate']):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
+        with patch("wab_archiver.main._generate_config", side_effect=SystemExit(0)) as mock_gen:
+            with patch("sys.argv", ['wa', 'config', 'generate']):
+                with pytest.raises(SystemExit):
+                    wa.parse_args()
+            mock_gen.assert_called_once_with(os.path.dirname(os.path.abspath(wa.__file__)))
 
     def test_restore_without_output_exits(self):
         with patch("sys.argv", ['wa', 'restore']):
