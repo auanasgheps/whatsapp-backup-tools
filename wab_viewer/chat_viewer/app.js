@@ -1990,10 +1990,12 @@
 
     if (currentChat.type === 'group' && info.created_ts) {
       body.appendChild(_infoRow('Group created', fmtTs(info.created_ts)).row);
-      if (info.creator_number) {
-        const match = (info.members || []).find(m => m.number === info.creator_number);
-        const creatorName = (match && match.name) ? match.name : '+' + info.creator_number;
-        body.appendChild(_infoRow('Created by', creatorName).row);
+      if (info.creator_number || info.creator_name) {
+        const match = info.creator_number ? (info.members || []).find(m => m.number && m.number === info.creator_number) : null;
+        const creatorName = (match && match.name) ? match.name : (info.creator_name || (info.creator_number ? '+' + info.creator_number : ''));
+        if (creatorName) {
+          body.appendChild(_infoRow('Created by', creatorName).row);
+        }
       }
     }
 
@@ -2036,8 +2038,9 @@
       const renderMember = m => {
         const el = document.createElement('div');
         el.className = 'chat-info-member';
-        const numSuffix = m.number && ('+' + m.number) !== m.name ? ' (+' + m.number + ')' : '';
-        el.textContent = (m.name || m.number || '?') + numSuffix;
+        const displayName = m.name || (m.number ? '+' + m.number : '?');
+        const numSuffix = m.number && ('+' + m.number) !== displayName ? ' (+' + m.number + ')' : '';
+        el.textContent = displayName + numSuffix;
         return el;
       };
       info.members.slice(0, SHOW).forEach(m => membersWrap.appendChild(renderMember(m)));

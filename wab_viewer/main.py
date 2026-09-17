@@ -852,13 +852,22 @@ _IOS_SELECT = f"""
         CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)        AS timestamp_ms,
         COALESCE(
             CASE WHEN ({_IOS_SENDER_JID}) = '0' THEN 'WhatsApp' END,
-            NULLIF(ic_s.full_name, ''),
+            CASE WHEN ic_s.full_name NOT LIKE '+%' THEN NULLIF(ic_s.full_name, '') END,
             NULLIF(con_s.display_name, ''),
-            NULLIF(cs_lid.ZPARTNERNAME, ''),
+            NULLIF(con_lid_s.display_name, ''),
             NULLIF(pp_lid.ZPUSHNAME, ''),
+            NULLIF(pp_phone.ZPUSHNAME, ''),
+            NULLIF(cs_lid.ZPARTNERNAME, ''),
+            NULLIF(cs_phone.ZPARTNERNAME, ''),
             CASE WHEN gm.ZMEMBERJID NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
-            CASE WHEN SUBSTR(COALESCE(({_IOS_SENDER_JID}), ''), 1, 1) != ''
-                 THEN '+' || ({_IOS_SENDER_JID})
+            CASE WHEN COALESCE(
+                CASE WHEN gm.ZMEMBERJID NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                ic_s.phone_number
+            ) IS NOT NULL
+            THEN '+' || COALESCE(
+                CASE WHEN gm.ZMEMBERJID NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                ic_s.phone_number
+            )
             END,
             ''
         )                                                            AS sender,
@@ -895,9 +904,17 @@ _IOS_SELECT = f"""
     LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = gm.ZMEMBERJID
     LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = gm.ZMEMBERJID
     LEFT JOIN _ios_contacts ic_s ON ic_s.jid = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
+    LEFT JOIN ZWAPROFILEPUSHNAME pp_phone ON pp_phone.ZJID = (ic_s.phone_number || '@s.whatsapp.net')
+    LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = (ic_s.phone_number || '@s.whatsapp.net')
     LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
     LEFT JOIN arch.contacts con_s
-          ON con_s.number = ({_IOS_SENDER_JID})
+          ON con_s.number = COALESCE(
+              CASE WHEN gm.ZMEMBERJID LIKE '%@lid' THEN ic_s.phone_number END,
+              ({_IOS_SENDER_JID})
+          )
+    LEFT JOIN arch.contacts con_lid_s
+          ON con_lid_s.number = SUBSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID), 1,
+                                       INSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID) || '@', '@') - 1)
     LEFT JOIN arch.contacts con_sq
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
@@ -1320,40 +1337,199 @@ def create_app(output_root: Path, rescan: bool = False):
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS _jid_map_resolved_lid ON _jid_map_resolved(lid_row_id)")
             if source_type == "ios":
-                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT, full_name TEXT)")
+                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT PRIMARY KEY, full_name TEXT, phone_number TEXT)")
 
                 contacts_v2 = _find_ios_db(wa_db_path, "ContactsV2.sqlite", output_root)
                 if contacts_v2:
                     conn.execute("ATTACH DATABASE ? AS cv", (str(contacts_v2),))
-                    conn.execute("""
-                        INSERT INTO _ios_contacts (jid, full_name)
-                        SELECT ZLID AS jid, ZFULLNAME AS full_name
+                    cv_cols = {r["name"] for r in conn.execute("PRAGMA cv.table_info(ZWAADDRESSBOOKCONTACT)").fetchall()}
+                    if "ZLID" in cv_cols:
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                ZLID AS jid,
+                                ZFULLNAME AS full_name,
+                                CASE WHEN ZWHATSAPPID LIKE '%@s.whatsapp.net'
+                                     THEN SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
+                                END AS phone_number
                             FROM cv.ZWAADDRESSBOOKCONTACT
-                            WHERE ZLID IS NOT NULL AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''
-                        UNION ALL
-                        SELECT ZWHATSAPPID, ZFULLNAME
+                            WHERE ZLID IS NOT NULL
+                              AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net'))
+                            ON CONFLICT(jid) DO UPDATE SET
+                                full_name = COALESCE(excluded.full_name, _ios_contacts.full_name),
+                                phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number)
+                        """)
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                SUBSTR(ZLID, 1, INSTR(ZLID, '@') - 1) AS jid,
+                                ZFULLNAME AS full_name,
+                                CASE WHEN ZWHATSAPPID LIKE '%@s.whatsapp.net'
+                                     THEN SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
+                                END AS phone_number
                             FROM cv.ZWAADDRESSBOOKCONTACT
-                            WHERE ZWHATSAPPID IS NOT NULL AND ZFULLNAME IS NOT NULL AND ZFULLNAME != ''
-                    """)
+                            WHERE ZLID LIKE '%@lid'
+                              AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net'))
+                            ON CONFLICT(jid) DO UPDATE SET
+                                full_name = COALESCE(excluded.full_name, _ios_contacts.full_name),
+                                phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number)
+                        """)
+                    if "ZWHATSAPPID" in cv_cols:
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                ZWHATSAPPID AS jid,
+                                ZFULLNAME AS full_name,
+                                CASE WHEN ZWHATSAPPID LIKE '%@s.whatsapp.net'
+                                     THEN SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
+                                END AS phone_number
+                            FROM cv.ZWAADDRESSBOOKCONTACT
+                            WHERE ZWHATSAPPID IS NOT NULL
+                              AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net'))
+                            ON CONFLICT(jid) DO UPDATE SET
+                                full_name = COALESCE(excluded.full_name, _ios_contacts.full_name),
+                                phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number)
+                        """)
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1) AS jid,
+                                ZFULLNAME AS full_name,
+                                CASE WHEN ZWHATSAPPID LIKE '%@s.whatsapp.net'
+                                     THEN SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
+                                END AS phone_number
+                            FROM cv.ZWAADDRESSBOOKCONTACT
+                            WHERE ZWHATSAPPID LIKE '%@s.whatsapp.net'
+                            ON CONFLICT(jid) DO UPDATE SET
+                                full_name = COALESCE(excluded.full_name, _ios_contacts.full_name),
+                                phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number)
+                        """)
                 lid_db = _find_ios_db(wa_db_path, "LID.sqlite", output_root)
                 if lid_db:
                     conn.execute("ATTACH DATABASE ? AS lid_db", (str(lid_db),))
+                    lid_cols = {r["name"] for r in conn.execute("PRAGMA lid_db.table_info(ZWAZACCOUNT)").fetchall()}
+                    if "ZIDENTIFIER" in lid_cols and "ZPHONENUMBER" in lid_cols:
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                ZIDENTIFIER AS jid,
+                                NULL AS full_name,
+                                ZPHONENUMBER AS phone_number
+                            FROM lid_db.ZWAZACCOUNT
+                            WHERE ZIDENTIFIER IS NOT NULL
+                              AND ZPHONENUMBER IS NOT NULL
+                              AND ZPHONENUMBER != ''
+                            ON CONFLICT(jid) DO UPDATE SET
+                                phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                        """)
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                SUBSTR(ZIDENTIFIER, 1, INSTR(ZIDENTIFIER, '@') - 1) AS jid,
+                                NULL AS full_name,
+                                ZPHONENUMBER AS phone_number
+                            FROM lid_db.ZWAZACCOUNT
+                            WHERE ZIDENTIFIER LIKE '%@lid'
+                              AND ZPHONENUMBER IS NOT NULL
+                              AND ZPHONENUMBER != ''
+                            ON CONFLICT(jid) DO UPDATE SET
+                                phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                        """)
+                try:
                     conn.execute("""
-                        INSERT INTO _ios_contacts (jid, full_name)
-                        SELECT ZIDENTIFIER AS jid, '+' || ZPHONENUMBER AS full_name
-                        FROM lid_db.ZWAZACCOUNT
-                        WHERE ZIDENTIFIER IS NOT NULL
-                          AND ZPHONENUMBER IS NOT NULL
-                          AND ZPHONENUMBER != ''
-                          AND ZIDENTIFIER NOT IN (SELECT jid FROM _ios_contacts)
-                        UNION ALL
-                        SELECT SUBSTR(ZIDENTIFIER, 1, INSTR(ZIDENTIFIER, '@') - 1) AS jid, '+' || ZPHONENUMBER AS full_name
-                        FROM lid_db.ZWAZACCOUNT
-                        WHERE ZIDENTIFIER LIKE '%@lid'
-                          AND ZPHONENUMBER IS NOT NULL
-                          AND ZPHONENUMBER != ''
-                          AND SUBSTR(ZIDENTIFIER, 1, INSTR(ZIDENTIFIER, '@') - 1) NOT IN (SELECT jid FROM _ios_contacts)
+                        INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                        SELECT
+                            ZJID AS jid,
+                            ZPUSHNAME AS full_name,
+                            CASE WHEN ZJID LIKE '%@s.whatsapp.net'
+                                 THEN SUBSTR(ZJID, 1, INSTR(ZJID, '@') - 1)
+                            END AS phone_number
+                        FROM ZWAPROFILEPUSHNAME
+                        WHERE ZJID IS NOT NULL AND ZPUSHNAME IS NOT NULL AND ZPUSHNAME != ''
+                        ON CONFLICT(jid) DO UPDATE SET
+                            full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                            phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
                     """)
+                    conn.execute("""
+                        INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                        SELECT
+                            SUBSTR(ZJID, 1, INSTR(ZJID, '@') - 1) AS jid,
+                            ZPUSHNAME AS full_name,
+                            CASE WHEN ZJID LIKE '%@s.whatsapp.net'
+                                 THEN SUBSTR(ZJID, 1, INSTR(ZJID, '@') - 1)
+                            END AS phone_number
+                        FROM ZWAPROFILEPUSHNAME
+                        WHERE ZJID IS NOT NULL AND ZPUSHNAME IS NOT NULL AND ZPUSHNAME != ''
+                        ON CONFLICT(jid) DO UPDATE SET
+                            full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                            phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                    """)
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute("""
+                        UPDATE _ios_contacts
+                        SET full_name = (
+                            SELECT con.display_name
+                            FROM arch.contacts con
+                            WHERE (con.number = _ios_contacts.phone_number
+                               OR con.number = _ios_contacts.jid
+                               OR con.number = SUBSTR(_ios_contacts.jid, 1, INSTR(_ios_contacts.jid || '@', '@') - 1))
+                              AND con.display_name IS NOT NULL
+                              AND con.display_name != ''
+                            LIMIT 1
+                        )
+                        WHERE (full_name IS NULL OR full_name = '' OR full_name LIKE '+%')
+                          AND EXISTS (
+                              SELECT 1 FROM arch.contacts con
+                              WHERE (con.number = _ios_contacts.phone_number
+                                 OR con.number = _ios_contacts.jid
+                                 OR con.number = SUBSTR(_ios_contacts.jid, 1, INSTR(_ios_contacts.jid || '@', '@') - 1))
+                                AND con.display_name IS NOT NULL
+                                AND con.display_name != ''
+                          )
+                    """)
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute("""
+                        UPDATE _ios_contacts
+                        SET full_name = (
+                            SELECT p.full_name FROM _ios_contacts p
+                            WHERE p.jid = (_ios_contacts.phone_number || '@s.whatsapp.net')
+                              AND p.full_name IS NOT NULL AND p.full_name != ''
+                              AND p.full_name NOT LIKE '+%'
+                            LIMIT 1
+                        )
+                        WHERE (full_name IS NULL OR full_name = '' OR full_name LIKE '+%')
+                          AND phone_number IS NOT NULL
+                          AND EXISTS (
+                              SELECT 1 FROM _ios_contacts p
+                              WHERE p.jid = (_ios_contacts.phone_number || '@s.whatsapp.net')
+                                AND p.full_name IS NOT NULL AND p.full_name != ''
+                                AND p.full_name NOT LIKE '+%'
+                          )
+                    """)
+                    conn.execute("""
+                        UPDATE _ios_contacts
+                        SET full_name = (
+                            SELECT l.full_name FROM _ios_contacts l
+                            WHERE l.phone_number = SUBSTR(_ios_contacts.jid, 1, INSTR(_ios_contacts.jid, '@') - 1)
+                              AND l.full_name IS NOT NULL AND l.full_name != ''
+                              AND l.full_name NOT LIKE '+%'
+                            LIMIT 1
+                        )
+                        WHERE (full_name IS NULL OR full_name = '' OR full_name LIKE '+%')
+                          AND _ios_contacts.jid LIKE '%@s.whatsapp.net'
+                          AND EXISTS (
+                              SELECT 1 FROM _ios_contacts l
+                              WHERE l.phone_number = SUBSTR(_ios_contacts.jid, 1, INSTR(_ios_contacts.jid, '@') - 1)
+                                AND l.full_name IS NOT NULL AND l.full_name != ''
+                                AND l.full_name NOT LIKE '+%'
+                          )
+                    """)
+                except sqlite3.OperationalError:
+                    pass
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS _ios_contacts_jid ON _ios_contacts(jid)"
                 )
@@ -2178,28 +2354,32 @@ def create_app(output_root: Path, rescan: bool = False):
                 # ContactsV2 full name, then chat-session partner name, then the
                 # broadcast push name keyed by the LID.
                 r = conn.execute(
-                    "SELECT full_name FROM _ios_contacts WHERE jid = ?", (lid_jid,)
+                    "SELECT full_name, phone_number FROM _ios_contacts WHERE jid = ?", (lid_jid,)
                 ).fetchone()
-                if r and r[0]:
+                if r and r[0] and not r[0].startswith("+"):
                     return r[0]
                 try:
-                    r = conn.execute(
+                    r_cs = conn.execute(
                         "SELECT ZPARTNERNAME FROM ZWACHATSESSION WHERE ZCONTACTJID = ? "
                         "AND ZPARTNERNAME IS NOT NULL AND ZPARTNERNAME != '' LIMIT 1",
                         (lid_jid,)
                     ).fetchone()
-                    if r and r[0]:
-                        return r[0]
-                    r = conn.execute(
+                    if r_cs and r_cs[0]:
+                        return r_cs[0]
+                    r_pp = conn.execute(
                         "SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ? "
                         "AND ZPUSHNAME IS NOT NULL AND ZPUSHNAME != '' LIMIT 1",
                         (lid_jid,)
                     ).fetchone()
-                    if r and r[0]:
-                        return r[0]
+                    if r_pp and r_pp[0]:
+                        return r_pp[0]
                 except sqlite3.OperationalError as e:
                     if "no such table" not in str(e).lower():
                         raise
+                if r and r[1]:
+                    return f"+{r[1]}"
+                if r and r[0]:
+                    return r[0]
                 return None
 
             reactors = []
@@ -2225,78 +2405,226 @@ def create_app(output_root: Path, rescan: bool = False):
     # ---- API: chat info -------------------------------------------------------
 
     def _group_members_android(conn, chat_id: str) -> list:
+        jid_cols = {r["name"] for r in conn.execute("PRAGMA table_info(jid)").fetchall()}
+        has_server = "server" in jid_cols
+        has_raw_string = "raw_string" in jid_cols
+        j_phone_fallback = "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END" if has_server else "j.user"
+        join_gp_jid = "j_gp.raw_string = gp.jid" if has_raw_string else "j_gp.user = NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')"
+        gjid_pred = "gp.gjid = (SELECT j.raw_string FROM jid j WHERE j._id = c.jid_row_id)" if has_raw_string else "1=1"
+
         try:
-            rows = conn.execute("""
+            rows = conn.execute(f"""
                 SELECT
-                    NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '') AS number,
                     COALESCE(
-                        NULLIF(con.display_name, ''),
-                        CASE WHEN NULLIF(SUBSTR(gp.jid, 1,
-                                               INSTR(gp.jid || '@', '@') - 1), '') IS NOT NULL
-                             THEN '+' || SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1)
+                        j_phone.user,
+                        CASE WHEN gp.jid NOT LIKE '%@lid'
+                             THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
                         END,
                         ''
-                    )                                                             AS name
+                    ) AS number,
+                    COALESCE(
+                        NULLIF(con.display_name, ''),
+                        NULLIF(con_lid.display_name, ''),
+                        CASE WHEN COALESCE(
+                            j_phone.user,
+                            CASE WHEN gp.jid NOT LIKE '%@lid'
+                                 THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
+                            END
+                        ) IS NOT NULL
+                        THEN '+' || COALESCE(
+                            j_phone.user,
+                            CASE WHEN gp.jid NOT LIKE '%@lid'
+                                 THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
+                            END
+                        )
+                        END,
+                        'Unknown'
+                    ) AS name
                 FROM group_participants gp
                 JOIN chat c ON c._id = CAST(? AS INTEGER)
+                LEFT JOIN jid j_gp ON {join_gp_jid}
+                LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = j_gp._id
+                LEFT JOIN jid j_phone ON j_phone._id = jm.jid_row_id
                 LEFT JOIN arch.contacts con
-                       ON con.number = NULLIF(SUBSTR(gp.jid, 1,
-                                                     INSTR(gp.jid || '@', '@') - 1), '')
-                WHERE gp.gjid = (SELECT j.raw_string FROM jid j WHERE j._id = c.jid_row_id)
+                       ON con.number = COALESCE(
+                           j_phone.user,
+                           CASE WHEN gp.jid NOT LIKE '%@lid'
+                                THEN NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')
+                           END
+                       )
+                LEFT JOIN arch.contacts con_lid
+                       ON con_lid.number = j_gp.user
+                WHERE {gjid_pred}
                   AND gp.jid != ''
                 ORDER BY name
             """, (chat_id,)).fetchall()
             if rows:
                 return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
         except sqlite3.OperationalError as e:
-            if "no such table" not in str(e).lower():
+            if "no such table" not in str(e).lower() and "no such column" not in str(e).lower():
                 raise
         rows = conn.execute(f"""
             SELECT DISTINCT
-                COALESCE(j2.user, j.user)                                AS number,
+                COALESCE(
+                    j2.user,
+                    {j_phone_fallback},
+                    ''
+                ) AS number,
                 COALESCE(
                     NULLIF(con.display_name, ''),
-                    CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
-                         THEN '+' || COALESCE(j2.user, j.user) END,
-                    ''
-                )                                                        AS name
+                    NULLIF(con_lid.display_name, ''),
+                    CASE WHEN COALESCE(
+                        j2.user,
+                        {j_phone_fallback}
+                    ) IS NOT NULL
+                    THEN '+' || COALESCE(
+                        j2.user,
+                        {j_phone_fallback}
+                    )
+                    END,
+                    'Unknown'
+                ) AS name
             FROM message m
             JOIN chat c ON c._id = m.chat_row_id
             LEFT JOIN jid j ON j._id = m.sender_jid_row_id
             LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = m.sender_jid_row_id
             LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
-            LEFT JOIN arch.contacts con ON con.number = COALESCE(j2.user, j.user)
+            LEFT JOIN arch.contacts con ON con.number = COALESCE(
+                j2.user,
+                {j_phone_fallback}
+            )
+            LEFT JOIN arch.contacts con_lid ON con_lid.number = j.user
             WHERE m.chat_row_id = CAST(? AS INTEGER)
               AND m.from_me = 0
-              AND COALESCE(j2.user, j.user) IS NOT NULL
+              AND m.sender_jid_row_id IS NOT NULL
             ORDER BY name
         """, (chat_id,)).fetchall()
         return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
 
     def _group_members_ios(conn, chat_id: str) -> list:
-        rows = conn.execute("""
+        phone_expr = """
+            COALESCE(
+                CASE WHEN gm.ZMEMBERJID LIKE '%@s.whatsapp.net'
+                     THEN SUBSTR(gm.ZMEMBERJID, 1, INSTR(gm.ZMEMBERJID || '@', '@') - 1)
+                END,
+                ic.phone_number
+            )
+        """
+        raw_prefix = "SUBSTR(gm.ZMEMBERJID, 1, INSTR(gm.ZMEMBERJID || '@', '@') - 1)"
+        phone_jid = f"({phone_expr} || '@s.whatsapp.net')"
+
+        query_template = f"""
             SELECT DISTINCT
-                NULLIF(SUBSTR(gm.ZMEMBERJID, 1,
-                              INSTR(gm.ZMEMBERJID || '@', '@') - 1), '') AS number,
                 COALESCE(
+                    {phone_expr},
+                    ''
+                ) AS number,
+                COALESCE(
+                    CASE WHEN ic.full_name NOT LIKE '+%' THEN NULLIF(ic.full_name, '') END,
                     NULLIF(con.display_name, ''),
-                    CASE WHEN NULLIF(SUBSTR(gm.ZMEMBERJID, 1,
-                                           INSTR(gm.ZMEMBERJID || '@', '@') - 1), '') IS NOT NULL
-                         THEN '+' || SUBSTR(gm.ZMEMBERJID, 1,
-                                            INSTR(gm.ZMEMBERJID || '@', '@') - 1)
+                    NULLIF(con_lid.display_name, ''),
+                    NULLIF(pp_lid.ZPUSHNAME, ''),
+                    NULLIF(pp_phone.ZPUSHNAME, ''),
+                    NULLIF(cs_lid.ZPARTNERNAME, ''),
+                    NULLIF(cs_phone.ZPARTNERNAME, ''),
+                    CASE WHEN {phone_expr} IS NOT NULL
+                         THEN '+' || {phone_expr}
                     END,
-                    gm.ZMEMBERJID
-                )                                                         AS name
-            FROM ZWAMESSAGE m
-            JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
-            LEFT JOIN arch.contacts con
-                   ON con.number = NULLIF(SUBSTR(gm.ZMEMBERJID, 1,
-                                                 INSTR(gm.ZMEMBERJID || '@', '@') - 1), '')
-            WHERE m.ZCHATSESSION = CAST(? AS INTEGER)
-              AND m.ZGROUPMEMBER IS NOT NULL
+                    'Unknown'
+                ) AS name
+            FROM {{source_table}}
+            LEFT JOIN _ios_contacts ic ON ic.jid = gm.ZMEMBERJID
+            LEFT JOIN arch.contacts con ON con.number = {phone_expr}
+            LEFT JOIN arch.contacts con_lid ON con_lid.number = {raw_prefix}
+            LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = gm.ZMEMBERJID
+            LEFT JOIN ZWAPROFILEPUSHNAME pp_phone ON pp_phone.ZJID = {phone_jid}
+            LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = gm.ZMEMBERJID
+            LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = {phone_jid}
+            WHERE {{where_clause}}
+              AND gm.ZMEMBERJID IS NOT NULL
+              AND gm.ZMEMBERJID != ''
             ORDER BY name
-        """, (chat_id,)).fetchall()
-        return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+        """
+        try:
+            # 1. Try active members from ZWAGROUPMEMBER
+            rows = conn.execute(query_template.format(
+                source_table="ZWAGROUPMEMBER gm",
+                where_clause="gm.ZCHATSESSION = CAST(? AS INTEGER) AND gm.ZISACTIVE = 1",
+            ), (chat_id,)).fetchall()
+            if not rows:
+                # 2. Try all members from ZWAGROUPMEMBER
+                rows = conn.execute(query_template.format(
+                    source_table="ZWAGROUPMEMBER gm",
+                    where_clause="gm.ZCHATSESSION = CAST(? AS INTEGER)",
+                ), (chat_id,)).fetchall()
+            if rows:
+                return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower() and "no such column" not in str(e).lower():
+                raise
+
+        # 3. Fallback to message history senders via ZWAGROUPMEMBER
+        try:
+            rows = conn.execute(query_template.format(
+                source_table="ZWAMESSAGE m JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER",
+                where_clause="m.ZCHATSESSION = CAST(? AS INTEGER)",
+            ), (chat_id,)).fetchall()
+            if rows:
+                return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+
+        # 4. Fallback to message history senders via ZFROMJID
+        phone_expr_m = """
+            COALESCE(
+                CASE WHEN m.ZFROMJID LIKE '%@s.whatsapp.net'
+                     THEN SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID || '@', '@') - 1)
+                END,
+                ic.phone_number
+            )
+        """
+        raw_prefix_m = "SUBSTR(m.ZFROMJID, 1, INSTR(m.ZFROMJID || '@', '@') - 1)"
+        phone_jid_m = f"({phone_expr_m} || '@s.whatsapp.net')"
+
+        try:
+            rows = conn.execute(f"""
+                SELECT DISTINCT
+                    COALESCE(
+                        {phone_expr_m},
+                        ''
+                    ) AS number,
+                    COALESCE(
+                        CASE WHEN ic.full_name NOT LIKE '+%' THEN NULLIF(ic.full_name, '') END,
+                        NULLIF(con.display_name, ''),
+                        NULLIF(con_lid.display_name, ''),
+                        NULLIF(pp_lid.ZPUSHNAME, ''),
+                        NULLIF(pp_phone.ZPUSHNAME, ''),
+                        NULLIF(cs_lid.ZPARTNERNAME, ''),
+                        NULLIF(cs_phone.ZPARTNERNAME, ''),
+                        CASE WHEN {phone_expr_m} IS NOT NULL
+                             THEN '+' || {phone_expr_m}
+                        END,
+                        'Unknown'
+                    ) AS name
+                FROM ZWAMESSAGE m
+                LEFT JOIN _ios_contacts ic ON ic.jid = m.ZFROMJID
+                LEFT JOIN arch.contacts con ON con.number = {phone_expr_m}
+                LEFT JOIN arch.contacts con_lid ON con_lid.number = {raw_prefix_m}
+                LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = m.ZFROMJID
+                LEFT JOIN ZWAPROFILEPUSHNAME pp_phone ON pp_phone.ZJID = {phone_jid_m}
+                LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = m.ZFROMJID
+                LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = {phone_jid_m}
+                WHERE m.ZCHATSESSION = CAST(? AS INTEGER)
+                  AND m.ZFROMJID IS NOT NULL
+                  AND m.ZFROMJID != ''
+                ORDER BY name
+            """, (chat_id,)).fetchall()
+            return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+            return []
 
     @app.route("/api/chat-info")
     def api_chat_info():
@@ -2340,6 +2668,7 @@ def create_app(output_root: Path, rescan: bool = False):
         top_senders = []
         created_ts = None
         creator_number = None
+        creator_name = None
 
         if conn is not None:
             if source_type == "android":
@@ -2404,26 +2733,39 @@ def create_app(output_root: Path, rescan: bool = False):
                     display_name = grp_row["name"] if grp_row else None
 
                     try:
-                        cre_row = conn.execute("""
+                        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                        jid_cols = {c[1] for c in conn.execute("PRAGMA table_info(jid)").fetchall()} if "jid" in tables else set()
+                        j_fallback = "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END" if "server" in jid_cols else "j.user"
+
+                        has_jid_map = "jid_map" in tables
+                        jm_join = """
+                            LEFT JOIN (
+                                SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                                FROM jid_map GROUP BY lid_row_id
+                            ) jm ON jm.lid_row_id = m.sender_jid_row_id
+                            LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+                        """ if has_jid_map else ""
+                        creator_expr = f"COALESCE(j_real.user, {j_fallback})" if has_jid_map else j_fallback
+
+                        cre_row = conn.execute(f"""
                             SELECT c.created_timestamp,
-                                   NULLIF(COALESCE(j_real.user, j.user), '') AS creator
+                                   {creator_expr} AS creator,
+                                   NULLIF(con.display_name, '') AS creator_name
                             FROM chat c
                             LEFT JOIN message m
                                    ON m.chat_row_id = c._id
                                   AND m.timestamp = c.created_timestamp
                                   AND m.message_type = 7
                             LEFT JOIN jid j ON j._id = m.sender_jid_row_id
-                            LEFT JOIN (
-                                SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                                FROM jid_map GROUP BY lid_row_id
-                            ) jm ON jm.lid_row_id = m.sender_jid_row_id
-                            LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+                            {jm_join}
+                            LEFT JOIN arch.contacts con ON con.number = {creator_expr}
                             WHERE c._id = CAST(? AS INTEGER)
                             LIMIT 1
                         """, (chat_id,)).fetchone()
                         if cre_row:
                             created_ts = cre_row["created_timestamp"]
                             creator_number = cre_row["creator"]
+                            creator_name = cre_row["creator_name"]
                     except sqlite3.OperationalError:
                         pass
 
@@ -2480,19 +2822,45 @@ def create_app(output_root: Path, rescan: bool = False):
                         " FROM arch.groups grp WHERE grp.chat_row_id = ?",
                         (chat_id,),
                     ).fetchone()
-                    display_name = grp_row["name"] if grp_row else None
+                    phone_expr_c = """
+                        COALESCE(
+                            CASE WHEN gi.ZCREATORJID LIKE '%@s.whatsapp.net'
+                                 THEN SUBSTR(gi.ZCREATORJID, 1, INSTR(gi.ZCREATORJID || '@', '@') - 1)
+                            END,
+                            ic.phone_number
+                        )
+                    """
+                    raw_prefix_c = "SUBSTR(gi.ZCREATORJID, 1, INSTR(gi.ZCREATORJID || '@', '@') - 1)"
+                    phone_jid_c = f"({phone_expr_c} || '@s.whatsapp.net')"
 
-                    cre_row = conn.execute("""
+                    cre_row = conn.execute(f"""
                         SELECT CAST((gi.ZCREATIONDATE + 978307200) * 1000 AS INTEGER) AS created_ms,
-                               NULLIF(SUBSTR(COALESCE(gi.ZCREATORJID,''), 1,
-                                      INSTR(COALESCE(gi.ZCREATORJID,'') || '@', '@') - 1), '') AS creator
+                               COALESCE({phone_expr_c}, '') AS creator_number,
+                               COALESCE(
+                                   CASE WHEN ic.full_name NOT LIKE '+%' THEN NULLIF(ic.full_name, '') END,
+                                   NULLIF(con.display_name, ''),
+                                   NULLIF(con_lid.display_name, ''),
+                                   NULLIF(pp_lid.ZPUSHNAME, ''),
+                                   NULLIF(pp_phone.ZPUSHNAME, ''),
+                                   NULLIF(cs_lid.ZPARTNERNAME, ''),
+                                   NULLIF(cs_phone.ZPARTNERNAME, ''),
+                                   ''
+                               ) AS creator_name
                         FROM ZWACHATSESSION cs
                         JOIN ZWAGROUPINFO gi ON gi.Z_PK = cs.ZGROUPINFO
+                        LEFT JOIN _ios_contacts ic ON ic.jid = gi.ZCREATORJID
+                        LEFT JOIN arch.contacts con ON con.number = {phone_expr_c}
+                        LEFT JOIN arch.contacts con_lid ON con_lid.number = {raw_prefix_c}
+                        LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = gi.ZCREATORJID
+                        LEFT JOIN ZWAPROFILEPUSHNAME pp_phone ON pp_phone.ZJID = {phone_jid_c}
+                        LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = gi.ZCREATORJID
+                        LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = {phone_jid_c}
                         WHERE cs.Z_PK = CAST(? AS INTEGER)
                     """, (chat_id,)).fetchone()
                     if cre_row:
                         created_ts = cre_row["created_ms"]
-                        creator_number = cre_row["creator"]
+                        creator_number = cre_row["creator_number"] or None
+                        creator_name = cre_row["creator_name"] or None
 
         result = {
             "display_name": display_name,
@@ -2508,6 +2876,7 @@ def create_app(output_root: Path, rescan: bool = False):
             result["top_senders"] = top_senders
             result["created_ts"] = created_ts
             result["creator_number"] = creator_number
+            result["creator_name"] = creator_name
         return jsonify(result)
 
     @app.route("/api/chat-info/media-size")

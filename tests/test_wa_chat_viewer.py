@@ -3282,5 +3282,423 @@ class TestIosHdDeduplication:
         assert gallery[0]["archive_path"] == "photos/hd.jpg"
 
 
+class TestGroupMembersLidResolution:
+    def test_ios_group_members_lid_resolved_via_contactsv2(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        contacts_path = tmp_path / "ContactsV2.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        # ChatStorage with active group members and creator
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103624826949001@lid');
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949001@lid', 1);
+            INSERT INTO ZWAGROUPMEMBER VALUES (2, 10, '15550002222@s.whatsapp.net', 1);
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Alice', 'Hello', '103624826949001@lid');
+        """)
+        conn.commit()
+        conn.close()
+
+        # ContactsV2 mapping LID -> phone & name
+        c_conn = sqlite3.connect(str(contacts_path))
+        c_conn.executescript("""
+            CREATE TABLE ZWAADDRESSBOOKCONTACT (
+                Z_PK INTEGER PRIMARY KEY, ZLID VARCHAR, ZWHATSAPPID VARCHAR, ZFULLNAME VARCHAR
+            );
+            INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (1, '103624826949001@lid', '15550001111@s.whatsapp.net', 'Alice Tester');
+        """)
+        c_conn.commit()
+        c_conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Alice', 'Alice Tester')")
+        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Bob', 'Bob Standard')")
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+        assert data["creator_number"] == "15550001111"
+        assert data["creator_name"] == "Alice Tester"
+        assert len(data["members"]) == 2
+
+        alice_m = next(m for m in data["members"] if m["name"] == "Alice Tester")
+        assert alice_m["number"] == "15550001111"
+
+        bob_m = next(m for m in data["members"] if m["name"] == "Bob Standard")
+        assert bob_m["number"] == "15550002222"
+
+    def test_ios_group_members_lid_resolved_via_lid_db(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        lid_path = tmp_path / "LID.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103624826949002@lid');
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949002@lid', 1);
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Charlie', 'Hi', '103624826949002@lid');
+        """)
+        conn.commit()
+        conn.close()
+
+        lid_conn = sqlite3.connect(str(lid_path))
+        lid_conn.executescript("""
+            CREATE TABLE ZWAZACCOUNT (Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER VARCHAR, ZPHONENUMBER VARCHAR);
+            INSERT INTO ZWAZACCOUNT VALUES (1, '103624826949002@lid', '15550003333');
+        """)
+        lid_conn.commit()
+        lid_conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550003333', 'Charlie', 'Charlie Tester')")
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+        assert data["creator_number"] == "15550003333"
+        assert data["creator_name"] == "Charlie Tester"
+        assert len(data["members"]) == 1
+        assert data["members"][0]["name"] == "Charlie Tester"
+        assert data["members"][0]["number"] == "15550003333"
+
+    def test_ios_group_members_unresolved_lid_never_leaks_numeric_lid(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103624826949003@lid');
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949003@lid', 1);
+            INSERT INTO ZWAGROUPMEMBER VALUES (2, 10, '103624826949004@lid', 1);
+            INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '103624826949003@lid', 'Mystery Member');
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Push1', 'Hi', '103624826949003@lid');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+        # Creator number should be None / empty because LID cannot be resolved to a phone number
+        assert data["creator_number"] is None
+        assert data["creator_name"] == "Mystery Member"
+
+        # Members: neither must have numeric LID in 'number', and unmapped LID without pushname must be 'Unknown'
+        members = data["members"]
+        assert len(members) == 2
+        m1 = next(m for m in members if m["name"] == "Mystery Member")
+        assert m1["number"] == ""
+
+        m2 = next(m for m in members if m["name"] == "Unknown")
+        assert m2["number"] == ""
+
+    def test_ios_group_members_filters_inactive_members(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '15550001111@s.whatsapp.net');
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '15550001111@s.whatsapp.net', 1);
+            INSERT INTO ZWAGROUPMEMBER VALUES (2, 10, '15550002222@s.whatsapp.net', 0);
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'User1', 'Hi', '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Active User', 'Active User')")
+        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Left User', 'Left User')")
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+        assert len(data["members"]) == 1
+        assert data["members"][0]["name"] == "Active User"
+        assert data["members"][0]["number"] == "15550001111"
+
+    def test_android_group_members_lid_resolved_and_unresolved(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (
+                _id        INTEGER PRIMARY KEY,
+                user       TEXT,
+                server     TEXT,
+                raw_string TEXT
+            );
+            CREATE TABLE chat (
+                _id                     INTEGER PRIMARY KEY,
+                jid_row_id              INTEGER,
+                subject                 TEXT,
+                hidden                  INTEGER DEFAULT 0,
+                sort_timestamp          INTEGER,
+                display_message_row_id  INTEGER,
+                created_timestamp       INTEGER
+            );
+            CREATE TABLE message (
+                _id               INTEGER PRIMARY KEY,
+                chat_row_id       INTEGER NOT NULL,
+                from_me           INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp         INTEGER,
+                text_data         TEXT,
+                message_type      INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE jid_map (
+                lid_row_id INTEGER,
+                jid_row_id INTEGER
+            );
+            CREATE TABLE group_participants (
+                _id   INTEGER PRIMARY KEY,
+                gjid  TEXT,
+                jid   TEXT,
+                admin INTEGER,
+                pending INTEGER
+            );
+
+            INSERT INTO jid VALUES (1, 'group1', 'g.us', 'group1@g.us');
+            INSERT INTO jid VALUES (2, '103624826949005', 'lid', '103624826949005@lid');
+            INSERT INTO jid VALUES (3, '15550005555', 's.whatsapp.net', '15550005555@s.whatsapp.net');
+            INSERT INTO jid VALUES (4, '103624826949006', 'lid', '103624826949006@lid');
+
+            INSERT INTO jid_map VALUES (2, 3);
+
+            INSERT INTO chat VALUES (10, 1, 'Android Group', 0, 1700000000000, 1, 1700000000000);
+            INSERT INTO message VALUES (1, 10, 0, 2, 1700000000000, NULL, 7);
+
+            INSERT INTO group_participants VALUES (1, 'group1@g.us', '103624826949005@lid', 0, 0);
+            INSERT INTO group_participants VALUES (2, 'group1@g.us', '103624826949006@lid', 0, 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550005555', 'Dave', 'Dave Android')")
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Android Group', 'Android Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+        assert data["creator_number"] == "15550005555"
+        assert data["creator_name"] == "Dave Android"
+
+        members = data["members"]
+        assert len(members) == 2
+
+        mapped_m = next(m for m in members if m["name"] == "Dave Android")
+        assert mapped_m["number"] == "15550005555"
+
+        unmapped_m = next(m for m in members if m["name"] == "Unknown")
+        assert unmapped_m["number"] == ""
+
+    def test_ios_group_members_unsaved_contact_shows_friendly_push_name(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        contacts_path = tmp_path / "ContactsV2.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        # ChatStorage with member whose LID is mapped to phone, but who has no address book name
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103624826949007@lid');
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949007@lid', 1);
+            -- Push name stored under phone JID in ZWAPROFILEPUSHNAME
+            INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '15550009999@s.whatsapp.net', 'Friendly Dave');
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, NULL, 'Hi', '103624826949007@lid');
+        """)
+        conn.commit()
+        conn.close()
+
+        # ContactsV2 has the LID-to-phone mapping but ZFULLNAME is NULL (unsaved contact)
+        c_conn = sqlite3.connect(str(contacts_path))
+        c_conn.executescript("""
+            CREATE TABLE ZWAADDRESSBOOKCONTACT (
+                Z_PK INTEGER PRIMARY KEY, ZLID VARCHAR, ZWHATSAPPID VARCHAR, ZFULLNAME VARCHAR
+            );
+            INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (1, '103624826949007@lid', '15550009999@s.whatsapp.net', NULL);
+        """)
+        c_conn.commit()
+        c_conn.close()
+
+        # Not saved in arch.contacts
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+            msgs = client.get("/api/messages?chat_id=10&chat_type=group").get_json()
+
+        # Creator resolves friendly name from ZWAPROFILEPUSHNAME
+        assert data["creator_name"] == "Friendly Dave"
+        assert data["creator_number"] == "15550009999"
+
+        # Member list resolves friendly name + real phone number
+        assert len(data["members"]) == 1
+        assert data["members"][0]["name"] == "Friendly Dave"
+        assert data["members"][0]["number"] == "15550009999"
+
+        # Message sender bubble shows friendly name
+        assert len(msgs) == 1
+        assert msgs[0]["sender"] == "Friendly Dave"
+
+    def test_ios_group_members_friendly_name_from_archived_pushname_map(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        lid_path = tmp_path / "LID.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT);
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '15550008888@s.whatsapp.net');
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949008@lid', 1);
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, NULL, 'Hi', '103624826949008@lid');
+        """)
+        conn.commit()
+        conn.close()
+
+        lid_conn = sqlite3.connect(str(lid_path))
+        lid_conn.executescript("""
+            CREATE TABLE ZWAZACCOUNT (Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER VARCHAR, ZPHONENUMBER VARCHAR);
+            INSERT INTO ZWAZACCOUNT VALUES (1, '103624826949008@lid', '15550008888');
+        """)
+        lid_conn.commit()
+        lid_conn.close()
+
+        # In arch.contacts, build_ios_pushname_map stored the push name keyed by the LID string
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('103624826949008', 'Dave Folder', 'Archived Friendly Dave')")
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+        assert len(data["members"]) == 1
+        assert data["members"][0]["name"] == "Archived Friendly Dave"
+        assert data["members"][0]["number"] == "15550008888"
+
+
 
 
