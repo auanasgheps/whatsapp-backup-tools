@@ -25,7 +25,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install pytest flask
+        run: pip install pytest pytest-cov flask
 
       - name: Run tests
-        run: pytest tests/ -v
+        shell: bash
+        run: |
+          echo "### Test Coverage Summary (${{ matrix.os }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          pytest tests/ -v --cov=wab_archiver --cov=wab_viewer --cov=shared --cov-report=term-missing --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
