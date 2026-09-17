@@ -3699,6 +3699,217 @@ class TestGroupMembersLidResolution:
         assert data["members"][0]["name"] == "Archived Friendly Dave"
         assert data["members"][0]["number"] == "15550008888"
 
+    def test_android_group_members_resolution_modern(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
 
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (
+                _id        INTEGER PRIMARY KEY,
+                user       TEXT,
+                server     TEXT,
+                raw_string TEXT
+            );
+            CREATE TABLE chat (
+                _id                     INTEGER PRIMARY KEY,
+                jid_row_id              INTEGER,
+                subject                 TEXT,
+                hidden                  INTEGER DEFAULT 0,
+                sort_timestamp          INTEGER,
+                display_message_row_id  INTEGER,
+                created_timestamp       INTEGER
+            );
+            CREATE TABLE message (
+                _id               INTEGER PRIMARY KEY,
+                chat_row_id       INTEGER NOT NULL,
+                from_me           INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp         INTEGER,
+                text_data         TEXT,
+                message_type      INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE jid_map (
+                lid_row_id INTEGER,
+                jid_row_id INTEGER
+            );
+            CREATE TABLE group_participant_user (
+                _id               INTEGER PRIMARY KEY,
+                group_jid_row_id  INTEGER,
+                user_jid_row_id   INTEGER,
+                rank              INTEGER,
+                pending           INTEGER
+            );
+            CREATE TABLE lid_display_name (
+                lid_row_id   INTEGER PRIMARY KEY,
+                display_name TEXT,
+                username     TEXT
+            );
 
+            -- JIDs
+            INSERT INTO jid VALUES (1, 'group1', 'g.us', 'group1@g.us');
+            INSERT INTO jid VALUES (2, 'lid_me', 'lid', 'lid_me');
+            INSERT INTO jid VALUES (3, '103624826949001', 'lid', '103624826949001@lid');
+            INSERT INTO jid VALUES (4, '15550001111', 's.whatsapp.net', '15550001111@s.whatsapp.net');
+            INSERT INTO jid VALUES (5, '103624826949002', 'lid', '103624826949002@lid');
+            INSERT INTO jid VALUES (6, '15550002222', 's.whatsapp.net', '15550002222@s.whatsapp.net');
+            INSERT INTO jid VALUES (7, '103624826949003', 'lid', '103624826949003@lid');
+            INSERT INTO jid VALUES (8, '15550003333', 's.whatsapp.net', '15550003333@s.whatsapp.net');
+            INSERT INTO jid VALUES (9, '103624826949004', 'lid', '103624826949004@lid');
+            INSERT INTO jid VALUES (10, '103624826949005', 'lid', '103624826949005@lid');
 
+            -- JID map (LID -> phone)
+            INSERT INTO jid_map VALUES (3, 4);
+            INSERT INTO jid_map VALUES (5, 6);
+            INSERT INTO jid_map VALUES (7, 8);
+
+            -- Masked phone strings in lid_display_name
+            INSERT INTO lid_display_name VALUES (9, '+1555••••004', NULL);
+
+            -- Group chat and members
+            INSERT INTO chat VALUES (10, 1, 'Android Modern Group', 0, 1700000000000, 1, 1700000000000);
+            -- Creator message (type 7) sent by user 5 (mapped to 15550002222)
+            INSERT INTO message VALUES (1, 10, 0, 5, 1700000000000, NULL, 7);
+
+            -- Group members in group_participant_user
+            INSERT INTO group_participant_user VALUES (1, 1, 2, 1, 0); -- lid_me
+            INSERT INTO group_participant_user VALUES (2, 1, 3, 0, 0); -- saved contact Alice
+            INSERT INTO group_participant_user VALUES (3, 1, 5, 0, 0); -- unsaved mapped LID (15550002222)
+            INSERT INTO group_participant_user VALUES (4, 1, 7, 0, 0); -- unsaved mapped LID (15550003333)
+            INSERT INTO group_participant_user VALUES (5, 1, 9, 0, 0); -- unmapped LID with lid_display_name
+            INSERT INTO group_participant_user VALUES (6, 1, 10, 0, 0); -- unmapped LID without lid_display_name
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Alice', 'Alice Saved')")
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Android Modern Group', 'Android Modern Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+        assert data["creator_number"] == "15550002222"
+        assert data["creator_name"] == "+15550002222"
+
+        members = data["members"]
+        assert len(members) == 6
+
+        # lid_me resolves to 'You'
+        m_me = next(m for m in members if m["name"] == "You")
+        assert m_me["number"] == ""
+
+        # Saved contact takes priority
+        m_alice = next(m for m in members if m["name"] == "Alice Saved")
+        assert m_alice["number"] == "15550001111"
+
+        # Unsaved mapped contact resolves to +<number>
+        m_bob = next(m for m in members if m["name"] == "+15550002222")
+        assert m_bob["number"] == "15550002222"
+
+        m_num = next(m for m in members if m["name"] == "+15550003333")
+        assert m_num["number"] == "15550003333"
+
+        # Unmapped LID with lid_display_name falls back to masked string
+        m_masked = next(m for m in members if m["name"] == "+1555••••004")
+        assert m_masked["number"] == ""
+
+        # Unmapped LID without lid_display_name resolves to Unknown
+        m_unmapped = next(m for m in members if m["name"] == "Unknown")
+        assert m_unmapped["number"] == ""
+
+    def test_android_message_sender_and_reactions_show_real_phone(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (
+                _id        INTEGER PRIMARY KEY,
+                user       TEXT,
+                server     TEXT,
+                raw_string TEXT
+            );
+            CREATE TABLE chat (
+                _id                     INTEGER PRIMARY KEY,
+                jid_row_id              INTEGER,
+                subject                 TEXT,
+                hidden                  INTEGER DEFAULT 0,
+                sort_timestamp          INTEGER,
+                display_message_row_id  INTEGER
+            );
+            CREATE TABLE message (
+                _id               INTEGER PRIMARY KEY,
+                chat_row_id       INTEGER NOT NULL,
+                from_me           INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp         INTEGER,
+                text_data         TEXT,
+                message_type      INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE message_add_on (
+                _id                    INTEGER PRIMARY KEY,
+                parent_message_row_id  INTEGER,
+                sender_jid_row_id      INTEGER,
+                from_me                INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_add_on_reaction (
+                _id                   INTEGER PRIMARY KEY,
+                message_add_on_row_id INTEGER,
+                reaction              TEXT
+            );
+            CREATE TABLE jid_map (
+                lid_row_id INTEGER,
+                jid_row_id INTEGER
+            );
+            CREATE TABLE lid_display_name (
+                lid_row_id   INTEGER PRIMARY KEY,
+                display_name TEXT,
+                username     TEXT
+            );
+
+            INSERT INTO jid VALUES (1, '103624826949010', 'lid', '103624826949010@lid');
+            INSERT INTO jid VALUES (2, '15550004444', 's.whatsapp.net', '15550004444@s.whatsapp.net');
+            INSERT INTO jid VALUES (3, 'group1', 'g.us', 'group1@g.us');
+
+            INSERT INTO jid_map VALUES (1, 2);
+            INSERT INTO lid_display_name VALUES (1, '+1555••••444', NULL);
+
+            INSERT INTO chat VALUES (10, 3, 'Test Group', 0, 1700000000000, 1);
+            -- Message sent by user 1 (LID mapped to 15550004444)
+            INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, 'Hello from Charlie', 0);
+            -- Reaction to message 1 by user 1
+            INSERT INTO message_add_on VALUES (1, 1, 1, 0);
+            INSERT INTO message_add_on_reaction VALUES (1, 1, '👍');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=group")
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["sender"] == "+15550004444"
+
+            # Reaction details
+            r_resp = client.get("/api/reaction_details/1")
+            r_data = r_resp.get_json()
+            assert r_data["available"] is True
+            assert r_data["reactors"][0]["name"] == "+15550004444"
+            assert r_data["reactors"][0]["emoji"] == "👍"
