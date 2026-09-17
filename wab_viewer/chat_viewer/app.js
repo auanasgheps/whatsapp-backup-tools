@@ -893,61 +893,27 @@
       }
     }
 
+    bubble.appendChild(meta);
+
     if (msg.reactions) {
-      const rxEl = document.createElement('div');
-      rxEl.className = 'msg-reactions';
-      if (msg.reactions_from_me !== undefined) {
-        const emojis = msg.reactions.split(',');
-        const fromMes = msg.reactions_from_me.split(',');
-        const myRx = [], theirRx = [];
-        emojis.forEach((e, i) => {
-          if (fromMes[i] === '1') myRx.push(e);
-          else theirRx.push(e);
-        });
-        const seen = {};
-        const addBadges = (arr) => arr.forEach(e => { seen[e] = (seen[e] || 0) + 1; });
-        addBadges(msg.from_me ? theirRx : myRx);
-        Object.entries(seen).forEach(([emoji, count]) => {
-          const badge = document.createElement('span');
-          badge.className = 'rx-badge';
-          badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
-          rxEl.appendChild(badge);
-        });
-        if (myRx.length || theirRx.length) {
-          const rxEl2 = document.createElement('div');
-          rxEl2.className = 'msg-reactions rx-badge-2';
-          const seen2 = {};
-          const addBadges2 = (arr) => arr.forEach(e => { seen2[e] = (seen2[e] || 0) + 1; });
-          addBadges2(msg.from_me ? myRx : theirRx);
-          Object.entries(seen2).forEach(([emoji, count]) => {
-            const badge = document.createElement('span');
-            badge.className = 'rx-badge';
-            badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
-            rxEl2.appendChild(badge);
-          });
-          if (rxEl2.children.length) {
-            if (msg.msg_id !== undefined) {
-              rxEl2.addEventListener('click', e => {
-                e.stopPropagation();
-                showReactionDetails(msg.msg_id, rxEl2);
-              });
-            }
-            bubble.appendChild(rxEl2);
-          }
+      const emojis = msg.reactions.split(',').filter(Boolean);
+      if (emojis.length) {
+        row.classList.add('has-reactions');
+        const rxEl = document.createElement('div');
+        rxEl.className = 'msg-reactions';
+        const distinct = Array.from(new Set(emojis));
+        const emojiSpan = document.createElement('span');
+        emojiSpan.className = 'rx-emojis';
+        emojiSpan.textContent = distinct.slice(0, 3).join(' ');
+        rxEl.appendChild(emojiSpan);
+
+        if (emojis.length > 1) {
+          const countSpan = document.createElement('span');
+          countSpan.className = 'rx-count';
+          countSpan.textContent = String(emojis.length);
+          rxEl.appendChild(countSpan);
         }
-      } else {
-        const seen = {};
-        msg.reactions.split(',').forEach(e => {
-          seen[e] = (seen[e] || 0) + 1;
-        });
-        Object.entries(seen).forEach(([emoji, count]) => {
-          const badge = document.createElement('span');
-          badge.className = 'rx-badge';
-          badge.textContent = count > 1 ? `${emoji} ${count}` : emoji;
-          rxEl.appendChild(badge);
-        });
-      }
-      if (rxEl.children.length) {
+
         if (msg.msg_id !== undefined) {
           rxEl.addEventListener('click', e => {
             e.stopPropagation();
@@ -957,8 +923,6 @@
         bubble.appendChild(rxEl);
       }
     }
-
-    bubble.appendChild(meta);
 
     row.appendChild(bubble);
     return row;
