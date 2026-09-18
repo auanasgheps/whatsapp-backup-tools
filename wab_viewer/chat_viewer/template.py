@@ -158,7 +158,10 @@ HTML_TEMPLATE = r"""
 <div id="chat-info-panel">
   <div id="chat-info-inner">
     <div id="chat-info-header">
-      <span id="chat-info-title"></span>
+      <div class="chat-info-header-text">
+        <span id="chat-info-title"></span>
+        <div id="chat-info-desc" class="chat-info-desc" style="display:none"></div>
+      </div>
       <button id="chat-info-close">&#10005;</button>
     </div>
     <div id="chat-info-body"></div>

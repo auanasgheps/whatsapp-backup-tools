@@ -1939,15 +1939,25 @@
 
   function closeChatInfo() {
     document.getElementById('chat-info-panel').classList.remove('open');
+    const desc = document.getElementById('chat-info-desc');
+    if (desc) {
+      desc.textContent = '';
+      desc.style.display = 'none';
+    }
   }
 
   async function openChatInfo() {
     if (!currentChat) return;
     const panel = document.getElementById('chat-info-panel');
     const title = document.getElementById('chat-info-title');
+    const desc  = document.getElementById('chat-info-desc');
     const body  = document.getElementById('chat-info-body');
 
     title.textContent = currentChat.display_name || '';
+    if (desc) {
+      desc.textContent = '';
+      desc.style.display = 'none';
+    }
     body.innerHTML = '';
 
     // Show loading skeleton
@@ -1980,6 +1990,11 @@
     if (currentChat !== chatAtOpen || !panel.classList.contains('open')) return;
 
     body.innerHTML = '';
+
+    if (currentChat.type === 'group' && info.description && desc) {
+      desc.textContent = info.description;
+      desc.style.display = 'block';
+    }
 
     const fmtTs = ts => ts ? new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
     const fmtNum = n => (n === null || n === undefined || n < 0) ? '—' : n.toLocaleString();

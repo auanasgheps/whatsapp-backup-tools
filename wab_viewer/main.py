@@ -12,6 +12,7 @@ Dependencies:
 from __future__ import annotations
 
 import argparse
+import base64
 import mimetypes
 import os
 import sqlite3
@@ -40,6 +41,90 @@ def _get_version() -> str:
 from wab_viewer.chat_viewer.template import HTML_TEMPLATE
 
 _CHAT_VIEWER_DIR = Path(__file__).parent / "chat_viewer"
+
+
+def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
+    """Read a base-128 varint from data starting at offset."""
+    val = 0
+    shift = 0
+    while offset < len(data):
+        b = data[offset]
+        offset += 1
+        val |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return val, offset
+        shift += 7
+    raise ValueError("Truncated varint in protobuf payload")
+
+
+def _extract_ios_group_description(raw_pic_id: str) -> str | None:
+    """Extract group description text from iOS ZWAGROUPINFO.ZPICTUREID protobuf."""
+    if not raw_pic_id:
+        return None
+    s = raw_pic_id[1:] if raw_pic_id.startswith("+") else raw_pic_id
+    try:
+        data = base64.b64decode(s, validate=True)
+    except Exception:
+        return None
+
+    offset = 0
+    while offset < len(data):
+        try:
+            tag, offset = _read_varint(data, offset)
+        except ValueError:
+            break
+        field_num = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 0:
+            try:
+                _, offset = _read_varint(data, offset)
+            except ValueError:
+                break
+        elif wire_type == 1:
+            offset += 8
+        elif wire_type == 2:
+            try:
+                length, offset = _read_varint(data, offset)
+            except ValueError:
+                break
+            payload = data[offset : offset + length]
+            offset += length
+            if field_num == 1:
+                sub_offset = 0
+                while sub_offset < len(payload):
+                    try:
+                        sub_tag, sub_offset = _read_varint(payload, sub_offset)
+                    except ValueError:
+                        break
+                    sub_num = sub_tag >> 3
+                    sub_wire = sub_tag & 0x07
+                    if sub_wire == 0:
+                        try:
+                            _, sub_offset = _read_varint(payload, sub_offset)
+                        except ValueError:
+                            break
+                    elif sub_wire == 1:
+                        sub_offset += 8
+                    elif sub_wire == 2:
+                        try:
+                            sub_len, sub_offset = _read_varint(payload, sub_offset)
+                        except ValueError:
+                            break
+                        sub_bytes = payload[sub_offset : sub_offset + sub_len]
+                        sub_offset += sub_len
+                        if sub_num == 3:
+                            desc = sub_bytes.decode("utf-8", errors="replace").strip()
+                            return desc if desc else None
+                    elif sub_wire == 5:
+                        sub_offset += 4
+                    else:
+                        break
+        elif wire_type == 5:
+            offset += 4
+        else:
+            break
+    return None
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -2762,6 +2847,7 @@ def create_app(output_root: Path, rescan: bool = False):
 
         display_name = None
         number = None
+        description = None
         members = []
         top_senders = []
         created_ts = None
@@ -2832,6 +2918,29 @@ def create_app(output_root: Path, rescan: bool = False):
 
                     try:
                         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                        if "message_system" in tables:
+                            desc_row = conn.execute("""
+                                SELECT m.text_data
+                                FROM message m
+                                JOIN message_system ms ON ms.message_row_id = m._id
+                                WHERE m.chat_row_id = CAST(? AS INTEGER)
+                                  AND ms.action_type = 27
+                                ORDER BY m.timestamp DESC, m._id DESC
+                                LIMIT 1
+                            """, (chat_id,)).fetchone()
+                            if desc_row and desc_row["text_data"]:
+                                description = desc_row["text_data"].strip() or None
+
+                        if not description:
+                            arch_grp_cols = {c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()}
+                            if "description" in arch_grp_cols:
+                                arch_desc_row = conn.execute(
+                                    "SELECT NULLIF(description, '') AS description FROM arch.groups WHERE chat_row_id = ?",
+                                    (str(chat_id),),
+                                ).fetchone()
+                                if arch_desc_row and arch_desc_row["description"]:
+                                    description = arch_desc_row["description"].strip() or None
+
                         jid_cols = {c[1] for c in conn.execute("PRAGMA table_info(jid)").fetchall()} if "jid" in tables else set()
                         j_fallback = "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END" if "server" in jid_cols else "j.user"
 
@@ -2956,6 +3065,16 @@ def create_app(output_root: Path, rescan: bool = False):
                     raw_prefix_c = "SUBSTR(gi.ZCREATORJID, 1, INSTR(gi.ZCREATORJID || '@', '@') - 1)"
                     phone_jid_c = f"({phone_expr_c} || '@s.whatsapp.net')"
 
+                    gi_cols = {c[1] for c in conn.execute("PRAGMA table_info(ZWAGROUPINFO)").fetchall()}
+                    extra_gi_cols = []
+                    if "ZPICTUREID" in gi_cols:
+                        extra_gi_cols.append("gi.ZPICTUREID AS picture_id")
+                    if "ZDESCRIPTION" in gi_cols:
+                        extra_gi_cols.append("gi.ZDESCRIPTION AS direct_desc")
+                    elif "ZGROUPDESCRIPTION" in gi_cols:
+                        extra_gi_cols.append("gi.ZGROUPDESCRIPTION AS direct_desc")
+                    extra_gi_select = (", " + ", ".join(extra_gi_cols)) if extra_gi_cols else ""
+
                     cre_row = conn.execute(f"""
                         SELECT CAST((gi.ZCREATIONDATE + 978307200) * 1000 AS INTEGER) AS created_ms,
                                COALESCE({phone_expr_c}, '') AS creator_number,
@@ -2969,6 +3088,7 @@ def create_app(output_root: Path, rescan: bool = False):
                                    NULLIF(cs_phone.ZPARTNERNAME, ''),
                                    ''
                                ) AS creator_name
+                               {extra_gi_select}
                         FROM ZWACHATSESSION cs
                         JOIN ZWAGROUPINFO gi ON gi.Z_PK = cs.ZGROUPINFO
                         LEFT JOIN _ios_contacts ic ON ic.jid = gi.ZCREATORJID
@@ -2984,6 +3104,21 @@ def create_app(output_root: Path, rescan: bool = False):
                         created_ts = cre_row["created_ms"]
                         creator_number = cre_row["creator_number"] or None
                         creator_name = cre_row["creator_name"] or None
+                        cre_keys = cre_row.keys()
+                        if "direct_desc" in cre_keys and cre_row["direct_desc"]:
+                            description = str(cre_row["direct_desc"]).strip() or None
+                        elif "picture_id" in cre_keys and cre_row["picture_id"]:
+                            description = _extract_ios_group_description(cre_row["picture_id"])
+
+                    if not description:
+                        arch_grp_cols = {c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()}
+                        if "description" in arch_grp_cols:
+                            arch_desc_row = conn.execute(
+                                "SELECT NULLIF(description, '') AS description FROM arch.groups WHERE chat_row_id = ?",
+                                (str(chat_id),),
+                            ).fetchone()
+                            if arch_desc_row and arch_desc_row["description"]:
+                                description = arch_desc_row["description"].strip() or None
 
         result = {
             "display_name": display_name,
@@ -2995,6 +3130,7 @@ def create_app(output_root: Path, rescan: bool = False):
             "total": total,
         }
         if chat_type == "group":
+            result["description"] = description
             result["members"] = members
             result["top_senders"] = top_senders
             result["created_ts"] = created_ts
