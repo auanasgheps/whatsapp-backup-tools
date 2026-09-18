@@ -4105,3 +4105,542 @@ class TestGroupMembersLidResolution:
             assert r_data["available"] is True
             assert r_data["reactors"][0]["name"] == "+15550004444"
             assert r_data["reactors"][0]["emoji"] == "👍"
+
+
+class TestServiceMessages:
+    """Tests for WhatsApp service messages and group events (iOS & Android)."""
+
+    def test_ios_service_events_formatting_and_preview(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        contacts_path = tmp_path / "ContactsV2.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT, ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZMESSAGETYPE INTEGER, ZGROUPEVENTTYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'iOS Test Group', 0);
+
+            -- 1. Group created with JSON payload containing subject and LID author
+            INSERT INTO ZWAMESSAGE VALUES (
+                1, 10, 0, 700000000.0, 6, 12, NULL, NULL, NULL, NULL,
+                '{"subject": "Alpha Project", "author": "103624826949010@lid"}',
+                '103624826949010@lid'
+            );
+            -- 2. Participant added (by me)
+            INSERT INTO ZWAMESSAGE VALUES (
+                2, 10, 1, 700000010.0, 6, 2, NULL, NULL, NULL, NULL,
+                '15550002222@s.whatsapp.net', NULL
+            );
+            -- 3. Subject changed (by me)
+            INSERT INTO ZWAMESSAGE VALUES (
+                3, 10, 1, 700000020.0, 6, 1, NULL, NULL, NULL, NULL,
+                'Beta Project', NULL
+            );
+            -- 4. Group icon changed (by Bob)
+            INSERT INTO ZWAMESSAGE VALUES (
+                4, 10, 0, 700000030.0, 6, 3, NULL, NULL, NULL, NULL,
+                NULL, '15550002222@s.whatsapp.net'
+            );
+            -- 5. Disappearing messages set
+            INSERT INTO ZWAMESSAGE VALUES (
+                5, 10, 0, 700000040.0, 6, 26, NULL, NULL, NULL, NULL,
+                '7776000', '15550002222@s.whatsapp.net'
+            );
+            -- 6. Disappearing messages turned off
+            INSERT INTO ZWAMESSAGE VALUES (
+                6, 10, 0, 700000050.0, 6, 26, NULL, NULL, NULL, NULL,
+                '0', '15550002222@s.whatsapp.net'
+            );
+            -- 7. Admin promoted
+            INSERT INTO ZWAMESSAGE VALUES (
+                7, 10, 0, 700000060.0, 6, 9, NULL, NULL, NULL, NULL,
+                '15550002222@s.whatsapp.net', NULL
+            );
+            -- 8. Admin demoted
+            INSERT INTO ZWAMESSAGE VALUES (
+                8, 10, 0, 700000070.0, 6, 5, NULL, NULL, NULL, NULL,
+                '15550002222@s.whatsapp.net', NULL
+            );
+            -- 9. Participant removed (by me)
+            INSERT INTO ZWAMESSAGE VALUES (
+                9, 10, 1, 700000080.0, 6, 7, NULL, NULL, NULL, NULL,
+                '103624826949010@lid', NULL
+            );
+            -- 10. Regular chat text message (PK 30)
+            INSERT INTO ZWAMESSAGE VALUES (
+                30, 10, 0, 700000090.0, 0, 0, NULL, NULL, NULL, NULL,
+                'Hello team', '15550002222@s.whatsapp.net'
+            );
+            -- 20. Participant added by WhatsApp official system sender (0@s.whatsapp.net, PK 20)
+            INSERT INTO ZWAMESSAGE VALUES (
+                20, 10, 0, 700000085.0, 6, 2, NULL, NULL, NULL, NULL,
+                '15550002222@s.whatsapp.net', '0@s.whatsapp.net'
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        # Setup ContactsV2 with LID mapping for user 1 (Alice)
+        c_conn = sqlite3.connect(str(contacts_path))
+        c_conn.executescript("""
+            CREATE TABLE ZWAADDRESSBOOKCONTACT (
+                Z_PK INTEGER PRIMARY KEY, ZLID VARCHAR, ZWHATSAPPID VARCHAR,
+                ZFULLNAME VARCHAR, ZPHONENUMBER VARCHAR
+            );
+            INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (
+                1, '103624826949010@lid', '15550001111@s.whatsapp.net',
+                'Alice Smith', '15550001111'
+            );
+        """)
+        c_conn.commit()
+        c_conn.close()
+
+        # Setup archive db with contact for Bob Jones
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Bob', 'Bob Jones')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'iOS Test Group', 'iOS Test Group')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            # 1. Fetch messages
+            resp = client.get("/api/messages?chat_id=10&chat_type=group&limit=50")
+            msgs = resp.get_json()
+            assert len(msgs) == 11
+
+            by_id = {m["msg_id"]: m for m in msgs}
+
+            # Msg 1: Group created
+            assert by_id[1]["media_type"] == "service"
+            assert by_id[1]["text_body"] == 'Alice Smith created group "Alpha Project"'
+            assert "@lid" not in by_id[1]["text_body"]
+
+            # Msg 2: Participant added
+            assert by_id[2]["media_type"] == "service"
+            assert by_id[2]["text_body"] == "You added Bob Jones"
+
+            # Msg 3: Subject changed
+            assert by_id[3]["media_type"] == "service"
+            assert by_id[3]["text_body"] == 'You changed the subject to "Beta Project"'
+
+            # Msg 4: Icon changed
+            assert by_id[4]["media_type"] == "service"
+            assert by_id[4]["text_body"] == "Bob Jones changed this group's icon"
+
+            # Msg 5: Disappearing messages on
+            assert by_id[5]["media_type"] == "service"
+            assert by_id[5]["text_body"] == "Disappearing messages set to 90 days"
+
+            # Msg 6: Disappearing messages off
+            assert by_id[6]["media_type"] == "service"
+            assert by_id[6]["text_body"] == "Disappearing messages turned off"
+
+            # Msg 7: Admin promoted
+            assert by_id[7]["media_type"] == "service"
+            assert by_id[7]["text_body"] == "Bob Jones is now an admin"
+
+            # Msg 8: Admin demoted
+            assert by_id[8]["media_type"] == "service"
+            assert by_id[8]["text_body"] == "Bob Jones is no longer an admin"
+
+            # Msg 9: Participant removed
+            assert by_id[9]["media_type"] == "service"
+            assert by_id[9]["text_body"] == "You removed Alice Smith"
+            assert "@lid" not in by_id[9]["text_body"]
+
+            # Msg 20: WhatsApp system sender
+            assert by_id[20]["media_type"] == "service"
+            assert by_id[20]["text_body"] == "WhatsApp added Bob Jones"
+
+            # Msg 30: Regular message
+            assert by_id[30]["media_type"] == "text"
+            assert by_id[30]["text_body"] == "Hello team"
+
+            # 2. Chat preview in /api/chats
+            c_resp = client.get("/api/chats")
+            chats = c_resp.get_json()
+            assert len(chats) == 1
+            assert chats[0]["last_msg_type"] == "text"
+            assert chats[0]["last_msg_preview"] == "Hello team"
+
+            # Add a newer service message and verify /api/chats reflects service preview
+            conn = sqlite3.connect(str(wa_path))
+            conn.execute("""
+                INSERT INTO ZWAMESSAGE VALUES (
+                    40, 10, 1, 700000100.0, 6, 1, NULL, NULL, NULL, NULL,
+                    'Gamma Project', NULL
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+            c_resp2 = client.get("/api/chats")
+            chats2 = c_resp2.get_json()
+            assert chats2[0]["last_msg_type"] == "service"
+            assert chats2[0]["last_msg_preview"] == 'You changed the subject to "Gamma Project"'
+
+            # 3. /api/chat-info excludes service messages from total/sent/received
+            info_resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            info = info_resp.get_json()
+            assert info["total"] == 1
+            assert info["sent"] == 0
+            assert info["received"] == 1
+
+    def test_android_service_events_formatting_and_preview(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (
+                _id        INTEGER PRIMARY KEY,
+                user       TEXT,
+                server     TEXT,
+                raw_string TEXT
+            );
+            CREATE TABLE chat (
+                _id                     INTEGER PRIMARY KEY,
+                jid_row_id              INTEGER,
+                subject                 TEXT,
+                hidden                  INTEGER DEFAULT 0,
+                sort_timestamp          INTEGER,
+                display_message_row_id  INTEGER
+            );
+            CREATE TABLE message (
+                _id               INTEGER PRIMARY KEY,
+                chat_row_id       INTEGER NOT NULL,
+                from_me           INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp         INTEGER,
+                text_data         TEXT,
+                message_type      INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (
+                _id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT
+            );
+            CREATE TABLE message_quoted (
+                _id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT,
+                from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER
+            );
+            CREATE TABLE message_system (
+                _id            INTEGER PRIMARY KEY,
+                message_row_id INTEGER NOT NULL,
+                action_type    INTEGER NOT NULL
+            );
+            CREATE TABLE message_system_chat_participant (
+                _id              INTEGER PRIMARY KEY,
+                message_row_id   INTEGER NOT NULL,
+                user_jid_row_id  INTEGER NOT NULL
+            );
+            CREATE TABLE jid_map (
+                lid_row_id INTEGER,
+                jid_row_id INTEGER
+            );
+            CREATE TABLE lid_display_name (
+                lid_row_id   INTEGER PRIMARY KEY,
+                display_name TEXT,
+                username     TEXT
+            );
+
+            INSERT INTO jid VALUES (1, '103624826949010', 'lid', '103624826949010@lid');
+            INSERT INTO jid VALUES (2, '15550001111', 's.whatsapp.net', '15550001111@s.whatsapp.net');
+            INSERT INTO jid VALUES (3, '15550002222', 's.whatsapp.net', '15550002222@s.whatsapp.net');
+            INSERT INTO jid VALUES (4, 'group1', 'g.us', 'group1@g.us');
+            INSERT INTO jid VALUES (5, '103624826949099', 'lid', '103624826949099@lid');
+            INSERT INTO jid VALUES (6, 'me', 'lid', 'lid_me');
+
+            INSERT INTO jid_map VALUES (1, 2);
+
+            INSERT INTO chat VALUES (10, 4, 'Android Group', 0, 1700000000000, 3);
+
+            -- 1. Action 11: Group created
+            INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, 'Android Group', 7);
+            INSERT INTO message_system VALUES (1, 1, 11);
+
+            -- 2. Action 12: Participant added (by me)
+            INSERT INTO message VALUES (2, 10, 1, 0, 1700000001000, NULL, 7);
+            INSERT INTO message_system VALUES (2, 2, 12);
+            INSERT INTO message_system_chat_participant VALUES (1, 2, 3);
+
+            -- 3. Action 1: Subject changed (by me)
+            INSERT INTO message VALUES (3, 10, 1, 0, 1700000002000, 'Renamed Android Group', 7);
+            INSERT INTO message_system VALUES (3, 3, 1);
+
+            -- 4. Action 6: Group icon changed (by Bob)
+            INSERT INTO message VALUES (4, 10, 0, 3, 1700000003000, NULL, 7);
+            INSERT INTO message_system VALUES (4, 4, 6);
+
+            -- 5. Action 27: Group description changed (by me)
+            INSERT INTO message VALUES (5, 10, 1, 0, 1700000004000, NULL, 7);
+            INSERT INTO message_system VALUES (5, 5, 27);
+
+            -- 6. Action 15: Admin promoted
+            INSERT INTO message VALUES (6, 10, 0, 1, 1700000005000, NULL, 7);
+            INSERT INTO message_system VALUES (6, 6, 15);
+            INSERT INTO message_system_chat_participant VALUES (2, 6, 3);
+
+            -- 7. Action 20: Admin demoted
+            INSERT INTO message VALUES (7, 10, 0, 1, 1700000006000, NULL, 7);
+            INSERT INTO message_system VALUES (7, 7, 20);
+            INSERT INTO message_system_chat_participant VALUES (3, 7, 3);
+
+            -- 8. Action 79: Joined via invite link
+            INSERT INTO message VALUES (8, 10, 0, 0, 1700000007000, NULL, 7);
+            INSERT INTO message_system VALUES (8, 8, 79);
+            INSERT INTO message_system_chat_participant VALUES (4, 8, 3);
+
+            -- 9. Action 14: Participant removed (by me)
+            INSERT INTO message VALUES (9, 10, 1, 0, 1700000008000, NULL, 7);
+            INSERT INTO message_system VALUES (9, 9, 14);
+            INSERT INTO message_system_chat_participant VALUES (5, 9, 3);
+
+            -- 10. Action 13: Participant left
+            INSERT INTO message VALUES (10, 10, 0, 0, 1700000009000, NULL, 7);
+            INSERT INTO message_system VALUES (10, 10, 13);
+            INSERT INTO message_system_chat_participant VALUES (6, 10, 3);
+
+            -- 11. Action 58: Announcement mode on
+            INSERT INTO message VALUES (11, 10, 0, 1, 1700000010000, 'true', 7);
+            INSERT INTO message_system VALUES (11, 11, 58);
+
+            -- 12. Action 58: Announcement mode off
+            INSERT INTO message VALUES (12, 10, 0, 1, 1700000011000, 'false', 7);
+            INSERT INTO message_system VALUES (12, 12, 58);
+
+            -- 13. Action 12: Unmapped LID participant added (must not leak raw LID)
+            INSERT INTO message VALUES (13, 10, 0, 1, 1700000012000, NULL, 7);
+            INSERT INTO message_system VALUES (13, 13, 12);
+            INSERT INTO message_system_chat_participant VALUES (7, 13, 5);
+
+            -- 14. Action 67: Noisy encryption notice (must be filtered out)
+            INSERT INTO message VALUES (14, 10, 0, 0, 1700000013000, NULL, 7);
+            INSERT INTO message_system VALUES (14, 14, 67);
+
+            -- 15. Action 18: Noisy device change (must be filtered out)
+            INSERT INTO message VALUES (15, 10, 0, 0, 1700000014000, NULL, 7);
+            INSERT INTO message_system VALUES (15, 15, 18);
+
+            -- 16. Regular chat message
+            INSERT INTO message VALUES (16, 10, 0, 3, 1700000015000, 'All systems go', 0);
+
+            -- 17. Action 12: Alice added You (lid_me participant)
+            INSERT INTO message VALUES (17, 10, 0, 1, 1700000016000, NULL, 7);
+            INSERT INTO message_system VALUES (17, 17, 12);
+            INSERT INTO message_system_chat_participant VALUES (8, 17, 6);
+
+            -- 18. Action 13: Bob left (no participant row, sender fallback)
+            INSERT INTO message VALUES (18, 10, 0, 3, 1700000017000, NULL, 7);
+            INSERT INTO message_system VALUES (18, 18, 13);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Alice', 'Alice Smith')"
+        )
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Bob', 'Bob Jones')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Android Group', 'Android Group')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=group&limit=50")
+            msgs = resp.get_json()
+
+            # Noisy actions 67 and 18 must be filtered out
+            msg_ids = [m["msg_id"] for m in msgs]
+            assert 14 not in msg_ids
+            assert 15 not in msg_ids
+            assert len(msgs) == 16  # 15 service messages + 1 text message
+
+            by_id = {m["msg_id"]: m for m in msgs}
+
+            # 1. Group created
+            assert by_id[1]["media_type"] == "service"
+            assert by_id[1]["text_body"] == 'Alice Smith created group "Android Group"'
+
+            # 2. Participant added
+            assert by_id[2]["media_type"] == "service"
+            assert by_id[2]["text_body"] == "You added Bob Jones"
+
+            # 3. Subject changed
+            assert by_id[3]["media_type"] == "service"
+            assert by_id[3]["text_body"] == 'You changed the subject to "Renamed Android Group"'
+
+            # 4. Icon changed
+            assert by_id[4]["media_type"] == "service"
+            assert by_id[4]["text_body"] == "Bob Jones changed this group's icon"
+
+            # 5. Description changed
+            assert by_id[5]["media_type"] == "service"
+            assert by_id[5]["text_body"] == "You changed the group description"
+
+            # 6. Admin promoted
+            assert by_id[6]["media_type"] == "service"
+            assert by_id[6]["text_body"] == "Bob Jones is now an admin"
+
+            # 7. Admin demoted
+            assert by_id[7]["media_type"] == "service"
+            assert by_id[7]["text_body"] == "Bob Jones is no longer an admin"
+
+            # 8. Joined via invite link
+            assert by_id[8]["media_type"] == "service"
+            assert by_id[8]["text_body"] == "Bob Jones joined using this group's invite link"
+
+            # 9. Participant removed
+            assert by_id[9]["media_type"] == "service"
+            assert by_id[9]["text_body"] == "You removed Bob Jones"
+
+            # 10. Participant left
+            assert by_id[10]["media_type"] == "service"
+            assert by_id[10]["text_body"] == "Bob Jones left"
+
+            # 11. Announcement mode on
+            assert by_id[11]["media_type"] == "service"
+            assert by_id[11]["text_body"] == "Only admins can send messages in this group"
+
+            # 12. Announcement mode off
+            assert by_id[12]["media_type"] == "service"
+            assert by_id[12]["text_body"] == "All participants can send messages in this group"
+
+            # 13. Unmapped LID participant
+            assert by_id[13]["media_type"] == "service"
+            assert by_id[13]["text_body"] == "Alice Smith added Unknown"
+            assert "103624826949099" not in by_id[13]["text_body"]
+            assert "@lid" not in by_id[13]["text_body"]
+
+            # 16. Regular message
+            assert by_id[16]["media_type"] == "text"
+            assert by_id[16]["text_body"] == "All systems go"
+
+            # 17. Alice added You
+            assert by_id[17]["media_type"] == "service"
+            assert by_id[17]["text_body"] == "Alice Smith added You"
+
+            # 18. Bob left (sender fallback)
+            assert by_id[18]["media_type"] == "service"
+            assert by_id[18]["text_body"] == "Bob Jones left"
+
+            # /api/chats preview
+            c_resp = client.get("/api/chats")
+            chats = c_resp.get_json()
+            assert len(chats) == 1
+            # display_message_row_id in chat was 3 (subject changed)
+            assert chats[0]["last_msg_type"] == "service"
+            assert chats[0]["last_msg_preview"] == 'You changed the subject to "Renamed Android Group"'
+
+            # /api/chat-info stats
+            info_resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
+            info = info_resp.get_json()
+            assert info["total"] == 1
+            assert info["sent"] == 0
+            assert info["received"] == 1
+
+    def test_service_messages_at_endpoint(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER, text_data TEXT, message_type INTEGER DEFAULT 0);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE message_system (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL, action_type INTEGER NOT NULL);
+            CREATE TABLE message_system_chat_participant (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL, user_jid_row_id INTEGER NOT NULL);
+
+            INSERT INTO jid VALUES (1, '15550001111', 's.whatsapp.net', '15550001111@s.whatsapp.net');
+            INSERT INTO jid VALUES (2, 'group1', 'g.us', 'group1@g.us');
+
+            INSERT INTO chat VALUES (10, 2, 'Test Group', 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 10, 1, 0, 1700000001000, 'Welcome to the team', 0);
+            INSERT INTO message VALUES (2, 10, 1, 0, 1700000002000, 'Renamed Team', 7);
+            INSERT INTO message_system VALUES (1, 2, 1);
+            INSERT INTO message VALUES (3, 10, 0, 1, 1700000003000, 'Thanks everyone', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/messages/at?chat_id=10&chat_type=group&ts=1700000002000&limit=10")
+            msgs = resp.get_json()
+            assert len(msgs) == 3
+            by_id = {m["msg_id"]: m for m in msgs}
+            assert by_id[2]["media_type"] == "service"
+            assert by_id[2]["text_body"] == 'You changed the subject to "Renamed Team"'
+
+    def test_fts_indexing_ignores_raw_lid_or_json(self, tmp_path):
+        cache_path = tmp_path / "cache.db"
+        cache_conn = sqlite3.connect(str(cache_path))
+        cache_conn.executescript("""
+            CREATE TABLE message_index (
+                rowid        INTEGER PRIMARY KEY,
+                chat_id      TEXT NOT NULL,
+                chat_type    TEXT NOT NULL,
+                timestamp_ms INTEGER NOT NULL
+            );
+            CREATE VIRTUAL TABLE message_index_fts USING fts5(
+                text_body
+            );
+        """)
+        cache_conn.row_factory = sqlite3.Row
+
+        raw_rows = [
+            {"rowid": 1, "chat_id": "1", "chat_type": "group", "timestamp_ms": 1000, "message_type": 6, "text_body": "103624826949010@lid", "media_file": None},
+            {"rowid": 2, "chat_id": "1", "chat_type": "group", "timestamp_ms": 2000, "message_type": 6, "text_body": '{"subject": "Secret", "author": "123"}', "media_file": None},
+            {"rowid": 3, "chat_id": "1", "chat_type": "group", "timestamp_ms": 3000, "message_type": 0, "text_body": "Important meeting tomorrow", "media_file": None},
+        ]
+
+        viewer._stream_fts_rows(raw_rows, cache_conn, 2000, None)
+
+        indexed_fts = cache_conn.execute("SELECT rowid, text_body FROM message_index_fts").fetchall()
+        assert len(indexed_fts) == 1
+        assert indexed_fts[0]["rowid"] == 3
+        assert indexed_fts[0]["text_body"] == "Important meeting tomorrow"
+        cache_conn.close()

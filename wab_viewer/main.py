@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import mimetypes
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -255,6 +257,340 @@ def _strip_none_reactions(rows: list) -> list:
             d.pop("reactions", None)
         result.append(d)
     return result
+
+
+def _resolve_ios_jid(jid_str: str, contacts_map: dict) -> str:
+    """Resolve an iOS JID (phone or @lid) to a contact name, phone number, or Unknown."""
+    if not jid_str:
+        return "Someone"
+    jid_str = jid_str.strip()
+    if jid_str in ("0@s.whatsapp.net", "0"):
+        return "WhatsApp"
+    if jid_str in contacts_map:
+        full_name, phone_number = contacts_map[jid_str]
+        if full_name:
+            return full_name
+        if phone_number:
+            return f"+{phone_number}"
+    if not jid_str.endswith("@s.whatsapp.net") and not jid_str.endswith("@lid"):
+        alt_s = f"{jid_str}@s.whatsapp.net"
+        if alt_s in contacts_map:
+            fn, pn = contacts_map[alt_s]
+            if fn:
+                return fn
+            if pn:
+                return f"+{pn}"
+        alt_lid = f"{jid_str}@lid"
+        if alt_lid in contacts_map:
+            fn, pn = contacts_map[alt_lid]
+            if fn:
+                return fn
+            if pn:
+                return f"+{pn}"
+    elif jid_str.endswith("@s.whatsapp.net"):
+        bare = jid_str.split("@")[0]
+        if bare in contacts_map:
+            fn, pn = contacts_map[bare]
+            if fn:
+                return fn
+            if pn:
+                return f"+{pn}"
+    if jid_str.endswith("@s.whatsapp.net"):
+        num = jid_str.split("@")[0]
+        return f"+{num}"
+    if jid_str.endswith("@lid"):
+        return "Unknown"
+    if jid_str.isdigit():
+        return f"+{jid_str}"
+    return jid_str
+
+
+def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
+    """Format an iOS service event row into a friendly human-readable string."""
+    ev = row.get("group_event_type")
+    txt = (row.get("text_body") or "").strip()
+    from_me = row.get("from_me")
+    sender = row.get("sender")
+    actor = "You" if from_me == 1 else (sender or "Someone")
+
+    if ev == 12:  # Group created
+        subj = txt
+        if txt.startswith("{"):
+            try:
+                data = json.loads(txt)
+                subj = data.get("subject", "")
+                author_jid = data.get("author")
+                if author_jid:
+                    resolved_author = _resolve_ios_jid(author_jid, contacts_map)
+                    if resolved_author and not from_me:
+                        actor = resolved_author
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        if subj:
+            return f'{actor} created group "{subj}"'
+        return f'{actor} created this group'
+
+    if ev == 1:  # Subject changed
+        if txt:
+            return f'{actor} changed the subject to "{txt}"'
+        return f'{actor} changed the group subject'
+
+    if ev == 2:  # Participant added or joined
+        jids = [j.strip() for j in re.split(r"[;,]", txt) if j.strip()]
+        names = [_resolve_ios_jid(j, contacts_map) for j in jids]
+        target = ", ".join(names) if names else "someone"
+        if actor and actor != "Someone" and actor != target:
+            return f"{actor} added {target}"
+        return f"{target} joined"
+
+    if ev == 7:  # Participant removed or left
+        jids = [j.strip() for j in re.split(r"[;,]", txt) if j.strip()]
+        names = [_resolve_ios_jid(j, contacts_map) for j in jids]
+        target = ", ".join(names) if names else "someone"
+        if actor and actor != "Someone" and actor != target:
+            return f"{actor} removed {target}"
+        return f"{target} left"
+
+    if ev == 3:  # Group icon changed
+        return f"{actor} changed this group's icon"
+
+    if ev in (5, 9):  # Admin changed
+        jids = [j.strip() for j in re.split(r"[;,]", txt) if j.strip()]
+        names = [_resolve_ios_jid(j, contacts_map) for j in jids]
+        target = ", ".join(names) if names else "A participant"
+        if ev == 9:
+            return f"{target} is now an admin"
+        return f"{target} is no longer an admin"
+
+    if ev == 26:  # Disappearing messages
+        secs = int(txt) if txt.isdigit() else None
+        if secs and secs > 0:
+            days = secs // 86400
+            if days >= 1:
+                return f"Disappearing messages set to {days} days"
+            hours = secs // 3600
+            return f"Disappearing messages set to {hours} hours"
+        return "Disappearing messages turned off"
+
+    if ev in (36, 37):
+        return "Group settings changed"
+
+    if txt and not txt.startswith("{") and "@lid" not in txt and not txt.isdigit():
+        return txt
+    return "Group event"
+
+
+def _format_android_service_row(row: dict) -> str:
+    """Format an Android service event row into a friendly human-readable string."""
+    act = row.get("action_type")
+    txt = (row.get("text_body") or "").strip()
+    from_me = row.get("from_me")
+    sender = row.get("sender")
+    part_name = row.get("participant_name")
+
+    actor = "You" if from_me == 1 else (sender or "Someone")
+    target = part_name or (sender if act in (4, 5, 13, 79) else None) or "Someone"
+
+    if act == 11:  # Group created
+        if txt:
+            return f'{actor} created group "{txt}"'
+        return f'{actor} created this group'
+
+    if act == 1:  # Subject changed
+        if txt:
+            return f'{actor} changed the subject to "{txt}"'
+        return f'{actor} changed the group subject'
+
+    if act in (12, 4):  # Participant added / joined
+        if actor and actor != "Someone" and actor != target:
+            return f"{actor} added {target}"
+        return f"{target} joined"
+
+    if act == 79:  # Joined via invite link
+        return f"{target} joined using this group's invite link"
+
+    if act in (13, 5):  # Participant left
+        return f"{target} left"
+
+    if act == 14:  # Participant removed
+        if actor and actor != "Someone" and actor != target:
+            return f"{actor} removed {target}"
+        return f"{target} was removed"
+
+    if act == 6:  # Photo / icon changed
+        return f"{actor} changed this group's icon"
+
+    if act == 27:  # Description changed
+        return f"{actor} changed the group description"
+
+    if act == 15:  # Admin promoted
+        return f"{target} is now an admin"
+
+    if act == 20:  # Admin demoted
+        return f"{target} is no longer an admin"
+
+    if act == 58:  # Announcement mode
+        if txt.lower() == "true":
+            return "Only admins can send messages in this group"
+        return "All participants can send messages in this group"
+
+    if txt and not txt.startswith("{") and "@lid" not in txt and txt.lower() not in ("true", "false") and not txt.isdigit():
+        return txt
+    return "Group event"
+
+
+def _hydrate_android_service_participants(
+    conn: sqlite3.Connection,
+    msg_ids: list,
+    has_mcp: bool,
+    has_lid_dn: bool,
+    has_jid_server: bool,
+    has_jid_raw_string: bool,
+) -> dict:
+    """Hydrate participant names for Android service messages on demand."""
+    if not has_mcp or not msg_ids:
+        return {}
+    ph = ",".join("?" * len(msg_ids))
+    ldn_col = "ldn.display_name AS lid_name," if has_lid_dn else "NULL AS lid_name,"
+    ldn_join = "LEFT JOIN lid_display_name ldn ON ldn.lid_row_id = mcp.user_jid_row_id" if has_lid_dn else ""
+    server_col = "j_part_raw.server AS raw_server," if has_jid_server else "NULL AS raw_server,"
+    raw_str_col = "j_part_raw.raw_string AS raw_string," if has_jid_raw_string else "NULL AS raw_string,"
+    is_lid_pred = "j_part_raw.server = 'lid'" if has_jid_server else "0"
+
+    sql = f"""
+        SELECT
+            mcp.message_row_id,
+            j_part_raw.user AS raw_user,
+            {server_col}
+            {raw_str_col}
+            j_part_real.user AS real_user,
+            con_part.display_name AS contact_name,
+            {ldn_col}
+            con_part.number AS contact_num
+        FROM message_system_chat_participant mcp
+        LEFT JOIN _jid_map_resolved jm_part ON jm_part.lid_row_id = mcp.user_jid_row_id
+        LEFT JOIN jid j_part_real ON j_part_real._id = jm_part.jid_row_id
+        LEFT JOIN jid j_part_raw ON j_part_raw._id = mcp.user_jid_row_id
+        {ldn_join}
+        LEFT JOIN arch.contacts con_part ON con_part.number = COALESCE(j_part_real.user, CASE WHEN NOT ({is_lid_pred}) THEN j_part_raw.user END)
+        WHERE mcp.message_row_id IN ({ph})
+    """
+    try:
+        p_rows = conn.execute(sql, msg_ids).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+
+    p_map: dict = {}
+    for pr in p_rows:
+        mid = pr["message_row_id"]
+        raw_str = pr["raw_string"] or ""
+        raw_u = pr["raw_user"] or ""
+        raw_s = pr["raw_server"] or ""
+        real_u = pr["real_user"] or ""
+        c_name = pr["contact_name"] or ""
+        lid_n = pr["lid_name"] or ""
+
+        if raw_str == "lid_me" or raw_u == "me":
+            name = "You"
+        elif c_name:
+            name = c_name
+        elif (real_u or (raw_s != "lid" and raw_u)) == "0":
+            name = "WhatsApp"
+        elif real_u:
+            name = f"+{real_u}"
+        elif lid_n:
+            name = lid_n
+        elif raw_s != "lid" and raw_u:
+            name = f"+{raw_u}"
+        else:
+            name = "Unknown"
+
+        p_map.setdefault(mid, []).append(name)
+
+    return {mid: ", ".join(names) for mid, names in p_map.items()}
+
+
+def _format_service_rows(
+    rows: list,
+    source_type: str,
+    conn: sqlite3.Connection,
+    has_mcp: bool,
+    has_lid_dn: bool,
+    has_jid_server: bool,
+    has_jid_raw_string: bool,
+) -> None:
+    """Format in-place text_body for all service event rows in a result set."""
+    service_rows = [r for r in rows if r.get("media_type") == "service"]
+    if not service_rows:
+        return
+
+    if source_type == "ios":
+        needed_jids = set()
+        for r in service_rows:
+            txt = (r.get("text_body") or "").strip()
+            if txt.startswith("{"):
+                try:
+                    data = json.loads(txt)
+                    author = data.get("author")
+                    if author:
+                        needed_jids.add(author)
+                        if not author.endswith("@s.whatsapp.net") and not author.endswith("@lid"):
+                            needed_jids.add(f"{author}@s.whatsapp.net")
+                            needed_jids.add(f"{author}@lid")
+                        elif author.endswith("@s.whatsapp.net"):
+                            needed_jids.add(author.split("@")[0])
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+            for part in re.split(r"[;,]", txt):
+                part = part.strip()
+                if part:
+                    needed_jids.add(part)
+                    if not part.endswith("@s.whatsapp.net") and not part.endswith("@lid"):
+                        needed_jids.add(f"{part}@s.whatsapp.net")
+                        needed_jids.add(f"{part}@lid")
+                    elif part.endswith("@s.whatsapp.net"):
+                        needed_jids.add(part.split("@")[0])
+
+        contacts_map = {}
+        if needed_jids:
+            ph = ",".join("?" * len(needed_jids))
+            try:
+                c_rows = conn.execute(
+                    f"SELECT jid, full_name, phone_number FROM _ios_contacts WHERE jid IN ({ph})",
+                    list(needed_jids),
+                ).fetchall()
+                for cr in c_rows:
+                    contacts_map[cr["jid"]] = (cr["full_name"], cr["phone_number"])
+            except sqlite3.OperationalError:
+                pass
+            try:
+                arch_rows = conn.execute(
+                    f"SELECT number, display_name FROM arch.contacts WHERE number IN ({ph})",
+                    list(needed_jids),
+                ).fetchall()
+                for ar in arch_rows:
+                    if ar["display_name"]:
+                        contacts_map[ar["number"]] = (ar["display_name"], ar["number"])
+                        contacts_map[f"{ar['number']}@s.whatsapp.net"] = (ar["display_name"], ar["number"])
+            except sqlite3.OperationalError:
+                pass
+
+        for r in service_rows:
+            r["text_body"] = _format_ios_service_row(r, contacts_map)
+
+    elif source_type == "android":
+        p_map = _hydrate_android_service_participants(
+            conn,
+            [r["msg_id"] for r in service_rows],
+            has_mcp,
+            has_lid_dn,
+            has_jid_server,
+            has_jid_raw_string,
+        )
+        for r in service_rows:
+            if not r.get("participant_name"):
+                r["participant_name"] = p_map.get(r["msg_id"], "")
+            r["text_body"] = _format_android_service_row(r)
 
 
 # ---------------------------------------------------------------------------
@@ -632,17 +968,20 @@ def _save_source_stamp(cache_conn: sqlite3.Connection, source_path: str):
 def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2000,
                      on_progress=None):
     idx_sql = """
-        INSERT INTO message_index (rowid, chat_id, chat_type, timestamp_ms)
+        INSERT OR IGNORE INTO message_index (rowid, chat_id, chat_type, timestamp_ms)
         VALUES (?, ?, ?, ?)
     """
     fts_sql = """
-        INSERT INTO message_index_fts (rowid, text_body)
+        INSERT OR IGNORE INTO message_index_fts (rowid, text_body)
         VALUES (?, ?)
     """
     idx_batch = []
     fts_batch = []
     for row in cursor:
         text_body = row["text_body"] or ""
+        msg_type = row["message_type"]
+        if msg_type in (6, 7) and ("@lid" in text_body or text_body.startswith("{") or text_body.isdigit() or text_body in ("true", "false")):
+            continue
         is_media = row["message_type"] is not None and row["message_type"] != 0 and row["media_file"] is not None
         if not text_body and not is_media:
             continue
@@ -914,20 +1253,17 @@ _ANDROID_SELECT = None
 
 _ANDROID_FILTER = """
     AND (
-        (m.text_data IS NOT NULL AND m.text_data != '')
-        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND mm.file_path IS NOT NULL)
+        (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
+        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
+        OR (m.message_type = 7)
     )
 """
 
 _IOS_CHAT_ID = "CAST(m.ZCHATSESSION AS TEXT)"
 _IOS_CHAT_TYPE = "CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END"
 
-_IOS_SENDER_JID = """CASE WHEN cs.ZGROUPINFO IS NOT NULL
-         THEN NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID,''), 1,
-                            INSTR(COALESCE(gm.ZMEMBERJID,'') || '@', '@') - 1), '')
-         ELSE NULLIF(SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                            INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1), '')
-    END"""
+_IOS_SENDER_JID = """NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID, ''), 1,
+                    INSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') || '@', '@') - 1), '')"""
 
 _IOS_SELECT = f"""
     SELECT
@@ -944,13 +1280,13 @@ _IOS_SELECT = f"""
             NULLIF(pp_phone.ZPUSHNAME, ''),
             NULLIF(cs_lid.ZPARTNERNAME, ''),
             NULLIF(cs_phone.ZPARTNERNAME, ''),
-            CASE WHEN gm.ZMEMBERJID NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
+            CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
             CASE WHEN COALESCE(
-                CASE WHEN gm.ZMEMBERJID NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
                 ic_s.phone_number
             ) IS NOT NULL
             THEN '+' || COALESCE(
-                CASE WHEN gm.ZMEMBERJID NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
                 ic_s.phone_number
             )
             END,
@@ -959,6 +1295,7 @@ _IOS_SELECT = f"""
         m.ZISFROMME                                                  AS from_me,
         ac.archive_path,
         CASE
+            WHEN m.ZMESSAGETYPE = 6 THEN 'service'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -981,20 +1318,22 @@ _IOS_SELECT = f"""
                  '')
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
-        NULL                                                          AS reactions
+        NULL                                                          AS reactions,
+        m.ZMESSAGETYPE                                               AS raw_msg_type,
+        0                                                            AS group_event_type
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
     LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
-    LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = gm.ZMEMBERJID
-    LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = gm.ZMEMBERJID
+    LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
+    LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
     LEFT JOIN _ios_contacts ic_s ON ic_s.jid = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
     LEFT JOIN ZWAPROFILEPUSHNAME pp_phone ON pp_phone.ZJID = (ic_s.phone_number || '@s.whatsapp.net')
     LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = (ic_s.phone_number || '@s.whatsapp.net')
     LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
     LEFT JOIN arch.contacts con_s
           ON con_s.number = COALESCE(
-              CASE WHEN gm.ZMEMBERJID LIKE '%@lid' THEN ic_s.phone_number END,
+              CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') LIKE '%@lid' THEN ic_s.phone_number END,
               ({_IOS_SENDER_JID})
           )
     LEFT JOIN arch.contacts con_lid_s
@@ -1009,17 +1348,13 @@ _IOS_SELECT = f"""
 
 _BASE_IOS_FILTER = """
     AND (
-        (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE = 6)
     )
 """
 
-_BASE_IOS_FILTER_TS = """
-    AND (
-        (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND mi.ZMEDIALOCALPATH IS NOT NULL)
-    )
-"""
+_BASE_IOS_FILTER_TS = _BASE_IOS_FILTER
 
 _IOS_FILTER = _BASE_IOS_FILTER
 _IOS_FILTER_TS = _BASE_IOS_FILTER_TS
@@ -1027,12 +1362,7 @@ _IOS_FILTER_TS = _BASE_IOS_FILTER_TS
 _ANDROID_TS = "COALESCE(m.timestamp, 0)"
 _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
 
-_ANDROID_FILTER_TS = """
-    AND (
-        (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
-        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND mm.file_path IS NOT NULL)
-    )
-"""
+_ANDROID_FILTER_TS = _ANDROID_FILTER
 
 _ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type = 0)"
 _IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
@@ -1367,6 +1697,7 @@ def create_app(output_root: Path, rescan: bool = False):
     _indexing_state: dict = {}
     _indexing_lock = threading.Lock()
     _bulk_index_state: dict = {"running": False, "indexed_msgs": 0, "total_msgs": 0}
+    _wa_local = threading.local()
 
     if source_type is None:
         print("[wab_viewer] Warning: No source WA DB found. Media-only mode.")
@@ -1387,8 +1718,6 @@ def create_app(output_root: Path, rescan: bool = False):
         else:
             count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             print(f"[wab_viewer] {count} chat(s) already indexed")
-
-        _wa_local = threading.local()
 
         has_ios_hd = False
         if source_type == "ios" and wa_db_path is not None:
@@ -1411,6 +1740,7 @@ def create_app(output_root: Path, rescan: bool = False):
         if conn is None:
             conn = sqlite3.connect(wa_db_path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 5000")
             conn.execute("PRAGMA cache_size = -32000")
             conn.execute("PRAGMA temp_store = MEMORY")
             conn.execute("ATTACH DATABASE ? AS arch", (str(archive_db_path),))
@@ -1645,15 +1975,38 @@ def create_app(output_root: Path, rescan: bool = False):
 
     @app.teardown_appcontext
     def _close_wa_conn(exc):
-        pass
+        if source_type is None:
+            return
+        conn = getattr(_wa_local, 'conn', None)
+        if conn is not None:
+            try:
+                conn.commit()
+            except sqlite3.Error:
+                pass
 
     def get_cache():
         return cache_conn
 
     _archive_conn = sqlite3.connect(str(archive_db_path), check_same_thread=False)
     _archive_conn.execute("PRAGMA journal_mode = WAL")
+    _archive_conn.execute("PRAGMA busy_timeout = 5000")
     _archive_conn.row_factory = sqlite3.Row
     _archive_conn.executescript(f"""
+        CREATE TABLE IF NOT EXISTS contacts (
+            number TEXT PRIMARY KEY,
+            folder TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS groups (
+            chat_row_id TEXT PRIMARY KEY,
+            folder TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS archive_copies (
+            original_path TEXT PRIMARY KEY,
+            archive_path TEXT NOT NULL,
+            sha256 TEXT
+        );
         CREATE TABLE IF NOT EXISTS recent_messages (
             chat_id        TEXT NOT NULL,
             chat_type      TEXT NOT NULL,
@@ -1686,10 +2039,15 @@ def create_app(output_root: Path, rescan: bool = False):
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
 
-    # Build _ANDROID_SELECT based on whether message_add_on and lid_display_name tables exist
+    # Build _ANDROID_SELECT and _IOS_SELECT based on available tables
     has_reactions = False
     has_ios_reactions = False
     has_lid_dn = False
+    has_message_system = False
+    has_mcp = False
+    has_ios_group_event = False
+    has_jid_server = False
+    has_jid_raw_string = False
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
         _wa_tables = {r[0] for r in _tmp_wa.execute(
@@ -1698,7 +2056,126 @@ def create_app(output_root: Path, rescan: bool = False):
         has_reactions = "message_add_on" in _wa_tables
         has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
         has_lid_dn = "lid_display_name" in _wa_tables
+        has_message_system = "message_system" in _wa_tables
+        has_mcp = "message_system_chat_participant" in _wa_tables
+        _jid_cols = {r[1] for r in _tmp_wa.execute("PRAGMA table_info(jid)").fetchall()} if "jid" in _wa_tables else set()
+        has_jid_server = "server" in _jid_cols
+        has_jid_raw_string = "raw_string" in _jid_cols
+        _zwa_cols = {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()} if "ZWAMESSAGE" in _wa_tables else set()
+        has_ios_group_event = "ZGROUPEVENTTYPE" in _zwa_cols
         _tmp_wa.close()
+
+    if source_type == "ios":
+        group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
+        ios_service_filter = "OR (m.ZMESSAGETYPE = 6 AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 5, 7, 9, 12, 26, 36, 37))" if has_ios_group_event else "OR (m.ZMESSAGETYPE = 6)"
+        globals()['_BASE_IOS_FILTER'] = f"""
+    AND (
+        (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        {ios_service_filter}
+    )
+"""
+        globals()['_BASE_IOS_FILTER_TS'] = globals()['_BASE_IOS_FILTER']
+        if has_ios_hd:
+            globals()['_IOS_FILTER'] = globals()['_BASE_IOS_FILTER'] + _IOS_HD_DEDUP_CLAUSE
+            globals()['_IOS_FILTER_TS'] = globals()['_BASE_IOS_FILTER_TS'] + _IOS_HD_DEDUP_CLAUSE
+        else:
+            globals()['_IOS_FILTER'] = globals()['_BASE_IOS_FILTER']
+            globals()['_IOS_FILTER_TS'] = globals()['_BASE_IOS_FILTER_TS']
+
+        globals()['_IOS_SELECT'] = f"""
+    SELECT
+        m.Z_PK                                                       AS msg_id,
+        {_IOS_CHAT_ID}                                               AS chat_id,
+        {_IOS_CHAT_TYPE}                                             AS chat_type,
+        CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)        AS timestamp_ms,
+        COALESCE(
+            CASE WHEN ({_IOS_SENDER_JID}) = '0' THEN 'WhatsApp' END,
+            CASE WHEN ic_s.full_name NOT LIKE '+%' THEN NULLIF(ic_s.full_name, '') END,
+            NULLIF(con_s.display_name, ''),
+            NULLIF(con_lid_s.display_name, ''),
+            NULLIF(pp_lid.ZPUSHNAME, ''),
+            NULLIF(pp_phone.ZPUSHNAME, ''),
+            NULLIF(cs_lid.ZPARTNERNAME, ''),
+            NULLIF(cs_phone.ZPARTNERNAME, ''),
+            CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
+            CASE WHEN COALESCE(
+                CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                ic_s.phone_number
+            ) IS NOT NULL
+            THEN '+' || COALESCE(
+                CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                ic_s.phone_number
+            )
+            END,
+            ''
+        )                                                            AS sender,
+        m.ZISFROMME                                                  AS from_me,
+        ac.archive_path,
+        CASE
+            WHEN m.ZMESSAGETYPE = 6 THEN 'service'
+            WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
+                CASE WHEN m.ZTEXT IS NOT NULL
+                      AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
+                           OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)
+                     THEN 'link' ELSE 'text' END
+            ELSE {_MEDIA_TYPE_EXPR.format(col="('Message/' || COALESCE(mi.ZMEDIALOCALPATH,''))")}
+        END                                                           AS media_type,
+        COALESCE(mi.ZTITLE, '')                                      AS media_name,
+        COALESCE(m.ZTEXT, '')                                        AS text_body,
+        COALESCE(qm.ZTEXT, '')                                       AS quoted_text,
+        CASE WHEN qm.ZISFROMME = 1 THEN 'You'
+             ELSE COALESCE(
+                 NULLIF(con_sq.display_name, ''),
+                 NULLIF(qm.ZPUSHNAME, ''),
+                 CASE WHEN SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
+                                   INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1) != ''
+                      THEN '+' || SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
+                                         INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
+                 END,
+                 '')
+        END                                                          AS quoted_sender,
+        COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
+        NULL                                                          AS reactions,
+        m.ZMESSAGETYPE                                               AS raw_msg_type,
+        {group_ev_col}                                               AS group_event_type
+    FROM ZWAMESSAGE m
+    LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+    LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+    LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+    LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
+    LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
+    LEFT JOIN _ios_contacts ic_s ON ic_s.jid = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
+    LEFT JOIN ZWAPROFILEPUSHNAME pp_phone ON pp_phone.ZJID = (ic_s.phone_number || '@s.whatsapp.net')
+    LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = (ic_s.phone_number || '@s.whatsapp.net')
+    LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
+    LEFT JOIN arch.contacts con_s
+          ON con_s.number = COALESCE(
+              CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') LIKE '%@lid' THEN ic_s.phone_number END,
+              ({_IOS_SENDER_JID})
+          )
+    LEFT JOIN arch.contacts con_lid_s
+          ON con_lid_s.number = SUBSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID), 1,
+                                       INSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID) || '@', '@') - 1)
+    LEFT JOIN arch.contacts con_sq
+          ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
+                                    INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
+    LEFT JOIN arch.archive_copies ac
+          ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
+"""
+
+    ms_join = "LEFT JOIN message_system ms ON ms.message_row_id = m._id" if has_message_system else ""
+    ms_col = "ms.action_type" if has_message_system else "NULL"
+
+    ms_action_clause = "ms.action_type IN (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79)" if has_message_system else "(m.text_data IS NOT NULL AND m.text_data != '')"
+    globals()['_ANDROID_FILTER'] = f"""
+    AND (
+        (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
+        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
+        OR (m.message_type = 7 AND {ms_action_clause})
+    )
+    """
+    globals()['_ANDROID_FILTER_TS'] = globals()['_ANDROID_FILTER']
 
     ldn_select_joins = """
     LEFT JOIN _lid_map_resolved jm_lid_s ON jm_lid_s.jid_row_id = m.sender_jid_row_id
@@ -1720,6 +2197,9 @@ def create_app(output_root: Path, rescan: bool = False):
                  NULLIF(ldn_sq_mapped.display_name, ''),
 """ if has_lid_dn else ""
 
+    j_is_lid = "j.server = 'lid'" if has_jid_server else "0"
+    jq_is_lid = "jq.server = 'lid'" if has_jid_server else "0"
+
     globals()['_ANDROID_SELECT'] = f"""
     SELECT
         m._id                                                        AS msg_id,
@@ -1728,15 +2208,16 @@ def create_app(output_root: Path, rescan: bool = False):
         COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
         COALESCE(
             NULLIF(con_s.display_name, ''),
-            CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
-            CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
-                 THEN '+' || COALESCE(j2.user, j.user) END,
+            CASE WHEN COALESCE(j2.user, CASE WHEN NOT ({j_is_lid}) THEN j.user END) = '0' THEN 'WhatsApp' END,
+            CASE WHEN j2.user IS NOT NULL THEN '+' || j2.user END,
             {ldn_sender_arm}
+            CASE WHEN NOT ({j_is_lid}) AND j.user IS NOT NULL THEN '+' || j.user END,
             ''
         )                                                            AS sender,
         m.from_me,
         ac.archive_path,
         CASE
+            WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IS NULL OR m.message_type = 0 THEN
                 CASE WHEN m.text_data IS NOT NULL
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
@@ -1750,11 +2231,13 @@ def create_app(output_root: Path, rescan: bool = False):
         CASE WHEN mq.from_me = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
-                 CASE WHEN COALESCE(jq2.user, jq.user) IS NOT NULL
-                      THEN '+' || COALESCE(jq2.user, jq.user) END,
+                 CASE WHEN jq2.user IS NOT NULL THEN '+' || jq2.user END,
                  {ldn_quoted_sender_arm}
+                 CASE WHEN NOT ({jq_is_lid}) AND jq.user IS NOT NULL THEN '+' || jq.user END,
                  '') END                                             AS quoted_sender,
-        COALESCE(mq.timestamp, 0)                                    AS quoted_ts
+        COALESCE(mq.timestamp, 0)                                    AS quoted_ts,
+        {ms_col}                                                     AS action_type,
+        ''                                                           AS participant_name
     FROM message m
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
     LEFT JOIN chat c ON c._id = m.chat_row_id
@@ -1766,6 +2249,7 @@ def create_app(output_root: Path, rescan: bool = False):
     LEFT JOIN _jid_map_resolved jmq ON jmq.lid_row_id = mq.sender_jid_row_id
     LEFT JOIN jid jq2 ON jq2._id = jmq.jid_row_id
     {ldn_select_joins}
+    {ms_join}
     LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
     LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)
     LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
@@ -1797,7 +2281,19 @@ def create_app(output_root: Path, rescan: bool = False):
             } for r in rows])
 
         if source_type == "android":
-            rows = conn.execute("""
+            j_s_is_lid = "j_s.server = 'lid'" if has_jid_server else "0"
+            ms_chat_col = "ms.action_type" if has_message_system else "NULL"
+            ms_chat_join = "LEFT JOIN message_system ms ON ms.message_row_id = m._id" if has_message_system else ""
+            ldn_s_join = """
+                LEFT JOIN _lid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id
+                LEFT JOIN lid_display_name ldn_s_direct ON ldn_s_direct.lid_row_id = m.sender_jid_row_id
+                LEFT JOIN lid_display_name ldn_s_mapped ON ldn_s_mapped.lid_row_id = jm_s.lid_row_id
+            """ if has_lid_dn else "LEFT JOIN _jid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id"
+            ldn_s_arm = """
+                NULLIF(ldn_s_direct.display_name, ''),
+                NULLIF(ldn_s_mapped.display_name, ''),
+            """ if has_lid_dn else ""
+            rows = conn.execute(f"""
                 SELECT
                     CASE WHEN c.subject IS NOT NULL THEN CAST(c._id AS TEXT)
                          ELSE COALESCE(j_chat_real.user, j_chat.user, CAST(c._id AS TEXT))
@@ -1817,23 +2313,41 @@ def create_app(output_root: Path, rescan: bool = False):
                     COALESCE(m.text_data, '')                          AS last_msg_preview,
                     COALESCE(m.message_type, 0)                        AS last_msg_type,
                     COALESCE(m.from_me, 0)                             AS last_msg_from_me,
-                    mm.file_path                                        AS last_msg_media_path
+                    m._id                                               AS last_msg_id,
+                    mm.file_path                                        AS last_msg_media_path,
+                    {ms_chat_col}                                       AS last_msg_action_type,
+                    ''                                                  AS last_msg_participant_name,
+                    COALESCE(
+                        NULLIF(con_s.display_name, ''),
+                        CASE WHEN COALESCE(j_s_real.user, CASE WHEN NOT ({j_s_is_lid}) THEN j_s.user END) = '0' THEN 'WhatsApp' END,
+                        CASE WHEN j_s_real.user IS NOT NULL THEN '+' || j_s_real.user END,
+                        {ldn_s_arm}
+                        CASE WHEN NOT ({j_s_is_lid}) AND j_s.user IS NOT NULL THEN '+' || j_s.user END,
+                        ''
+                    )                                                   AS last_msg_sender
                 FROM chat c
                 LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
-                LEFT JOIN (
-                    SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                    FROM jid_map GROUP BY lid_row_id
-                ) jm_chat ON jm_chat.lid_row_id = c.jid_row_id
+                LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
                 LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
                 LEFT JOIN arch.contacts con ON con.number = COALESCE(j_chat_real.user, j_chat.user)
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(c._id AS TEXT)
                 LEFT JOIN message m ON m._id = c.display_message_row_id
                 LEFT JOIN message_media mm ON mm.message_row_id = m._id
+                LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
+                {ldn_s_join}
+                LEFT JOIN jid j_s_real ON j_s_real._id = jm_s.jid_row_id
+                LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j_s_real.user, j_s.user)
+                {ms_chat_join}
                 WHERE c.hidden = 0
                 ORDER BY c.sort_timestamp DESC
             """).fetchall()
         else:
-            rows = conn.execute("""
+            group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
+            ios_service_filter_last_real = (
+                "OR (msg.ZMESSAGETYPE = 6 AND msg.ZGROUPEVENTTYPE IN (1, 2, 3, 5, 7, 9, 12, 26, 36, 37))"
+                if has_ios_group_event else "OR (msg.ZMESSAGETYPE = 6)"
+            )
+            rows = conn.execute(f"""
                 SELECT
                     CAST(cs.Z_PK AS TEXT)                               AS id,
                     CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
@@ -1856,8 +2370,10 @@ def create_app(output_root: Path, rescan: bool = False):
                     CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS newest_ts,
                     COALESCE(m.ZTEXT, '')                              AS last_msg_preview,
                     COALESCE(m.ZMESSAGETYPE, 0)                        AS last_msg_type,
+                    {group_ev_col}                                     AS last_msg_group_event_type,
                     COALESCE(m.ZISFROMME, 0)                           AS last_msg_from_me,
-                    mi.ZMEDIALOCALPATH                                  AS last_msg_media_path
+                    mi.ZMEDIALOCALPATH                                  AS last_msg_media_path,
+                    COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '')            AS last_msg_sender_jid
                 FROM ZWACHATSESSION cs
                 LEFT JOIN arch.contacts con
                       ON con.number = SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
@@ -1867,23 +2383,139 @@ def create_app(output_root: Path, rescan: bool = False):
                     SELECT msg.ZCHATSESSION, MAX(msg.Z_PK) AS last_pk
                     FROM ZWAMESSAGE msg
                     LEFT JOIN ZWAMEDIAITEM mi2 ON mi2.Z_PK = msg.ZMEDIAITEM
-                    WHERE (msg.ZTEXT IS NOT NULL AND msg.ZTEXT != '')
-                       OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE != 0
+                    WHERE (msg.ZTEXT IS NOT NULL AND msg.ZTEXT != '' AND (msg.ZMESSAGETYPE IS NULL OR msg.ZMESSAGETYPE = 0))
+                       OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE != 0 AND msg.ZMESSAGETYPE != 6
                            AND mi2.ZMEDIALOCALPATH IS NOT NULL)
+                       {ios_service_filter_last_real}
                     GROUP BY msg.ZCHATSESSION
                 ) last_real ON last_real.ZCHATSESSION = cs.Z_PK
                 JOIN ZWAMESSAGE m ON m.Z_PK = last_real.last_pk
                 LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
                 WHERE cs.ZHIDDEN = 0
                 ORDER BY m.ZMESSAGEDATE DESC
             """).fetchall()
 
         result = []
+        ios_contacts_map = {}
+        if source_type == "ios":
+            needed_jids = set()
+            for r in rows:
+                if r["last_msg_type"] == 6:
+                    s_jid = r["last_msg_sender_jid"]
+                    if s_jid:
+                        needed_jids.add(s_jid)
+                        if not s_jid.endswith("@s.whatsapp.net") and not s_jid.endswith("@lid"):
+                            needed_jids.add(f"{s_jid}@s.whatsapp.net")
+                            needed_jids.add(f"{s_jid}@lid")
+                        elif s_jid.endswith("@s.whatsapp.net"):
+                            needed_jids.add(s_jid.split("@")[0])
+                    txt = (r["last_msg_preview"] or "").strip()
+                    if txt.startswith("{"):
+                        try:
+                            data = json.loads(txt)
+                            author = data.get("author")
+                            if author:
+                                needed_jids.add(author)
+                                if not author.endswith("@s.whatsapp.net") and not author.endswith("@lid"):
+                                    needed_jids.add(f"{author}@s.whatsapp.net")
+                                    needed_jids.add(f"{author}@lid")
+                                elif author.endswith("@s.whatsapp.net"):
+                                    needed_jids.add(author.split("@")[0])
+                        except (json.JSONDecodeError, AttributeError):
+                            pass
+                    for part in re.split(r"[;,]", txt):
+                        part = part.strip()
+                        if part:
+                            needed_jids.add(part)
+                            if not part.endswith("@s.whatsapp.net") and not part.endswith("@lid"):
+                                needed_jids.add(f"{part}@s.whatsapp.net")
+                                needed_jids.add(f"{part}@lid")
+                            elif part.endswith("@s.whatsapp.net"):
+                                needed_jids.add(part.split("@")[0])
+            if needed_jids:
+                ph = ",".join("?" * len(needed_jids))
+                try:
+                    c_rows = conn.execute(
+                        f"SELECT jid, full_name, phone_number FROM _ios_contacts WHERE jid IN ({ph})",
+                        list(needed_jids),
+                    ).fetchall()
+                    for cr in c_rows:
+                        ios_contacts_map[cr["jid"]] = (cr["full_name"], cr["phone_number"])
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    arch_rows = conn.execute(
+                        f"SELECT number, display_name FROM arch.contacts WHERE number IN ({ph})",
+                        list(needed_jids),
+                    ).fetchall()
+                    for ar in arch_rows:
+                        if ar["display_name"]:
+                            ios_contacts_map[ar["number"]] = (ar["display_name"], ar["number"])
+                            ios_contacts_map[f"{ar['number']}@s.whatsapp.net"] = (ar["display_name"], ar["number"])
+                except sqlite3.OperationalError:
+                    pass
+
+        android_p_map = {}
+        if source_type == "android" and has_mcp:
+            svc_mids = [
+                r["last_msg_id"] for r in rows
+                if r["last_msg_type"] == 7
+                and r["last_msg_action_type"] in (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79)
+                and r["last_msg_id"]
+            ]
+            if svc_mids:
+                android_p_map = _hydrate_android_service_participants(
+                    conn,
+                    svc_mids,
+                    has_mcp,
+                    has_lid_dn,
+                    has_jid_server,
+                    has_jid_raw_string,
+                )
+
         for r in rows:
             d = dict(r)
             raw_type = d.pop("last_msg_type", 0)
             media_path = d.pop("last_msg_media_path", None)
-            if raw_type != 0 and media_path:
+            last_msg_id = d.pop("last_msg_id", None)
+            last_msg_action_type = d.pop("last_msg_action_type", None)
+            last_msg_participant_name = d.pop("last_msg_participant_name", None)
+            if not last_msg_participant_name and last_msg_id:
+                last_msg_participant_name = android_p_map.get(last_msg_id, "")
+            last_msg_group_event_type = d.pop("last_msg_group_event_type", None)
+            last_msg_sender = d.pop("last_msg_sender", None)
+            last_msg_sender_jid = d.pop("last_msg_sender_jid", None)
+
+            if source_type == "android" and raw_type == 7:
+                if last_msg_action_type in (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79):
+                    s_row = {
+                        "action_type": last_msg_action_type,
+                        "text_body": d.get("last_msg_preview", ""),
+                        "from_me": d.get("last_msg_from_me", 0),
+                        "sender": last_msg_sender,
+                        "participant_name": last_msg_participant_name,
+                    }
+                    d["last_msg_preview"] = _format_android_service_row(s_row)
+                    d["last_msg_type"] = "service"
+                else:
+                    d["last_msg_preview"] = ""
+                    d["last_msg_type"] = "text"
+            elif source_type == "ios" and raw_type == 6:
+                if not has_ios_group_event or last_msg_group_event_type in (1, 2, 3, 5, 7, 9, 12, 26, 36, 37):
+                    sender_name = _resolve_ios_jid(last_msg_sender_jid, ios_contacts_map) if last_msg_sender_jid else ""
+                    s_row = {
+                        "group_event_type": last_msg_group_event_type,
+                        "text_body": d.get("last_msg_preview", ""),
+                        "from_me": d.get("last_msg_from_me", 0),
+                        "sender": sender_name,
+                    }
+                    d["last_msg_preview"] = _format_ios_service_row(s_row, ios_contacts_map)
+                    d["last_msg_type"] = "service"
+                else:
+                    d["last_msg_preview"] = ""
+                    d["last_msg_type"] = "text"
+            elif raw_type != 0 and media_path:
                 path = media_path if source_type == "android" else f"Message/{media_path}"
                 d["last_msg_type"] = _media_type_from_path(path)
             else:
@@ -1953,8 +2585,10 @@ def create_app(output_root: Path, rescan: bool = False):
             sql = f"{select} WHERE {chat_pred} {extra} ORDER BY {ts_col} DESC LIMIT ?"
             rows = conn.execute(sql, chat_params + [limit]).fetchall()
 
+        rows = [dict(r) for r in rows]
+        _format_service_rows(rows, source_type, conn, has_mcp, has_lid_dn, has_jid_server, has_jid_raw_string)
+
         if source_type == "android" and rows and has_reactions:
-            rows = [dict(r) for r in rows]
             msg_ids = [r["msg_id"] for r in rows]
             placeholders = ",".join("?" * len(msg_ids))
             cached = get_archive().execute(
@@ -1988,7 +2622,6 @@ def create_app(output_root: Path, rescan: bool = False):
                 for row in rows:
                     row["reactions"] = cached_map.get(row["msg_id"])
         elif source_type == "ios" and rows and has_ios_reactions:
-            rows = [dict(r) for r in rows]
             msg_ids = [r["msg_id"] for r in rows]
             ios_rx = _ios_reactions(conn, chat_id, msg_ids)
             for row in rows:
@@ -1999,9 +2632,14 @@ def create_app(output_root: Path, rescan: bool = False):
                 else:
                     row["reactions"] = None
         else:
-            rows = [dict(r) for r in rows]
             for row in rows:
                 row.setdefault("reactions", None)
+
+        for row in rows:
+            row.pop("action_type", None)
+            row.pop("participant_name", None)
+            row.pop("group_event_type", None)
+            row.pop("raw_msg_type", None)
 
         if not before and not after:
             threading.Thread(
@@ -2052,10 +2690,10 @@ def create_app(output_root: Path, rescan: bool = False):
         ).fetchall()
 
         combined = [dict(r) for r in reversed(before_rows)] + [dict(r) for r in after_rows]
+        _format_service_rows(combined, source_type, conn, has_mcp, has_lid_dn, has_jid_server, has_jid_raw_string)
         if source_type == "android" and combined and has_reactions:
             _resolve_and_cache_reactions(source_type, conn, get_archive(), combined)
         elif source_type == "ios" and combined and has_ios_reactions:
-            combined = [dict(r) for r in combined]
             msg_ids = [r["msg_id"] for r in combined]
             ios_rx = _ios_reactions(conn, chat_id, msg_ids)
             for row in combined:
@@ -2065,6 +2703,11 @@ def create_app(output_root: Path, rescan: bool = False):
                     row["reactions_from_me"] = ",".join(str(f) for _, _, f in reactors)
                 else:
                     row["reactions"] = None
+        for row in combined:
+            row.pop("action_type", None)
+            row.pop("participant_name", None)
+            row.pop("group_event_type", None)
+            row.pop("raw_msg_type", None)
         return jsonify(_strip_none_reactions(combined))
 
     # ---- API: media gallery ------------------------------------------------
@@ -2864,7 +3507,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     f"SELECT COUNT(*) AS total,"
                     f" SUM(CASE WHEN from_me=1 THEN 1 ELSE 0 END) AS sent,"
                     f" SUM(CASE WHEN from_me=0 THEN 1 ELSE 0 END) AS received"
-                    f" FROM ({select} WHERE {chat_pred} {extra})",
+                    f" FROM ({select} WHERE {chat_pred} {extra}) WHERE media_type != 'service'",
                     chat_params,
                 ).fetchone()
                 total = count_row["total"] or 0 if count_row else 0
@@ -2904,7 +3547,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     top_rows = conn.execute(
                         f"SELECT CASE WHEN from_me=1 THEN 'You' ELSE sender END AS sndr,"
                         f" COUNT(*) AS cnt FROM ({select} WHERE {chat_pred} {extra})"
-                        f" WHERE from_me=1 OR sender != '' GROUP BY sndr ORDER BY cnt DESC LIMIT 5",
+                        f" WHERE (from_me=1 OR sender != '') AND media_type != 'service' GROUP BY sndr ORDER BY cnt DESC LIMIT 5",
                         chat_params,
                     ).fetchall()
                     top_senders = [{"name": r["sndr"], "count": r["cnt"]} for r in top_rows]
@@ -3010,7 +3653,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     f"SELECT COUNT(*) AS total,"
                     f" SUM(CASE WHEN from_me=1 THEN 1 ELSE 0 END) AS sent,"
                     f" SUM(CASE WHEN from_me=0 THEN 1 ELSE 0 END) AS received"
-                    f" FROM ({select} WHERE {chat_pred} {extra})",
+                    f" FROM ({select} WHERE {chat_pred} {extra}) WHERE media_type != 'service'",
                     chat_params,
                 ).fetchone()
                 total = count_row["total"] or 0 if count_row else 0
@@ -3044,7 +3687,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     top_rows = conn.execute(
                         f"SELECT CASE WHEN from_me=1 THEN 'You' ELSE sender END AS sndr,"
                         f" COUNT(*) AS cnt FROM ({select} WHERE {chat_pred} {extra})"
-                        f" WHERE from_me=1 OR sender != '' GROUP BY sndr ORDER BY cnt DESC LIMIT 5",
+                        f" WHERE (from_me=1 OR sender != '') AND media_type != 'service' GROUP BY sndr ORDER BY cnt DESC LIMIT 5",
                         chat_params,
                     ).fetchall()
                     top_senders = [{"name": r["sndr"], "count": r["cnt"]} for r in top_rows]
