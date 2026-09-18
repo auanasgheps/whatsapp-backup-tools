@@ -384,6 +384,9 @@
                         gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link'};
   function chatPreview(chat) {
     const prefix = chat.last_msg_from_me ? 'You: ' : '';
+    if (chat.last_msg_type === 'service') {
+      return esc(chat.last_msg_preview || '…');
+    }
     if (chat.last_msg_type !== 'text') {
       return prefix + (MEDIA_LABELS[chat.last_msg_type] || '📎 Media');
     }
@@ -410,7 +413,7 @@
 
   async function selectChat(chat, el) {
     _indexPollGen++;
-    ++_loadGen;
+    const gen = ++_loadGen;
     loading = false;
     document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
     el.classList.add('active');
@@ -419,14 +422,13 @@
     currentChat = chat;
     msgList = [];
     noMoreOlder = false;
-    noMoreNewer = false;
-    pendingLoad = null;
+    noMoreNewer = true;
 
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
     document.getElementById('scroll-to-bottom').classList.remove('visible');
 
-    document.getElementById('chat-header').style.display = '';
+    document.getElementById('chat-header').style.display = 'flex';
     document.getElementById('chat-title').textContent = chat.display_name;
     document.getElementById('empty-pane').style.display = 'none';
     document.getElementById('search-results').classList.remove('has-results');
@@ -442,11 +444,22 @@
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
+    scroll.style.display = 'none';
 
-    await loadMessages('older');
-
-    loadingEl.style.display = 'none';
-    scroll.scrollTop = scroll.scrollHeight;
+    suppressScroll = true;
+    try {
+      await loadMessages('older');
+      if (gen !== _loadGen) return;
+    } catch (err) {
+      console.error('Failed to load chat messages:', err);
+    } finally {
+      if (gen === _loadGen) {
+        loadingEl.style.display = 'none';
+        scroll.style.display = 'flex';
+        scroll.scrollTop = scroll.scrollHeight;
+        suppressScroll = false;
+      }
+    }
 
     _startIndexPoll(chat);
   }
@@ -457,7 +470,6 @@
   let _loadGen = 0;
   let noMoreOlder = false;
   let noMoreNewer = false;
-  let pendingLoad = null;
 
   function showSpinner(position) {
     const el = document.createElement('div');
@@ -497,6 +509,9 @@
 
     try {
       const res = await fetch('/api/messages?' + params);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
       const msgs = await res.json();
       removeSpinner(direction === 'older' ? 'top' : 'bottom');
       if (gen !== _loadGen) return;
@@ -506,24 +521,24 @@
         else noMoreNewer = true;
         return;
       }
+      if (direction === 'older' && msgs.length < 50 && !params.has('before')) {
+        noMoreOlder = true;
+      }
 
-      const scroll = document.getElementById('message-scroll');
-      const anchor = captureAnchor();
+      suppressScroll = true;
+      const anchor = captureAnchor(direction);
       mergePage(msgs);
       pruneList(direction);
       renderWindow();
       restoreAnchor(anchor);
-      await _awaitImagesSettled(scroll);
-      if (gen === _loadGen) restoreAnchor(anchor);
+      suppressScroll = false;
 
+    } catch (err) {
+      removeSpinner(direction === 'older' ? 'top' : 'bottom');
+      console.error('loadMessages error:', err);
     } finally {
       if (gen === _loadGen) {
         loading = false;
-        if (pendingLoad) {
-          const dir = pendingLoad;
-          pendingLoad = null;
-          loadMessages(dir);
-        }
       }
     }
   }
@@ -565,13 +580,28 @@
     );
   }
 
-  function captureAnchor() {
+  function captureAnchor(direction) {
     const scroll = document.getElementById('message-scroll');
     const top = scroll.getBoundingClientRect().top;
-    for (const row of scroll.querySelectorAll('.msg-row[data-msg-id]')) {
-      const rect = row.getBoundingClientRect();
-      if (rect.bottom > top) {
-        return { id: row.dataset.msgId, offset: rect.top - top };
+    const bottom = scroll.getBoundingClientRect().bottom;
+    const rows = scroll.querySelectorAll('.msg-row[data-msg-id]');
+    if (!rows.length) return null;
+
+    if (direction === 'newer') {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i];
+        const rect = row.getBoundingClientRect();
+        if (rect.top < bottom && rect.bottom > top) {
+          return { id: row.dataset.msgId, offset: rect.top - top };
+        }
+      }
+    } else {
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom > top) {
+          return { id: row.dataset.msgId, offset: rect.top - top };
+        }
       }
     }
     return null;
@@ -583,9 +613,7 @@
     if (!row) return;
     const scroll = document.getElementById('message-scroll');
     const top = scroll.getBoundingClientRect().top;
-    suppressScroll = true;
     scroll.scrollTop += (row.getBoundingClientRect().top - top) - anchor.offset;
-    suppressScroll = false;
   }
 
   function mergePage(newMsgs) {
@@ -744,10 +772,10 @@
       const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
       btn.classList.toggle('visible', !atBottom);
       if (scroll.scrollTop < 100) {
-        if (loading) { pendingLoad = 'older'; return; }
+        if (loading) return;
         loadMessages('older');
       } else if (atBottom) {
-        if (loading) { pendingLoad = 'newer'; return; }
+        if (loading) return;
         loadMessages('newer');
       }
     });
@@ -760,7 +788,7 @@
       }
       msgList = [];
       noMoreOlder = false;
-      noMoreNewer = false;
+      noMoreNewer = true;
       await loadMessages('older');
       suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
@@ -814,6 +842,22 @@
     }
 
     const msg = unit.msg;
+    if (msg.media_type === 'service') {
+      const row = document.createElement('div');
+      row.className = 'msg-row service';
+      row.dataset.msgId = String(msg.msg_id);
+
+      const bubble = document.createElement('div');
+      bubble.className = 'msg-service-bubble';
+      bubble.textContent = msg.text_body;
+      if (msg.timestamp_ms) {
+        bubble.title = fmtTime(msg.timestamp_ms);
+      }
+
+      row.appendChild(bubble);
+      return row;
+    }
+
     const row = document.createElement('div');
     row.className = 'msg-row ' + (msg.from_me ? 'sent' : 'recv');
     row.dataset.msgId = String(msg.msg_id);
@@ -1623,7 +1667,7 @@
           await selectChat(chat, el2);
           const row = await jumpToTimestamp(r.timestamp_ms, null);
           if (row) {
-            const bubble = row.querySelector('.msg-bubble');
+            const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
             if (bubble) {
               bubble.classList.add('search-jump-highlight');
               bubble.addEventListener('animationend', () => bubble.classList.remove('search-jump-highlight'), { once: true });
@@ -1773,7 +1817,7 @@
   }
 
   function highlightMessageRow(row) {
-    const bubble = row.querySelector('.msg-bubble');
+    const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
     if (bubble) bubble.classList.add('search-highlight');
     row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
@@ -1830,19 +1874,6 @@
     }
   }
 
-  // Resolve once every <img> in container has finished loading (or errored),
-  // capped per image so a slow/broken source can't stall a jump indefinitely.
-  function _awaitImagesSettled(container) {
-    const pending = [...container.querySelectorAll('img')].filter(img => !img.complete);
-    if (!pending.length) return Promise.resolve();
-    return Promise.all(pending.map(img => new Promise(resolve => {
-      const done = () => resolve();
-      img.addEventListener('load', done, { once: true });
-      img.addEventListener('error', done, { once: true });
-      setTimeout(done, 2000);
-    })));
-  }
-
   // exactMsgId: when the caller needs a specific message in the DOM (e.g. jumpToMessage,
   // chat search), pass its msg_id to bypass the nearest-ts early-exit — the caller already
   // confirmed the message is not in the current window, so a full fetch is always needed.
@@ -1861,7 +1892,6 @@
 
     const gen = ++_loadGen;
     loading = true;
-    pendingLoad = null;
     const scroll = document.getElementById('message-scroll');
 
     try {
