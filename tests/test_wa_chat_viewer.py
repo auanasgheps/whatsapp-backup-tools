@@ -4644,3 +4644,37 @@ class TestServiceMessages:
         assert indexed_fts[0]["rowid"] == 3
         assert indexed_fts[0]["text_body"] == "Important meeting tomorrow"
         cache_conn.close()
+
+
+# ===========================================================================
+# wab_viewer entrypoint tests
+# ===========================================================================
+
+class TestViewerEntrypoint:
+    def test_import_main_does_not_execute(self):
+        from unittest.mock import patch
+        import importlib
+        with patch("wab_viewer.main.main") as mock_main:
+            import wab_viewer.__main__
+            importlib.reload(wab_viewer.__main__)
+            mock_main.assert_not_called()
+
+    def test_run_as_directory_help(self):
+        import subprocess
+        res = subprocess.run(
+            [sys.executable, "wab_viewer", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert "Browse archived WhatsApp chats" in res.stdout
+
+    def test_run_as_module_help(self):
+        import subprocess
+        res = subprocess.run(
+            [sys.executable, "-m", "wab_viewer", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert "Browse archived WhatsApp chats" in res.stdout

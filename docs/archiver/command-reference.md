@@ -67,8 +67,8 @@ The archiver uses subcommands. `archive` is the default and can be omitted.
 ### `archive` (default)
 
 ```
-wab-archiver archive [--wa-root PATH | --ios-backup PATH | --from-adb]
-                     [--msgstore PATH] [--e2e-key KEY]
+wab-archiver archive [--wa-root PATH | --ios-backup PATH]
+                     [--from-adb] [--msgstore PATH] [--e2e-key KEY]
                      [-c PATH] [--ios-password PASSWORD] [--ios-contacts PATH]
                      [--business] [--pull-media] [--staging PATH]
                      -o PATH [-l PATH] [--timezone TZ] [--config PATH]
@@ -77,16 +77,16 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH | --from-adb]
 
 | Argument | Required | Description |
 |---|---|---|
-| `--wa-root PATH` | Android / iOS pre-extracted | Root path of your WhatsApp folder. **Repeat the flag** to specify multiple source folders |
-| `--ios-backup PATH` | iOS (recommended) | Path to the iPhone backup directory (the folder containing `Manifest.db`). Mutually exclusive with `--wa-root` |
-| `--from-adb` | ADB mode | Pull msgstore and contacts automatically from a connected Android device via ADB. Mutually exclusive with `--wa-root` and `--ios-backup` |
+| `--wa-root PATH` | Android / iOS pre-extracted | Root path of your WhatsApp folder. **Repeat the flag** to specify multiple source folders. Mutually exclusive with `--ios-backup` and `--pull-media` |
+| `--ios-backup PATH` | iOS (recommended) | Path to the iPhone backup directory (the folder containing `Manifest.db`). Mutually exclusive with `--wa-root` and `--from-adb` |
+| `--from-adb` | ADB mode | Pull msgstore and contacts automatically from a connected Android device via ADB. Mutually exclusive with `--ios-backup` |
 | `--msgstore PATH` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Defaults to `msgstore.db` in the current folder |
 | `--e2e-key KEY` | If encrypted | Your cryptographic key for `.crypt15` decryption |
 | `-c`, `--contacts PATH` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
 | `--ios-password PASSWORD` | No | Password for an encrypted iPhone backup |
 | `--ios-contacts PATH` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios-backup` if omitted |
 | `--business` | No | Target **WhatsApp Business** instead of the regular WhatsApp app |
-| `--pull-media` | No | Pull WhatsApp media files from the device via ADB. Only valid with `--from-adb`. See [Android setup](setup-android.md#adb-pull-media-optional) |
+| `--pull-media` | No | Pull WhatsApp media files from the device via ADB. Only valid with `--from-adb`. Mutually exclusive with `--wa-root`. See [Android setup](setup-android.md#adb-pull-media-optional) |
 | `--staging PATH` | If `--pull-media` | Local directory where ADB-pulled media is staged. Must be persistent across runs |
 | `-o`, `--output PATH` | **Yes** | Destination folder for the archive |
 | `-l`, `--log PATH` | No | Custom log file path. Defaults to `<output>/wab-archiver.log` |
@@ -131,6 +131,7 @@ Writes `example-config.toml` to the package folder and exits.
 ```bash
 wab-archiver archive \
   --from-adb \
+  --wa-root /path/to/WhatsApp \
   --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --output /path/to/output \
   --dry-run
