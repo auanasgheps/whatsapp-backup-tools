@@ -2114,6 +2114,198 @@ class TestChatInfo:
             ).get_json()
         assert data["bytes"] == 0
 
+    def test_android_group_chat_info_with_description(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (10, 20, 0, 3, 1700000000001, 'Hi group', 0)"
+        )
+        wa_conn.execute("CREATE TABLE message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER)")
+        wa_conn.execute("INSERT INTO message_system VALUES (11, 27)")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (11, 20, 0, 3, 1700000000002, 'Synthesized group description text', 7)"
+        )
+        wa_conn.commit()
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('20', 'Test Group', 'Test Group')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=20&chat_type=group").get_json()
+
+        assert data["description"] == "Synthesized group description text"
+
+    def test_android_group_chat_info_without_description(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.commit()
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('20', 'Test Group', 'Test Group')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=20&chat_type=group").get_json()
+
+        assert data["description"] is None
+
+    def test_android_group_chat_info_cleared_description(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.execute("CREATE TABLE message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER)")
+        wa_conn.execute("INSERT INTO message_system VALUES (11, 27)")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (11, 20, 0, 3, 1700000000002, 'Old description', 7)"
+        )
+        # More recent description-clear message
+        wa_conn.execute("INSERT INTO message_system VALUES (12, 27)")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (12, 20, 0, 3, 1700000000005, '', 7)"
+        )
+        wa_conn.commit()
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('20', 'Test Group', 'Test Group')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=20&chat_type=group").get_json()
+
+        assert data["description"] is None
+
+    def test_contact_chat_info_has_no_description(self, tmp_path):
+        app = _make_android_app(tmp_path)
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=123456789&chat_type=contact").get_json()
+        assert "description" not in data
+
+    def test_ios_group_chat_info_with_description(self, tmp_path):
+        import base64
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        desc_text = "Synthesized iOS Group Description"
+        desc_bytes = desc_text.encode("utf-8")
+        sub_msg = bytes([0x1A, len(desc_bytes)]) + desc_bytes
+        main_msg = bytes([0x0A, len(sub_msg)]) + sub_msg
+        proto_pic = "+" + base64.b64encode(main_msg).decode("ascii")
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript(f"""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT, ZPICTUREID TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '15550001111@s.whatsapp.net', '{proto_pic}');
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test iOS Group');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '15550001111@s.whatsapp.net', 1);
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Alice', 'Hi', '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test iOS Group', 'Test iOS Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=10&chat_type=group").get_json()
+
+        assert data["description"] == desc_text
+
+    def test_ios_group_chat_info_without_description(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT, ZPICTUREID TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '15550001111@s.whatsapp.net', NULL);
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test iOS Group');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '15550001111@s.whatsapp.net', 1);
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Alice', 'Hi', '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test iOS Group', 'Test iOS Group')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=10&chat_type=group").get_json()
+
+        assert data["description"] is None
+
+    def test_protobuf_extract_ios_group_description_edge_cases(self):
+        from wab_viewer.main import _extract_ios_group_description
+        assert _extract_ios_group_description(None) is None
+        assert _extract_ios_group_description("") is None
+        assert _extract_ios_group_description("not-base64!#$@") is None
+        assert _extract_ios_group_description("+") is None
+
+
 
 # ---------------------------------------------------------------------------
 # recent_messages cache

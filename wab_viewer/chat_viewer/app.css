@@ -852,10 +852,16 @@
     }
     #chat-info-panel.open #chat-info-inner { transform: none; }
     #chat-info-header {
-      display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 12px;
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 12px; margin-bottom: 12px;
     }
+    .chat-info-header-text { flex: 1; min-width: 0; }
     #chat-info-title { font-weight: 600; font-size: 15px; color: var(--text); }
+    .chat-info-desc {
+      font-size: 12px; color: var(--text-muted);
+      margin-top: 4px; line-height: 1.4;
+      white-space: pre-wrap; word-break: break-word;
+    }
     #chat-info-close {
       background: none; border: none; cursor: pointer;
       color: var(--text-muted); font-size: 16px; line-height: 1; padding: 2px 4px;
