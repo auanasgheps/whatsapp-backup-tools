@@ -576,7 +576,7 @@ def run_restore_mode(args, logger):
 _VALID_CONFIG_KEYS = {
     'output', 'msgstore', 'e2e_key', 'wa_root', 'contacts', 'log',
     'business', 'timezone', 'since', 'ios_backup', 'ios_password', 'ios_contacts',
-    'pull_media', 'staging',
+    'from_adb', 'pull_media', 'staging',
 }
 
 _EXAMPLE_CONFIG = """\
@@ -604,6 +604,7 @@ output     = "/path/to/archive"         # required
 # since    = ""                         # e.g. 2024-01-01
 
 # Android — pull via ADB  (wab-archiver archive --from-adb; see setup-android.md)
+# from_adb   = false
 # pull_media = false                    # also pull media files (--pull-media)
 # staging    = ""                       # persistent folder for pulled media (--staging)
 
@@ -769,8 +770,7 @@ def parse_args() -> argparse.Namespace:
         'archive',
         help='Build or update an archive from a source (default command).',
         description=(
-            'Archive WhatsApp media from an Android device, iOS backup, or via ADB. '
-            'Exactly one source is required: --wa-root, --ios-backup, or --from-adb.'
+            'Archive WhatsApp media from an Android device, iOS backup, or via ADB.'
         ),
     )
     _src = archive_p.add_mutually_exclusive_group()
@@ -785,7 +785,7 @@ def parse_args() -> argparse.Namespace:
         '--ios-backup', dest='ios_backup', default=None, metavar='PATH',
         help='Path to iPhone backup directory (contains Manifest.db).',
     )
-    _src.add_argument(
+    archive_p.add_argument(
         '--from-adb', dest='from_adb', action='store_true',
         help='Pull msgstore and contacts from a connected Android device via ADB.',
     )
@@ -909,22 +909,28 @@ def parse_args() -> argparse.Namespace:
     if not args.output:
         archive_p.error("the following arguments are required: -o/--output")
 
-    _n_sources = sum([bool(args.wa_roots), bool(args.ios_backup), args.from_adb])
-    if _n_sources == 0:
-        archive_p.error("one of --wa-root, --ios-backup, or --from-adb is required")
-    if _n_sources > 1:
-        archive_p.error("--wa-root, --ios-backup, and --from-adb are mutually exclusive")
-
-    if args.contacts and args.ios_backup:
-        archive_p.error(
-            "--contacts is for Android ADB exports and cannot be used with --ios-backup. "
-            "iOS contacts are loaded automatically from the backup (ContactsV2.sqlite). "
-            "Use --ios-contacts to supply a pre-extracted ContactsV2.sqlite instead."
-        )
-    if args.pull_media and not args.from_adb:
-        archive_p.error("--pull-media requires --from-adb.")
-    if args.pull_media and not args.staging:
-        archive_p.error("--pull-media requires --staging.")
+    if args.ios_backup:
+        if args.wa_roots:
+            archive_p.error("--wa-root and --ios-backup are mutually exclusive")
+        if args.from_adb:
+            archive_p.error("--from-adb and --ios-backup are mutually exclusive")
+        if args.pull_media:
+            archive_p.error("--pull-media and --ios-backup are mutually exclusive")
+        if args.contacts:
+            archive_p.error(
+                "--contacts is for Android ADB exports and cannot be used with --ios-backup. "
+                "iOS contacts are loaded automatically from the backup (ContactsV2.sqlite). "
+                "Use --ios-contacts to supply a pre-extracted ContactsV2.sqlite instead."
+            )
+    else:
+        if args.pull_media and not args.from_adb:
+            archive_p.error("--pull-media requires --from-adb.")
+        if args.pull_media and not args.staging:
+            archive_p.error("--pull-media requires --staging.")
+        if args.pull_media and args.wa_roots:
+            archive_p.error("--wa-root and --pull-media are mutually exclusive.")
+        if not args.wa_roots and not args.pull_media:
+            archive_p.error("either --wa-root or --pull-media (with --staging) is required")
 
     return args
 

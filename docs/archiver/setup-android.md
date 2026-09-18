@@ -77,7 +77,7 @@ wab-archiver archive \
 
 This populates the archive DB with all your existing files. From the next run onward, switch to `--from-adb --pull-media` — the archiver will skip everything already archived and only pull new files.
 
-> Note: `--from-adb` and `--wa-root` are mutually exclusive and cannot be combined in a single invocation.
+> Note: `--pull-media` and `--wa-root` are mutually exclusive and cannot be combined in a single invocation.
 
 ### Multiple Source Folders
 
@@ -107,6 +107,7 @@ Run the archiver:
 ```bash
 wab-archiver archive \
   --from-adb \
+  --wa-root /path/to/WhatsApp \
   --e2e-key 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b \
   --output /path/to/output
 ```

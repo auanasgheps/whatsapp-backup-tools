@@ -2057,6 +2057,7 @@ class TestGenerateConfig:
         content = dest.read_text(encoding='utf-8')
         assert "config.toml" in content
         assert "output" in content
+        assert "from_adb" in content
 
     def test_overwrites_existing_file(self, tmp_path):
         dest = tmp_path / "example-config.toml"
@@ -2118,6 +2119,15 @@ class TestConfigInParseArgs:
         with patch("sys.argv", ["wa", "--config", str(cfg)]):
             args = wa.parse_args()
         assert args.since == "2024-01-01"
+
+    def test_config_from_adb(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\nfrom_adb = true\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.from_adb is True
+        assert args.wa_roots == ["/wa"]
 
     def test_autodetect_single_config_yes(self, tmp_path):
         cfg = tmp_path / "config.toml"
@@ -2769,6 +2779,37 @@ class TestParseArgsValidationExtra:
             with pytest.raises(SystemExit):
                 wa.parse_args()
 
+    def test_wa_root_with_from_adb_allowed(self, tmp_path):
+        with patch("sys.argv", ['wa', 'archive', '-o', str(tmp_path),
+                                 '--wa-root', '/wa', '--from-adb']):
+            args = wa.parse_args()
+        assert args.from_adb is True
+        assert args.wa_roots == ['/wa']
+
+    def test_pull_media_with_wa_root_exits(self, tmp_path):
+        with patch("sys.argv", ['wa', 'archive', '-o', str(tmp_path),
+                                 '--from-adb', '--pull-media', '--staging', '/stage',
+                                 '--wa-root', '/wa']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_from_adb_with_ios_backup_exits(self, tmp_path):
+        with patch("sys.argv", ['wa', 'archive', '-o', str(tmp_path),
+                                 '--ios-backup', '/backup', '--from-adb']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_pull_media_without_from_adb_exits(self, tmp_path):
+        with patch("sys.argv", ['wa', 'archive', '-o', str(tmp_path),
+                                 '--pull-media', '--staging', '/stage']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_no_media_source_exits(self, tmp_path):
+        with patch("sys.argv", ['wa', 'archive', '-o', str(tmp_path), '--from-adb']):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
 
 # ===========================================================================
 # wab_archiver.main: _warn_network_paths
@@ -3189,5 +3230,36 @@ class TestIosHdDeduplication:
         ]):
             args = parse_args()
         run_forward_mode(args, logger)
+
+
+# ===========================================================================
+# wab_archiver entrypoint tests
+# ===========================================================================
+
+class TestMainEntrypoint:
+    def test_import_main_does_not_execute(self):
+        with patch("wab_archiver.main.main") as mock_main:
+            import importlib
+            import wab_archiver.__main__
+            importlib.reload(wab_archiver.__main__)
+            mock_main.assert_not_called()
+
+    def test_run_as_directory_help(self):
+        res = subprocess.run(
+            [sys.executable, "wab_archiver", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert "Archive WhatsApp media" in res.stdout
+
+    def test_run_as_module_help(self):
+        res = subprocess.run(
+            [sys.executable, "-m", "wab_archiver", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert "Archive WhatsApp media" in res.stdout
 
 
