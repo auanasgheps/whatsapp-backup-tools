@@ -82,7 +82,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--from-adb` | ADB mode | Pull msgstore and contacts automatically from a connected Android device via ADB. Mutually exclusive with `--ios-backup` |
 | `--msgstore PATH` | No | Path to `msgstore.db`, `msgstore.db.crypt15`, or `ChatStorage.sqlite`. Defaults to `msgstore.db` in the current folder |
 | `--e2e-key KEY` | If encrypted | Your cryptographic key for `.crypt15` decryption |
-| `-c`, `--contacts PATH` | No | Path to the `wa_contacts` file exported via ADB (Android only) |
+| `-c`, `--contacts PATH` | No | Path to the `wa_contacts` file (exported via ADB or a CSV of `phone,name`) |
 | `--ios-password PASSWORD` | No | Password for an encrypted iPhone backup |
 | `--ios-contacts PATH` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios-backup` if omitted |
 | `--business` | No | Target **WhatsApp Business** instead of the regular WhatsApp app |

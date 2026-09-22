@@ -176,15 +176,27 @@ wab-archiver archive \
 
 Contacts are optional but strongly recommended — without them, folder names will show raw phone numbers instead of contact names.
 
-For manual pull:
+For manual pull, query the Android contacts provider via ADB:
 
 ```bash
 adb shell content query \
   --uri content://com.android.contacts/data \
-  --projection display_name:data1 \
-  | grep @s.whatsapp.net > wa_contacts
+  --projection display_name:data1:data4:mimetype \
+  > wa_contacts
 ```
 
 Pass the file to the archiver with `--contacts`.
+
+> 💡 This command runs directly across Linux, macOS, and Windows (PowerShell or cmd.exe) without external tools like `grep`. It exports both WhatsApp profile links and device phone contacts.
+>
+> Alternatively, `--contacts` also accepts a plain text or CSV file with lines formatted as `phone_number,contact_name` (e.g. `+15551234567, Alice` or `15551234567, Alice`).
+
+### Troubleshooting Contact Names on Android
+
+If your exported contacts do not match your chats, or WhatsApp contacts appear to be missing:
+
+1. **Refresh WhatsApp contacts**: Open WhatsApp on your phone → tap **New Chat** (chat bubble/pencil icon) → tap **⋮ (three dots)** in the top right → select **Refresh**.
+2. **Ensure WhatsApp Contact Sync is enabled**: Go to Android **Settings** → **Passwords & accounts** (or **Accounts and backup → Manage accounts** on Samsung) → select **WhatsApp** → tap **Account sync** → make sure **Contacts** is toggled ON and tap **Sync now**.
+3. Re-run the contact export command.
 
 > 💡 You only need to repeat this if your contacts have changed significantly since the last run.

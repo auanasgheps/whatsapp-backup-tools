@@ -22,7 +22,7 @@ _WA_BUSINESS_MEDIA_ROOT = (
     '/storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp Business/Media'
 )
 _CONTACTS_URI = 'content://com.android.contacts/data'
-_CONTACTS_PROJECTION = 'display_name:data1'
+_CONTACTS_PROJECTION = 'display_name:data1:data4:mimetype'
 
 _TRANSIENT_ERRORS = (
     'error: closed',
@@ -110,9 +110,16 @@ def pull_contacts(output_dir: str, logger=None) -> str:
         raise
 
     lines = result.stdout.decode(errors='replace').splitlines()
-    wa_lines = [line for line in lines if '@s.whatsapp.net' in line]
+    relevant_lines = [
+        line for line in lines
+        if 'vnd.com.whatsapp' in line
+        or '@s.whatsapp.net' in line
+        or 'vnd.android.cursor.item/phone_v2' in line
+    ]
+    # If no lines matched known mimetypes, write all lines as fallback
+    output_lines = relevant_lines if relevant_lines else lines
     with open(dest, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(wa_lines) + '\n')
+        f.write('\n'.join(output_lines) + '\n')
     return dest
 
 

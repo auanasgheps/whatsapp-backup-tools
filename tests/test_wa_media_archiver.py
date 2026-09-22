@@ -400,6 +400,77 @@ class TestLoadAndroidContacts:
             android_handler.load_contacts(str(f), log)
         assert any("no WhatsApp contacts" in r.message for r in caplog.records)
 
+    def test_parses_projection_with_data4_and_mimetype(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=Charlie, data1=0170 1234567, data4=+491701234567, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n",
+            encoding='utf-8',
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("491701234567") == "Charlie"
+        assert result.get("01701234567") == "Charlie"
+
+    def test_phone_number_cleaning(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=Bob, data1=+1 (555) 123-4567, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n"
+            "Row: 1 display_name=Alice, data1=0044 20 7946 0999, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n",
+            encoding='utf-8',
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("15551234567") == "Bob"
+        assert result.get("442079460999") == "Alice"
+
+    def test_whatsapp_profile_precedence(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=David Phone, data1=+15550001111, data4=+15550001111, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n"
+            "Row: 1 display_name=David WA, data1=15550001111@s.whatsapp.net, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/vnd.com.whatsapp.profile\n",
+            encoding='utf-8',
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("15550001111") == "David WA"
+
+    def test_display_name_with_comma(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=Smith, John, data1=+15559876543, data4=+15559876543, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n",
+            encoding='utf-8',
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("15559876543") == "Smith, John"
+
+    def test_csv_and_delimited_format(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "+39 340 1234567, Mario Rossi\n"
+            "Luigi Verdi: +393409876543\n",
+            encoding='utf-8',
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("393401234567") == "Mario Rossi"
+        assert result.get("393409876543") == "Luigi Verdi"
+
+    def test_non_phone_mimetypes_ignored(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=Eve, data1=eve@company.com, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/email_v2\n"
+            "Row: 1 display_name=Frank, data1=+15551112222, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n",
+            encoding='utf-8',
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert "eve@company.com" not in result
+        assert "eve" not in result
+        assert result.get("15551112222") == "Frank"
+
 
 # ===========================================================================
 # iOS: validate_ios_schema
@@ -1954,6 +2025,25 @@ class TestPullContacts:
         assert '@s.whatsapp.net' in content
         assert 'bob@gmail.com' not in content
         assert content.count('@s.whatsapp.net') == 2
+
+    def test_retains_phone_and_whatsapp_lines(self, logger, tmp_path):
+        raw = (
+            "Row: 0 display_name=Alice, data1=391234567890@s.whatsapp.net, "
+            "data4=NULL, mimetype=vnd.android.cursor.item/vnd.com.whatsapp.profile\n"
+            "Row: 1 display_name=Bob, data1=bob@gmail.com, "
+            "data4=NULL, mimetype=vnd.android.cursor.item/email_v2\n"
+            "Row: 2 display_name=Carol, data1=+15551234567, "
+            "data4=+15551234567, mimetype=vnd.android.cursor.item/phone_v2\n"
+        )
+        mock_result = MagicMock()
+        mock_result.stdout = raw.encode()
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock_result):
+            dest = adb.pull_contacts(str(tmp_path), logger=logger)
+
+        content = open(dest, encoding='utf-8').read()
+        assert 'Alice' in content
+        assert 'Carol' in content
+        assert 'bob@gmail.com' not in content
 
     def test_failure_raises(self, logger, tmp_path):
         with patch("wab_archiver.adb_extractor.subprocess.run",
