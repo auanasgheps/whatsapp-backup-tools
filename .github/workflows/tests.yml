@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install pytest pytest-cov flask
+        run: pip install pytest pytest-cov flask wa-crypt-tools iphone-backup-decrypt
 
       - name: Run tests
         shell: bash

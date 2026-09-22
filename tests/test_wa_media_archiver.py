@@ -3444,6 +3444,18 @@ class TestMainEntrypoint:
 # msgstore Decryption
 # ===========================================================================
 
+try:
+    import wa_crypt_tools
+    _HAS_WA_CRYPT_TOOLS = True
+except ImportError:
+    _HAS_WA_CRYPT_TOOLS = False
+
+_requires_wa_crypt_tools = pytest.mark.skipif(
+    not _HAS_WA_CRYPT_TOOLS,
+    reason="wa-crypt-tools is not installed",
+)
+
+
 def _create_synthetic_crypt15(plain_bytes: bytes, key_hex: str) -> bytes:
     import zlib
     from wa_crypt_tools.lib.db.db15 import Database15
@@ -3467,6 +3479,7 @@ class TestDecryptMsgstore:
         conn.close()
         return db_path.read_bytes()
 
+    @_requires_wa_crypt_tools
     def test_decrypt_msgstore_success_with_hex_key(self, tmp_path, logger, synthetic_db):
         key_hex = '11' * 32
         encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
@@ -3485,6 +3498,7 @@ class TestDecryptMsgstore:
         assert row[0] == 'synthetic_test_value'
         conn.close()
 
+    @_requires_wa_crypt_tools
     def test_decrypt_msgstore_success_with_binary_key_file(self, tmp_path, logger, synthetic_db):
         from wa_crypt_tools.lib.key.key15 import Key15
 
@@ -3503,6 +3517,7 @@ class TestDecryptMsgstore:
         assert res == str(output_path)
         assert output_path.read_bytes() == synthetic_db
 
+    @_requires_wa_crypt_tools
     def test_decrypt_msgstore_success_with_text_hex_key_file(self, tmp_path, logger, synthetic_db):
         key_hex = '11' * 32
         encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
@@ -3527,6 +3542,7 @@ class TestDecryptMsgstore:
             with pytest.raises(SystemExit):
                 wa.decrypt_msgstore(str(crypt_path), '11' * 32, str(output_path), logger)
 
+    @_requires_wa_crypt_tools
     def test_decrypt_msgstore_invalid_key_raises(self, tmp_path, logger, synthetic_db):
         key_hex = '11' * 32
         encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
@@ -3537,6 +3553,7 @@ class TestDecryptMsgstore:
         with pytest.raises(SystemExit):
             wa.decrypt_msgstore(str(crypt_path), "invalid_key_string", str(output_path), logger)
 
+    @_requires_wa_crypt_tools
     def test_decrypt_msgstore_corrupt_file_raises(self, tmp_path, logger):
         crypt_path = tmp_path / "corrupted.crypt15"
         crypt_path.write_bytes(b"")
@@ -3545,6 +3562,7 @@ class TestDecryptMsgstore:
         with pytest.raises(SystemExit):
             wa.decrypt_msgstore(str(crypt_path), '11' * 32, str(output_path), logger)
 
+    @_requires_wa_crypt_tools
     def test_decrypt_msgstore_wrong_key_fails(self, tmp_path, logger, synthetic_db):
         key_hex = '11' * 32
         wrong_key_hex = '22' * 32
@@ -3556,6 +3574,7 @@ class TestDecryptMsgstore:
         with pytest.raises(SystemExit):
             wa.decrypt_msgstore(str(crypt_path), wrong_key_hex, str(output_path), logger)
 
+    @_requires_wa_crypt_tools
     def test_decrypt_msgstore_overwrites_existing_warning(self, tmp_path, logger, synthetic_db):
         key_hex = '11' * 32
         encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
@@ -3585,6 +3604,7 @@ class TestPrepareInputDecryption:
         with pytest.raises(SystemExit):
             wa._prepare_input(args, logger)
 
+    @_requires_wa_crypt_tools
     def test_prepare_input_calls_decrypt_msgstore(self, tmp_path, logger):
         db_path = tmp_path / "plain.db"
         conn = sqlite3.connect(str(db_path))
