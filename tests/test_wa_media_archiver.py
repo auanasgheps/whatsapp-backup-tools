@@ -4128,7 +4128,8 @@ class TestRunForwardModeFilters:
             msgstore=str(db_path), wa_roots=[str(wa_root)],
             output=str(out_dir), contacts=None, log=None,
         )
-        with patch("wab_archiver.ios_handler.validate_ios_schema"), \
+        with patch("wab_archiver.main.check_dependencies"), \
+             patch("wab_archiver.ios_handler.validate_ios_schema"), \
              patch("wab_archiver.ios_handler.validate_ios_wa_root"), \
              patch("wab_archiver.ios_handler.build_ios_number_map", return_value={}), \
              patch("wab_archiver.ios_handler.build_ios_pushname_map", return_value={}), \
@@ -4148,7 +4149,8 @@ class TestRunForwardModeFilters:
             msgstore=str(db_path), wa_roots=[str(tmp_path)],
             output=str(tmp_path), contacts=None, log=None,
         )
-        with pytest.raises(SystemExit):
+        with patch("wab_archiver.main.check_dependencies"), \
+             pytest.raises(SystemExit):
             wa.run_forward_mode(args, logger)
 
     def test_run_forward_mode_valid_since(self, tmp_path, logger):
@@ -4171,7 +4173,8 @@ class TestRunForwardModeFilters:
             msgstore=str(db_path), wa_roots=[str(wa_root)],
             output=str(out_dir), contacts=None, log=None,
         )
-        with patch("wab_archiver.ios_handler.validate_ios_schema"), \
+        with patch("wab_archiver.main.check_dependencies"), \
+             patch("wab_archiver.ios_handler.validate_ios_schema"), \
              patch("wab_archiver.ios_handler.validate_ios_wa_root"), \
              patch("wab_archiver.ios_handler.build_ios_number_map", return_value={}), \
              patch("wab_archiver.ios_handler.build_ios_pushname_map", return_value={}), \
