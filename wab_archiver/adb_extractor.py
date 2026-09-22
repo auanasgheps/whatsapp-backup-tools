@@ -4,7 +4,10 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
+
+from .progress import ProgressReporter
 
 _MSGSTORE_PATH = (
     '/storage/emulated/0/Android/media/com.whatsapp'
@@ -300,17 +303,24 @@ def pull_media(staging_dir: str, business: bool,
     skip_count = 0
     conflicts = []
 
-    for remote_path, remote_size in remote_files:
+    progress_eval = ProgressReporter(
+        "Evaluating media", len(remote_files), logger, sys.stderr, 0.2
+    )
+
+    for i, (remote_path, remote_size) in enumerate(remote_files, 1):
         if remote_path in done_paths:
             skip_count += 1
+            progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
             continue
         basename = os.path.basename(remote_path)
         if basename not in filename_index:
             pull_list.append((remote_path, remote_size))
+            progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
             continue
         db_size, db_md5 = filename_index[basename]
         if db_size is not None and db_size != remote_size:
             pull_list.append((remote_path, remote_size))
+            progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
             continue
         # Size matches (or DB has no size for old record): verify via remote md5
         try:
@@ -318,6 +328,7 @@ def pull_media(staging_dir: str, business: bool,
         except Exception as e:
             logger.warning(f"Could not hash remote file {remote_path}: {e} — will pull")
             pull_list.append((remote_path, remote_size))
+            progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
             continue
         if remote_md5 == db_md5:
             skip_count += 1
@@ -332,6 +343,9 @@ def pull_media(staging_dir: str, business: bool,
                 f"CONFLICT: {basename} has different content on device vs archive "
                 f"(same {'name+size' if db_size == remote_size else 'name'}) — skipped"
             )
+        progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
+
+    progress_eval.finish({"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
 
     logger.info(
         f"Delta pre-filter: {len(pull_list):,} to pull, "
@@ -340,7 +354,12 @@ def pull_media(staging_dir: str, business: bool,
     )
 
     pulled = 0
-    for remote_path, remote_size in pull_list:
+    failed = 0
+    progress_pull = ProgressReporter(
+        "Pulling media", len(pull_list), logger, sys.stderr, 0.2
+    )
+
+    for i, (remote_path, remote_size) in enumerate(pull_list, 1):
         local = _staging_path(remote_path, wa_media_root, staging_dir)
         os.makedirs(os.path.dirname(local), exist_ok=True)
         _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
@@ -348,6 +367,7 @@ def pull_media(staging_dir: str, business: bool,
             _run_adb(['adb', 'pull', remote_path, local], logger)
         except KeyboardInterrupt:
             _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            progress_pull.finish({"Pulled": pulled, "Failed": failed})
             raise
         except Exception as e:
             stderr = ''
@@ -357,17 +377,22 @@ def pull_media(staging_dir: str, business: bool,
             if 'device not found' in stderr or 'device offline' in stderr or \
                     'error: closed' in stderr:
                 _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+                progress_pull.finish({"Pulled": pulled, "Failed": failed})
                 raise RuntimeError(
                     f"Device disconnected during pull of {remote_path}: {reason}"
                 ) from e
             logger.error(f"Failed to pull {remote_path}: {reason}")
             _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            failed += 1
+            progress_pull.update(i, {"Pulled": pulled, "Failed": failed})
             continue
         if not os.path.exists(local):
             logger.error(
                 f"ADB pull reported success but file not found locally: {local}"
             )
             _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            failed += 1
+            progress_pull.update(i, {"Pulled": pulled, "Failed": failed})
             continue
         if os.path.getsize(local) != remote_size:
             logger.warning(
@@ -375,10 +400,15 @@ def pull_media(staging_dir: str, business: bool,
                 f"got {os.path.getsize(local)} B): {remote_path}"
             )
             _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            failed += 1
+            progress_pull.update(i, {"Pulled": pulled, "Failed": failed})
             continue
         _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'done')
         pulled += 1
         logger.debug(f"Pulled: {remote_path}")
+        progress_pull.update(i, {"Pulled": pulled, "Failed": failed})
+
+    progress_pull.finish({"Pulled": pulled, "Failed": failed})
 
     logger.info(f"Pull complete: {pulled:,} file(s) pulled.")
     return pulled, skip_count, conflicts

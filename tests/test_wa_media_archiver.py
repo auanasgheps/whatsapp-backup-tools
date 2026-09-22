@@ -27,6 +27,7 @@ import wab_archiver.backup_reader as br
 import wab_archiver.android_handler as android_handler
 import wab_archiver.adb_extractor as adb
 import wab_archiver.archive_db as arc
+import wab_archiver.progress as prg
 import shared.source_detection as sd
 
 
@@ -2706,6 +2707,92 @@ class TestProcessRowsProgress:
             output_root=str(tmp_path), logger=mock_logger, dry_run=True,
         )
         assert any('Progress: 1000/' in m for m in info_calls)
+
+
+# ===========================================================================
+# wab_archiver.progress: ProgressReporter
+# ===========================================================================
+
+class TestProgressReporter:
+    def test_no_default_parameter_values(self):
+        import inspect
+        for member_name in dir(prg.ProgressReporter):
+            if member_name.startswith('_') and member_name != '__init__':
+                continue
+            member = getattr(prg.ProgressReporter, member_name)
+            if callable(member):
+                sig = inspect.signature(member)
+                for p_name, param in sig.parameters.items():
+                    assert param.default == inspect.Parameter.empty, (
+                        f"ProgressReporter.{member_name} parameter '{p_name}' "
+                        f"has default value: {param.default}"
+                    )
+
+    def test_isatty_in_place_rendering(self, logger):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        reporter = prg.ProgressReporter("Archiving", 100, logger, stream, 0.0)
+        reporter.update(50, {"Copied": 10, "Skipped": 40})
+        output = stream.getvalue()
+        assert "\rArchiving: 50.0% (50/100) | Copied: 10 | Skipped: 40" in output
+
+        reporter.finish({"Copied": 10, "Skipped": 40})
+        final_output = stream.getvalue()
+        assert final_output.endswith("\n")
+
+    def test_isatty_interleaving_guard(self):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        test_logger = logging.getLogger("test_guard")
+        test_logger.setLevel(logging.INFO)
+        test_logger.handlers = []
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        test_logger.addHandler(handler)
+
+        reporter = prg.ProgressReporter("Archiving", 100, test_logger, stream, 0.0)
+        reporter.update(10, {"Copied": 5})
+
+        test_logger.warning("File missing!")
+
+        output = stream.getvalue()
+        assert "File missing!\n" in output
+
+        reporter.finish({"Copied": 5})
+
+    def test_non_tty_milestone_logging(self, logger):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: False
+
+        mock_logger = MagicMock()
+        info_logs = []
+        mock_logger.info.side_effect = lambda msg, *a, **kw: info_logs.append(str(msg))
+
+        reporter = prg.ProgressReporter("Archiving", 50, mock_logger, stream, 0.0)
+        for i in range(1, 51):
+            reporter.update(i, {"Copied": i})
+        reporter.finish({"Copied": 50})
+
+        # Check that no \r was written to non-tty stream
+        assert "\r" not in stream.getvalue()
+        # Check that milestones were logged
+        assert any("Archiving: 10/50" in msg for msg in info_logs)
+        assert any("Archiving: 50/50" in msg for msg in info_logs)
+
+    def test_zero_total_handling(self, logger):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        reporter = prg.ProgressReporter("Evaluating", 0, logger, stream, 0.0)
+        reporter.update(0, {})
+        reporter.finish({})
+        assert "Evaluating: 0" in stream.getvalue()
 
 
 # ===========================================================================

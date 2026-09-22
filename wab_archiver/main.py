@@ -29,6 +29,7 @@ from . import android_handler
 from . import archive_db
 from . import backup_reader
 from . import ios_handler
+from .progress import ProgressReporter
 from shared import db, hashing
 
 # ==============================================================================
@@ -358,11 +359,12 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
     missing_rows = []
     cursor = conn.cursor() if conn is not None else None
 
+    progress = ProgressReporter(
+        "Progress", total, logger, sys.stderr, 0.2
+    )
+
     for i, (msg_id, timestamp, file_path, mime_type, chat_row_id,
             chat_subject, sender, key_from_me, message_url, media_name) in enumerate(rows, 1):
-
-        if i % 1000 == 0:
-            logger.info(f"Progress: {i}/{total} rows processed...")
 
         is_group = chat_subject is not None
         filename = media_name if media_name else (
@@ -377,6 +379,7 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
                 filename=filename, tz=tz,
             ))
             stats['missing'] += 1
+            progress.update(i, {"Copied": stats['copied'], "Skipped": stats['skipped'], "Missing": stats['missing']})
             continue
 
         src = media_resolver(file_path)
@@ -389,6 +392,7 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
                 filename=filename, tz=tz,
             ))
             stats['missing'] += 1
+            progress.update(i, {"Copied": stats['copied'], "Skipped": stats['skipped'], "Missing": stats['missing']})
             continue
 
         if timestamp is None:
@@ -399,6 +403,7 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
                 filename=filename, tz=tz,
             ))
             stats['missing'] += 1
+            progress.update(i, {"Copied": stats['copied'], "Skipped": stats['skipped'], "Missing": stats['missing']})
             continue
 
         year = get_year(timestamp, tz)
@@ -422,7 +427,9 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
         stats['copied'] += copied
         stats['skipped'] += skipped
         stats['warnings'] += warnings
+        progress.update(i, {"Copied": stats['copied'], "Skipped": stats['skipped'], "Missing": stats['missing']})
 
+    progress.finish({"Copied": stats['copied'], "Skipped": stats['skipped'], "Missing": stats['missing']})
     return stats, updated_index, updated_group_index, missing_rows
 
 
@@ -481,7 +488,11 @@ def run_restore_mode(args, logger):
         ):
             restore_map.setdefault(original_path, []).append(archive_path)
 
-        for original_path, archive_paths in restore_map.items():
+        progress = ProgressReporter(
+            "Restore", len(restore_map), logger, sys.stderr, 0.2
+        )
+
+        for i, (original_path, archive_paths) in enumerate(restore_map.items(), 1):
 
             src = None
             src_rel = None
@@ -500,6 +511,11 @@ def run_restore_mode(args, logger):
                     'source_archive_path': '',
                     'status':              'unrestorable',
                 })
+                progress.update(i, {
+                    'Restored': stats['restored'],
+                    'Skipped': stats['skipped'],
+                    'Unrestorable': stats['unrestorable'],
+                })
                 continue
 
             dest = os.path.join(args.output, *original_path.split('/'))
@@ -508,6 +524,11 @@ def run_restore_mode(args, logger):
                 if file_md5(src) == file_md5(dest):
                     logger.debug(f"SKIP (identical already restored): {original_path}")
                     stats['skipped'] += 1
+                    progress.update(i, {
+                        'Restored': stats['restored'],
+                        'Skipped': stats['skipped'],
+                        'Unrestorable': stats['unrestorable'],
+                    })
                     continue
                 logger.warning(
                     f"{'[DRY RUN] ' if args.dry_run else ''}"
@@ -520,11 +541,21 @@ def run_restore_mode(args, logger):
                         'source_archive_path': src_rel,
                         'status':              'collision_skipped',
                     })
+                progress.update(i, {
+                    'Restored': stats['restored'],
+                    'Skipped': stats['skipped'],
+                    'Unrestorable': stats['unrestorable'],
+                })
                 continue
 
             if args.dry_run:
                 logger.info(f"[DRY RUN] Would restore: {original_path}")
                 stats['restored'] += 1
+                progress.update(i, {
+                    'Restored': stats['restored'],
+                    'Skipped': stats['skipped'],
+                    'Unrestorable': stats['unrestorable'],
+                })
                 continue
 
             os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -540,6 +571,17 @@ def run_restore_mode(args, logger):
                     'source_archive_path': src_rel,
                     'status':              f'error: {e}',
                 })
+            progress.update(i, {
+                'Restored': stats['restored'],
+                'Skipped': stats['skipped'],
+                'Unrestorable': stats['unrestorable'],
+            })
+
+        progress.finish({
+            'Restored': stats['restored'],
+            'Skipped': stats['skipped'],
+            'Unrestorable': stats['unrestorable'],
+        })
 
         if not args.dry_run:
             if report_rows:
