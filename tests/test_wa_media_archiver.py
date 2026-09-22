@@ -3263,3 +3263,180 @@ class TestMainEntrypoint:
         assert "Archive WhatsApp media" in res.stdout
 
 
+# ===========================================================================
+# msgstore Decryption
+# ===========================================================================
+
+def _create_synthetic_crypt15(plain_bytes: bytes, key_hex: str) -> bytes:
+    import zlib
+    from wa_crypt_tools.lib.db.db15 import Database15
+    from wa_crypt_tools.lib.key.keyfactory import KeyFactory
+    from wa_crypt_tools.lib.props import Props
+
+    key = KeyFactory.new(key_hex)
+    db15 = Database15(key=key)
+    compressed = zlib.compress(plain_bytes, 1)
+    return db15.encrypt(key, Props(), compressed)
+
+
+class TestDecryptMsgstore:
+    @pytest.fixture
+    def synthetic_db(self, tmp_path):
+        db_path = tmp_path / "plain.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, msg TEXT)")
+        conn.execute("INSERT INTO test VALUES (1, 'synthetic_test_value')")
+        conn.commit()
+        conn.close()
+        return db_path.read_bytes()
+
+    def test_decrypt_msgstore_success_with_hex_key(self, tmp_path, logger, synthetic_db):
+        key_hex = '11' * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        output_path = tmp_path / "out" / "msgstore.db"
+        res = wa.decrypt_msgstore(str(crypt_path), key_hex, str(output_path), logger)
+
+        assert res == str(output_path)
+        assert output_path.exists()
+        assert output_path.read_bytes() == synthetic_db
+
+        conn = sqlite3.connect(str(output_path))
+        row = conn.execute("SELECT msg FROM test WHERE id = 1").fetchone()
+        assert row[0] == 'synthetic_test_value'
+        conn.close()
+
+    def test_decrypt_msgstore_success_with_binary_key_file(self, tmp_path, logger, synthetic_db):
+        from wa_crypt_tools.lib.key.key15 import Key15
+
+        key_hex = '11' * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        key_file = tmp_path / "encrypted_backup.key"
+        key_obj = Key15(keyarray=bytes.fromhex(key_hex))
+        key_obj.file_dump(key_file)
+
+        output_path = tmp_path / "msgstore.db"
+        res = wa.decrypt_msgstore(str(crypt_path), str(key_file), str(output_path), logger)
+
+        assert res == str(output_path)
+        assert output_path.read_bytes() == synthetic_db
+
+    def test_decrypt_msgstore_success_with_text_hex_key_file(self, tmp_path, logger, synthetic_db):
+        key_hex = '11' * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        key_txt = tmp_path / "hex_key.txt"
+        key_txt.write_text(f"  {key_hex}\n", encoding='utf-8')
+
+        output_path = tmp_path / "msgstore.db"
+        res = wa.decrypt_msgstore(str(crypt_path), str(key_txt), str(output_path), logger)
+
+        assert res == str(output_path)
+        assert output_path.read_bytes() == synthetic_db
+
+    def test_decrypt_msgstore_missing_dependency(self, tmp_path, logger):
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(b"dummy")
+        output_path = tmp_path / "msgstore.db"
+
+        with patch.dict(sys.modules, {"wa_crypt_tools.lib.db.dbfactory": None}):
+            with pytest.raises(SystemExit):
+                wa.decrypt_msgstore(str(crypt_path), '11' * 32, str(output_path), logger)
+
+    def test_decrypt_msgstore_invalid_key_raises(self, tmp_path, logger, synthetic_db):
+        key_hex = '11' * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+        output_path = tmp_path / "msgstore.db"
+
+        with pytest.raises(SystemExit):
+            wa.decrypt_msgstore(str(crypt_path), "invalid_key_string", str(output_path), logger)
+
+    def test_decrypt_msgstore_corrupt_file_raises(self, tmp_path, logger):
+        crypt_path = tmp_path / "corrupted.crypt15"
+        crypt_path.write_bytes(b"")
+        output_path = tmp_path / "msgstore.db"
+
+        with pytest.raises(SystemExit):
+            wa.decrypt_msgstore(str(crypt_path), '11' * 32, str(output_path), logger)
+
+    def test_decrypt_msgstore_wrong_key_fails(self, tmp_path, logger, synthetic_db):
+        key_hex = '11' * 32
+        wrong_key_hex = '22' * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+        output_path = tmp_path / "msgstore.db"
+
+        with pytest.raises(SystemExit):
+            wa.decrypt_msgstore(str(crypt_path), wrong_key_hex, str(output_path), logger)
+
+    def test_decrypt_msgstore_overwrites_existing_warning(self, tmp_path, logger, synthetic_db):
+        key_hex = '11' * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        output_path = tmp_path / "msgstore.db"
+        output_path.write_bytes(b"prior_existing_bytes")
+
+        with patch.object(logger, "warning") as mock_warn:
+            wa.decrypt_msgstore(str(crypt_path), key_hex, str(output_path), logger)
+            assert output_path.read_bytes() == synthetic_db
+            mock_warn.assert_called_once()
+            assert "Overwriting existing" in mock_warn.call_args[0][0]
+
+
+class TestPrepareInputDecryption:
+    def test_prepare_input_missing_e2e_key_raises(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=None,
+            from_adb=False,
+            contacts=None,
+            msgstore="msgstore.db.crypt15",
+            e2e_key=None,
+            output=str(tmp_path),
+        )
+        with pytest.raises(SystemExit):
+            wa._prepare_input(args, logger)
+
+    def test_prepare_input_calls_decrypt_msgstore(self, tmp_path, logger):
+        db_path = tmp_path / "plain.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)")
+        conn.execute("INSERT INTO test VALUES (1, 'val1')")
+        conn.commit()
+        conn.close()
+        plain_bytes = db_path.read_bytes()
+
+        key_hex = '11' * 32
+        encrypted_bytes = _create_synthetic_crypt15(plain_bytes, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            from_adb=False,
+            contacts=None,
+            msgstore=str(crypt_path),
+            e2e_key=key_hex,
+            output=str(tmp_path),
+        )
+
+        platform, resolver, ios_contacts, contacts = wa._prepare_input(args, logger)
+        expected_db = os.path.join(str(tmp_path), "Whatsapp Databases", "msgstore.db")
+        assert args.msgstore == expected_db
+        assert os.path.isfile(expected_db)
+        with open(expected_db, 'rb') as f:
+            assert f.read() == plain_bytes
+
+
+

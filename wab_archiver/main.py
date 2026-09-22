@@ -946,6 +946,105 @@ def _warn_network_paths(args: argparse.Namespace, logger: logging.Logger):
             )
 
 
+def decrypt_msgstore(
+    encrypted_path: str,
+    e2e_key: str,
+    output_path: str,
+    logger: logging.Logger,
+) -> str:
+    """Decrypt an encrypted WhatsApp msgstore database (.crypt15) using wa-crypt-tools.
+
+    Args:
+        encrypted_path: Path to the encrypted msgstore file.
+        e2e_key: Path to the encryption key file or 64-character hex key string.
+        output_path: Destination path for the decrypted SQLite database.
+        logger: Logger instance.
+
+    Returns:
+        The output path to the decrypted database file.
+    """
+    try:
+        from wa_crypt_tools.lib.db.dbfactory import DatabaseFactory
+        from wa_crypt_tools.lib.key.keyfactory import KeyFactory
+    except ImportError:
+        logger.error(
+            "wa-crypt-tools is required for decryption but is not installed.\n"
+            "  Run: pip install wa-crypt-tools"
+        )
+        raise SystemExit(1)
+
+    key = KeyFactory.new(e2e_key)
+    if key is None and os.path.isfile(e2e_key):
+        try:
+            with open(e2e_key, "r", encoding="utf-8") as f:
+                hex_candidate = f.read().strip()
+            if len(hex_candidate) == 64:
+                key = KeyFactory.new(hex_candidate)
+        except OSError:
+            pass
+
+    if key is None:
+        logger.error(
+            f"Could not load decryption key from: {e2e_key}\n"
+            "  Make sure --e2e-key points to a valid WhatsApp key file or 64-character hex key."
+        )
+        raise SystemExit(1)
+
+    logger.info("Decrypting msgstore...")
+    try:
+        with open(encrypted_path, 'rb') as msg_file:
+            try:
+                db_file = DatabaseFactory.from_file(msg_file)
+            except Exception as e:
+                logger.error(
+                    f"Failed to parse encrypted database header from '{encrypted_path}': {e}"
+                )
+                raise SystemExit(1)
+
+            if db_file is None:
+                logger.error(
+                    f"Failed to parse encrypted database header from '{encrypted_path}'.\n"
+                    "  Make sure the file is a valid encrypted WhatsApp backup."
+                )
+                raise SystemExit(1)
+
+            encrypted_payload = msg_file.read()
+    except OSError as e:
+        logger.error(f"Failed to read encrypted database file '{encrypted_path}': {e}")
+        raise SystemExit(1)
+
+    try:
+        decrypted = db_file.decrypt(key, encrypted_payload)
+    except Exception as e:
+        logger.error(
+            f"Decryption failed: {e}\n"
+            "  The key file may not match this backup."
+        )
+        raise SystemExit(1)
+
+    try:
+        output_file = zlib.decompressobj().decompress(decrypted)
+    except zlib.error:
+        output_file = decrypted
+
+    if not output_file.startswith(b'SQLite format 3\x00'):
+        logger.error(
+            f"Decryption failed for '{encrypted_path}': decrypted output is not a valid SQLite database.\n"
+            "  The key file may not match this backup, or the file is corrupted."
+        )
+        raise SystemExit(1)
+
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    if os.path.exists(output_path):
+        logger.warning(f"Overwriting existing {output_path} with decrypted database.")
+    with open(output_path, 'wb') as out:
+        out.write(output_file)
+    logger.info("Decryption complete.")
+    return output_path
+
+
 def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
     """
     Resolve all input sources into a ready-to-query state.
@@ -984,18 +1083,19 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
     # wa_root mode
     # -------------------------------------------------------------------------
     else:
-        ios_contacts_path = args.ios_contacts
+        ios_contacts_path = getattr(args, 'ios_contacts', None)
         platform = None
 
+        wa_roots = getattr(args, 'wa_roots', None) or []
         _conflict_rows = []
-        _root_hits = {root: 0 for root in (args.wa_roots or [])}
+        _root_hits = {root: 0 for root in wa_roots}
         _zero_byte_count = [0]
 
         def _multi_root_resolver(fp):
             rel_parts = fp.split('/')
             candidates = [
                 os.path.join(root, *rel_parts)
-                for root in args.wa_roots
+                for root in (getattr(args, 'wa_roots', None) or [])
                 if os.path.exists(os.path.join(root, *rel_parts))
             ]
             valid = [c for c in candidates if os.path.getsize(c) > 0]
@@ -1038,12 +1138,13 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
             return chosen
 
         def _owning_root(path):
+            roots = getattr(args, 'wa_roots', None) or []
             norm_path = os.path.normcase(os.path.normpath(path))
-            for root in args.wa_roots:
+            for root in roots:
                 norm_root = os.path.normcase(os.path.normpath(root))
                 if norm_path.startswith(norm_root + os.sep):
                     return root
-            return args.wa_roots[0]
+            return roots[0] if roots else ''
 
         media_resolver = _multi_root_resolver
         media_resolver.conflict_rows = _conflict_rows
@@ -1097,47 +1198,10 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
                 "Exiting."
             )
             raise SystemExit(1)
-        logger.info("Decrypting msgstore...")
-        try:
-            from wa_crypt_tools.lib.db.dbfactory import DatabaseFactory
-            from wa_crypt_tools.lib.key.keyfactory import KeyFactory
-        except ImportError:
-            logger.error(
-                "wa-crypt-tools is required for decryption but is not installed.\n"
-                "  Run: pip install wa-crypt-tools"
-            )
-            raise SystemExit(1)
-
-        with open(args.msgstore, 'rb') as msg:
-            raw = msg.read()
-        db_file = DatabaseFactory.from_file(io.BytesIO(raw))
-        key = KeyFactory.new(args.e2e_key)
-        if key is None:
-            logger.error(
-                f"Could not load decryption key from: {args.e2e_key}\n"
-                "  Make sure --e2e-key points to a valid WhatsApp key file."
-            )
-            raise SystemExit(1)
-        try:
-            decrypted = db_file.decrypt(key, raw)
-        except Exception as e:
-            logger.error(
-                f"Decryption failed: {e}\n"
-                "  The key file may not match this backup."
-            )
-            raise SystemExit(1)
-        try:
-            output_file = zlib.decompress(decrypted)
-        except zlib.error:
-            output_file = decrypted
         db_dir = os.path.join(args.output, "Whatsapp Databases")
         os.makedirs(db_dir, exist_ok=True)
-        args.msgstore = os.path.join(db_dir, 'msgstore.db')
-        if os.path.exists(args.msgstore):
-            logger.warning(f"Overwriting existing {args.msgstore} with decrypted database.")
-        with open(args.msgstore, 'wb') as out:
-            out.write(output_file)
-        logger.info("Decryption complete.")
+        decrypted_db = os.path.join(db_dir, 'msgstore.db')
+        args.msgstore = decrypt_msgstore(args.msgstore, args.e2e_key, decrypted_db, logger)
 
     return platform, media_resolver, ios_contacts_path, contacts
 
