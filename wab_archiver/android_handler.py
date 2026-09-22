@@ -267,9 +267,55 @@ SELECT * FROM (
 """
 
 
+def _clean_phone_number(raw: str) -> str:
+    """Strip formatting characters and return clean numeric string."""
+    cleaned = re.sub(r'[\s\-\(\)\.\+]', '', raw)
+    if cleaned.startswith('00'):
+        cleaned = cleaned[2:]
+    if cleaned.isdigit():
+        return cleaned
+    return ''
+
+
+def _parse_adb_row(line: str) -> dict[str, str]:
+    """Parse key=value columns from an ADB content query row."""
+    pattern = re.compile(r'([a-zA-Z0-9_]+)=')
+    matches = list(pattern.finditer(line))
+    if not matches:
+        return {}
+    fields = {}
+    for i, m in enumerate(matches):
+        key = m.group(1)
+        val_start = m.end()
+        val_end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
+        val = line[val_start:val_end].rstrip(', \r\n')
+        fields[key] = val
+    return fields
+
+
+def _parse_delimited_contact(line: str) -> tuple[str, str] | None:
+    """Parse a manual contact entry formatted as 'number,name' or 'name: number'."""
+    trimmed = line.strip()
+    if not trimmed or trimmed.startswith('#'):
+        return None
+    for delimiter in (',', ':', '\t'):
+        if delimiter in trimmed:
+            parts = trimmed.split(delimiter, 1)
+            p1, p2 = parts[0].strip(), parts[1].strip()
+            c1 = _clean_phone_number(p1)
+            c2 = _clean_phone_number(p2)
+            if c1 and not c2:
+                return c1, p2
+            if c2 and not c1:
+                return c2, p1
+            if c1 and c2:
+                return c1, p2
+    return None
+
+
 def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
     """
-    Load Android contacts from an ADB-exported contacts file.
+    Load Android contacts from an ADB-exported contacts file or CSV.
     Returns {phone_number: display_name} — same format as ios_handler.load_ios_contacts.
     """
     if not file_path:
@@ -280,10 +326,69 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
     except OSError as e:
         logger.warning(f"Could not read contacts file ({e}); proceeding without names.")
         return {}
-    contacts = {}
-    for name, number in re.findall(
-            r"display_name=(.+?), data1=([^@\n\r]+)", content):
-        contacts[number.strip()] = name.strip()
+
+    wa_contacts = {}
+    phone_contacts = {}
+
+    for line in content.splitlines():
+        fields = _parse_adb_row(line)
+        if fields and 'display_name' in fields and ('data1' in fields or 'data4' in fields):
+            name = fields['display_name'].strip()
+            if not name:
+                continue
+            data1 = fields.get('data1', '').strip()
+            data4 = fields.get('data4', '').strip()
+            mimetype = fields.get('mimetype', '').strip()
+
+            if data1 in ('NULL', 'null'):
+                data1 = ''
+            if data4 in ('NULL', 'null'):
+                data4 = ''
+
+            is_wa_profile = (
+                'vnd.com.whatsapp' in mimetype
+                or '@s.whatsapp.net' in data1
+                or '@w4b' in data1
+            )
+            is_phone = mimetype == 'vnd.android.cursor.item/phone_v2'
+
+            if is_wa_profile:
+                raw_num = data1.split('@')[0] if '@' in data1 else data1
+                clean = _clean_phone_number(raw_num)
+                if clean:
+                    wa_contacts[clean] = name
+            elif is_phone:
+                if data4:
+                    clean4 = _clean_phone_number(data4)
+                    if clean4:
+                        phone_contacts[clean4] = name
+                if data1 and '@' not in data1:
+                    clean1 = _clean_phone_number(data1)
+                    if clean1:
+                        phone_contacts[clean1] = name
+            elif not mimetype:
+                # Legacy projection (display_name:data1)
+                if '@' in data1:
+                    if '@s.whatsapp.net' in data1 or '@w4b' in data1:
+                        raw_num = data1.split('@')[0]
+                        clean = _clean_phone_number(raw_num)
+                        if clean:
+                            wa_contacts[clean] = name
+                    # Other emails are skipped
+                else:
+                    clean1 = _clean_phone_number(data1)
+                    if clean1:
+                        phone_contacts[clean1] = name
+        else:
+            delimited = _parse_delimited_contact(line)
+            if delimited:
+                clean_num, name = delimited
+                if clean_num and name:
+                    phone_contacts[clean_num] = name
+
+    # WhatsApp profiles take precedence over phone contacts
+    contacts = {**phone_contacts, **wa_contacts}
+
     if not contacts:
         logger.warning(
             "Contacts file was read but no WhatsApp contacts were found. "
