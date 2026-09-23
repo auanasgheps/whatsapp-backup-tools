@@ -230,6 +230,8 @@
     }
 
     #chat-header {
+      position: relative;
+      z-index: 11;
       background: var(--surface);
       padding: 8px 16px;
       border-bottom: 1px solid var(--border);
@@ -460,9 +462,17 @@
     }
 
     #chat-loading {
-      display: none; flex: 1; flex-direction: column;
-      align-items: center; justify-content: center;
-      gap: 12px; color: var(--text-muted); font-size: 14px;
+      position: absolute;
+      inset: 0;
+      background: var(--bg);
+      z-index: 10;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      color: var(--text-muted);
+      font-size: 14px;
     }
     #chat-loading .loading-spinner {
       width: 28px; height: 28px;

@@ -444,21 +444,25 @@
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
-    scroll.style.display = 'none';
 
-    suppressScroll = true;
     try {
       await loadMessages('older');
+      if (gen !== _loadGen) return;
+      suppressScroll = true;
+      scroll.scrollTop = scroll.scrollHeight;
+      suppressScroll = false;
+      await _awaitImagesSettled(scroll, 1500);
       if (gen !== _loadGen) return;
     } catch (err) {
       console.error('Failed to load chat messages:', err);
     } finally {
       if (gen === _loadGen) {
         loadingEl.style.display = 'none';
-        scroll.style.display = 'flex';
-        scroll.scrollTop = scroll.scrollHeight;
         suppressScroll = false;
       }
+    }
+    if (gen === _loadGen) {
+      await _pinToBottom(gen);
     }
 
     _startIndexPoll(chat);
@@ -697,6 +701,19 @@
     return row;
   }
 
+  function _attachMediaScrollAnchor(mediaEl) {
+    mediaEl.addEventListener('load', () => {
+      const scroll = document.getElementById('message-scroll');
+      if (!scroll) return;
+      const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
+      if (distFromBottom < 40) {
+        suppressScroll = true;
+        scroll.scrollTop = scroll.scrollHeight;
+        suppressScroll = false;
+      }
+    });
+  }
+
   function renderMediaGrid(group) {
     const grid = document.createElement('div');
     grid.className = 'media-grid';
@@ -718,6 +735,7 @@
         img.loading = 'lazy';
         img.alt = msg.media_name || 'image';
         img.addEventListener('click', () => showLightboxForGroup(group, idx));
+        _attachMediaScrollAnchor(img);
         wrap.appendChild(img);
       } else if (mt === 'video') {
         const vid = document.createElement('video');
@@ -736,6 +754,12 @@
           canvas.getContext('2d').drawImage(probe, 0, 0);
           vid.poster = canvas.toDataURL('image/jpeg', 0.8);
           probe.src = '';
+          const scroll = document.getElementById('message-scroll');
+          if (scroll && (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40)) {
+            suppressScroll = true;
+            scroll.scrollTop = scroll.scrollHeight;
+            suppressScroll = false;
+          }
         }, { once: true });
         probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
       }
@@ -781,18 +805,21 @@
     });
     btn.addEventListener('click', async () => {
       if (noMoreNewer) {
-        suppressScroll = true;
-        scroll.scrollTop = scroll.scrollHeight;
-        suppressScroll = false;
+        await _pinToBottom(_loadGen);
         return;
       }
+      const gen = ++_loadGen;
       msgList = [];
       noMoreOlder = false;
       noMoreNewer = true;
       await loadMessages('older');
+      if (gen !== _loadGen) return;
       suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
       suppressScroll = false;
+      await _awaitImagesSettled(scroll, 1500);
+      if (gen !== _loadGen) return;
+      await _pinToBottom(gen);
     });
   }
   setupScrollTrigger();
@@ -985,6 +1012,7 @@
       img.loading = 'lazy';
       img.alt = msg.media_name || 'image';
       img.addEventListener('click', () => showLightbox(msg));
+      _attachMediaScrollAnchor(img);
       wrap.appendChild(img);
     } else if (mt === 'video') {
       const vid = document.createElement('video');
@@ -1004,6 +1032,12 @@
         canvas.getContext('2d').drawImage(probe, 0, 0);
         vid.poster = canvas.toDataURL('image/jpeg', 0.8);
         probe.src = '';
+        const scroll = document.getElementById('message-scroll');
+        if (scroll && (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40)) {
+          suppressScroll = true;
+          scroll.scrollTop = scroll.scrollHeight;
+          suppressScroll = false;
+        }
       }, { once: true });
       probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
     } else if (mt === 'audio') {
@@ -1851,6 +1885,41 @@
     document.getElementById('date-go-btn').style.display = 'none';
     document.getElementById('date-clear-btn').style.display = 'none';
   });
+
+  // Resolve once every <img> in container has finished loading (or errored),
+  // capped by timeoutMs so slow or broken sources never stall indefinitely.
+  function _awaitImagesSettled(container, timeoutMs) {
+    const pending = [...container.querySelectorAll('img')].filter(img => !img.complete);
+    if (!pending.length) return Promise.resolve();
+    return Promise.all(pending.map(img => new Promise(resolve => {
+      const done = () => resolve();
+      img.addEventListener('load', done, { once: true });
+      img.addEventListener('error', done, { once: true });
+      setTimeout(done, timeoutMs);
+    })));
+  }
+
+  // Scroll to bottom and hold it there as media loads and layout stabilizes.
+  // Snaps each animation frame until the position holds steady (3 stable frames)
+  // or 1000 ms have passed. Bails immediately if a newer load superseded this one.
+  async function _pinToBottom(gen) {
+    const scroll = document.getElementById('message-scroll');
+    const snap = () => {
+      suppressScroll = true;
+      scroll.scrollTop = scroll.scrollHeight;
+      suppressScroll = false;
+    };
+    snap();
+    const deadline = performance.now() + 1000;
+    let stable = 0;
+    while (performance.now() < deadline && stable < 3) {
+      await new Promise(r => requestAnimationFrame(r));
+      if (gen !== _loadGen) return;
+      const before = scroll.scrollTop;
+      snap();
+      stable = Math.abs(scroll.scrollTop - before) < 2 ? stable + 1 : 0;
+    }
+  }
 
   // Center targetEl and hold it there as lazy media above it loads and shifts layout.
   // Re-centers each animation frame until the position holds steady (3 stable frames)
