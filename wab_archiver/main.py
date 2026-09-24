@@ -360,7 +360,7 @@ def process_rows(rows, total: int, contacts, number_map, folder_index, group_ind
     cursor = conn.cursor() if conn is not None else None
 
     progress = ProgressReporter(
-        "Progress", total, logger, sys.stderr, 0.2
+        "Progress", total, logger, sys.stderr, 0.5
     )
 
     for i, (msg_id, timestamp, file_path, mime_type, chat_row_id,
@@ -489,7 +489,7 @@ def run_restore_mode(args, logger):
             restore_map.setdefault(original_path, []).append(archive_path)
 
         progress = ProgressReporter(
-            "Restore", len(restore_map), logger, sys.stderr, 0.2
+            "Restore", len(restore_map), logger, sys.stderr, 0.5
         )
 
         for i, (original_path, archive_paths) in enumerate(restore_map.items(), 1):
