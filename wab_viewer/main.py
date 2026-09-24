@@ -295,6 +295,14 @@ def _resolve_ios_jid(jid_str: str, contacts_map: dict) -> str:
                 return fn
             if pn:
                 return f"+{pn}"
+    elif jid_str.endswith("@lid"):
+        bare = jid_str.split("@")[0]
+        if bare in contacts_map:
+            fn, pn = contacts_map[bare]
+            if fn:
+                return fn
+            if pn:
+                return f"+{pn}"
     if jid_str.endswith("@s.whatsapp.net"):
         num = jid_str.split("@")[0]
         return f"+{num}"
@@ -309,58 +317,126 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
     """Format an iOS service event row into a friendly human-readable string."""
     ev = row.get("group_event_type")
     txt = (row.get("text_body") or "").strip()
-    from_me = row.get("from_me")
-    sender = row.get("sender")
-    actor = "You" if from_me == 1 else (sender or "Someone")
+    member_jid = (row.get("member_jid") or "").strip()
+    from_me = row.get("from_me", 0)
+    sender = row.get("sender") or ""
 
     if ev == 12:  # Group created
         subj = txt
+        creator = None
         if txt.startswith("{"):
             try:
                 data = json.loads(txt)
                 subj = data.get("subject", "")
                 author_jid = data.get("author")
                 if author_jid:
-                    resolved_author = _resolve_ios_jid(author_jid, contacts_map)
-                    if resolved_author and not from_me:
-                        actor = resolved_author
+                    creator = _resolve_ios_jid(author_jid, contacts_map)
             except (json.JSONDecodeError, AttributeError):
                 pass
+        if not creator:
+            if from_me == 1:
+                creator = "You"
+            elif member_jid:
+                creator = _resolve_ios_jid(member_jid, contacts_map)
+            elif sender and sender != "Someone":
+                creator = sender
+            else:
+                creator = "Someone"
         if subj:
-            return f'{actor} created group "{subj}"'
-        return f'{actor} created this group'
+            return f'{creator} created group "{subj}"'
+        return f'{creator} created this group'
 
     if ev == 1:  # Subject changed
+        actor = "You" if from_me == 1 else (_resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone"))
         if txt:
             return f'{actor} changed the subject to "{txt}"'
         return f'{actor} changed the group subject'
 
+    if ev == 3:  # Group icon changed
+        actor = "You" if from_me == 1 else (_resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone"))
+        return f"{actor} changed this group's icon"
+
+    if ev == 4:  # Participant left
+        target = _resolve_ios_jid(member_jid, contacts_map) if member_jid else ("You" if from_me == 1 else "A participant")
+        if target in ("You", "you"):
+            return "You left"
+        return f"{target} left"
+
+    if ev == 15:  # Joined via invite link
+        target = _resolve_ios_jid(member_jid, contacts_map) if member_jid else ("You" if from_me == 1 else "A participant")
+        if target in ("You", "you"):
+            return "You joined using this group's invite link"
+        return f"{target} joined using this group's invite link"
+
     if ev == 2:  # Participant added or joined
-        jids = [j.strip() for j in re.split(r"[;,]", txt) if j.strip()]
-        names = [_resolve_ios_jid(j, contacts_map) for j in jids]
-        target = ", ".join(names) if names else "someone"
+        if member_jid:
+            actor = "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
+            target = _resolve_ios_jid(member_jid, contacts_map)
+        elif from_me == 1:
+            actor = "You"
+            target = _resolve_ios_jid(txt, contacts_map) if txt else "someone"
+        elif sender == "WhatsApp":
+            actor = "WhatsApp"
+            target = _resolve_ios_jid(txt, contacts_map) if txt else "someone"
+        else:
+            actor = _resolve_ios_jid(txt, contacts_map) if txt else None
+            target = "you"
+
+        if target in ("You", "you"):
+            if actor and actor != "Someone":
+                return f"{actor} added you"
+            return "You joined"
+        if actor == "You":
+            return f"You added {target}"
         if actor and actor != "Someone" and actor != target:
             return f"{actor} added {target}"
         return f"{target} joined"
 
+    if ev == 50:  # Multiple participants added
+        if ";" in txt:
+            actor_part, targets_part = txt.split(";", 1)
+            actor = "You" if from_me == 1 else _resolve_ios_jid(actor_part.strip(), contacts_map)
+            target_jids = [j.strip() for j in targets_part.split(",") if j.strip()]
+        else:
+            actor = "You" if from_me == 1 else None
+            target_jids = [j.strip() for j in txt.split(",") if j.strip()]
+        names = [_resolve_ios_jid(j, contacts_map) for j in target_jids]
+        target_str = ", ".join("you" if n in ("You", "you") else n for n in names) if names else "participants"
+        if actor and actor != "Someone":
+            return f"{actor} added {target_str}"
+        return f"{target_str} joined"
+
     if ev == 7:  # Participant removed or left
-        jids = [j.strip() for j in re.split(r"[;,]", txt) if j.strip()]
-        names = [_resolve_ios_jid(j, contacts_map) for j in jids]
-        target = ", ".join(names) if names else "someone"
+        if member_jid:
+            actor = "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
+            target = _resolve_ios_jid(member_jid, contacts_map)
+        elif from_me == 1:
+            actor = "You"
+            target = _resolve_ios_jid(txt, contacts_map) if txt else "someone"
+        elif sender == "WhatsApp":
+            actor = "WhatsApp"
+            target = _resolve_ios_jid(txt, contacts_map) if txt else "someone"
+        else:
+            actor = _resolve_ios_jid(txt, contacts_map) if txt else None
+            target = "you"
+
+        if target in ("You", "you"):
+            if actor and actor != "Someone":
+                return f"{actor} removed you"
+            return "You left"
+        if actor == "You":
+            return f"You removed {target}"
         if actor and actor != "Someone" and actor != target:
             return f"{actor} removed {target}"
-        return f"{target} left"
-
-    if ev == 3:  # Group icon changed
-        return f"{actor} changed this group's icon"
+        return f"{target} was removed"
 
     if ev in (5, 9):  # Admin changed
-        jids = [j.strip() for j in re.split(r"[;,]", txt) if j.strip()]
-        names = [_resolve_ios_jid(j, contacts_map) for j in jids]
-        target = ", ".join(names) if names else "A participant"
-        if ev == 9:
-            return f"{target} is now an admin"
-        return f"{target} is no longer an admin"
+        target = _resolve_ios_jid(member_jid, contacts_map) if member_jid else (
+            _resolve_ios_jid(txt, contacts_map) if txt else "You"
+        )
+        if target in ("You", "you"):
+            return "You're now an admin" if ev == 9 else "You're no longer an admin"
+        return f"{target} is now an admin" if ev == 9 else f"{target} is no longer an admin"
 
     if ev == 26:  # Disappearing messages
         secs = int(txt) if txt.isdigit() else None
@@ -402,17 +478,27 @@ def _format_android_service_row(row: dict) -> str:
         return f'{actor} changed the group subject'
 
     if act in (12, 4):  # Participant added / joined
+        if target in ("You", "you") and (not actor or actor == "Someone"):
+            return "You joined"
         if actor and actor != "Someone" and actor != target:
             return f"{actor} added {target}"
         return f"{target} joined"
 
     if act == 79:  # Joined via invite link
+        if target in ("You", "you"):
+            return "You joined using this group's invite link"
         return f"{target} joined using this group's invite link"
 
     if act in (13, 5):  # Participant left
+        if target in ("You", "you"):
+            return "You left"
         return f"{target} left"
 
     if act == 14:  # Participant removed
+        if target in ("You", "you"):
+            if actor and actor != "Someone":
+                return f"{actor} removed you"
+            return "You were removed"
         if actor and actor != "Someone" and actor != target:
             return f"{actor} removed {target}"
         return f"{target} was removed"
@@ -424,9 +510,13 @@ def _format_android_service_row(row: dict) -> str:
         return f"{actor} changed the group description"
 
     if act == 15:  # Admin promoted
+        if target in ("You", "you"):
+            return "You're now an admin"
         return f"{target} is now an admin"
 
     if act == 20:  # Admin demoted
+        if target in ("You", "you"):
+            return "You're no longer an admin"
         return f"{target} is no longer an admin"
 
     if act == 58:  # Announcement mode
@@ -527,6 +617,14 @@ def _format_service_rows(
     if source_type == "ios":
         needed_jids = set()
         for r in service_rows:
+            m_jid = (r.get("member_jid") or "").strip()
+            if m_jid:
+                needed_jids.add(m_jid)
+                if not m_jid.endswith("@s.whatsapp.net") and not m_jid.endswith("@lid"):
+                    needed_jids.add(f"{m_jid}@s.whatsapp.net")
+                    needed_jids.add(f"{m_jid}@lid")
+                elif m_jid.endswith("@s.whatsapp.net"):
+                    needed_jids.add(m_jid.split("@")[0])
             txt = (r.get("text_body") or "").strip()
             if txt.startswith("{"):
                 try:
@@ -574,6 +672,37 @@ def _format_service_rows(
                         contacts_map[f"{ar['number']}@s.whatsapp.net"] = (ar["display_name"], ar["number"])
             except sqlite3.OperationalError:
                 pass
+            try:
+                push_rows = conn.execute(
+                    f"SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID IN ({ph})",
+                    list(needed_jids),
+                ).fetchall()
+                for pr in push_rows:
+                    if pr["ZPUSHNAME"]:
+                        if pr["ZJID"] not in contacts_map:
+                            contacts_map[pr["ZJID"]] = (pr["ZPUSHNAME"], None)
+                        bare_p = pr["ZJID"].split("@")[0]
+                        if bare_p not in contacts_map:
+                            contacts_map[bare_p] = (pr["ZPUSHNAME"], None)
+            except sqlite3.OperationalError:
+                pass
+
+        try:
+            user_row = conn.execute(
+                "SELECT ZTOJID FROM ZWAMESSAGE WHERE ZFROMJID LIKE '%@g.us' AND ZTOJID LIKE '%@s.whatsapp.net' LIMIT 1"
+            ).fetchone()
+            if not user_row:
+                user_row = conn.execute(
+                    "SELECT ZTOJID FROM ZWAMESSAGE WHERE ZISFROMME = 0 AND ZTOJID LIKE '%@s.whatsapp.net' LIMIT 1"
+                ).fetchone()
+            if user_row and user_row[0]:
+                u_jid = user_row[0]
+                u_phone = u_jid.split("@")[0]
+                contacts_map[u_jid] = ("You", u_phone)
+                contacts_map[u_phone] = ("You", u_phone)
+                contacts_map[f"+{u_phone}"] = ("You", u_phone)
+        except sqlite3.OperationalError:
+            pass
 
         for r in service_rows:
             r["text_body"] = _format_ios_service_row(r, contacts_map)
@@ -1262,12 +1391,19 @@ _ANDROID_FILTER = """
 _IOS_CHAT_ID = "CAST(m.ZCHATSESSION AS TEXT)"
 _IOS_CHAT_TYPE = "CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END"
 
-_IOS_SENDER_JID = """NULLIF(SUBSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID, ''), 1,
-                    INSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') || '@', '@') - 1), '')"""
+_IOS_SENDER_RAW = """COALESCE(
+    gm.ZMEMBERJID,
+    CASE WHEN m.ZFROMJID NOT LIKE '%@g.us' THEN m.ZFROMJID END,
+    ''
+)"""
+
+_IOS_SENDER_JID = f"""NULLIF(SUBSTR({_IOS_SENDER_RAW}, 1,
+                    INSTR({_IOS_SENDER_RAW} || '@', '@') - 1), '')"""
 
 _IOS_SELECT = f"""
     SELECT
         m.Z_PK                                                       AS msg_id,
+        m.Z_PK                                                       AS sort_id,
         {_IOS_CHAT_ID}                                               AS chat_id,
         {_IOS_CHAT_TYPE}                                             AS chat_type,
         CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)        AS timestamp_ms,
@@ -1280,13 +1416,13 @@ _IOS_SELECT = f"""
             NULLIF(pp_phone.ZPUSHNAME, ''),
             NULLIF(cs_lid.ZPARTNERNAME, ''),
             NULLIF(cs_phone.ZPARTNERNAME, ''),
-            CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
+            CASE WHEN ({_IOS_SENDER_RAW}) NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
             CASE WHEN COALESCE(
-                CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                CASE WHEN ({_IOS_SENDER_RAW}) NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
                 ic_s.phone_number
             ) IS NOT NULL
             THEN '+' || COALESCE(
-                CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                CASE WHEN ({_IOS_SENDER_RAW}) NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
                 ic_s.phone_number
             )
             END,
@@ -1320,25 +1456,26 @@ _IOS_SELECT = f"""
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
         NULL                                                          AS reactions,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
-        0                                                            AS group_event_type
+        0                                                            AS group_event_type,
+        gm.ZMEMBERJID                                                AS member_jid
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
     LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
-    LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
-    LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
-    LEFT JOIN _ios_contacts ic_s ON ic_s.jid = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
+    LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = ({_IOS_SENDER_RAW})
+    LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = ({_IOS_SENDER_RAW})
+    LEFT JOIN _ios_contacts ic_s ON ic_s.jid = ({_IOS_SENDER_RAW})
     LEFT JOIN ZWAPROFILEPUSHNAME pp_phone ON pp_phone.ZJID = (ic_s.phone_number || '@s.whatsapp.net')
     LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = (ic_s.phone_number || '@s.whatsapp.net')
     LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
     LEFT JOIN arch.contacts con_s
           ON con_s.number = COALESCE(
-              CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') LIKE '%@lid' THEN ic_s.phone_number END,
+              CASE WHEN ({_IOS_SENDER_RAW}) LIKE '%@lid' THEN ic_s.phone_number END,
               ({_IOS_SENDER_JID})
           )
     LEFT JOIN arch.contacts con_lid_s
-          ON con_lid_s.number = SUBSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID), 1,
-                                       INSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID) || '@', '@') - 1)
+          ON con_lid_s.number = SUBSTR(({_IOS_SENDER_RAW}), 1,
+                                       INSTR(({_IOS_SENDER_RAW}) || '@', '@') - 1)
     LEFT JOIN arch.contacts con_sq
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
@@ -1954,6 +2091,22 @@ def create_app(output_root: Path, rescan: bool = False):
                     """)
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    user_row = conn.execute(
+                        "SELECT ZTOJID FROM ZWAMESSAGE WHERE ZFROMJID LIKE '%@g.us' AND ZTOJID LIKE '%@s.whatsapp.net' LIMIT 1"
+                    ).fetchone()
+                    if not user_row:
+                        user_row = conn.execute(
+                            "SELECT ZTOJID FROM ZWAMESSAGE WHERE ZISFROMME = 0 AND ZTOJID LIKE '%@s.whatsapp.net' LIMIT 1"
+                        ).fetchone()
+                    if user_row and user_row[0]:
+                        u_jid = user_row[0]
+                        u_phone = u_jid.split("@")[0]
+                        conn.execute("INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)", (u_jid, u_phone))
+                        conn.execute("INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)", (u_phone, u_phone))
+                        conn.execute("INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)", (f"+{u_phone}", u_phone))
+                except sqlite3.OperationalError:
+                    pass
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS _ios_contacts_jid ON _ios_contacts(jid)"
                 )
@@ -2067,7 +2220,9 @@ def create_app(output_root: Path, rescan: bool = False):
 
     if source_type == "ios":
         group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
-        ios_service_filter = "OR (m.ZMESSAGETYPE = 6 AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 5, 7, 9, 12, 26, 36, 37))" if has_ios_group_event else "OR (m.ZMESSAGETYPE = 6)"
+        has_ios_sort = "ZSORT" in _zwa_cols
+        sort_col_ios = "COALESCE(m.ZSORT, m.Z_PK)" if has_ios_sort else "m.Z_PK"
+        ios_service_filter = "OR (m.ZMESSAGETYPE = 6 AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))" if has_ios_group_event else "OR (m.ZMESSAGETYPE = 6)"
         globals()['_BASE_IOS_FILTER'] = f"""
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
@@ -2086,6 +2241,7 @@ def create_app(output_root: Path, rescan: bool = False):
         globals()['_IOS_SELECT'] = f"""
     SELECT
         m.Z_PK                                                       AS msg_id,
+        {sort_col_ios}                                               AS sort_id,
         {_IOS_CHAT_ID}                                               AS chat_id,
         {_IOS_CHAT_TYPE}                                             AS chat_type,
         CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)        AS timestamp_ms,
@@ -2098,13 +2254,13 @@ def create_app(output_root: Path, rescan: bool = False):
             NULLIF(pp_phone.ZPUSHNAME, ''),
             NULLIF(cs_lid.ZPARTNERNAME, ''),
             NULLIF(cs_phone.ZPARTNERNAME, ''),
-            CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
+            CASE WHEN ({_IOS_SENDER_RAW}) NOT LIKE '%@lid' THEN NULLIF(m.ZPUSHNAME, '') END,
             CASE WHEN COALESCE(
-                CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                CASE WHEN ({_IOS_SENDER_RAW}) NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
                 ic_s.phone_number
             ) IS NOT NULL
             THEN '+' || COALESCE(
-                CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
+                CASE WHEN ({_IOS_SENDER_RAW}) NOT LIKE '%@lid' THEN ({_IOS_SENDER_JID}) END,
                 ic_s.phone_number
             )
             END,
@@ -2138,25 +2294,26 @@ def create_app(output_root: Path, rescan: bool = False):
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
         NULL                                                          AS reactions,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
-        {group_ev_col}                                               AS group_event_type
+        {group_ev_col}                                               AS group_event_type,
+        gm.ZMEMBERJID                                                AS member_jid
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
     LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
-    LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
-    LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
-    LEFT JOIN _ios_contacts ic_s ON ic_s.jid = COALESCE(gm.ZMEMBERJID, m.ZFROMJID)
+    LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = ({_IOS_SENDER_RAW})
+    LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = ({_IOS_SENDER_RAW})
+    LEFT JOIN _ios_contacts ic_s ON ic_s.jid = ({_IOS_SENDER_RAW})
     LEFT JOIN ZWAPROFILEPUSHNAME pp_phone ON pp_phone.ZJID = (ic_s.phone_number || '@s.whatsapp.net')
     LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = (ic_s.phone_number || '@s.whatsapp.net')
     LEFT JOIN ZWAMESSAGE qm ON qm.Z_PK = m.ZPARENTMESSAGE
     LEFT JOIN arch.contacts con_s
           ON con_s.number = COALESCE(
-              CASE WHEN COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '') LIKE '%@lid' THEN ic_s.phone_number END,
+              CASE WHEN ({_IOS_SENDER_RAW}) LIKE '%@lid' THEN ic_s.phone_number END,
               ({_IOS_SENDER_JID})
           )
     LEFT JOIN arch.contacts con_lid_s
-          ON con_lid_s.number = SUBSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID), 1,
-                                       INSTR(COALESCE(gm.ZMEMBERJID, m.ZFROMJID) || '@', '@') - 1)
+          ON con_lid_s.number = SUBSTR(({_IOS_SENDER_RAW}), 1,
+                                       INSTR(({_IOS_SENDER_RAW}) || '@', '@') - 1)
     LEFT JOIN arch.contacts con_sq
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
@@ -2344,7 +2501,7 @@ def create_app(output_root: Path, rescan: bool = False):
         else:
             group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
             ios_service_filter_last_real = (
-                "OR (msg.ZMESSAGETYPE = 6 AND msg.ZGROUPEVENTTYPE IN (1, 2, 3, 5, 7, 9, 12, 26, 36, 37))"
+                "OR (msg.ZMESSAGETYPE = 6 AND msg.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))"
                 if has_ios_group_event else "OR (msg.ZMESSAGETYPE = 6)"
             )
             rows = conn.execute(f"""
@@ -2356,13 +2513,13 @@ def create_app(output_root: Path, rescan: bool = False):
                         NULLIF(con.display_name, ''),
                         CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) = '0'
-                             THEN 'WhatsApp' END,
+                            THEN 'WhatsApp' END,
                         con.folder,
                         grp.subject,
                         cs.ZPARTNERNAME,
                         CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) != ''
-                             THEN '+' || SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                            THEN '+' || SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                                 INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1)
                         END,
                         CAST(cs.Z_PK AS TEXT)
@@ -2373,7 +2530,8 @@ def create_app(output_root: Path, rescan: bool = False):
                     {group_ev_col}                                     AS last_msg_group_event_type,
                     COALESCE(m.ZISFROMME, 0)                           AS last_msg_from_me,
                     mi.ZMEDIALOCALPATH                                  AS last_msg_media_path,
-                    COALESCE(gm.ZMEMBERJID, m.ZFROMJID, '')            AS last_msg_sender_jid
+                    CASE WHEN m.ZFROMJID NOT LIKE '%@g.us' THEN m.ZFROMJID END AS last_msg_sender_jid,
+                    gm.ZMEMBERJID                                       AS last_msg_member_jid
                 FROM ZWACHATSESSION cs
                 LEFT JOIN arch.contacts con
                       ON con.number = SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
@@ -2402,14 +2560,14 @@ def create_app(output_root: Path, rescan: bool = False):
             needed_jids = set()
             for r in rows:
                 if r["last_msg_type"] == 6:
-                    s_jid = r["last_msg_sender_jid"]
-                    if s_jid:
-                        needed_jids.add(s_jid)
-                        if not s_jid.endswith("@s.whatsapp.net") and not s_jid.endswith("@lid"):
-                            needed_jids.add(f"{s_jid}@s.whatsapp.net")
-                            needed_jids.add(f"{s_jid}@lid")
-                        elif s_jid.endswith("@s.whatsapp.net"):
-                            needed_jids.add(s_jid.split("@")[0])
+                    for s_jid in (r["last_msg_sender_jid"], r["last_msg_member_jid"]):
+                        if s_jid:
+                            needed_jids.add(s_jid)
+                            if not s_jid.endswith("@s.whatsapp.net") and not s_jid.endswith("@lid"):
+                                needed_jids.add(f"{s_jid}@s.whatsapp.net")
+                                needed_jids.add(f"{s_jid}@lid")
+                            elif s_jid.endswith("@s.whatsapp.net"):
+                                needed_jids.add(s_jid.split("@")[0])
                     txt = (r["last_msg_preview"] or "").strip()
                     if txt.startswith("{"):
                         try:
@@ -2455,6 +2613,37 @@ def create_app(output_root: Path, rescan: bool = False):
                             ios_contacts_map[f"{ar['number']}@s.whatsapp.net"] = (ar["display_name"], ar["number"])
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    push_rows = conn.execute(
+                        f"SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID IN ({ph})",
+                        list(needed_jids),
+                    ).fetchall()
+                    for pr in push_rows:
+                        if pr["ZPUSHNAME"]:
+                            if pr["ZJID"] not in ios_contacts_map:
+                                ios_contacts_map[pr["ZJID"]] = (pr["ZPUSHNAME"], None)
+                            bare_p = pr["ZJID"].split("@")[0]
+                            if bare_p not in ios_contacts_map:
+                                ios_contacts_map[bare_p] = (pr["ZPUSHNAME"], None)
+                except sqlite3.OperationalError:
+                    pass
+
+            try:
+                user_row = conn.execute(
+                    "SELECT ZTOJID FROM ZWAMESSAGE WHERE ZFROMJID LIKE '%@g.us' AND ZTOJID LIKE '%@s.whatsapp.net' LIMIT 1"
+                ).fetchone()
+                if not user_row:
+                    user_row = conn.execute(
+                        "SELECT ZTOJID FROM ZWAMESSAGE WHERE ZISFROMME = 0 AND ZTOJID LIKE '%@s.whatsapp.net' LIMIT 1"
+                    ).fetchone()
+                if user_row and user_row[0]:
+                    u_jid = user_row[0]
+                    u_phone = u_jid.split("@")[0]
+                    ios_contacts_map[u_jid] = ("You", u_phone)
+                    ios_contacts_map[u_phone] = ("You", u_phone)
+                    ios_contacts_map[f"+{u_phone}"] = ("You", u_phone)
+            except sqlite3.OperationalError:
+                pass
 
         android_p_map = {}
         if source_type == "android" and has_mcp:
@@ -2486,6 +2675,7 @@ def create_app(output_root: Path, rescan: bool = False):
             last_msg_group_event_type = d.pop("last_msg_group_event_type", None)
             last_msg_sender = d.pop("last_msg_sender", None)
             last_msg_sender_jid = d.pop("last_msg_sender_jid", None)
+            last_msg_member_jid = d.pop("last_msg_member_jid", None)
 
             if source_type == "android" and raw_type == 7:
                 if last_msg_action_type in (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79):
@@ -2502,13 +2692,14 @@ def create_app(output_root: Path, rescan: bool = False):
                     d["last_msg_preview"] = ""
                     d["last_msg_type"] = "text"
             elif source_type == "ios" and raw_type == 6:
-                if not has_ios_group_event or last_msg_group_event_type in (1, 2, 3, 5, 7, 9, 12, 26, 36, 37):
+                if not has_ios_group_event or last_msg_group_event_type in (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50):
                     sender_name = _resolve_ios_jid(last_msg_sender_jid, ios_contacts_map) if last_msg_sender_jid else ""
                     s_row = {
                         "group_event_type": last_msg_group_event_type,
                         "text_body": d.get("last_msg_preview", ""),
                         "from_me": d.get("last_msg_from_me", 0),
                         "sender": sender_name,
+                        "member_jid": last_msg_member_jid or "",
                     }
                     d["last_msg_preview"] = _format_ios_service_row(s_row, ios_contacts_map)
                     d["last_msg_type"] = "service"
@@ -2571,18 +2762,20 @@ def create_app(output_root: Path, rescan: bool = False):
         if source_type == "android":
             chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
             ts_col = _ANDROID_TS
+            sort_phys_col = "m._id"
         else:
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             ts_col = _IOS_TS
+            sort_phys_col = "COALESCE(m.ZSORT, m.Z_PK)" if has_ios_sort else "m.Z_PK"
 
         if before:
-            sql = f"{select} WHERE {chat_pred} AND {ts_col} < ? {extra} ORDER BY {ts_col} DESC LIMIT ?"
+            sql = f"{select} WHERE {chat_pred} AND {ts_col} < ? {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?"
             rows = conn.execute(sql, chat_params + [int(before), limit]).fetchall()
         elif after:
-            sql = f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC LIMIT ?"
+            sql = f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC, {sort_phys_col} ASC LIMIT ?"
             rows = conn.execute(sql, chat_params + [int(after), limit]).fetchall()
         else:
-            sql = f"{select} WHERE {chat_pred} {extra} ORDER BY {ts_col} DESC LIMIT ?"
+            sql = f"{select} WHERE {chat_pred} {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?"
             rows = conn.execute(sql, chat_params + [limit]).fetchall()
 
         rows = [dict(r) for r in rows]
@@ -2640,6 +2833,7 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("participant_name", None)
             row.pop("group_event_type", None)
             row.pop("raw_msg_type", None)
+            row.pop("member_jid", None)
 
         if not before and not after:
             threading.Thread(
@@ -2676,16 +2870,18 @@ def create_app(output_root: Path, rescan: bool = False):
         if source_type == "android":
             chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
             ts_col = _ANDROID_TS
+            sort_phys_col = "m._id"
         else:
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             ts_col = _IOS_TS
+            sort_phys_col = "COALESCE(m.ZSORT, m.Z_PK)" if has_ios_sort else "m.Z_PK"
 
         before_rows = conn.execute(
-            f"{select} WHERE {chat_pred} AND {ts_col} <= ? {extra} ORDER BY {ts_col} DESC LIMIT ?",
+            f"{select} WHERE {chat_pred} AND {ts_col} <= ? {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?",
             chat_params + [ts, half]
         ).fetchall()
         after_rows = conn.execute(
-            f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC LIMIT ?",
+            f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC, {sort_phys_col} ASC LIMIT ?",
             chat_params + [ts, half]
         ).fetchall()
 
@@ -2708,6 +2904,7 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("participant_name", None)
             row.pop("group_event_type", None)
             row.pop("raw_msg_type", None)
+            row.pop("member_jid", None)
         return jsonify(_strip_none_reactions(combined))
 
     # ---- API: media gallery ------------------------------------------------
