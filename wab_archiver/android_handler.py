@@ -396,6 +396,9 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
             "  If using --from-adb, check that the device contacts permission is granted."
         )
     else:
-        logger.info(f"Loaded {len(contacts)} Android contacts.")
+        unique_contacts = len({name for name in contacts.values() if name})
+        logger.info(
+            f"Loaded {len(contacts)} phone number(s) across {unique_contacts} Android contact(s)."
+        )
     contacts.setdefault('0', 'WhatsApp')
     return contacts

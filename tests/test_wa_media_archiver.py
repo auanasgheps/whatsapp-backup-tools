@@ -471,6 +471,24 @@ class TestLoadAndroidContacts:
         assert "eve" not in result
         assert result.get("15551112222") == "Frank"
 
+    def test_logs_phone_numbers_and_unique_contacts(self, tmp_path, caplog):
+        import logging as _logging
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: display_name=Alice, data1=111\n"
+            "Row: display_name=Alice, data1=222\n"
+            "Row: display_name=Bob, data1=333\n",
+            encoding='utf-8',
+        )
+        log = _logging.getLogger("test_android_log")
+        log.setLevel(_logging.INFO)
+        with caplog.at_level(_logging.INFO, logger="test_android_log"):
+            android_handler.load_contacts(str(f), log)
+        assert any(
+            "Loaded 3 phone number(s) across 2 Android contact(s)." in r.message
+            for r in caplog.records
+        )
+
 
 # ===========================================================================
 # iOS: validate_ios_schema
@@ -1866,6 +1884,22 @@ class TestLoadIosContacts:
     def test_missing_file_returns_empty(self, tmp_path, logger):
         result = ios.load_ios_contacts(str(tmp_path / "nonexistent.sqlite"), logger)
         assert result == {}
+
+    def test_logs_phone_numbers_and_unique_contacts(self, tmp_path, caplog):
+        import logging as _logging
+        path = _make_contacts_db(tmp_path, [
+            ("111@s.whatsapp.net", "Alice"),
+            ("222@s.whatsapp.net", "Alice"),
+            ("333@s.whatsapp.net", "Bob"),
+        ])
+        log = _logging.getLogger("test_ios_log")
+        log.setLevel(_logging.INFO)
+        with caplog.at_level(_logging.INFO, logger="test_ios_log"):
+            ios.load_ios_contacts(path, log)
+        assert any(
+            "Loaded 3 phone number(s) across 2 iOS contact(s)." in r.message
+            for r in caplog.records
+        )
 
 
 # ===========================================================================

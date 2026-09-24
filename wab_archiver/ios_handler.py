@@ -374,6 +374,9 @@ def load_ios_contacts(sqlite_path: str,
         return {}
 
     contacts = {number: name for number, name in rows if number}
+    unique_contacts = len({name for name in contacts.values() if name})
+    logger.info(
+        f"Loaded {len(contacts)} phone number(s) across {unique_contacts} iOS contact(s)."
+    )
     contacts.setdefault('0', 'WhatsApp')
-    logger.info(f"Loaded {len(contacts)} iOS contacts.")
     return contacts
