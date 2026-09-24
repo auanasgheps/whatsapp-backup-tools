@@ -628,7 +628,7 @@
         msgList.push(m);
       }
     }
-    msgList.sort((a, b) => (a.timestamp_ms - b.timestamp_ms) || (a.msg_id - b.msg_id));
+    msgList.sort((a, b) => (a.timestamp_ms - b.timestamp_ms) || ((a.sort_id ?? a.msg_id) - (b.sort_id ?? b.msg_id)) || (a.msg_id - b.msg_id));
   }
 
   function pruneList(direction) {

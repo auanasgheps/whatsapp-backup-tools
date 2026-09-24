@@ -4315,6 +4315,154 @@ class TestServiceMessages:
             assert info["sent"] == 0
             assert info["received"] == 1
 
+    def test_ios_service_events_actor_target_and_ordering(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        contacts_path = tmp_path / "ContactsV2.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT, ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEMBERJID TEXT, ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZMESSAGETYPE INTEGER, ZGROUPEVENTTYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT, ZTOJID TEXT, ZSORT INTEGER
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (20, 1, 'awesomegroup@g.us', 'Awesome Group', 0);
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 20, '15550002222@s.whatsapp.net', 1);
+            INSERT INTO ZWAGROUPMEMBER VALUES (2, 20, '15550003333@s.whatsapp.net', 1);
+
+            -- 1. Group created (ZSORT = 2, PK = 101, TS = 700000000.0)
+            INSERT INTO ZWAMESSAGE VALUES (
+                101, 20, 0, 700000000.0, 6, 12, NULL, NULL, NULL, NULL,
+                '{"subject": "Awesome Group", "author": "15550001111@s.whatsapp.net"}',
+                'awesomegroup@g.us', '15550009999@s.whatsapp.net', 2
+            );
+            -- 2. Participant added: Alice added Bob (ZSORT = 3, PK = 100, TS = 700000000.0)
+            -- Note: PK is lower than group created to test sort ordering by ZSORT
+            INSERT INTO ZWAMESSAGE VALUES (
+                100, 20, 0, 700000000.0, 6, 2, NULL, 1, NULL, NULL,
+                '15550001111@s.whatsapp.net', 'awesomegroup@g.us', '15550009999@s.whatsapp.net', 3
+            );
+            -- 3. Participant added: Alice added you (member_jid is NULL -> target is you)
+            INSERT INTO ZWAMESSAGE VALUES (
+                102, 20, 0, 700000010.0, 6, 2, NULL, NULL, NULL, NULL,
+                '15550001111@s.whatsapp.net', 'awesomegroup@g.us', '15550009999@s.whatsapp.net', 4
+            );
+            -- 4. Participant removed: Alice removed you (member_jid is NULL -> target is you)
+            INSERT INTO ZWAMESSAGE VALUES (
+                103, 20, 0, 700000020.0, 6, 7, NULL, NULL, NULL, NULL,
+                '15550001111@s.whatsapp.net', 'awesomegroup@g.us', '15550009999@s.whatsapp.net', 5
+            );
+            -- 5. Participant left: Bob left
+            INSERT INTO ZWAMESSAGE VALUES (
+                104, 20, 0, 700000030.0, 6, 4, NULL, 1, NULL, NULL,
+                NULL, 'awesomegroup@g.us', '15550009999@s.whatsapp.net', 6
+            );
+            -- 6. Joined via invite link: Bob joined
+            INSERT INTO ZWAMESSAGE VALUES (
+                105, 20, 0, 700000040.0, 6, 15, NULL, 1, NULL, NULL,
+                NULL, 'awesomegroup@g.us', '15550009999@s.whatsapp.net', 7
+            );
+            -- 7. Multiple participants added: Alice added Bob and Charlie
+            INSERT INTO ZWAMESSAGE VALUES (
+                106, 20, 0, 700000050.0, 6, 50, NULL, NULL, NULL, NULL,
+                '15550001111@s.whatsapp.net; 15550002222@s.whatsapp.net, 15550003333@s.whatsapp.net',
+                'awesomegroup@g.us', '15550009999@s.whatsapp.net', 8
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        c_conn = sqlite3.connect(str(contacts_path))
+        c_conn.executescript("""
+            CREATE TABLE ZWAADDRESSBOOKCONTACT (
+                Z_PK INTEGER PRIMARY KEY, ZLID VARCHAR, ZWHATSAPPID VARCHAR,
+                ZFULLNAME VARCHAR, ZPHONENUMBER VARCHAR
+            );
+            INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (
+                1, '103624826949010@lid', '15550001111@s.whatsapp.net',
+                'Alice Smith', '15550001111'
+            );
+        """)
+        c_conn.commit()
+        c_conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Bob', 'Bob Jones')"
+        )
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550003333', 'Charlie', 'Charlie Brown')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('20', 'Awesome Group', 'Awesome Group')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=20&chat_type=group&limit=50")
+            msgs = resp.get_json()
+            assert len(msgs) == 7
+
+            by_id = {m["msg_id"]: m for m in msgs}
+
+            # 1. Group created
+            assert by_id[101]["media_type"] == "service"
+            assert by_id[101]["text_body"] == 'Alice Smith created group "Awesome Group"'
+
+            # 2. Alice added Bob Jones (actor in ZTEXT, target in member_jid)
+            assert by_id[100]["media_type"] == "service"
+            assert by_id[100]["text_body"] == "Alice Smith added Bob Jones"
+            assert "Awesome Group" not in by_id[100]["sender"]
+
+            # 3. Alice added you (target is you when member_jid is NULL)
+            assert by_id[102]["media_type"] == "service"
+            assert by_id[102]["text_body"] == "Alice Smith added you"
+
+            # 4. Alice removed you
+            assert by_id[103]["media_type"] == "service"
+            assert by_id[103]["text_body"] == "Alice Smith removed you"
+
+            # 5. Bob Jones left (event 4)
+            assert by_id[104]["media_type"] == "service"
+            assert by_id[104]["text_body"] == "Bob Jones left"
+
+            # 6. Joined via invite link (event 15)
+            assert by_id[105]["media_type"] == "service"
+            assert by_id[105]["text_body"] == "Bob Jones joined using this group's invite link"
+
+            # 7. Multiple participants added (event 50)
+            assert by_id[106]["media_type"] == "service"
+            assert by_id[106]["text_body"] == "Alice Smith added Bob Jones, Charlie Brown"
+
+            # Verify ordering at same timestamp:
+            # In descending order (newest first): msgs returned by /api/messages
+            # For same timestamp (700000000.0), sort_id 3 (Bob added) comes before sort_id 2 (Group created)
+            # When reversed (chronological order), Group Created (sort_id 2) comes BEFORE Participant Added (sort_id 3)
+            same_ts_msgs = [m for m in reversed(msgs) if m["timestamp_ms"] == int((700000000.0 + 978307200) * 1000)]
+            assert len(same_ts_msgs) == 2
+            assert same_ts_msgs[0]["msg_id"] == 101  # Group created (ZSORT = 2)
+            assert same_ts_msgs[1]["msg_id"] == 100  # Bob added (ZSORT = 3, despite PK 100 < 101)
+
     def test_android_service_events_formatting_and_preview(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
         archive_path = tmp_path / ".wa_media_archiver.db"
