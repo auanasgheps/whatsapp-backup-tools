@@ -2918,6 +2918,40 @@ class TestProgressReporter:
         reporter.finish({})
         assert "Evaluating: 0" in stream.getvalue()
 
+    def test_cursor_visibility_management(self, logger):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        reporter = prg.ProgressReporter("Archiving", 100, logger, stream, 0.0)
+        assert not reporter._cursor_hidden
+
+        reporter.update(10, {"Copied": 5})
+        assert reporter._cursor_hidden
+        assert "\033[?25l" in stream.getvalue()
+
+        reporter.finish({"Copied": 5})
+        assert not reporter._cursor_hidden
+        assert "\033[?25h" in stream.getvalue()
+
+    def test_redundant_redraw_skipped(self, logger):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        reporter = prg.ProgressReporter("Archiving", 100, logger, stream, 0.0)
+        reporter.update(10, {"Copied": 5})
+        len_after_first = len(stream.getvalue())
+
+        # Second update with same current and stats should be suppressed
+        reporter.update(10, {"Copied": 5})
+        assert len(stream.getvalue()) == len_after_first
+
+        # Update with changed stats should render
+        reporter.update(11, {"Copied": 6})
+        assert len(stream.getvalue()) > len_after_first
+        reporter.finish({"Copied": 6})
+
 
 # ===========================================================================
 # wab_archiver.main: _inject_default_archive_command

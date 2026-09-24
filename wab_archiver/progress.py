@@ -1,7 +1,24 @@
+import atexit
 import logging
 import sys
 import time
 import typing
+
+
+def _enable_windows_vt() -> None:
+    """Enable Virtual Terminal Processing on Windows console handles if available."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        for handle_id in (-11, -12):
+            handle = kernel32.GetStdHandle(handle_id)
+            mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        pass
 
 
 class _ConsoleFilter(logging.Filter):
@@ -41,6 +58,8 @@ class ProgressReporter:
 
         self._last_update_time = 0.0
         self._last_len = 0
+        self._last_rendered_line = ""
+        self._cursor_hidden = False
         self._is_tty = hasattr(stream, "isatty") and stream.isatty()
         self._last_milestone = -1
         self._finished = False
@@ -49,7 +68,25 @@ class ProgressReporter:
         self._hooked_handler = None
         self._orig_emit = None
 
+        if self._is_tty:
+            _enable_windows_vt()
+            atexit.register(self._show_cursor)
+
         self._setup_interleaving_guard()
+
+    def _hide_cursor(self) -> None:
+        """Hide terminal cursor to prevent update strobing."""
+        if self._is_tty and self._stream is not None and not self._cursor_hidden:
+            self._stream.write("\033[?25l")
+            self._stream.flush()
+            self._cursor_hidden = True
+
+    def _show_cursor(self) -> None:
+        """Restore terminal cursor."""
+        if self._cursor_hidden and self._stream is not None:
+            self._stream.write("\033[?25h")
+            self._stream.flush()
+            self._cursor_hidden = False
 
     def _setup_interleaving_guard(self) -> None:
         """Prevent console log messages from colliding with the in-place status line."""
@@ -70,16 +107,24 @@ class ProgressReporter:
                     def wrapped_emit(record: logging.LogRecord) -> None:
                         if reporter_self._last_len > 0 and not getattr(record, 'is_progress', False):
                             if reporter_self._stream is not None:
+                                reporter_self._show_cursor()
                                 reporter_self._stream.write("\r" + " " * reporter_self._last_len + "\r")
                                 reporter_self._stream.flush()
                             reporter_self._last_len = 0
+                            reporter_self._last_rendered_line = ""
                         if reporter_self._orig_emit:
                             reporter_self._orig_emit(record)
 
                     handler.emit = wrapped_emit
 
     def _teardown_interleaving_guard(self) -> None:
-        """Restore original handler emit and remove console filter."""
+        """Restore original handler emit, show cursor, and remove console filter."""
+        try:
+            atexit.unregister(self._show_cursor)
+        except Exception:
+            pass
+        self._show_cursor()
+
         if self._hooked_handler and self._orig_emit:
             self._hooked_handler.emit = self._orig_emit
             self._hooked_handler = None
@@ -156,8 +201,14 @@ class ProgressReporter:
         if self._is_tty and self._stream is not None and (
             is_first_or_last or (now - self._last_update_time >= self._min_interval_seconds)
         ):
-            self._last_update_time = now
             line = self._format_status_line(current, stats)
+            if line == self._last_rendered_line and not is_first_or_last:
+                return
+
+            self._hide_cursor()
+            self._last_update_time = now
+            self._last_rendered_line = line
+
             padding = max(0, self._last_len - len(line))
             self._stream.write("\r" + line + (" " * padding))
             self._stream.flush()
@@ -176,6 +227,7 @@ class ProgressReporter:
                 self._logger.info(log_msg, extra={'is_progress': True})
 
         if self._is_tty and self._stream is not None:
+            self._show_cursor()
             line = self._format_status_line(self._total, stats)
             padding = max(0, self._last_len - len(line))
             self._stream.write("\r" + line + (" " * padding) + "\n")
@@ -183,4 +235,3 @@ class ProgressReporter:
             self._last_len = 0
 
         self._teardown_interleaving_guard()
-
