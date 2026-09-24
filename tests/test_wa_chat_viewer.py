@@ -4608,6 +4608,23 @@ class TestServiceMessages:
             -- 18. Action 13: Bob left (no participant row, sender fallback)
             INSERT INTO message VALUES (18, 10, 0, 3, 1700000017000, NULL, 7);
             INSERT INTO message_system VALUES (18, 18, 13);
+
+            -- 19. Action 6: Group icon changed by Bob with from_me = 1 (Android DB quirk)
+            INSERT INTO message VALUES (19, 10, 1, 3, 1700000018000, NULL, 7);
+            INSERT INTO message_system VALUES (19, 19, 6);
+
+            -- 20. Action 14: Bob removed You with from_me = 1
+            INSERT INTO message VALUES (20, 10, 1, 3, 1700000019000, NULL, 7);
+            INSERT INTO message_system VALUES (20, 20, 14);
+            INSERT INTO message_system_chat_participant VALUES (9, 20, 6);
+
+            -- 21. Action 4: Bob joined on his own (from_me = 1, sender = Bob)
+            INSERT INTO message VALUES (21, 10, 1, 3, 1700000020000, NULL, 7);
+            INSERT INTO message_system VALUES (21, 21, 4);
+
+            -- 22. Action 5: You left (from_me = 1, sender = 0)
+            INSERT INTO message VALUES (22, 10, 1, 0, 1700000021000, NULL, 7);
+            INSERT INTO message_system VALUES (22, 22, 5);
         """)
         conn.commit()
         conn.close()
@@ -4636,7 +4653,7 @@ class TestServiceMessages:
             msg_ids = [m["msg_id"] for m in msgs]
             assert 14 not in msg_ids
             assert 15 not in msg_ids
-            assert len(msgs) == 16  # 15 service messages + 1 text message
+            assert len(msgs) == 20  # 19 service messages + 1 text message
 
             by_id = {m["msg_id"]: m for m in msgs}
 
@@ -4705,6 +4722,22 @@ class TestServiceMessages:
             # 18. Bob left (sender fallback)
             assert by_id[18]["media_type"] == "service"
             assert by_id[18]["text_body"] == "Bob Jones left"
+
+            # 19. Icon changed by Bob with from_me = 1 (Android DB quirk)
+            assert by_id[19]["media_type"] == "service"
+            assert by_id[19]["text_body"] == "Bob Jones changed this group's icon"
+
+            # 20. Bob removed You with from_me = 1
+            assert by_id[20]["media_type"] == "service"
+            assert by_id[20]["text_body"] == "Bob Jones removed you"
+
+            # 21. Bob joined on his own (from_me = 1, sender = Bob)
+            assert by_id[21]["media_type"] == "service"
+            assert by_id[21]["text_body"] == "Bob Jones joined"
+
+            # 22. You left (from_me = 1, sender = 0)
+            assert by_id[22]["media_type"] == "service"
+            assert by_id[22]["text_body"] == "You left"
 
             # /api/chats preview
             c_resp = client.get("/api/chats")

@@ -464,8 +464,8 @@ def _format_android_service_row(row: dict) -> str:
     sender = row.get("sender")
     part_name = row.get("participant_name")
 
-    actor = "You" if from_me == 1 else (sender or "Someone")
-    target = part_name or (sender if act in (4, 5, 13, 79) else None) or "Someone"
+    actor = sender if sender else ("You" if from_me == 1 else "Someone")
+    target = part_name or (sender if act in (4, 5, 13, 79) else None) or ("You" if from_me == 1 and act in (4, 5, 13, 79) else "Someone")
 
     if act == 11:  # Group created
         if txt:
@@ -478,7 +478,7 @@ def _format_android_service_row(row: dict) -> str:
         return f'{actor} changed the group subject'
 
     if act in (12, 4):  # Participant added / joined
-        if target in ("You", "you") and (not actor or actor == "Someone"):
+        if target in ("You", "you") and (not actor or actor == "Someone" or actor == "You"):
             return "You joined"
         if actor and actor != "Someone" and actor != target:
             return f"{actor} added {target}"
@@ -496,7 +496,7 @@ def _format_android_service_row(row: dict) -> str:
 
     if act == 14:  # Participant removed
         if target in ("You", "you"):
-            if actor and actor != "Someone":
+            if actor and actor != "Someone" and actor != "You":
                 return f"{actor} removed you"
             return "You were removed"
         if actor and actor != "Someone" and actor != target:
