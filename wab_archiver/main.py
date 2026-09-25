@@ -1087,7 +1087,22 @@ def decrypt_msgstore(
     return output_path
 
 
-def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
+def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger):
+    """Decrypt encrypted msgstore if necessary."""
+    if hasattr(args, 'msgstore') and args.msgstore and args.msgstore.endswith('.crypt15'):
+        if not getattr(args, 'e2e_key', None):
+            logger.error(
+                "Encrypted msgstore detected but no --e2e-key provided. "
+                "Exiting."
+            )
+            raise SystemExit(1)
+        db_dir = os.path.join(args.output, "Whatsapp Databases")
+        os.makedirs(db_dir, exist_ok=True)
+        decrypted_db = os.path.join(db_dir, 'msgstore.db')
+        args.msgstore = decrypt_msgstore(args.msgstore, args.e2e_key, decrypted_db, logger)
+
+
+def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: logging.Logger):
     """
     Resolve all input sources into a ready-to-query state.
 
@@ -1207,12 +1222,25 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
         except subprocess.CalledProcessError:
             raise SystemExit(1)
 
+        _decrypt_msgstore_if_needed(args, logger)
+
         if args.pull_media:
+            target_paths = None
+            if since_ms is not None:
+                with contextlib.closing(sqlite3.connect(args.msgstore)) as check_conn:
+                    check_cur = check_conn.cursor()
+                    hd_dedup = android_handler._check_hd_association(check_cur, logger)
+                    target_paths = android_handler.get_media_file_paths(check_cur, since_ms, hd_dedup)
+                    logger.info(
+                        f"Filtering ADB media pull to {len(target_paths):,} file(s) "
+                        f"referenced on or after {args.since}."
+                    )
+
             staging_dir = args.staging
             conn_for_pull = archive_db.open_archive_db(args.output)
             try:
                 pulled, skipped, conflicts = adb_extractor.pull_media(
-                    staging_dir, args.business, conn_for_pull, logger,
+                    staging_dir, args.business, conn_for_pull, logger, target_paths,
                 )
             except (RuntimeError, KeyboardInterrupt) as e:
                 logger.error(f"ADB media pull stopped: {e}")
@@ -1233,17 +1261,7 @@ def _prepare_input(args: argparse.Namespace, logger: logging.Logger):
         contacts = android_handler.load_contacts(args.contacts, logger)
 
     # --- Decrypt if needed ---
-    if args.msgstore.endswith('.crypt15'):
-        if not args.e2e_key:
-            logger.error(
-                "Encrypted msgstore detected but no --e2e-key provided. "
-                "Exiting."
-            )
-            raise SystemExit(1)
-        db_dir = os.path.join(args.output, "Whatsapp Databases")
-        os.makedirs(db_dir, exist_ok=True)
-        decrypted_db = os.path.join(db_dir, 'msgstore.db')
-        args.msgstore = decrypt_msgstore(args.msgstore, args.e2e_key, decrypted_db, logger)
+    _decrypt_msgstore_if_needed(args, logger)
 
     return platform, media_resolver, ios_contacts_path, contacts
 
@@ -1286,16 +1304,6 @@ def check_dependencies(args: argparse.Namespace, logger: logging.Logger):
 def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     """Execute a full forward archival run."""
     check_dependencies(args, logger)
-    platform, media_resolver, ios_contacts_path, contacts = _prepare_input(args, logger)
-
-    logger.info(f"Connecting to: {args.msgstore}")
-    if not os.path.isfile(args.msgstore):
-        logger.error(f"Database file not found: {args.msgstore}")
-        raise SystemExit(1)
-
-    if platform is None:
-        platform = detect_db_platform(args.msgstore)
-        logger.info(f"Detected platform: {platform}")
 
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     tz = None
@@ -1325,6 +1333,17 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     if args.limit:
         logger.info(f"LIMIT active: {args.limit // 2} rows per chat type "
                     f"({(args.limit // 2) * 2} max total rows).")
+
+    platform, media_resolver, ios_contacts_path, contacts = _prepare_input(args, since_ms, logger)
+
+    logger.info(f"Connecting to: {args.msgstore}")
+    if not os.path.isfile(args.msgstore):
+        logger.error(f"Database file not found: {args.msgstore}")
+        raise SystemExit(1)
+
+    if platform is None:
+        platform = detect_db_platform(args.msgstore)
+        logger.info(f"Detected platform: {platform}")
 
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()

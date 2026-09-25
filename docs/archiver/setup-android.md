@@ -47,6 +47,7 @@ If you prefer not to set up Syncthing, the archiver can pull your media files di
 **How it works:** The archiver tracks every file it pulls in a state table inside the archive's `.wa_media_archiver.db`. On subsequent runs:
 
 - Files already in the archive are **skipped without re-transferring** — detected via filename and file size, with remote MD5 verification for matching sizes
+- When combined with `--since <DATE>`, only media referenced by messages on or after that date is transferred, significantly speeding up partial or catch-up transfers
 - Interrupted transfers are **resumed automatically** — partial files are cleaned up at the start of each run and re-pulled
 - Files with the same name but different content on device vs archive are **logged to `adb_conflicts_report.csv`** and skipped — resolve these manually
 
