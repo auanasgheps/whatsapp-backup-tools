@@ -208,6 +208,56 @@ class TestBuildQuery:
         assert 'timestamp >=' not in query
 
 
+class TestGetMediaFilePaths:
+    def test_get_media_file_paths_since_filter(self):
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, 'Group 1', 10)")
+        conn.execute("INSERT INTO chat VALUES (2, NULL, 20)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO jid VALUES (20, '123456')")
+        conn.execute("INSERT INTO message VALUES (1, 1000, 10, 0)")
+        conn.execute("INSERT INTO message VALUES (2, 2000, 20, 0)")
+        conn.execute("INSERT INTO message_media VALUES ('Media/WhatsApp Images/old.jpg', 'image/jpeg', 1, 1, 'url', NULL)")
+        conn.execute("INSERT INTO message_media VALUES ('Media/WhatsApp Images/new.jpg', 'image/jpeg', 2, 2, 'url', NULL)")
+        conn.commit()
+
+        paths = android_handler.get_media_file_paths(conn.cursor(), 1500, False)
+        assert paths == {'Media/WhatsApp Images/new.jpg'}
+        conn.close()
+
+    def test_get_media_file_paths_no_filter_returns_all(self):
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, 'Group 1', 10)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO message VALUES (1, 1000, 10, 0)")
+        conn.execute("INSERT INTO message VALUES (2, 2000, 10, 0)")
+        conn.execute("INSERT INTO message_media VALUES ('Media/WhatsApp Images/img1.jpg', 'image/jpeg', 1, 1, 'url', NULL)")
+        conn.execute("INSERT INTO message_media VALUES ('Media/WhatsApp Video/clip.mp4', 'video/mp4', 1, 2, 'url', NULL)")
+        conn.commit()
+
+        paths = android_handler.get_media_file_paths(conn.cursor(), None, False)
+        assert paths == {'Media/WhatsApp Images/img1.jpg', 'Media/WhatsApp Video/clip.mp4'}
+        conn.close()
+
+    def test_get_media_file_paths_hd_dedup(self):
+        conn = _make_msgstore(extra_tables=["message_association"])
+        conn.execute("ALTER TABLE message_association ADD COLUMN parent_message_row_id INTEGER")
+        conn.execute("ALTER TABLE message_association ADD COLUMN child_message_row_id INTEGER")
+        conn.execute("ALTER TABLE message_association ADD COLUMN association_type INTEGER")
+        conn.execute("INSERT INTO chat VALUES (1, 'Group 1', 10)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO message VALUES (1, 1000, 10, 0)")
+        conn.execute("INSERT INTO message VALUES (2, 1000, 10, 0)")
+        conn.execute("INSERT INTO message_media VALUES ('Media/WhatsApp Images/lq.jpg', 'image/jpeg', 1, 1, 'url', NULL)")
+        conn.execute("INSERT INTO message_media VALUES ('Media/WhatsApp Images/hd.jpg', 'image/jpeg', 1, 2, 'url', NULL)")
+        conn.execute("INSERT INTO message_association VALUES (1, 1, 2, 12)")
+        conn.commit()
+
+        paths = android_handler.get_media_file_paths(conn.cursor(), None, True)
+        assert paths == {'Media/WhatsApp Images/hd.jpg'}
+        conn.close()
+
+
 # ===========================================================================
 # Schema validation (needs an in-memory SQLite DB)
 # ===========================================================================
@@ -2575,7 +2625,7 @@ class TestStagingPath:
             "/storage/WA/Media",
             "/tmp/stage",
         )
-        assert result == os.path.join("/tmp/stage", "img.jpg")
+        assert result == os.path.join("/tmp/stage", "Media", "img.jpg")
 
     def test_nested_subdir(self):
         result = adb._staging_path(
@@ -2583,7 +2633,15 @@ class TestStagingPath:
             "/storage/WA/Media",
             "/tmp/stage",
         )
-        assert result == os.path.join("/tmp/stage", "WhatsApp Images", "img.jpg")
+        assert result == os.path.join("/tmp/stage", "Media", "WhatsApp Images", "img.jpg")
+
+    def test_staging_dir_passes_validate_wa_root(self, tmp_path, logger):
+        stage_dir = str(tmp_path / "stage")
+        remote_path = "/storage/WA/Media/WhatsApp Images/img.jpg"
+        local = adb._staging_path(remote_path, "/storage/WA/Media", stage_dir)
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        # Should validate without error since staging_dir now contains Media/
+        android_handler.validate_wa_root([stage_dir], logger)
 
 
 # ===========================================================================
@@ -2625,7 +2683,7 @@ class TestPullMedia:
              patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"), \
              patch("wab_archiver.adb_extractor.enumerate_remote_files", return_value=[]):
             pulled, skipped, conflicts = adb.pull_media(
-                str(tmp_path / "stage"), False, conn, logger
+                str(tmp_path / "stage"), False, conn, logger, None
             )
         assert pulled == 0
         assert skipped == 0
@@ -2640,7 +2698,7 @@ class TestPullMedia:
              patch("wab_archiver.adb_extractor.enumerate_remote_files",
                    return_value=[(remote_path, 1024)]):
             pulled, skipped, conflicts = adb.pull_media(
-                str(tmp_path / "stage"), False, conn, logger
+                str(tmp_path / "stage"), False, conn, logger, None
             )
         assert pulled == 0
         assert skipped == 1
@@ -2666,13 +2724,63 @@ class TestPullMedia:
                    return_value=[(remote_path, remote_size)]), \
              patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb):
             pulled, skipped, conflicts = adb.pull_media(
-                stage_dir, False, conn, logger
+                stage_dir, False, conn, logger, None
             )
 
         assert pulled == 1
         assert skipped == 0
         assert conflicts == []
         assert remote_path in arc.get_adb_done_paths(conn, "serial-1")
+
+    def test_target_paths_filters_unmatched_files(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        path1 = adb._WA_MEDIA_ROOT + "/WhatsApp Images/keep.jpg"
+        path2 = adb._WA_MEDIA_ROOT + "/WhatsApp Images/ignore.jpg"
+        stage_dir = str(tmp_path / "stage")
+
+        target_paths = {"Media/WhatsApp Images/keep.jpg"}
+
+        def _fake_run_adb(cmd, logger):
+            if cmd[1] == 'pull':
+                local = cmd[3]
+                os.makedirs(os.path.dirname(local), exist_ok=True)
+                with open(local, 'wb') as f:
+                    f.write(b'data')
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        with patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"), \
+             patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"), \
+             patch("wab_archiver.adb_extractor.enumerate_remote_files",
+                   return_value=[(path1, 4), (path2, 4)]), \
+             patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb):
+            pulled, skipped, conflicts = adb.pull_media(
+                stage_dir, False, conn, logger, target_paths
+            )
+
+        assert pulled == 1
+        assert skipped == 0
+        assert conflicts == []
+        assert path1 in arc.get_adb_done_paths(conn, "serial-1")
+        assert path2 not in arc.get_adb_done_paths(conn, "serial-1")
+        conn.close()
+
+    def test_target_paths_empty_returns_zeros(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        path1 = adb._WA_MEDIA_ROOT + "/WhatsApp Images/img.jpg"
+        stage_dir = str(tmp_path / "stage")
+
+        with patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"), \
+             patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"), \
+             patch("wab_archiver.adb_extractor.enumerate_remote_files",
+                   return_value=[(path1, 100)]):
+            pulled, skipped, conflicts = adb.pull_media(
+                stage_dir, False, conn, logger, set()
+            )
+
+        assert pulled == 0
+        assert skipped == 0
+        assert conflicts == []
+        conn.close()
 
 
 # ===========================================================================
@@ -3764,7 +3872,7 @@ class TestPrepareInputDecryption:
             output=str(tmp_path),
         )
         with pytest.raises(SystemExit):
-            wa._prepare_input(args, logger)
+            wa._prepare_input(args, None, logger)
 
     @_requires_wa_crypt_tools
     def test_prepare_input_calls_decrypt_msgstore(self, tmp_path, logger):
@@ -3790,7 +3898,7 @@ class TestPrepareInputDecryption:
             output=str(tmp_path),
         )
 
-        platform, resolver, ios_contacts, contacts = wa._prepare_input(args, logger)
+        platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
         expected_db = os.path.join(str(tmp_path), "Whatsapp Databases", "msgstore.db")
         assert args.msgstore == expected_db
         assert os.path.isfile(expected_db)
@@ -3816,7 +3924,7 @@ class TestPrepareInputIos:
         )
         with patch("wab_archiver.backup_reader.detect_encrypted", return_value=True):
             with pytest.raises(SystemExit):
-                wa._prepare_input(args, logger)
+                wa._prepare_input(args, None, logger)
 
     def test_prepare_input_ios_encrypted_success(self, tmp_path, logger):
         args = argparse.Namespace(
@@ -3836,7 +3944,7 @@ class TestPrepareInputIos:
         with patch("wab_archiver.backup_reader.detect_encrypted", return_value=True), \
              patch("wab_archiver.backup_reader.extract_encrypted",
                    return_value=(fake_db, fake_contacts, fake_resolver)) as mock_ext:
-            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, logger)
+            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
 
         assert platform == 'ios'
         assert args.msgstore == fake_db
@@ -3864,7 +3972,7 @@ class TestPrepareInputIos:
         with patch("wab_archiver.backup_reader.detect_encrypted", return_value=False), \
              patch("wab_archiver.backup_reader.extract_plaintext",
                    return_value=(fake_manifest, fake_db, None)) as mock_ext:
-            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, logger)
+            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
 
         assert platform == 'ios'
         assert args.msgstore == fake_db
@@ -3893,7 +4001,7 @@ class TestPrepareInputMultiRoot:
             contacts=None,
             msgstore="dummy",
         )
-        platform, resolver, _, _ = wa._prepare_input(args, logger)
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
         resolved = resolver("Media/photo.jpg")
         expected = os.path.join(str(root1), "Media", "photo.jpg")
         assert resolved == expected
@@ -3914,7 +4022,7 @@ class TestPrepareInputMultiRoot:
             contacts=None,
             msgstore="dummy",
         )
-        platform, resolver, _, _ = wa._prepare_input(args, logger)
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
         resolved = resolver("Media/photo.jpg")
         assert resolved == str(img1)
         assert resolver.root_hits[str(root1)] == 1
@@ -3940,7 +4048,7 @@ class TestPrepareInputMultiRoot:
             contacts=None,
             msgstore="dummy",
         )
-        platform, resolver, _, _ = wa._prepare_input(args, logger)
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
         resolved = resolver("Media/photo.jpg")
         assert resolved == str(img2)
         assert resolver.zero_byte_count[0] == 1
@@ -3966,7 +4074,7 @@ class TestPrepareInputMultiRoot:
             contacts=None,
             msgstore="dummy",
         )
-        platform, resolver, _, _ = wa._prepare_input(args, logger)
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
         resolved = resolver("Media/photo.jpg")
         assert resolved == str(img1)
         assert len(resolver.conflict_rows) == 1
@@ -3994,7 +4102,7 @@ class TestPrepareInputMultiRoot:
             contacts=None,
             msgstore="dummy",
         )
-        platform, resolver, _, _ = wa._prepare_input(args, logger)
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
         resolved = resolver("Media/photo.jpg")
         assert resolved == str(img1)
         assert len(resolver.conflict_rows) == 0
@@ -4020,7 +4128,7 @@ class TestPrepareInputMultiRoot:
             contacts=None,
             msgstore="dummy",
         )
-        platform, resolver, _, _ = wa._prepare_input(args, logger)
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
         resolved = resolver("Media/photo.jpg")
         assert resolved == str(img1)
         assert len(resolver.conflict_rows) == 1
@@ -4036,7 +4144,7 @@ class TestPrepareInputMultiRoot:
             contacts=None,
             msgstore="dummy",
         )
-        platform, resolver, _, _ = wa._prepare_input(args, logger)
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
         other_path = tmp_path / "other" / "file.jpg"
         other_path.parent.mkdir()
         other_path.write_bytes(b"some_bytes")
@@ -4064,7 +4172,7 @@ class TestPrepareInputAdb:
         )
         with patch("wab_archiver.adb_extractor.check_adb", return_value=False):
             with pytest.raises(SystemExit):
-                wa._prepare_input(args, logger)
+                wa._prepare_input(args, None, logger)
 
     def test_prepare_input_adb_device_not_connected(self, tmp_path, logger):
         args = argparse.Namespace(
@@ -4078,7 +4186,7 @@ class TestPrepareInputAdb:
         with patch("wab_archiver.adb_extractor.check_adb", return_value=True), \
              patch("wab_archiver.adb_extractor.check_device_connected", return_value=False):
             with pytest.raises(SystemExit):
-                wa._prepare_input(args, logger)
+                wa._prepare_input(args, None, logger)
 
     def test_prepare_input_adb_pull_called_process_error(self, tmp_path, logger):
         args = argparse.Namespace(
@@ -4096,7 +4204,7 @@ class TestPrepareInputAdb:
              patch("wab_archiver.adb_extractor.pull_msgstore",
                    side_effect=subprocess.CalledProcessError(1, 'adb')):
             with pytest.raises(SystemExit):
-                wa._prepare_input(args, logger)
+                wa._prepare_input(args, None, logger)
 
     def test_prepare_input_adb_pull_media_success(self, tmp_path, logger):
         stage_dir = str(tmp_path / "staging")
@@ -4117,14 +4225,55 @@ class TestPrepareInputAdb:
              patch("wab_archiver.adb_extractor.pull_msgstore", return_value="/pulled/msgstore.db"), \
              patch("wab_archiver.adb_extractor.pull_contacts", return_value="/pulled/contacts.txt"), \
              patch("wab_archiver.archive_db.open_archive_db", return_value=sqlite3.connect(":memory:")), \
-             patch("wab_archiver.adb_extractor.pull_media", return_value=(5, 1, conflicts)), \
+             patch("wab_archiver.adb_extractor.pull_media", return_value=(5, 1, conflicts)) as mock_pull_media, \
              patch("wab_archiver.adb_extractor.write_adb_conflicts_report") as mock_conf_report:
-            wa._prepare_input(args, logger)
+            wa._prepare_input(args, None, logger)
 
         assert args.msgstore == "/pulled/msgstore.db"
         assert args.contacts == "/pulled/contacts.txt"
         assert args.wa_roots == [stage_dir]
         mock_conf_report.assert_called_once()
+        mock_pull_media.assert_called_once()
+        assert mock_pull_media.call_args[0][4] is None
+
+    def test_prepare_input_adb_pull_media_with_since_ms(self, tmp_path, logger):
+        stage_dir = str(tmp_path / "staging")
+        db_file = tmp_path / "pulled_msgstore.db"
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, 'Test Group', 10)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO message VALUES (1, 1705000000000, 10, 0)")
+        conn.execute("INSERT INTO message_media VALUES ('Media/WhatsApp Images/photo1.jpg', 'image/jpeg', 1, 1, 'url', NULL)")
+        conn.commit()
+        # Dump memory DB to disk file
+        disk_conn = sqlite3.connect(str(db_file))
+        conn.backup(disk_conn)
+        disk_conn.close()
+        conn.close()
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[],
+            from_adb=True,
+            pull_media=True,
+            staging=stage_dir,
+            business=False,
+            contacts=None,
+            msgstore="dummy",
+            output=str(tmp_path),
+            since="2024-01-01",
+        )
+        with patch("wab_archiver.adb_extractor.check_adb", return_value=True), \
+             patch("wab_archiver.adb_extractor.check_device_connected", return_value=True), \
+             patch("wab_archiver.adb_extractor.pull_msgstore", return_value=str(db_file)), \
+             patch("wab_archiver.adb_extractor.pull_contacts", return_value="/pulled/contacts.txt"), \
+             patch("wab_archiver.archive_db.open_archive_db", return_value=sqlite3.connect(":memory:")), \
+             patch("wab_archiver.adb_extractor.pull_media", return_value=(1, 0, [])) as mock_pull_media:
+            wa._prepare_input(args, 1704067200000, logger)
+
+        mock_pull_media.assert_called_once()
+        target_paths = mock_pull_media.call_args[0][4]
+        assert target_paths == {'Media/WhatsApp Images/photo1.jpg'}
 
     def test_prepare_input_adb_pull_media_runtime_error(self, tmp_path, logger):
         stage_dir = str(tmp_path / "staging")
@@ -4146,7 +4295,7 @@ class TestPrepareInputAdb:
              patch("wab_archiver.archive_db.open_archive_db", return_value=sqlite3.connect(":memory:")), \
              patch("wab_archiver.adb_extractor.pull_media", side_effect=RuntimeError("USB error")):
             with pytest.raises(SystemExit):
-                wa._prepare_input(args, logger)
+                wa._prepare_input(args, None, logger)
 
     def test_prepare_input_loads_android_contacts(self, tmp_path, logger):
         args = argparse.Namespace(
@@ -4157,7 +4306,7 @@ class TestPrepareInputAdb:
             msgstore="dummy",
         )
         with patch("wab_archiver.android_handler.load_contacts", return_value={"39012345": "Alice"}):
-            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, logger)
+            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
         assert contacts == {"39012345": "Alice"}
 
 
@@ -4207,6 +4356,47 @@ class TestRunForwardModeFilters:
              patch("wab_archiver.ios_handler.build_ios_group_subjects_query", return_value="SELECT '1', 'g' WHERE 0"), \
              patch("wab_archiver.main.process_rows", return_value=({'copied': 0, 'skipped': 0, 'missing': 0, 'warnings': 0}, {}, {}, [])):
             wa.run_forward_mode(args, logger)
+
+    def test_run_forward_mode_adb_pull_media_with_since(self, tmp_path, logger):
+        out_dir = tmp_path / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stage_dir = tmp_path / "staging"
+
+        db_file = tmp_path / "msgstore.db"
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, 'Test Group', 10)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO message VALUES (1, 1705000000000, 10, 0)")
+        conn.execute("INSERT INTO message_media VALUES ('Media/WhatsApp Images/img.jpg', 'image/jpeg', 1, 1, 'url', NULL)")
+        conn.commit()
+        disk_conn = sqlite3.connect(str(db_file))
+        conn.backup(disk_conn)
+        disk_conn.close()
+        conn.close()
+
+        args = argparse.Namespace(
+            from_adb=True, e2e_key=None, ios_password=None, timezone="UTC",
+            since="2024-01-01", limit=None, ios_backup=None, dry_run=True,
+            msgstore="dummy", pull_media=True, staging=str(stage_dir),
+            wa_roots=[], business=False, output=str(out_dir),
+            contacts=None, log=None,
+        )
+        with patch("wab_archiver.main.check_dependencies"), \
+             patch("wab_archiver.adb_extractor.check_adb", return_value=True), \
+             patch("wab_archiver.adb_extractor.check_device_connected", return_value=True), \
+             patch("wab_archiver.adb_extractor.pull_msgstore", return_value=str(db_file)), \
+             patch("wab_archiver.adb_extractor.pull_contacts", return_value=str(tmp_path / "contacts.txt")), \
+             patch("wab_archiver.android_handler.load_contacts", return_value={}), \
+             patch("wab_archiver.adb_extractor.pull_media", return_value=(1, 0, [])) as mock_pull_media, \
+             patch("wab_archiver.android_handler.validate_schema"), \
+             patch("wab_archiver.android_handler.validate_wa_root"), \
+             patch("wab_archiver.android_handler.build_number_map", return_value={}), \
+             patch("wab_archiver.main.process_rows", return_value=({'copied': 0, 'skipped': 0, 'missing': 0, 'warnings': 0}, {}, {}, [])):
+            wa.run_forward_mode(args, logger)
+
+        mock_pull_media.assert_called_once()
+        target_paths = mock_pull_media.call_args[0][4]
+        assert target_paths == {'Media/WhatsApp Images/img.jpg'}
 
     def test_run_forward_mode_invalid_timezone(self, tmp_path, logger):
         db_path = tmp_path / "plain.db"

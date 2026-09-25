@@ -267,6 +267,18 @@ SELECT * FROM (
 """
 
 
+def get_media_file_paths(cursor: sqlite3.Cursor, since_ms: int | None, hd_dedup: bool) -> set[str]:
+    """
+    Return distinct relative media file paths (e.g. 'Media/WhatsApp Images/...')
+    referenced by messages on or after since_ms.
+    """
+    query = build_query(None, since_ms, hd_dedup)
+    rows = cursor.execute(
+        f"SELECT DISTINCT file_path FROM ({query}) WHERE file_path IS NOT NULL"
+    ).fetchall()
+    return {row[0].replace('\\', '/') for row in rows if row[0]}
+
+
 def _clean_phone_number(raw: str) -> str:
     """Strip formatting characters and return clean numeric string."""
     cleaned = re.sub(r'[\s\-\(\)\.\+]', '', raw)

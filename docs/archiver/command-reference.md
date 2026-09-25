@@ -150,7 +150,7 @@ wab-archiver archive \
   --output /path/to/output
 ```
 
-> ⚠️ On first run, every media file is transferred — this can take hours for large collections. Subsequent runs skip already-archived files automatically.
+> ⚠️ On first run without `--since`, every media file is transferred — this can take hours for large collections. Subsequent runs skip already-archived files automatically. Passing `--since <DATE>` restricts both the database query and the ADB media transfer to messages on or after that date.
 
 #### Manual — decrypted database
 

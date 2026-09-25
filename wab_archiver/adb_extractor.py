@@ -257,13 +257,14 @@ def _remote_md5(remote_path: str, md5_binary: str, logger) -> bytes:
 
 
 def _staging_path(remote_path: str, remote_root: str, staging_dir: str) -> str:
-    """Map a remote absolute path to a local staging path."""
+    """Map a remote absolute path to a local staging path under Media/."""
     rel = remote_path[len(remote_root):].lstrip('/')
-    return os.path.join(staging_dir, rel.replace('/', os.sep))
+    return os.path.join(staging_dir, 'Media', rel.replace('/', os.sep))
 
 
 def pull_media(staging_dir: str, business: bool,
-               conn: sqlite3.Connection, logger) -> tuple:
+               conn: sqlite3.Connection, logger,
+               target_paths: set[str] | None) -> tuple:
     """
     Pull WhatsApp media from a connected device to staging_dir.
 
@@ -297,6 +298,23 @@ def pull_media(staging_dir: str, business: bool,
     if not remote_files:
         logger.warning("No media files found on device.")
         return 0, 0, []
+
+    if target_paths is not None:
+        prefix_len = len(wa_media_root)
+        candidate_files = []
+        for remote_path, remote_size in remote_files:
+            rel = remote_path[prefix_len:].lstrip('/')
+            db_path = f"Media/{rel.replace('\\', '/')}"
+            if db_path in target_paths:
+                candidate_files.append((remote_path, remote_size))
+        logger.info(
+            f"Filtered {len(remote_files):,} remote file(s) to "
+            f"{len(candidate_files):,} file(s) matching filter."
+        )
+        remote_files = candidate_files
+        if not remote_files:
+            logger.info("No remote files match the filter.")
+            return 0, 0, []
 
     logger.info(
         f"Found {len(remote_files):,} file(s) to evaluate. "
