@@ -172,7 +172,7 @@ def build_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> str:
     If limit is provided, it is split evenly between the group chats and
     1-to-1 chats blocks (LIMIT N//2 each), so both types are always
     represented. Total rows returned is at most N.
-    If since_ms is provided, only messages at or after that timestamp
+    If since_ms is provided, only media from messages at or after that timestamp
     (milliseconds) are included.
     If hd_dedup is True, LQ parent rows are excluded when an HD child with a
     valid file_path exists (requires message_association table).
