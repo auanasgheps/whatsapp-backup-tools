@@ -94,7 +94,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--config PATH` | No | Path to a TOML config file. Auto-detects `config.toml` if omitted |
 | `--dry-run` | No | Simulate the run without copying any files |
 | `--limit N` | No | Cap rows returned per chat type. Total rows ≤ N. Useful for test runs |
-| `--since DATE` | No | Only include messages on or after this date (`YYYY-MM-DD`) |
+| `--since DATE` | No | Only archive media from messages sent or received on or after this date (`YYYY-MM-DD`) |
 
 ### `restore`
 

@@ -897,7 +897,7 @@ def parse_args() -> argparse.Namespace:
     )
     archive_p.add_argument(
         '--since', default=None, metavar='DATE',
-        help='Only include messages on or after this date (YYYY-MM-DD). Combines with --limit.',
+        help='Only archive media from messages sent or received on or after this date (YYYY-MM-DD). Combines with --limit.',
     )
     # Apply config defaults to the archive subparser.
     archive_p.set_defaults(**_config)
