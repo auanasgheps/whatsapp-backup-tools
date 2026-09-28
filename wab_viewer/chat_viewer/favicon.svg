@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <!-- WhatsApp Backup Viewer - Favicon & App Logo -->
+  <path d="M100 16 C53.6 16 16 53.6 16 100 C16 116.2 20.6 131.4 28.6 144.3 L18 182 L57.2 171.7 C69.6 179.4 84.3 184 100 184 C146.4 184 184 146.4 184 100 C184 53.6 146.4 16 100 16 Z" fill="#25D366"/>
+  <!-- Incoming message pill (top left) -->
+  <rect x="54" y="76" width="66" height="22" rx="11" fill="#FFFFFF"/>
+  <!-- Outgoing message pill (bottom right) -->
+  <rect x="80" y="106" width="66" height="22" rx="11" fill="#FFFFFF" fill-opacity="0.92"/>
+</svg>

@@ -18,6 +18,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -159,6 +160,25 @@ def get_archive_db_path(output_root: Path) -> Path:
     return output_root / ".wa_media_archiver.db"
 
 
+def _ensure_writable(path: Path) -> None:
+    """Clear the read-only file attribute if present so SQLite can write to it."""
+    for p in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        if not p.exists():
+            continue
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                attrs = ctypes.windll.kernel32.GetFileAttributesW(str(p))
+                if attrs != -1 and (attrs & 1):  # FILE_ATTRIBUTE_READONLY
+                    ctypes.windll.kernel32.SetFileAttributesW(str(p), attrs & ~1)
+            mode = p.stat().st_mode
+            if not (mode & stat.S_IWRITE):
+                p.chmod(mode | stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+
+
+
 # ---------------------------------------------------------------------------
 # Cache schema
 # ---------------------------------------------------------------------------
@@ -223,9 +243,23 @@ _MEDIA_TYPE_EXPR = """
 
 
 def _ensure_wa_indexes(wa_db_path: Path) -> None:
-    conn = sqlite3.connect(str(wa_db_path))
     try:
-        conn.execute("PRAGMA journal_mode = WAL")
+        conn = sqlite3.connect(str(wa_db_path))
+    except sqlite3.OperationalError as e:
+        if "readonly" in str(e).lower():
+            print(f"[wab_viewer] Notice: Source DB is read-only; skipping index optimization: {e}")
+            return
+        raise
+
+    try:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError as e:
+            if "readonly" in str(e).lower():
+                print(f"[wab_viewer] Notice: Source DB is read-only; skipping index optimization: {e}")
+                return
+            raise
+
         existing = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
         if "idx_message_chat_ts" not in existing:
@@ -245,6 +279,11 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                     "CREATE INDEX IF NOT EXISTS idx_zwamessage_chat_ts "
                     "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE)")
         conn.commit()
+    except sqlite3.OperationalError as e:
+        if "readonly" in str(e).lower():
+            print(f"[wab_viewer] Notice: Source DB is read-only; skipping index optimization: {e}")
+            return
+        raise
     finally:
         conn.close()
 
@@ -1032,16 +1071,25 @@ def _media_type_from_path(path: str) -> str:
 
 def _open_cache_db(output_root: Path) -> sqlite3.Connection:
     cache_path = get_cache_db_path(output_root)
-    conn = sqlite3.connect(str(cache_path), check_same_thread=False)
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA cache_size = -8000")
-    conn.executescript(CACHE_SCHEMA)
-    conn.row_factory = sqlite3.Row
-    conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('theme', 'dark')")
-    conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('date_format', 'DD/MM/YYYY')")
-    conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('font_size', 'medium')")
-    conn.commit()
+    _ensure_writable(cache_path)
+    try:
+        conn = sqlite3.connect(str(cache_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA cache_size = -8000")
+        conn.executescript(CACHE_SCHEMA)
+        conn.row_factory = sqlite3.Row
+        conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('theme', 'dark')")
+        conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('date_format', 'DD/MM/YYYY')")
+        conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('font_size', 'medium')")
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        if "readonly" in str(e).lower():
+            raise sqlite3.OperationalError(
+                f"Cannot open cache database at '{cache_path}' for writing ({e}). "
+                "Ensure the archive folder and its database files are not marked read-only."
+            ) from e
+        raise
     return conn
 
 
@@ -1830,6 +1878,9 @@ def create_app(output_root: Path, rescan: bool = False):
 
     archive_db_path = get_archive_db_path(output_root)
     source_type, wa_db_path = _detect_source_db(output_root)
+    _ensure_writable(archive_db_path)
+    if wa_db_path:
+        _ensure_writable(Path(wa_db_path))
     cache_conn = _open_cache_db(output_root)
     _indexing_state: dict = {}
     _indexing_lock = threading.Lock()
@@ -1846,6 +1897,7 @@ def create_app(output_root: Path, rescan: bool = False):
     else:
         print(f"[wab_viewer] Source DB: {source_type} at {wa_db_path}")
 
+        _ensure_writable(Path(wa_db_path))
         _ensure_wa_indexes(wa_db_path)
 
         if rescan or _source_changed(cache_conn, wa_db_path):
@@ -2140,6 +2192,7 @@ def create_app(output_root: Path, rescan: bool = False):
     def get_cache():
         return cache_conn
 
+    _ensure_writable(archive_db_path)
     _archive_conn = sqlite3.connect(str(archive_db_path), check_same_thread=False)
     _archive_conn.execute("PRAGMA journal_mode = WAL")
     _archive_conn.execute("PRAGMA busy_timeout = 5000")
@@ -4219,6 +4272,11 @@ def create_app(output_root: Path, rescan: bool = False):
     @app.route("/static/app.js")
     def serve_app_js():
         return send_from_directory(_CHAT_VIEWER_DIR, "app.js")
+
+    @app.route("/static/favicon.svg")
+    @app.route("/favicon.ico")
+    def serve_favicon():
+        return send_from_directory(_CHAT_VIEWER_DIR, "favicon.svg", mimetype="image/svg+xml")
 
     # ---- UI ----------------------------------------------------------------
 

@@ -14,6 +14,7 @@ HTML_TEMPLATE = r"""
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta id="meta-color-scheme" name="color-scheme" content="dark">
   <title>WhatsApp Backup Tools</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <style>""" + _PICO_CSS + r"""</style>
   <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -109,11 +110,14 @@ HTML_TEMPLATE = r"""
       <button id="settings-close">&#10005;</button>
     </div>
     <div id="settings-app-info">
-      <h2 id="settings-app-name">WhatsApp Backup Viewer</h2>
-      <p id="settings-app-subtitle">from WhatsApp Backup Tools</p>
-      <div id="settings-app-links">
-        <a id="settings-repo-link" href="https://github.com/auanasgheps/whatsapp-backup-tools" target="_blank" rel="noopener noreferrer">Repository</a>
-        <span id="settings-version">v{{ version }}</span>
+      <img id="settings-app-logo" src="/static/favicon.svg" alt="" width="52" height="52">
+      <div id="settings-app-details">
+        <h2 id="settings-app-name">WhatsApp Backup Viewer</h2>
+        <p id="settings-app-subtitle">from WhatsApp Backup Tools</p>
+        <div id="settings-app-links">
+          <a id="settings-repo-link" href="https://github.com/auanasgheps/whatsapp-backup-tools" target="_blank" rel="noopener noreferrer">Repository</a>
+          <span id="settings-version">v{{ version }}</span>
+        </div>
       </div>
     </div>
     <div class="settings-section">
