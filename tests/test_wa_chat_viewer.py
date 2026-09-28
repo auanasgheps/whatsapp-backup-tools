@@ -4881,3 +4881,63 @@ class TestViewerEntrypoint:
         )
         assert res.returncode == 0
         assert "Browse archived WhatsApp chats" in res.stdout
+
+    def test_resolve_browser_url(self):
+        assert viewer.resolve_browser_url("0.0.0.0", 5000) == "http://127.0.0.1:5000"
+        assert viewer.resolve_browser_url("::", 8080) == "http://127.0.0.1:8080"
+        assert viewer.resolve_browser_url("192.168.1.50", 5000) == "http://192.168.1.50:5000"
+        assert viewer.resolve_browser_url("localhost", 3000) == "http://localhost:3000"
+        assert viewer.resolve_browser_url("127.0.0.1", 5000) == "http://127.0.0.1:5000"
+
+    def test_parse_args_browser_options(self, tmp_path):
+        from unittest.mock import patch
+        archive_dir = str(tmp_path)
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir]):
+            args = viewer.parse_args()
+            assert args.output_root == archive_dir
+            assert args.host == "127.0.0.1"
+            assert args.port == 5000
+            assert args.no_browser is False
+
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "192.168.1.50", "--port", "8080", "--no-browser"]):
+            args = viewer.parse_args()
+            assert args.host == "192.168.1.50"
+            assert args.port == 8080
+            assert args.no_browser is True
+
+    def test_main_browser_launch(self, tmp_path):
+        from unittest.mock import patch, MagicMock
+        archive_dir = str(tmp_path)
+        mock_app = MagicMock()
+
+        # 1. Host 192.168.1.50 opens http://192.168.1.50:5000
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "192.168.1.50"]), \
+             patch("wab_viewer.main.validate_output_root"), \
+             patch("wab_viewer.main.create_app", return_value=mock_app), \
+             patch("wab_viewer.main.webbrowser.open") as mock_open:
+            viewer.main()
+            mock_open.assert_called_once_with("http://192.168.1.50:5000")
+            mock_app.run.assert_called_once_with(host="192.168.1.50", port=5000, debug=False, threaded=True)
+
+        mock_app.reset_mock()
+
+        # 2. Host 0.0.0.0 opens http://127.0.0.1:5000
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "0.0.0.0"]), \
+             patch("wab_viewer.main.validate_output_root"), \
+             patch("wab_viewer.main.create_app", return_value=mock_app), \
+             patch("wab_viewer.main.webbrowser.open") as mock_open:
+            viewer.main()
+            mock_open.assert_called_once_with("http://127.0.0.1:5000")
+            mock_app.run.assert_called_once_with(host="0.0.0.0", port=5000, debug=False, threaded=True)
+
+        mock_app.reset_mock()
+
+        # 3. With --no-browser, webbrowser.open is not called
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--no-browser"]), \
+             patch("wab_viewer.main.validate_output_root"), \
+             patch("wab_viewer.main.create_app", return_value=mock_app), \
+             patch("wab_viewer.main.webbrowser.open") as mock_open:
+            viewer.main()
+            mock_open.assert_not_called()
+            mock_app.run.assert_called_once_with(host="127.0.0.1", port=5000, debug=False, threaded=True)
+

@@ -848,7 +848,8 @@ def parse_args() -> argparse.Namespace:
     )
     archive_p.add_argument(
         '-c', '--contacts', default=None, metavar='PATH',
-        help='Path to contacts export file (Android ADB format).',
+        help='Path to an existing contacts file (e.g. wa_contacts exported via ADB, or a phone,name CSV). '
+             'Auto-extracted when using --from-adb.',
     )
     archive_p.add_argument(
         '--ios-password', dest='ios_password', default=None, metavar='PASSWORD',
