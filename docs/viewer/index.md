@@ -28,6 +28,9 @@ wab-viewer ./output --port 8080
 # Expose on the local network (accessible from other devices)
 wab-viewer ./output --host 0.0.0.0
 
+# Start server without opening a browser (e.g. headless or remote machine)
+wab-viewer ./output --no-browser
+
 # Rebuild the cache
 wab-viewer ./output --rescan
 

@@ -139,6 +139,7 @@ def parse_args():
                    help="Path to the archive output directory")
     p.add_argument("--port", type=int, default=5000, help="Port to listen on (default: 5000)")
     p.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+    p.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically")
     p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
     p.add_argument('--version', action='version',
                    version=f'WhatsApp Backup Tools — Viewer v{_get_version()}')
@@ -146,6 +147,19 @@ def parse_args():
     if not args.output_root:
         p.error("output_root is required")
     return args
+
+
+def resolve_browser_url(host: str, port: int) -> str:
+    """Resolve the URL to open in the local browser.
+
+    Wildcard bind addresses (0.0.0.0 and ::) bind to all network interfaces,
+    which modern web browsers reject as non-routable destination addresses.
+    They are replaced with loopback 127.0.0.1 for local browser launching.
+    Specific hostnames and IP addresses are preserved verbatim.
+    """
+    browser_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    return f"http://{browser_host}:{port}"
+
 
 
 # ---------------------------------------------------------------------------
@@ -4329,8 +4343,9 @@ def main():
     print(f"[wab_viewer] Starting server at {url}")
     print(f"[wab_viewer] Press Ctrl+C to stop")
 
-    browser_url = f"http://127.0.0.1:{args.port}"
-    webbrowser.open(browser_url)
+    if not args.no_browser:
+        browser_url = resolve_browser_url(args.host, args.port)
+        webbrowser.open(browser_url)
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
 
