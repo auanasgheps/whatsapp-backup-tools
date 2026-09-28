@@ -10,48 +10,42 @@ WhatsApp Backup Tools is a suite to archive and access your WhatsApp data.
 Consists of two complementary programs:
 
 - **wab-archiver** (WhatsApp Backup Archiver) organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
-- **wab-viewer** (WhatsApp Backup Viewer) lets you browse and search your archived chats through a local web UI, replicating WhatsApp Web. See [docs/viewer/](docs/viewer/).
+- **wab-viewer** (WhatsApp Backup Viewer) lets you browse and search your archived chats through a local web UI, replicating WhatsApp Web. 
 
-Both tools run locally — no data leaves your machine. Windows, Linux, and macOS are supported. Python 3.11 required.
+Both tools run locally — **no data leaves your machine**. Windows, Linux, and macOS are supported. Python 3.11 required.
 
 > ⚠️ **These tools are designed to run on a backup copy of your WhatsApp data — never on live device files.** The archiver always makes a copy of your data.
+
+
+**Whatsapp Backup Viewer screenshots**
+<p float="left">
+  <img src="docs/images/viewer_dark.png" width="500" />
+  <img src="docs/images/viewer_clean.png" width="500" /> 
+</p>
 
 ---
 
 ### WhatsApp Backup Archiver Features
 
-Archive your WhatsApp media in a human readable format.
+Organise and preserve your WhatsApp media in a clean, human-readable structure.
 
-- Structured archival: `Contacts/` and `Groups/` top-level folders
-- Year and `Sent/` and `Received/` subfolders for 1-to-1 chats
-- Sender name appended to filenames in group chats
-- Correct file timestamps preserved from the WhatsApp database
-- Contact number change tracking — consolidates old and new numbers into one folder
-- Contact rename detection across runs — folders renamed automatically
-- Group rename detection across runs — group folders renamed automatically
-- Groups with identical names handled correctly — each distinct group gets its own folder
-- Safe re-runs: identical files skipped, collisions renamed, never overwritten
-- Duplicate media detection across runs — CSV report of files with identical content at multiple archive paths
-- Missing media CSV report for manual recovery of old or deleted files
-- Multiple Android media source roots — repeat `--wa-root` to search across several WhatsApp folders (e.g. old archive + current phone). Best copy selected automatically; content conflicts reported separately
-- Dry run mode for safe previewing before a full run
-- WhatsApp platform: Android and iOS are both supported. No root or jailbreak are required.
-    - Android: Syncthing is the recommended way to get your media files off the phone. If you prefer not to set that up, `--from-adb --pull-media` can pull them directly over USB — but it is slow and unreliable for large collections (many small files over ADB can take hours and drop mid-transfer). See [docs/archiver/setup-android.md](docs/archiver/setup-android.md).
-    - iOS: reads directly from an iPhone backup, encrypted backups are supported via `wa-crypt-tools`
-- Restore mode — reconstructs the original `WhatsApp/Media/` folder structure from the archive (Android only)
+- **Structured & Human-Readable**: Organises media into `Contacts/` and `Groups/` sorted by year and `Sent/Received`, with original WhatsApp message timestamps preserved.
+- **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
+- **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
+- **Cross-Platform Support**: Works with both Android (no root required) and iOS (via iTunes backups), with optional restore mode to reconstruct Android media layouts.
+
+#### Supported Media Types
+
+The archiver handles: Images, Videos, Audio, Voice messages, Video Messages, Animated GIFs, and Documents.
 
 ### WhatsApp Backup Viewer Features
 
-Aims to replicate WhatsApp Web experience, but with your archived data.
+Explore and search your archived chats through a local web UI replicating WhatsApp Web.
 
-- Sidebar with contacts and groups, message counts, last activity time
-- Chronological chat timeline
-- Full-text search across messages, scoped to current chat or all chats
-- Media gallery — images, videos, and audio stream in-browser with seeking
-
-### Supported Media Types
-
-The archiver handles: Images, Videos, Audio, Voice messages, Video Messages, Animated GIFs, and Documents.
+- **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, customizable font size, and regional date formats.
+- **Rich Chat Timeline**: Chronological chat history with reactions, quoted replies, delivery/read receipts, and smooth, lag-free scrolling even in massive conversations.
+- **In-Browser Media Player & Gallery**: Stream video and voice notes with seeking, open photos in a lightbox, and explore chat media via thumbnail grid or archive folder tree.
+- **Full-Text Search & Navigation**: Search across all chats or within a single conversation, jump directly to matches, or jump to specific dates with the date picker.
 
 ---
 
