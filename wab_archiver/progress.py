@@ -65,6 +65,7 @@ class ProgressReporter:
         self._finished = False
 
         self._console_filter = None
+        self._hooked_handlers: list[tuple[logging.Handler, typing.Callable]] = []
         self._hooked_handler = None
         self._orig_emit = None
 
@@ -96,26 +97,43 @@ class ProgressReporter:
         self._console_filter = _ConsoleFilter(self._is_tty)
 
         for handler in self._logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                continue
             if isinstance(handler, logging.StreamHandler):
                 handler.addFilter(self._console_filter)
-                if self._hooked_handler is None:
-                    self._hooked_handler = handler
-                    self._orig_emit = handler.emit
+                orig_emit = handler.emit
 
-                    reporter_self = self
+                reporter_self = self
 
+                def _make_wrapped_emit(orig: typing.Callable) -> typing.Callable:
                     def wrapped_emit(record: logging.LogRecord) -> None:
-                        if reporter_self._last_len > 0 and not getattr(record, 'is_progress', False):
-                            if reporter_self._stream is not None:
-                                reporter_self._show_cursor()
-                                reporter_self._stream.write("\r" + " " * reporter_self._last_len + "\r")
-                                reporter_self._stream.flush()
-                            reporter_self._last_len = 0
-                            reporter_self._last_rendered_line = ""
-                        if reporter_self._orig_emit:
-                            reporter_self._orig_emit(record)
+                        if getattr(record, 'is_progress', False):
+                            orig(record)
+                            return
 
-                    handler.emit = wrapped_emit
+                        had_progress = reporter_self._last_len > 0
+                        saved_line = reporter_self._last_rendered_line
+
+                        if had_progress and reporter_self._stream is not None:
+                            reporter_self._stream.write("\r" + " " * reporter_self._last_len + "\r")
+                            reporter_self._stream.flush()
+                            reporter_self._last_len = 0
+
+                        orig(record)
+
+                        if had_progress and reporter_self._stream is not None and saved_line and not reporter_self._finished:
+                            reporter_self._stream.write(saved_line)
+                            reporter_self._stream.flush()
+                            reporter_self._last_len = len(saved_line)
+
+                    return wrapped_emit
+
+                handler.emit = _make_wrapped_emit(orig_emit)
+                self._hooked_handlers.append((handler, orig_emit))
+
+        if self._hooked_handlers:
+            self._hooked_handler = self._hooked_handlers[0][0]
+            self._orig_emit = self._hooked_handlers[0][1]
 
     def _teardown_interleaving_guard(self) -> None:
         """Restore original handler emit, show cursor, and remove console filter."""
@@ -125,10 +143,11 @@ class ProgressReporter:
             pass
         self._show_cursor()
 
-        if self._hooked_handler and self._orig_emit:
-            self._hooked_handler.emit = self._orig_emit
-            self._hooked_handler = None
-            self._orig_emit = None
+        for handler, orig_emit in self._hooked_handlers:
+            handler.emit = orig_emit
+        self._hooked_handlers.clear()
+        self._hooked_handler = None
+        self._orig_emit = None
 
         if self._console_filter and self._logger is not None and hasattr(self._logger, "handlers"):
             for handler in self._logger.handlers:
