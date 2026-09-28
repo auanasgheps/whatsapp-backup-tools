@@ -34,7 +34,7 @@ output     = "/path/to/archive"
 # Android — pull via ADB (wab-archiver archive --from-adb; see setup-android.md)
 # from_adb  = false
 # pull_media = false
-# staging    = ""         # persistent folder for pulled media
+# staging    = ""         # permanent copy of phone storage (treated as wa_root, copied to output)
 
 # iOS
 # ios_backup   = ""
@@ -87,7 +87,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--ios-contacts PATH` | No | Path to `ContactsV2.sqlite` for iOS contacts. Auto-extracted from `--ios-backup` if omitted |
 | `--business` | No | Target **WhatsApp Business** instead of the regular WhatsApp app |
 | `--pull-media` | No | Pull WhatsApp media files from the device via ADB. Only valid with `--from-adb`. Mutually exclusive with `--wa-root`. See [Android setup](setup-android.md#adb-pull-media-optional) |
-| `--staging PATH` | If `--pull-media` | Local directory where ADB-pulled media is staged. Must be persistent across runs |
+| `--staging PATH` | If `--pull-media` | Permanent local folder where ADB-pulled media is stored (phone backup). Treated as `--wa-root`; files are copied to `--output` and never deleted |
 | `-o`, `--output PATH` | **Yes** | Destination folder for the archive |
 | `-l`, `--log PATH` | No | Custom log file path. Defaults to `<output>/wab-archiver.log` |
 | `--timezone TZ` | No | [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) for year folders and report timestamps. **Windows users: requires `pip install tzdata`** |
@@ -149,6 +149,8 @@ wab-archiver archive \
   --staging /path/to/wa-staging \
   --output /path/to/output
 ```
+
+> 💡 `--staging` is a permanent copy of your phone storage (effectively your phone backup). The archiver treats it as `--wa-root` and copies media into `--output`; files in `--staging` are never deleted.
 
 > ⚠️ On first run without `--since`, every media file is transferred — this can take hours for large collections. Subsequent runs skip already-archived files automatically. Passing `--since <DATE>` restricts both the database query and the ADB media transfer to messages on or after that date.
 
