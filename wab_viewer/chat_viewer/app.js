@@ -2418,5 +2418,48 @@
     document.getElementById('index-all-btn').disabled = false;
   });
 
+  const optBtn = document.getElementById('optimize-db-btn');
+  if (optBtn) {
+    optBtn.addEventListener('click', async () => {
+      const statusEl = document.getElementById('optimize-db-status');
+      optBtn.disabled = true;
+      const orig = optBtn.textContent;
+      optBtn.textContent = 'Optimizing…';
+      if (statusEl) {
+        statusEl.textContent = 'Defragmenting index and compacting database…';
+        statusEl.style.display = 'block';
+      }
+      try {
+        const res = await fetch('/api/index/optimize', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) {
+          if (statusEl) {
+            statusEl.textContent = 'Could not optimize: ' + data.error;
+            statusEl.style.display = 'block';
+          }
+        } else {
+          const mbReclaimed = (data.reclaimed / (1024 * 1024)).toFixed(1);
+          const mbCurrent = (data.size_after / (1024 * 1024)).toFixed(1);
+          if (statusEl) {
+            if (data.reclaimed > 0) {
+              statusEl.textContent = `Compacted! Reclaimed ${mbReclaimed} MB (Current size: ${mbCurrent} MB).`;
+            } else {
+              statusEl.textContent = `Database is already optimal (${mbCurrent} MB).`;
+            }
+            statusEl.style.display = 'block';
+          }
+        }
+      } catch (_) {
+        if (statusEl) {
+          statusEl.textContent = 'Optimization failed.';
+          statusEl.style.display = 'block';
+        }
+      } finally {
+        optBtn.disabled = false;
+        optBtn.textContent = orig;
+      }
+    });
+  }
+
   loadPrefs().then(() => loadChats());
 })();
