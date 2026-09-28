@@ -51,9 +51,19 @@ If you prefer not to set up Syncthing, the archiver can pull your media files di
 - Interrupted transfers are **resumed automatically** — partial files are cleaned up at the start of each run and re-pulled
 - Files with the same name but different content on device vs archive are **logged to `adb_conflicts_report.csv`** and skipped — resolve these manually
 
+#### Understanding the Staging Folder (`--staging`)
+
+When you run with `--pull-media`, the `--staging <path>` argument is required. It is important to understand how this folder operates:
+
+- **Permanent phone backup:** The staging folder replicates the phone's native WhatsApp structure (`Media/WhatsApp Images`, `Media/WhatsApp Video`, etc.). It is a permanent 1:1 copy of your phone storage — effectively serving as your phone's media backup on your computer.
+- **Treated as `--wa-root`:** After pulling media from the device, the archiver treats the staging folder as its media source root (`wa_root`).
+- **Files are not deleted:** Because the staging folder is the media source root, files inside it are **never deleted, purged, or moved** after archiving finishes. **Do not use a temporary folder** (like `/tmp`) and do not delete this folder between runs.
+- **Media is copied to the output folder:** The archiver reads files from the staging folder and **copies** them into the `--output` folder, organizing them into the structured archive (`Contacts/`, `Groups/`, chronological year folders, `Sent/` and `Received/`).
+- **Efficient future runs:** Keeping the staging folder intact allows subsequent runs to retain previously pulled media. The archiver only needs to pull newly added files from your phone, avoiding long re-downloads.
+
 **Requirements:**
 - USB debugging enabled on the device
-- `--staging <path>` — a persistent local folder for pulled files, used as `--wa-root` for archiving. **Do not use a temp folder**; state is stored in the archive DB, not here.
+- `--staging <path>` — a persistent local folder for pulled files (phone backup)
 
 **Example:**
 
@@ -65,6 +75,8 @@ wab-archiver archive \
   --staging /path/to/wa-staging \
   --output /path/to/output
 ```
+
+> 💡 In this command, media is pulled from the device into `/path/to/wa-staging` (the permanent phone backup). The archiver treats that staging folder as `--wa-root` and copies the organized media into `/path/to/output`.
 
 > ⚠️ On first run, every file is transferred — if you have many gigabytes of media, expect this to take hours. Voice messages and other small files are the bottleneck: ADB spawns a new subprocess per file, making transfers very slow per unit of data.
 

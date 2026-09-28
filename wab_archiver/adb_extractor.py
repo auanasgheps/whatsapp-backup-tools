@@ -268,6 +268,10 @@ def pull_media(staging_dir: str, business: bool,
     """
     Pull WhatsApp media from a connected device to staging_dir.
 
+    staging_dir acts as a permanent 1:1 copy of the phone's WhatsApp storage
+    (treated as wa_root during archiving; files are copied to the output folder
+    and are not deleted).
+
     Returns (pulled, skipped, conflicts) where conflicts is a list of
     {'remote_path', 'remote_md5', 'archived_md5'} dicts.
     """

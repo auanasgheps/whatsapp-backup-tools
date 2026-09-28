@@ -221,26 +221,33 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection,
         FROM dup_hashes dh
         JOIN files f ON f.md5 = dh.md5
         JOIN archive_copies ac ON ac.original_path = f.original_path
-        ORDER BY dh.total DESC, dh.md5
+        ORDER BY dh.total DESC, dh.md5, ac.archive_path ASC
     """).fetchall()
 
     if not rows:
         logger.info("No duplicate media found.")
         return
 
-    fieldnames = ['md5_hex', 'file_count', 'archived_path']
+    fieldnames = ['group_id', 'file_count', 'archived_path', 'md5_hex']
+    current_md5 = None
+    group_id = 0
+
     with open(report_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for md5_bytes, file_count, archived_path in rows:
+            if md5_bytes != current_md5:
+                current_md5 = md5_bytes
+                group_id += 1
             writer.writerow({
-                'md5_hex':       md5_bytes.hex(),
+                'group_id':      group_id,
                 'file_count':    file_count,
                 'archived_path': archived_path,
+                'md5_hex':       md5_bytes.hex(),
             })
     logger.info(
         f"Duplicate media report written to: {report_path} "
-        f"({len({r[0] for r in rows})} group(s), {len(rows)} file(s))"
+        f"({group_id} group(s), {len(rows)} file(s))"
     )
 
 
@@ -648,7 +655,7 @@ output     = "/path/to/archive"         # required
 # Android — pull via ADB  (wab-archiver archive --from-adb; see setup-android.md)
 # from_adb   = false
 # pull_media = false                    # also pull media files (--pull-media)
-# staging    = ""                       # persistent folder for pulled media (--staging)
+# staging    = ""                       # permanent copy of phone storage (treated as wa_root, copied to output)
 
 # iOS
 # ios_backup   = ""
@@ -864,8 +871,9 @@ def parse_args() -> argparse.Namespace:
     )
     archive_p.add_argument(
         '--staging', dest='staging', default=None, metavar='PATH',
-        help='Persistent local directory where ADB-pulled media is staged. '
-             'Required with --pull-media.',
+        help='Persistent local folder where ADB-pulled media is stored. '
+             'Acts as a permanent copy of phone storage and wa_root; '
+             'files are copied to output and never deleted. Required with --pull-media.',
     )
     archive_p.add_argument(
         '-o', '--output', default=None, metavar='PATH',

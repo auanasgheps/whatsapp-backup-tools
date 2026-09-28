@@ -31,7 +31,7 @@ wab-archiver archive \
   --dry-run
 ```
 
-To also pull media files over ADB (instead of using Syncthing or a manual copy), add `--pull-media --staging /path/to/staging`. See [Android setup](setup-android.md#adb-pull-media-optional) for details.
+To also pull media files over ADB (instead of using Syncthing or a manual copy), add `--pull-media --staging /path/to/staging`. The staging folder acts as a permanent copy of your phone storage (`--wa-root`); media is copied to the output folder and not deleted. See [Android setup](setup-android.md#adb-pull-media-optional) for details.
 
 ### iOS — read directly from an iPhone backup
 
