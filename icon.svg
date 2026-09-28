@@ -1,31 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
-  <!-- App icon background -->
-  <rect width="200" height="200" rx="44" fill="#1e293b"/>
-
-  <!-- Archive box body (touch smaller) -->
-  <rect x="38" y="100" width="124" height="78" rx="6" fill="#e2e8f0"/>
-  <!-- Archive box lid -->
-  <rect x="30" y="78" width="140" height="26" rx="6" fill="#cbd5e1"/>
-  <!-- Lid clasp -->
-  <rect x="76" y="84" width="48" height="12" rx="6" fill="#94a3b8"/>
-
-  <!-- Chat bubble (larger, top-right) -->
-  <path d="M90,12 Q90,4 100,4 L182,4 Q190,4 190,12 L190,78 Q190,86 182,86 L148,86 L136,102 L140,86 L100,86 Q90,86 90,78 Z" fill="#22c55e"/>
-
-  <!-- Three stacked photo thumbnails -->
-
-  <!-- Photo 3 (back) -->
-  <rect x="116" y="24" width="56" height="42" rx="3" fill="#166534"/>
-
-  <!-- Photo 2 (middle) -->
-  <rect x="110" y="18" width="56" height="42" rx="3" fill="#15803d"/>
-
-  <!-- Photo 1 (front) -->
-  <rect x="104" y="12" width="56" height="42" rx="3" fill="white" opacity="0.95"/>
-  <!-- Sky -->
-  <rect x="104" y="12" width="56" height="42" rx="3" fill="#bfdbfe" opacity="0.55"/>
-  <!-- Mountain -->
-  <polygon points="104,54 122,34 134,44 146,36 160,54" fill="white" opacity="0.95"/>
-  <!-- Sun -->
-  <circle cx="152" cy="21" r="6" fill="white" opacity="0.95"/>
+  <!-- WhatsApp Backup Tools - Repository Logo -->
+  <path d="M100 16 C53.6 16 16 53.6 16 100 C16 116.2 20.6 131.4 28.6 144.3 L18 182 L57.2 171.7 C69.6 179.4 84.3 184 100 184 C146.4 184 184 146.4 184 100 C184 53.6 146.4 16 100 16 Z" fill="#25D366"/>
+  <!-- Archive Box Lid -->
+  <rect x="52" y="74" width="96" height="18" rx="5" fill="#FFFFFF"/>
+  <!-- Archive Box Body -->
+  <rect x="58" y="96" width="84" height="46" rx="6" fill="#FFFFFF"/>
+  <!-- Box Handle Cutout -->
+  <rect x="86" y="106" width="28" height="8" rx="4" fill="#25D366"/>
 </svg>

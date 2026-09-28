@@ -4826,6 +4826,28 @@ class TestServiceMessages:
         assert indexed_fts[0]["text_body"] == "Important meeting tomorrow"
         cache_conn.close()
 
+class TestFaviconAndStaticAssets:
+    def test_favicon_served(self, tmp_path):
+        archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp_svg = client.get("/static/favicon.svg")
+            assert resp_svg.status_code == 200
+            assert "image/svg+xml" in resp_svg.content_type
+            assert b"<svg" in resp_svg.data
+
+            resp_ico = client.get("/favicon.ico")
+            assert resp_ico.status_code == 200
+            assert "image/svg+xml" in resp_ico.content_type
+            assert b"<svg" in resp_ico.data
+
+            resp_index = client.get("/")
+            assert resp_index.status_code == 200
+            assert b'href="/static/favicon.svg"' in resp_index.data
+            assert b'id="settings-app-logo"' in resp_index.data
+
 
 # ===========================================================================
 # wab_viewer entrypoint tests
