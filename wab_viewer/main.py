@@ -205,6 +205,7 @@ CREATE TABLE IF NOT EXISTS message_index (
     timestamp_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_midx_chat_ts ON message_index(chat_id, timestamp_ms);
+CREATE INDEX IF NOT EXISTS idx_midx_chat_type_ts ON message_index(chat_id, chat_type, timestamp_ms);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(
     text_body,
@@ -1049,8 +1050,8 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
         INSERT OR REPLACE INTO recent_messages
             (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
              archive_path, media_type, media_name, text_body,
-             quoted_text, quoted_sender, quoted_ts)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             quoted_text, quoted_sender, quoted_ts, reactions)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     keys = rows[0].keys()
     archive_conn.executemany(sql, [
@@ -1059,7 +1060,8 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
          r["media_type"], r["media_name"] if "media_name" in keys else None,
          r["text_body"], r["quoted_text"] if "quoted_text" in keys else None,
          r["quoted_sender"] if "quoted_sender" in keys else None,
-         r["quoted_ts"] if "quoted_ts" in keys else None)
+         r["quoted_ts"] if "quoted_ts" in keys else None,
+         r["reactions"] if "reactions" in keys else None)
         for r in rows
     ])
     archive_conn.commit()
@@ -1088,10 +1090,13 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
     _ensure_writable(cache_path)
     try:
         conn = sqlite3.connect(str(cache_path), check_same_thread=False)
+        conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA cache_size = -8000")
         conn.executescript(CACHE_SCHEMA)
+        if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+            conn.execute("PRAGMA user_version = 1")
         conn.row_factory = sqlite3.Row
         conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('theme', 'dark')")
         conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('date_format', 'DD/MM/YYYY')")
@@ -1105,6 +1110,24 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
             ) from e
         raise
     return conn
+
+
+def _run_db_maintenance(cache_conn: sqlite3.Connection, archive_conn: sqlite3.Connection | None) -> None:
+    """Run lightweight non-blocking maintenance on cache and archive databases."""
+    try:
+        cache_conn.execute("PRAGMA incremental_vacuum(500)")
+        cache_conn.execute("PRAGMA optimize")
+        cache_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except Exception as e:
+        print(f"[wab_viewer] Notice: Cache DB maintenance: {e}")
+
+    if archive_conn is not None:
+        try:
+            archive_conn.execute("PRAGMA incremental_vacuum(500)")
+            archive_conn.execute("PRAGMA optimize")
+            archive_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception:
+            pass
 
 
 def _detect_source_db(output_root: Path):
@@ -1420,6 +1443,8 @@ def _build_media_only(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Conn
 
     cache_conn.executemany(insert_sql, batch)
     cache_conn.commit()
+    cache_conn.execute("PRAGMA incremental_vacuum(500)")
+    cache_conn.execute("PRAGMA optimize")
 
 
 # ---------------------------------------------------------------------------
@@ -1901,6 +1926,9 @@ def create_app(output_root: Path, rescan: bool = False):
     _bulk_index_state: dict = {"running": False, "indexed_msgs": 0, "total_msgs": 0}
     _wa_local = threading.local()
 
+    app._indexing_lock = _indexing_lock
+    app._bulk_index_state = _bulk_index_state
+
     if source_type is None:
         print("[wab_viewer] Warning: No source WA DB found. Media-only mode.")
         archive_conn_tmp = sqlite3.connect(str(archive_db_path), check_same_thread=False)
@@ -1916,6 +1944,7 @@ def create_app(output_root: Path, rescan: bool = False):
 
         if rescan or _source_changed(cache_conn, wa_db_path):
             _clear_fts_index(cache_conn)
+            cache_conn.execute("VACUUM")
             _save_source_stamp(cache_conn, wa_db_path)
             print("[wab_viewer] FTS cache cleared — chats will be indexed on first open")
         else:
@@ -2258,6 +2287,8 @@ def create_app(output_root: Path, rescan: bool = False):
         "PRAGMA table_info(recent_messages)").fetchall()]
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
+
+    _run_db_maintenance(cache_conn, _archive_conn)
 
     # Build _ANDROID_SELECT and _IOS_SELECT based on available tables
     has_reactions = False
@@ -2804,14 +2835,17 @@ def create_app(output_root: Path, rescan: bool = False):
                                      _indexing_state, _indexing_lock)
                 if source_type == "android" and rows:
                     rows = [dict(r) for r in rows]
-                    rx_cache = get_archive().execute(
-                        """SELECT msg_id, reactions FROM reactions_cache
-                           WHERE chat_id = ? AND msg_id IN (""" + ",".join("?" * len(rows)) + """)""",
-                        [chat_id] + [r["msg_id"] for r in rows]
-                    ).fetchall()
-                    rx_map = {r["msg_id"]: r["reactions"] for r in rx_cache}
-                    for row in rows:
-                        row["reactions"] = rx_map.get(row["msg_id"])
+                    missing_rx = [r["msg_id"] for r in rows if r.get("reactions") is None]
+                    if missing_rx:
+                        rx_cache = get_archive().execute(
+                            """SELECT msg_id, reactions FROM reactions_cache
+                               WHERE chat_id = ? AND msg_id IN (""" + ",".join("?" * len(missing_rx)) + """)""",
+                            [chat_id] + missing_rx
+                        ).fetchall()
+                        rx_map = {r["msg_id"]: r["reactions"] for r in rx_cache}
+                        for row in rows:
+                            if row["msg_id"] in rx_map:
+                                row["reactions"] = rx_map[row["msg_id"]]
                 return jsonify(rows)
 
         conn = get_wa()
@@ -3106,8 +3140,8 @@ def create_app(output_root: Path, rescan: bool = False):
             if chat_id and chat_type:
                 idx_rows = fts_conn.execute("""
                     SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
-                    FROM message_index mi
-                    JOIN message_index_fts fts ON fts.rowid = mi.rowid
+                    FROM message_index_fts fts
+                    JOIN message_index mi ON mi.rowid = fts.rowid
                     WHERE message_index_fts MATCH ?
                       AND mi.chat_id = ? AND mi.chat_type = ?
                     ORDER BY mi.timestamp_ms ASC LIMIT 500
@@ -3115,16 +3149,16 @@ def create_app(output_root: Path, rescan: bool = False):
             elif chat_id:
                 idx_rows = fts_conn.execute("""
                     SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
-                    FROM message_index mi
-                    JOIN message_index_fts fts ON fts.rowid = mi.rowid
+                    FROM message_index_fts fts
+                    JOIN message_index mi ON mi.rowid = fts.rowid
                     WHERE message_index_fts MATCH ? AND mi.chat_id = ?
                     ORDER BY mi.timestamp_ms ASC LIMIT 500
                 """, (q, chat_id)).fetchall()
             else:
                 idx_rows = fts_conn.execute("""
                     SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
-                    FROM message_index mi
-                    JOIN message_index_fts fts ON fts.rowid = mi.rowid
+                    FROM message_index_fts fts
+                    JOIN message_index mi ON mi.rowid = fts.rowid
                     WHERE message_index_fts MATCH ?
                     ORDER BY mi.timestamp_ms ASC LIMIT 100
                 """, (q,)).fetchall()
@@ -4177,6 +4211,10 @@ def create_app(output_root: Path, rescan: bool = False):
                     _build_fts_chat(cache_bulk, source_type, wa_db_path,
                                     row["id"], row["type"], on_progress=_on_progress)
 
+            cache_bulk.execute("INSERT INTO message_index_fts(message_index_fts) VALUES('optimize')")
+            cache_bulk.execute("PRAGMA optimize")
+            cache_bulk.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            cache_bulk.commit()
             cache_bulk.close()
         except Exception:
             print(f"[wab_viewer] Bulk index error:\n{traceback.format_exc()}")
@@ -4206,6 +4244,35 @@ def create_app(output_root: Path, rescan: bool = False):
         _clear_fts_index(get_cache())
         get_cache().execute("VACUUM")
         return jsonify({"ok": True})
+
+    @app.route("/api/index/optimize", methods=["POST"])
+    def api_index_optimize():
+        with _indexing_lock:
+            if _bulk_index_state["running"]:
+                return jsonify({"error": "indexing in progress"}), 409
+        cache_path = get_cache_db_path(output_root)
+        wal_path = cache_path.with_name(cache_path.name + "-wal")
+
+        def _calc_size():
+            sz = cache_path.stat().st_size if cache_path.exists() else 0
+            if wal_path.exists():
+                sz += wal_path.stat().st_size
+            return sz
+
+        size_before = _calc_size()
+        c = get_cache()
+        c.execute("INSERT INTO message_index_fts(message_index_fts) VALUES('optimize')")
+        c.commit()
+        c.execute("VACUUM")
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        c.execute("PRAGMA optimize")
+        size_after = _calc_size()
+        return jsonify({
+            "ok": True,
+            "size_before": size_before,
+            "size_after": size_after,
+            "reclaimed": max(0, size_before - size_after),
+        })
 
     # ---- API: preferences --------------------------------------------------
 

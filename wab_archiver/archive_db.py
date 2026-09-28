@@ -16,8 +16,8 @@ from shared.db import (
 def open_archive_db(output_root: str) -> sqlite3.Connection:
     db_path = os.path.join(output_root, '.wa_media_archiver.db')
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS contacts (
@@ -67,12 +67,20 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             pulled_at      TEXT,
             PRIMARY KEY (remote_path, device_serial)
         );
+        CREATE TABLE IF NOT EXISTS reactions_cache (
+            chat_id    TEXT NOT NULL,
+            msg_id     INTEGER NOT NULL,
+            reactions  TEXT NOT NULL,
+            PRIMARY KEY (chat_id, msg_id)
+        );
     """)
     # Migrate existing DBs: add size column if absent (safe no-op on new DBs)
     existing = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
     if 'size' not in existing:
         conn.execute("ALTER TABLE files ADD COLUMN size INTEGER")
-        conn.commit()
+    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+        conn.execute("PRAGMA user_version = 1")
+    conn.commit()
     return conn
 
 

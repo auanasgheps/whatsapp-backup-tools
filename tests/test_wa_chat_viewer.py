@@ -4941,3 +4941,71 @@ class TestViewerEntrypoint:
             mock_open.assert_not_called()
             mock_app.run.assert_called_once_with(host="127.0.0.1", port=5000, debug=False, threaded=True)
 
+
+class TestDatabaseOptimizationsAndMaintenance:
+    def test_cache_db_pragmas_and_covering_index(self, tmp_path):
+        conn = viewer._open_cache_db(tmp_path)
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert user_version == 1
+        auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
+        assert auto_vacuum == 2  # INCREMENTAL
+        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        assert "idx_midx_chat_type_ts" in indexes
+        conn.close()
+
+    def test_run_db_maintenance(self, tmp_path):
+        cache_conn = viewer._open_cache_db(tmp_path)
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        viewer._run_db_maintenance(cache_conn, arc_conn)
+        cache_conn.close()
+        arc_conn.close()
+
+    def test_recent_messages_reactions_persisted(self, tmp_path):
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        rows = [{
+            "chat_id": "12345",
+            "chat_type": "contact",
+            "msg_id": 100,
+            "timestamp_ms": 1000,
+            "sender": "Alice",
+            "from_me": 0,
+            "archive_path": "path.jpg",
+            "media_type": "image",
+            "media_name": "pic.jpg",
+            "text_body": "hello",
+            "quoted_text": None,
+            "quoted_sender": None,
+            "quoted_ts": None,
+            "reactions": "❤️",
+        }]
+        viewer._backfill_recent_messages(arc_conn, rows)
+        saved = arc_conn.execute("SELECT reactions FROM recent_messages WHERE msg_id = 100").fetchone()[0]
+        assert saved == "❤️"
+        arc_conn.close()
+
+    def test_api_index_optimize_endpoint(self, tmp_path):
+        make_archive_db(tmp_path / ".wa_media_archiver.db")
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.post("/api/index/optimize")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["ok"] is True
+            assert "size_before" in data
+            assert "size_after" in data
+            assert "reclaimed" in data
+
+    def test_api_index_optimize_conflict_when_indexing(self, tmp_path):
+        make_archive_db(tmp_path / ".wa_media_archiver.db")
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            with app._indexing_lock:
+                app._bulk_index_state["running"] = True
+            try:
+                resp = client.post("/api/index/optimize")
+                assert resp.status_code == 409
+                assert resp.get_json()["error"] == "indexing in progress"
+            finally:
+                with app._indexing_lock:
+                    app._bulk_index_state["running"] = False
+

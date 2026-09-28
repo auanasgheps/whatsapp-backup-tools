@@ -1098,6 +1098,17 @@ class TestCheckDbHealth:
         arc.check_db_health(conn, logger)  # should not raise
         conn.close()
 
+    def test_archive_db_user_version_and_reactions_cache(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert user_version == 1
+        auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
+        assert auto_vacuum == 2  # INCREMENTAL
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "reactions_cache" in tables
+        assert "recent_messages" in tables
+        conn.close()
+
 
 # ===========================================================================
 # Archive DB: ADB pull state + filename index

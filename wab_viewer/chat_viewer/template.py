@@ -146,6 +146,8 @@ HTML_TEMPLATE = r"""
     <div class="settings-section">
       <div class="settings-label">Database</div>
       <div class="settings-row" style="flex-direction:column;gap:8px;align-items:flex-start">
+        <button id="optimize-db-btn" class="pref-btn">Compact & optimize database</button>
+        <div id="optimize-db-status" class="index-progress-label" style="display:none"></div>
         <button id="index-all-btn" class="pref-btn">Index all chats for search</button>
         <div id="index-all-progress" style="display:none;width:100%">
           <div class="index-progress-bar-wrap">
