@@ -3,7 +3,7 @@
 wab_viewer — Browse archived WhatsApp chats via a local Flask web UI.
 
 Usage:
-    python -m wab_viewer <output_root> [--port PORT] [--host HOST] [--rescan]
+    python -m wab_viewer <output_root> [--port PORT] [--host HOST] [--no-browser] [--rescan] [--verbose]
 
 Dependencies:
     pip install flask
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -141,6 +142,7 @@ def parse_args():
     p.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     p.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically")
     p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
+    p.add_argument("-v", "--verbose", action="store_true", help="Enable verbose HTTP request logging (default: error only)")
     p.add_argument('--version', action='version',
                    version=f'WhatsApp Backup Tools — Viewer v{_get_version()}')
     args = p.parse_args()
@@ -2910,11 +2912,9 @@ def create_app(output_root: Path, rescan: bool = False):
                         [(chat_id, r["msg_id"], r["reactions"]) for r in from_wa]
                     )
                     get_archive().commit()
-                for row in rows:
-                    row["reactions"] = wa_map.get(row["msg_id"])
-            else:
-                for row in rows:
-                    row["reactions"] = cached_map.get(row["msg_id"])
+                cached_map.update(wa_map)
+            for row in rows:
+                row["reactions"] = cached_map.get(row["msg_id"])
         elif source_type == "ios" and rows and has_ios_reactions:
             msg_ids = [r["msg_id"] for r in rows]
             ios_rx = _ios_reactions(conn, chat_id, msg_ids)
@@ -4401,6 +4401,9 @@ def main():
     output_root = Path(raw_path).expanduser().resolve()
 
     validate_output_root(output_root)
+
+    log_level = logging.INFO if args.verbose else logging.ERROR
+    logging.getLogger("werkzeug").setLevel(log_level)
 
     print(f"[wab_viewer] Opening archive: {output_root}")
 

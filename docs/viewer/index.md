@@ -34,9 +34,14 @@ wab-viewer ./output --no-browser
 # Rebuild the cache
 wab-viewer ./output --rescan
 
+# Enable verbose HTTP request logging (default is error only)
+wab-viewer ./output --verbose
+
 # Check the installed version
 wab-viewer --version
 ```
+
+By default, routine HTTP request logs (`GET /api/... 200`) are silenced to keep the console clean and focused on startup, cache, and error messages. Pass `--verbose` (or `-v`) to enable HTTP request logging for debugging.
 
 ## How It Works
 
