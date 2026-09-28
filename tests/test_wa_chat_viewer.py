@@ -4898,12 +4898,18 @@ class TestViewerEntrypoint:
             assert args.host == "127.0.0.1"
             assert args.port == 5000
             assert args.no_browser is False
+            assert args.verbose is False
 
-        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "192.168.1.50", "--port", "8080", "--no-browser"]):
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "192.168.1.50", "--port", "8080", "--no-browser", "--verbose"]):
             args = viewer.parse_args()
             assert args.host == "192.168.1.50"
             assert args.port == 8080
             assert args.no_browser is True
+            assert args.verbose is True
+
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "-v"]):
+            args = viewer.parse_args()
+            assert args.verbose is True
 
     def test_main_browser_launch(self, tmp_path):
         from unittest.mock import patch, MagicMock
@@ -4940,6 +4946,28 @@ class TestViewerEntrypoint:
             viewer.main()
             mock_open.assert_not_called()
             mock_app.run.assert_called_once_with(host="127.0.0.1", port=5000, debug=False, threaded=True)
+
+    def test_main_logging_level(self, tmp_path):
+        import logging
+        from unittest.mock import patch, MagicMock
+        archive_dir = str(tmp_path)
+        mock_app = MagicMock()
+
+        # Default log level should be ERROR
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir]), \
+             patch("wab_viewer.main.validate_output_root"), \
+             patch("wab_viewer.main.create_app", return_value=mock_app), \
+             patch("wab_viewer.main.webbrowser.open"):
+            viewer.main()
+            assert logging.getLogger("werkzeug").level == logging.ERROR
+
+        # With --verbose, log level should be INFO
+        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--verbose"]), \
+             patch("wab_viewer.main.validate_output_root"), \
+             patch("wab_viewer.main.create_app", return_value=mock_app), \
+             patch("wab_viewer.main.webbrowser.open"):
+            viewer.main()
+            assert logging.getLogger("werkzeug").level == logging.INFO
 
 
 class TestDatabaseOptimizationsAndMaintenance:
