@@ -333,7 +333,7 @@ def pull_media(staging_dir: str, business: bool,
     conflicts = []
 
     progress_eval = ProgressReporter(
-        "Evaluating media", len(remote_files), logger, sys.stderr, 0.5
+        "Evaluating media", len(remote_files), logger, sys.stderr, 0.2
     )
 
     for i, (remote_path, remote_size) in enumerate(remote_files, 1):
@@ -385,7 +385,7 @@ def pull_media(staging_dir: str, business: bool,
     pulled = 0
     failed = 0
     progress_pull = ProgressReporter(
-        "Pulling media", len(pull_list), logger, sys.stderr, 0.5
+        "Pulling media", len(pull_list), logger, sys.stderr, 0.2
     )
 
     for i, (remote_path, remote_size) in enumerate(pull_list, 1):

@@ -3060,6 +3060,77 @@ class TestProgressReporter:
         assert len(stream.getvalue()) > len_after_first
         reporter.finish({"Copied": 6})
 
+    def test_file_handler_excluded_from_guard_and_filter(self, tmp_path):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        log_file = tmp_path / "test.log"
+        fh = logging.FileHandler(str(log_file), encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+
+        ch = logging.StreamHandler(stream)
+        ch.setLevel(logging.INFO)
+
+        test_logger = logging.getLogger("test_fh_exclusion")
+        test_logger.setLevel(logging.DEBUG)
+        test_logger.handlers = [fh, ch]
+
+        reporter = prg.ProgressReporter("Archiving", 100, test_logger, stream, 0.0)
+        reporter.update(10, {"Copied": 5})
+
+        val_before_debug = stream.getvalue()
+        # Debug logs go to file handler, should NOT clear or alter stream
+        test_logger.debug("COPIED: media.jpg -> archive/media.jpg")
+        assert stream.getvalue() == val_before_debug
+
+        reporter.finish({"Copied": 5})
+        fh.close()
+
+    def test_interleaving_log_immediately_restores_status_line(self):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        test_logger = logging.getLogger("test_restore_status")
+        test_logger.setLevel(logging.INFO)
+        test_logger.handlers = []
+        ch = logging.StreamHandler(stream)
+        ch.setFormatter(logging.Formatter("%(message)s"))
+        test_logger.addHandler(ch)
+
+        reporter = prg.ProgressReporter("Archiving", 100, test_logger, stream, 0.0)
+        reporter.update(10, {"Copied": 5})
+
+        test_logger.warning("Missing source file")
+        output = stream.getvalue()
+        assert "Missing source file\n" in output
+        # Status line must be immediately rewritten after the log line
+        assert output.endswith("Archiving: 10.0% (10/100) | Copied: 5")
+
+        reporter.finish({"Copied": 5})
+
+    def test_file_handler_receives_milestones_when_tty(self, tmp_path):
+        import io
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        log_file = tmp_path / "milestones.log"
+        fh = logging.FileHandler(str(log_file), encoding="utf-8")
+        fh.setLevel(logging.INFO)
+
+        test_logger = logging.getLogger("test_milestone_fh")
+        test_logger.setLevel(logging.INFO)
+        test_logger.handlers = [fh]
+
+        reporter = prg.ProgressReporter("Archiving", 10, test_logger, stream, 0.0)
+        reporter.update(10, {"Copied": 10})
+        reporter.finish({"Copied": 10})
+        fh.close()
+
+        log_content = log_file.read_text(encoding="utf-8")
+        assert "Archiving: 10/10 (100.0%) | Copied: 10" in log_content
+
 
 # ===========================================================================
 # wab_archiver.main: _inject_default_archive_command
