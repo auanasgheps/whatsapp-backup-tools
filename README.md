@@ -93,12 +93,15 @@ After a successful run, the archive is organised as follows:
 
 ## Quick Start
 
-### wab-archiver quick start
-Install first (see [docs/prerequisites.md](docs/prerequisites.md)):
+You can install wab-tools as a package, or proceed manually.
+
+See [docs/prerequisites.md](docs/prerequisites.md):
 
 ```bash
 pip install -e .
 ```
+
+### wab-archiver quick start
 
 Always do a dry run first:
 
