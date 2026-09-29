@@ -33,7 +33,7 @@ pip install .
 You can also download pre-built `.whl` packages from [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and install them:
 
 ```bash
-pip install wab_tools-0.50-py3-none-any.whl
+pip install wab_tools-x.xx-py3-none-any.whl
 ```
 
 > 💡 **Windows users:** If `pip install` is not recognized, run `py -m pip install .` instead.
@@ -44,6 +44,18 @@ This registers the two unified CLI commands:
 
 All required core packages (`flask`, `wa-crypt-tools`, `iphone-backup-decrypt`) are automatically installed.
 
+### Manual Execution (without pip)
+
+Alternatively, clone the repository and run the tools directly using Python without installing the package:
+
+```bash
+git clone https://github.com/auanasgheps/whatsapp-backup-tools.git
+cd whatsapp-backup-tools
+python -m wab_archiver --help
+python -m wab_viewer --help
+```
+
+When using manual execution, you must manually install required packages.
 ---
 
 ## 3. Platform-Specific Prerequisites
