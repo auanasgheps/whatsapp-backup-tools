@@ -93,6 +93,8 @@ After a successful run, the archive is organised as follows:
 
 ## Installation
 
+See [docs/prerequisites.md](docs/prerequisites.md) for system requirements and platform-specific backup preparation (Android / iOS).
+
 Install directly from GitHub:
 
 ```bash
@@ -110,14 +112,27 @@ pip install .
 You can also download the pre-built `.whl` package attached to the [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and install it:
 
 ```bash
-pip install wab_tools-0.50-py3-none-any.whl
+pip install wab_tools-x-xx-py3-none-any.whl
 ```
 
 > ℹ️ *PyPI distribution (`pip install wab-tools`) will be available in an upcoming update.*
 
+### Manual execution (without pip)
+
+Alternatively, clone the repository and run the tools directly with Python without installing the package:
+
+```bash
+git clone https://github.com/auanasgheps/whatsapp-backup-tools.git
+cd whatsapp-backup-tools
+python -m wab_archiver --help
+python -m wab_viewer --help
+```
+
 ### wab-archiver quick start
 
 Always do a dry run first:
+
+> 💡 Without `pip install`, use `python -m wab_archiver` instead of `wab-archiver`.
 
 ```bash
 wab-archiver archive \
@@ -137,6 +152,8 @@ See [documentation](docs/archiver/index.md) for full setup instructions and comm
 ### wab-viewer quick start
 
 First, run `wab-archiver` to create the archive. Then point `wab-viewer` to your archive folder:
+
+> 💡 Without `pip install`, use `python -m wab_viewer` instead of `wab-viewer`.
 
 ```bash
 wab-viewer /path/to/archive
