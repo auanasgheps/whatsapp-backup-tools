@@ -1,4 +1,6 @@
-# Command Reference
+[← Back to Archiver Overview](index.md) • [Android Setup](setup-android.md) • [iOS Setup](setup-ios.md) • [Main Readme](../../README.md)
+
+# Command Reference & Configuration
 
 ## Config File
 
@@ -275,3 +277,12 @@ The reconstructed tree is written to `<output>/Media/`, alongside the existing `
 **Limitations:**
 - Restored file timestamps reflect the WhatsApp message timestamp (same as in the archive), not the original on-device creation date
 - If a forward run was filtered with `--since` or `--limit`, the restore index only covers what was actually archived
+
+---
+
+## Next Steps
+
+Once your media has been archived:
+
+👉 **[WhatsApp Backup Viewer Guide](../viewer/index.md)** — Start browsing and searching your chats offline in the local web interface.
+

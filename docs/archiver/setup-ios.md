@@ -1,3 +1,5 @@
+[← Back to Archiver Overview](index.md) • [Main Readme](../../README.md)
+
 # iOS Setup
 
 WhatsApp on iOS stores its database and media inside an iPhone backup. The archiver reads the backup directly via `--ios-backup`.
@@ -75,7 +77,18 @@ Contacts and auxiliary databases (`ChatStorage.sqlite`, `ContactsV2.sqlite`, `Ex
 
 ## Encrypted vs. Unencrypted Backups
 
-Both encrypted and unencrypted iPhone backups are supported.
+Both encrypted and unencrypted iPhone backups are supported:
 
-- **Unencrypted backup** — no extra argument needed.
-- **Encrypted backup** — pass `--ios-password <password>`. Requires `pip install iphone-backup-decrypt`.
+- **Unencrypted backup** — no extra password argument needed.
+- **Encrypted backup** — pass `--ios-password <password>`. (The required `iphone-backup-decrypt` package is installed automatically with `wab-tools`).
+
+---
+
+## Next Steps
+
+Now that your iOS backup is located and configured:
+
+1. 📖 Review the **[Command Reference & Config File](command-reference.md)** for advanced flags and configuration options.
+2. 🧪 Run your command with `--dry-run` to test decryption and preview archive results.
+3. 🌐 Once archived, launch the **[WhatsApp Backup Viewer](../viewer/index.md)** to browse your conversations offline.
+

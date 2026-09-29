@@ -41,7 +41,7 @@ def _get_version() -> str:
     try:
         from importlib.metadata import version as _pkg_version
 
-        return _pkg_version("wabtools")
+        return _pkg_version("wab-tools")
     except Exception:
         import tomllib
         from pathlib import Path
