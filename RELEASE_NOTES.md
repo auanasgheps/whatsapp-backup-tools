@@ -2,7 +2,7 @@
 
 Introducing **WhatsApp Backup Tools**, a suite to archive and access your WhatsApp data locally and privately.
 
-**Privacy, Privacy, Privacy**: Both tools run 100% locally on your machine. No data leaves your computer.
+**Privacy, Privacy, Privacy**: These tools run 100% locally on your machine. No data leaves your computer.
 
 ## What's New in v0.50
 
@@ -32,7 +32,7 @@ Access your backups like WhatsApp Web, but local and offline.
 - **Instant Search & Jump to Date**: Fast full-text search across all conversations or scoped to individual chats.
 
 ### ⚠️ Initial Release Notes
-It's the first release of the tool, and work is planned to expand its capacities.
+It's the first release of the Viewer, and work is planned to expand its capacities.
 
 Call history, poll voting details, and stickers are not yet rendered in the timeline. Large media gallery thumbnail optimizations are planned for subsequent updates.
 
