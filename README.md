@@ -132,7 +132,7 @@ wab-archiver archive \
 
 > 💡 Repeat `--wa-root` to search multiple media folders and automatically select the best copy of each file.
 
-See [docs/archiver/](docs/archiver/) for full setup instructions and command reference.
+See [docs/archiver/](docs/archiver/index.md) for full setup instructions and command reference.
 
 ### wab-viewer quick start
 
