@@ -4,6 +4,12 @@
 
 Browse and search your archived WhatsApp chats offline through a local web UI replicating WhatsApp Web.
 
+**Whatsapp Backup Viewer screenshots**
+<p float="left">
+  <img src="docs/images/viewer_dark.png" width="700" />
+  <img src="docs/images/viewer_clean.png" width="700" /> 
+</p>
+
 ## Quick Start
 
 Point `wab-viewer` to your archive output folder:

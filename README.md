@@ -142,7 +142,7 @@ First, run `wab-archiver` to create the archive. Then point `wab-viewer` to your
 wab-viewer /path/to/archive
 ```
 
-Opens in your browser at `http://127.0.0.1:5000`. See [docs/viewer/](docs/viewer/) for full usage.
+Opens in your browser at `http://127.0.0.1:5000`. See [docs/viewer/](docs/viewer/index.md) for full usage.
 
 ---
 
