@@ -1,20 +1,16 @@
-# Chat Viewer
+[← Back to Main Readme](../../README.md) • [Archiver Guide](../archiver/index.md)
 
-Browse and search your archived WhatsApp chats through a local web UI.
+# WhatsApp Backup Viewer (`wab-viewer`)
 
-## Requirements
+Browse and search your archived WhatsApp chats offline through a local web UI replicating WhatsApp Web.
 
-```bash
-pip install flask
-```
+## Quick Start
 
-## Usage
+Point `wab-viewer` to your archive output folder:
 
 ```bash
 wab-viewer /path/to/archive
 ```
-
-> 💡 If you haven't installed the package (`pip install -e .`), use `python -m wab_viewer` instead of `wab-viewer`.
 
 The viewer opens your browser at `http://127.0.0.1:5000`. Use `--rescan` to force a cache rebuild.
 
@@ -91,6 +87,16 @@ The server binds to `127.0.0.1` by default — it is not accessible from other m
 
 ## Known Limitations
 
+- **Initial release scope**: Call history, poll interactions/votes, and stickers are not yet rendered in the timeline.
+- **Media gallery optimization**: Large media galleries load original files directly; optimized thumbnail caching and lazy loading optimizations are planned for future releases.
 - **Profile pictures are not displayed.** On Android this requires extracting `wa.db` (not yet implemented). On iOS no local image data is available in the backup.
 - **Friendly profile push names for unsaved contacts are not available on Android without root.** On Android, user-chosen friendly push names (`wa_name`) reside exclusively in `/data/data/com.whatsapp/databases/wa.db` within WhatsApp's private application sandbox. WhatsApp excludes contact records from local backups (`WhatsApp/Backups/wa.db.crypt14/15`), so extracting `wa.db` requires root access on the device, which is not implemented in the Viewer or Archiver. Unsaved contacts on Android will therefore display their phone number. On iOS, WhatsApp stores push names directly in `ChatStorage.sqlite` (`ZWAPROFILEPUSHNAME`), so they are preserved in standard backups.
 - **iOS read and played receipts require `MessagingInfraDatabase.sqlite`.** On modern iOS backups (v2.24+), delivery, read, and voice message played timestamps are read directly from `MessagingInfraDatabase.sqlite`. For older backups or messages not recorded in it (such as those sent via web or companion devices), the viewer falls back to `ChatStorage.sqlite`'s `ZRECEIPTINFO`, which shows "Read (time not stored)" when a read state is confirmed without a timestamp.
+
+---
+
+## Navigation
+
+- **Previous**: [Archiver Guide & Workflow](../archiver/index.md)
+- **Home**: [Main Project Readme](../../README.md)
+

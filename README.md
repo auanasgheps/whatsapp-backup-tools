@@ -91,21 +91,33 @@ After a successful run, the archive is organised as follows:
 
 ---
 
-## Quick Start
+## Installation
 
-You can install wab-tools as a package, or proceed manually.
-
-See [docs/prerequisites.md](docs/prerequisites.md):
+Install directly from GitHub:
 
 ```bash
-pip install -e .
+pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"
 ```
+
+Or clone the repository and install locally:
+
+```bash
+git clone https://github.com/auanasgheps/whatsapp-backup-tools.git
+cd whatsapp-backup-tools
+pip install .
+```
+
+You can also download the pre-built `.whl` package attached to the [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and install it:
+
+```bash
+pip install wab_tools-0.50-py3-none-any.whl
+```
+
+> ℹ️ *PyPI distribution (`pip install wab-tools`) will be available in an upcoming update.*
 
 ### wab-archiver quick start
 
 Always do a dry run first:
-
-> 💡 Without `pip install -e .`, use `python -m wab_archiver` instead of `wab-archiver`.
 
 ```bash
 wab-archiver archive \
@@ -124,14 +136,11 @@ See [docs/archiver/](docs/archiver/) for full setup instructions and command ref
 
 ### wab-viewer quick start
 
-First, run wab-archiver to create the archive. Then:
+First, run `wab-archiver` to create the archive. Then point `wab-viewer` to your archive folder:
 
 ```bash
-pip install flask
 wab-viewer /path/to/archive
 ```
-
-> 💡 Without `pip install -e .`, use `python -m wab_viewer` instead of `wab-viewer`.
 
 Opens in your browser at `http://127.0.0.1:5000`. See [docs/viewer/](docs/viewer/) for full usage.
 
@@ -170,7 +179,8 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ### Viewer
 
-See [viewer known limitations](docs/viewer/index.md#known-limitations).
+- **Initial release scope**: Call history, poll interactions, and stickers are not yet rendered in the chat timeline. Progressive media optimization for large photo galleries is planned for future updates.
+- See [viewer known limitations](docs/viewer/index.md#known-limitations) for full details on profile push names, receipts, and platform variations.
 
 ---
 

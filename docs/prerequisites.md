@@ -1,54 +1,65 @@
+[← Back to Main Readme](../README.md)
 
-# Prerequisites
+# Prerequisites & Installation
 
-## Python
-
-Python 3.11 or later is required.
-
----
-
-## Installation
-
-Install the tools from the repo root:
-
-```bash
-pip install -e .
-```
-
-This registers the `wab-archiver` and `wab-viewer` entry points so they are available as commands in your terminal.
-
-> 💡 **Windows users:** if `pip install` doesn't work for you, use `py -m pip install`.
+Everything you need to get started with **WhatsApp Backup Tools (`wab-tools`)**.
 
 ---
 
-## wab-archiver Packages
+## 1. System Requirements
 
-Install these manually before running the archiver.
-
-**Android encrypted backup decryption** (required for `--msgstore <file.crypt15>` or `--from-adb`):
-
-```bash
-pip install wa-crypt-tools
-```
-
-**iOS encrypted backup decryption** (required for encrypted iPhone backups):
-
-```bash
-pip install iphone-backup-decrypt
-```
-
-**Timezone support on Windows** (required for `--timezone`):
-
-```bash
-pip install tzdata
-```
+- **Python**: Version 3.11 or later is required (Python 3.12 recommended).
+- **Supported Operating Systems**: Windows 10/11, macOS (12+), and modern Linux distributions.
+- **Local Storage**: Adequate free disk space for your media and extracted databases. All processing is 100% local—no data leaves your machine.
 
 ---
 
-## wab-viewer Packages
+## 2. Installation
 
-**Flask** (required):
+Install directly via `pip` from GitHub:
 
 ```bash
-pip install flask
+pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"
 ```
+
+Or clone the repository and install locally:
+
+```bash
+git clone https://github.com/auanasgheps/whatsapp-backup-tools.git
+cd whatsapp-backup-tools
+pip install .
+```
+
+You can also download pre-built `.whl` packages from [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and install them:
+
+```bash
+pip install wab_tools-0.50-py3-none-any.whl
+```
+
+> 💡 **Windows users:** If `pip install` is not recognized, run `py -m pip install .` instead.
+
+This registers the two unified CLI commands:
+- **`wab-archiver`**: Preserves and organizes media into a structured directory tree.
+- **`wab-viewer`**: Launches the local WebUI chat viewer.
+
+All required core packages (`flask`, `wa-crypt-tools`, `iphone-backup-decrypt`) are automatically installed.
+
+---
+
+## 3. Platform-Specific Prerequisites
+
+- **Android Users**:
+  - Enable **End-to-End Encrypted Backup** in WhatsApp (`Settings → Chats → Chat Backup → End-to-end Encrypted Backup`) and save your 64-digit key.
+  - No root is required.
+  - Review the [Android Setup Guide](archiver/setup-android.md).
+
+- **iOS Users**:
+  - In-app WhatsApp E2E backup must be **disabled** before making a device backup.
+  - Create a device backup using **Finder** (macOS) or the **Apple Devices app / iTunes** (Windows).
+  - Review the [iOS Setup Guide](archiver/setup-ios.md).
+
+---
+
+## Next Step
+
+👉 Proceed to the **[Archiver Guide](archiver/index.md)** to prepare your media archive.

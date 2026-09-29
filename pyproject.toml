@@ -1,25 +1,54 @@
 [project]
-name = "wabtools"
-version = "0.40"
+name = "wab-tools"
+version = "0.50"
 description = "Archive and browse your WhatsApp data offline. Archive media from Android and iOS backups into a structured folder hierarchy. View chats in a WebUI that mirrors WhatsApp Web."
+readme = "README.md"
 requires-python = ">=3.11"
+authors = [
+    { name = "auanasgheps" },
+]
+license = "GPL-3.0-or-later"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: System :: Archiving :: Backup",
+]
+keywords = ["whatsapp", "backup", "archiver", "viewer", "chat", "media", "ios", "android"]
 dependencies = [
     "flask",
+    "wa-crypt-tools",
+    "iphone-backup-decrypt",
 ]
 
 [project.optional-dependencies]
-archiver = [
-    "wa-crypt-tools",
-    "iphone-backup-decrypt",
-]
 lint = [
     "ruff>=0.9.0",
 ]
-all = [
-    "wa-crypt-tools",
-    "iphone-backup-decrypt",
-    "ruff>=0.9.0",
+test = [
+    "pytest",
+    "pytest-cov",
+    "tzdata",
 ]
+all = [
+    "ruff>=0.9.0",
+    "pytest",
+    "pytest-cov",
+    "tzdata",
+]
+
+[project.urls]
+Homepage = "https://github.com/auanasgheps/whatsapp-backup-tools"
+Documentation = "https://github.com/auanasgheps/whatsapp-backup-tools#readme"
+Repository = "https://github.com/auanasgheps/whatsapp-backup-tools"
+Issues = "https://github.com/auanasgheps/whatsapp-backup-tools/issues"
 
 [project.scripts]
 wab-archiver = "wab_archiver.__main__:main"
@@ -31,6 +60,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["shared*", "wab_archiver*", "wab_viewer*"]
+
+[tool.setuptools.package-data]
+"wab_viewer.chat_viewer" = ["*.css", "*.js", "*.svg"]
 
 [tool.ruff]
 target-version = "py311"

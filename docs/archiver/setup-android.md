@@ -1,3 +1,5 @@
+[← Back to Archiver Overview](index.md) • [Main Readme](../../README.md)
+
 # Android Setup
 
 ## WhatsApp E2E Encrypted Backup
@@ -213,3 +215,14 @@ If your exported contacts do not match your chats, or WhatsApp contacts appear t
 3. Re-run the contact export command.
 
 > 💡 You only need to repeat this if your contacts have changed significantly since the last run.
+
+---
+
+## Next Steps
+
+Now that you have your Android backup, media folder, and contacts ready:
+
+1. 📖 Review the **[Command Reference & Config File](command-reference.md)** to configure your run.
+2. 🧪 Run your command with `--dry-run` to preview the archive before copying files.
+3. 🌐 Once archived, launch the **[WhatsApp Backup Viewer](../viewer/index.md)** to browse your chats.
+
