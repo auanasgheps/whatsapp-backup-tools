@@ -23,22 +23,23 @@ from .cdp_driver import CDPSession, find_free_port, launch_browser_session
 # Locate generate_demo_output.py from Extras
 _DEMO_SCRIPT = REPO_ROOT / "Extras" / "generate_demo_output.py"
 
-_spec = importlib.util.spec_from_file_location("generate_demo_output", _DEMO_SCRIPT)
-if _spec is None or _spec.loader is None:
-    raise ImportError(f"Cannot load demo generator from {_DEMO_SCRIPT}")
-_demo_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_demo_mod)
-generate_demo = _demo_mod.generate_demo
-configure_logger = _demo_mod.configure_logger
-
 
 @pytest.fixture(scope="session")
 def ui_demo_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Generate a clean, privacy-safe synthetic WhatsApp archive for UI tests."""
+    if not _DEMO_SCRIPT.is_file():
+        pytest.skip(f"UI tests require {_DEMO_SCRIPT}, which is local-only and not tracked in git.")
+
+    _spec = importlib.util.spec_from_file_location("generate_demo_output", _DEMO_SCRIPT)
+    if _spec is None or _spec.loader is None:
+        raise ImportError(f"Cannot load demo generator from {_DEMO_SCRIPT}")
+    _demo_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_demo_mod)
+
     temp_dir = tmp_path_factory.mktemp("ui_demo_data")
     out_dir = temp_dir / "Demo Output"
-    logger = configure_logger("ui_test_demo")
-    generate_demo(out_dir, logger)
+    logger = _demo_mod.configure_logger("ui_test_demo")
+    _demo_mod.generate_demo(out_dir, logger)
     return out_dir
 
 
