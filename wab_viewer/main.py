@@ -28,21 +28,24 @@ import webbrowser
 from pathlib import Path
 
 try:
-    from flask import Flask, Response, g, jsonify, render_template_string, request, send_from_directory
+    from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory
 except ImportError:
     sys.exit("Flask is not installed. Run: pip install flask")
+
+from wab_viewer.chat_viewer.template import HTML_TEMPLATE
+
 
 def _get_version() -> str:
     try:
         from importlib.metadata import version as _pkg_version
+
         return _pkg_version("wabtools")
     except Exception:
         import tomllib
-        from pathlib import Path
+
         root = Path(__file__).resolve().parents[1]
         return tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
 
-from wab_viewer.chat_viewer.template import HTML_TEMPLATE
 
 _CHAT_VIEWER_DIR = Path(__file__).parent / "chat_viewer"
 
@@ -130,21 +133,32 @@ def _extract_ios_group_description(raw_pic_id: str) -> str | None:
             break
     return None
 
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     p = argparse.ArgumentParser(description="Browse archived WhatsApp chats")
-    p.add_argument("output_root", nargs="?", default=None,
-                   help="Path to the archive output directory")
+    p.add_argument(
+        "output_root", nargs="?", default=None, help="Path to the archive output directory"
+    )
     p.add_argument("--port", type=int, default=5000, help="Port to listen on (default: 5000)")
     p.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
-    p.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically")
+    p.add_argument(
+        "--no-browser", action="store_true", help="Do not open the browser automatically"
+    )
     p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
-    p.add_argument("-v", "--verbose", action="store_true", help="Enable verbose HTTP request logging (default: error only)")
-    p.add_argument('--version', action='version',
-                   version=f'WhatsApp Backup Tools — Viewer v{_get_version()}')
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose HTTP request logging (default: error only)",
+    )
+    p.add_argument(
+        "--version", action="version", version=f"WhatsApp Backup Tools — Viewer v{_get_version()}"
+    )
     args = p.parse_args()
     if not args.output_root:
         p.error("output_root is required")
@@ -163,10 +177,10 @@ def resolve_browser_url(host: str, port: int) -> str:
     return f"http://{browser_host}:{port}"
 
 
-
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+
 
 def get_cache_db_path(output_root: Path) -> Path:
     return output_root / ".wa_viewer.db"
@@ -184,6 +198,7 @@ def _ensure_writable(path: Path) -> None:
         try:
             if sys.platform == "win32":
                 import ctypes
+
                 attrs = ctypes.windll.kernel32.GetFileAttributesW(str(p))
                 if attrs != -1 and (attrs & 1):  # FILE_ATTRIBUTE_READONLY
                     ctypes.windll.kernel32.SetFileAttributesW(str(p), attrs & ~1)
@@ -192,7 +207,6 @@ def _ensure_writable(path: Path) -> None:
                 p.chmod(mode | stat.S_IWRITE | stat.S_IREAD)
         except OSError:
             pass
-
 
 
 # ---------------------------------------------------------------------------
@@ -233,9 +247,9 @@ CREATE TABLE IF NOT EXISTS user_preferences (
 """
 
 VALID_PREF_VALUES = {
-    "theme":       {"dark", "light"},
+    "theme": {"dark", "light"},
     "date_format": {"DD/MM/YYYY", "MM/DD/YYYY", "YYYY/MM/DD"},
-    "font_size":   {"small", "medium", "large"},
+    "font_size": {"small", "medium", "large"},
 }
 
 GALLERY_PAGE_SIZE = 100
@@ -273,12 +287,16 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
             conn.execute("PRAGMA journal_mode = WAL")
         except sqlite3.OperationalError as e:
             if "readonly" in str(e).lower():
-                print(f"[wab_viewer] Notice: Source DB is read-only; skipping index optimization: {e}")
+                print(
+                    f"[wab_viewer] Notice: Source DB is read-only; skipping index optimization: {e}"
+                )
                 return
             raise
 
-        existing = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        existing = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+        }
         if "idx_message_chat_ts" not in existing:
             has_android = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
@@ -286,7 +304,8 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
             if has_android:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_message_chat_ts "
-                    "ON message(chat_row_id, timestamp)")
+                    "ON message(chat_row_id, timestamp)"
+                )
         if "idx_zwamessage_chat_ts" not in existing:
             has_ios = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
@@ -294,7 +313,8 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
             if has_ios:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_zwamessage_chat_ts "
-                    "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE)")
+                    "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE)"
+                )
         conn.commit()
     except sqlite3.OperationalError as e:
         if "readonly" in str(e).lower():
@@ -400,33 +420,55 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
                 creator = "Someone"
         if subj:
             return f'{creator} created group "{subj}"'
-        return f'{creator} created this group'
+        return f"{creator} created this group"
 
     if ev == 1:  # Subject changed
-        actor = "You" if from_me == 1 else (_resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone"))
+        actor = (
+            "You"
+            if from_me == 1
+            else (
+                _resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone")
+            )
+        )
         if txt:
             return f'{actor} changed the subject to "{txt}"'
-        return f'{actor} changed the group subject'
+        return f"{actor} changed the group subject"
 
     if ev == 3:  # Group icon changed
-        actor = "You" if from_me == 1 else (_resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone"))
+        actor = (
+            "You"
+            if from_me == 1
+            else (
+                _resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone")
+            )
+        )
         return f"{actor} changed this group's icon"
 
     if ev == 4:  # Participant left
-        target = _resolve_ios_jid(member_jid, contacts_map) if member_jid else ("You" if from_me == 1 else "A participant")
+        target = (
+            _resolve_ios_jid(member_jid, contacts_map)
+            if member_jid
+            else ("You" if from_me == 1 else "A participant")
+        )
         if target in ("You", "you"):
             return "You left"
         return f"{target} left"
 
     if ev == 15:  # Joined via invite link
-        target = _resolve_ios_jid(member_jid, contacts_map) if member_jid else ("You" if from_me == 1 else "A participant")
+        target = (
+            _resolve_ios_jid(member_jid, contacts_map)
+            if member_jid
+            else ("You" if from_me == 1 else "A participant")
+        )
         if target in ("You", "you"):
             return "You joined using this group's invite link"
         return f"{target} joined using this group's invite link"
 
     if ev == 2:  # Participant added or joined
         if member_jid:
-            actor = "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
+            actor = (
+                "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
+            )
             target = _resolve_ios_jid(member_jid, contacts_map)
         elif from_me == 1:
             actor = "You"
@@ -457,14 +499,20 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
             actor = "You" if from_me == 1 else None
             target_jids = [j.strip() for j in txt.split(",") if j.strip()]
         names = [_resolve_ios_jid(j, contacts_map) for j in target_jids]
-        target_str = ", ".join("you" if n in ("You", "you") else n for n in names) if names else "participants"
+        target_str = (
+            ", ".join("you" if n in ("You", "you") else n for n in names)
+            if names
+            else "participants"
+        )
         if actor and actor != "Someone":
             return f"{actor} added {target_str}"
         return f"{target_str} joined"
 
     if ev == 7:  # Participant removed or left
         if member_jid:
-            actor = "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
+            actor = (
+                "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
+            )
             target = _resolve_ios_jid(member_jid, contacts_map)
         elif from_me == 1:
             actor = "You"
@@ -487,8 +535,10 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
         return f"{target} was removed"
 
     if ev in (5, 9):  # Admin changed
-        target = _resolve_ios_jid(member_jid, contacts_map) if member_jid else (
-            _resolve_ios_jid(txt, contacts_map) if txt else "You"
+        target = (
+            _resolve_ios_jid(member_jid, contacts_map)
+            if member_jid
+            else (_resolve_ios_jid(txt, contacts_map) if txt else "You")
         )
         if target in ("You", "you"):
             return "You're now an admin" if ev == 9 else "You're no longer an admin"
@@ -521,17 +571,21 @@ def _format_android_service_row(row: dict) -> str:
     part_name = row.get("participant_name")
 
     actor = sender if sender else ("You" if from_me == 1 else "Someone")
-    target = part_name or (sender if act in (4, 5, 13, 79) else None) or ("You" if from_me == 1 and act in (4, 5, 13, 79) else "Someone")
+    target = (
+        part_name
+        or (sender if act in (4, 5, 13, 79) else None)
+        or ("You" if from_me == 1 and act in (4, 5, 13, 79) else "Someone")
+    )
 
     if act == 11:  # Group created
         if txt:
             return f'{actor} created group "{txt}"'
-        return f'{actor} created this group'
+        return f"{actor} created this group"
 
     if act == 1:  # Subject changed
         if txt:
             return f'{actor} changed the subject to "{txt}"'
-        return f'{actor} changed the group subject'
+        return f"{actor} changed the group subject"
 
     if act in (12, 4):  # Participant added / joined
         if target in ("You", "you") and (not actor or actor == "Someone" or actor == "You"):
@@ -580,7 +634,13 @@ def _format_android_service_row(row: dict) -> str:
             return "Only admins can send messages in this group"
         return "All participants can send messages in this group"
 
-    if txt and not txt.startswith("{") and "@lid" not in txt and txt.lower() not in ("true", "false") and not txt.isdigit():
+    if (
+        txt
+        and not txt.startswith("{")
+        and "@lid" not in txt
+        and txt.lower() not in ("true", "false")
+        and not txt.isdigit()
+    ):
         return txt
     return "Group event"
 
@@ -598,9 +658,15 @@ def _hydrate_android_service_participants(
         return {}
     ph = ",".join("?" * len(msg_ids))
     ldn_col = "ldn.display_name AS lid_name," if has_lid_dn else "NULL AS lid_name,"
-    ldn_join = "LEFT JOIN lid_display_name ldn ON ldn.lid_row_id = mcp.user_jid_row_id" if has_lid_dn else ""
+    ldn_join = (
+        "LEFT JOIN lid_display_name ldn ON ldn.lid_row_id = mcp.user_jid_row_id"
+        if has_lid_dn
+        else ""
+    )
     server_col = "j_part_raw.server AS raw_server," if has_jid_server else "NULL AS raw_server,"
-    raw_str_col = "j_part_raw.raw_string AS raw_string," if has_jid_raw_string else "NULL AS raw_string,"
+    raw_str_col = (
+        "j_part_raw.raw_string AS raw_string," if has_jid_raw_string else "NULL AS raw_string,"
+    )
     is_lid_pred = "j_part_raw.server = 'lid'" if has_jid_server else "0"
 
     sql = f"""
@@ -725,7 +791,10 @@ def _format_service_rows(
                 for ar in arch_rows:
                     if ar["display_name"]:
                         contacts_map[ar["number"]] = (ar["display_name"], ar["number"])
-                        contacts_map[f"{ar['number']}@s.whatsapp.net"] = (ar["display_name"], ar["number"])
+                        contacts_map[f"{ar['number']}@s.whatsapp.net"] = (
+                            ar["display_name"],
+                            ar["number"],
+                        )
             except sqlite3.OperationalError:
                 pass
             try:
@@ -782,6 +851,7 @@ def _format_service_rows(
 # iOS reactions — ZRECEIPTINFO protobuf extraction
 # ---------------------------------------------------------------------------
 
+
 def _read_varint(data: bytes, pos: int) -> tuple:
     """Read a base-128 varint from data at pos. Returns (value, new_pos).
 
@@ -791,7 +861,7 @@ def _read_varint(data: bytes, pos: int) -> tuple:
     while pos < len(data):
         b = data[pos]
         pos += 1
-        val |= (b & 0x7f) << shift
+        val |= (b & 0x7F) << shift
         if not (b & 0x80):
             break
         shift += 7
@@ -815,12 +885,12 @@ def _parse_protobuf(data: bytes) -> list:
                 val, pos = _read_varint(data, pos)
                 results.append((f, "varint", val))
             elif w == 1:  # 64-bit fixed
-                val = int.from_bytes(data[pos:pos + 8], "little")
+                val = int.from_bytes(data[pos : pos + 8], "little")
                 pos += 8
                 results.append((f, "fixed64", val))
             elif w == 2:  # length-delimited
                 length, pos = _read_varint(data, pos)
-                val = data[pos:pos + length]
+                val = data[pos : pos + length]
                 pos += length
                 results.append((f, "len", val))
             elif w == 5:  # 32-bit fixed
@@ -850,11 +920,11 @@ def _scan_emojis(data: bytes) -> list[str]:
             i += 3
         elif b == 0xE2 and i + 2 < len(data):
             # 3-byte emoji (e.g. ❤️ = e2 9d a4)
-            emojis.append(data[i:i + 3].hex())
+            emojis.append(data[i : i + 3].hex())
             i += 3
         elif b == 0xF0 and i + 3 < len(data):
             # 4-byte emoji (e.g. 😂 = f0 9f 98 82)
-            emojis.append(data[i:i + 4].hex())
+            emojis.append(data[i : i + 4].hex())
             i += 4
         else:
             i += 1
@@ -939,9 +1009,7 @@ def _extract_ios_reaction_reactors(receipt_bytes: bytes) -> list:
     return []
 
 
-def _ios_reactions(wa_conn: sqlite3.Connection,
-                   chat_id: str,
-                   msg_ids: list) -> dict:
+def _ios_reactions(wa_conn: sqlite3.Connection, chat_id: str, msg_ids: list) -> dict:
     """Batch-fetch iOS reactions from ZRECEIPTINFO for a list of message IDs.
 
     Returns a dict: {msg_id: [(sender_hex, emoji_hex), ...]}.
@@ -956,14 +1024,17 @@ def _ios_reactions(wa_conn: sqlite3.Connection,
     # Resolve "me" from a sent message in this chat so we can annotate reactions.
     # In group chats ZGROUPMEMBER.ZMEMBERJID is populated; in 1-to-1 chats we fall
     # back to ZWAMESSAGE.ZFROMJID.
-    my_row = wa_conn.execute(f"""
+    my_row = wa_conn.execute(
+        """
         SELECT COALESCE(gm.ZMEMBERJID, m.ZFROMJID) AS me_jid
         FROM ZWAMESSAGE m
         LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
         WHERE m.ZCHATSESSION = CAST(? AS INTEGER)
           AND m.ZISFROMME = 1
         LIMIT 1
-    """, (chat_id,)).fetchone()
+    """,
+        (chat_id,),
+    ).fetchone()
 
     my_phone = None
     if my_row and my_row["me_jid"]:
@@ -972,14 +1043,17 @@ def _ios_reactions(wa_conn: sqlite3.Connection,
         if at > 0:
             my_phone = jid[:at]
 
-    rows = wa_conn.execute(f"""
+    rows = wa_conn.execute(
+        f"""
         SELECT m.Z_PK AS msg_id,
                mi.ZRECEIPTINFO AS receipt_info
         FROM ZWAMESSAGE m
         LEFT JOIN ZWAMESSAGEINFO mi ON mi.Z_PK = m.ZMESSAGEINFO
         WHERE m.Z_PK IN ({placeholders})
           AND mi.ZRECEIPTINFO IS NOT NULL
-    """, msg_ids).fetchall()
+    """,
+        msg_ids,
+    ).fetchall()
 
     if not rows:
         return {}
@@ -1004,10 +1078,9 @@ def _ios_reactions(wa_conn: sqlite3.Connection,
     return reactions_by_msg
 
 
-def _resolve_and_cache_reactions(source_type: str,
-                                 wa_conn: sqlite3.Connection,
-                                 archive_conn: sqlite3.Connection,
-                                 rows: list) -> None:
+def _resolve_and_cache_reactions(
+    source_type: str, wa_conn: sqlite3.Connection, archive_conn: sqlite3.Connection, rows: list
+) -> None:
     if source_type != "android" or not rows:
         return
 
@@ -1016,14 +1089,17 @@ def _resolve_and_cache_reactions(source_type: str,
         return
 
     placeholders = ",".join("?" * len(msg_ids))
-    reaction_rows = wa_conn.execute(f"""
+    reaction_rows = wa_conn.execute(
+        f"""
         SELECT ao.parent_message_row_id AS msg_id,
                GROUP_CONCAT(r.reaction) AS reactions
         FROM message_add_on ao
         JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
         WHERE ao.parent_message_row_id IN ({placeholders})
         GROUP BY ao.parent_message_row_id
-    """, msg_ids).fetchall()
+    """,
+        msg_ids,
+    ).fetchall()
 
     if not reaction_rows:
         return
@@ -1037,11 +1113,14 @@ def _resolve_and_cache_reactions(source_type: str,
         INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions)
         VALUES (?, ?, ?)
     """
-    archive_conn.executemany(cache_sql, [
-        (row["chat_id"], row["msg_id"], row["reactions"])
-        for row in rows
-        if row["msg_id"] in reaction_map
-    ])
+    archive_conn.executemany(
+        cache_sql,
+        [
+            (row["chat_id"], row["msg_id"], row["reactions"])
+            for row in rows
+            if row["msg_id"] in reaction_map
+        ],
+    )
     archive_conn.commit()
 
 
@@ -1056,16 +1135,28 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     keys = rows[0].keys()
-    archive_conn.executemany(sql, [
-        (r["chat_id"], r["chat_type"], r["msg_id"], r["timestamp_ms"],
-         r["sender"], r["from_me"], r["archive_path"] if "archive_path" in keys else None,
-         r["media_type"], r["media_name"] if "media_name" in keys else None,
-         r["text_body"], r["quoted_text"] if "quoted_text" in keys else None,
-         r["quoted_sender"] if "quoted_sender" in keys else None,
-         r["quoted_ts"] if "quoted_ts" in keys else None,
-         r["reactions"] if "reactions" in keys else None)
-        for r in rows
-    ])
+    archive_conn.executemany(
+        sql,
+        [
+            (
+                r["chat_id"],
+                r["chat_type"],
+                r["msg_id"],
+                r["timestamp_ms"],
+                r["sender"],
+                r["from_me"],
+                r["archive_path"] if "archive_path" in keys else None,
+                r["media_type"],
+                r["media_name"] if "media_name" in keys else None,
+                r["text_body"],
+                r["quoted_text"] if "quoted_text" in keys else None,
+                r["quoted_sender"] if "quoted_sender" in keys else None,
+                r["quoted_ts"] if "quoted_ts" in keys else None,
+                r["reactions"] if "reactions" in keys else None,
+            )
+            for r in rows
+        ],
+    )
     archive_conn.commit()
 
 
@@ -1101,8 +1192,12 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
             conn.execute("PRAGMA user_version = 1")
         conn.row_factory = sqlite3.Row
         conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('theme', 'dark')")
-        conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('date_format', 'DD/MM/YYYY')")
-        conn.execute("INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('font_size', 'medium')")
+        conn.execute(
+            "INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('date_format', 'DD/MM/YYYY')"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO user_preferences (key, value) VALUES ('font_size', 'medium')"
+        )
         conn.commit()
     except sqlite3.OperationalError as e:
         if "readonly" in str(e).lower():
@@ -1114,7 +1209,9 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
     return conn
 
 
-def _run_db_maintenance(cache_conn: sqlite3.Connection, archive_conn: sqlite3.Connection | None) -> None:
+def _run_db_maintenance(
+    cache_conn: sqlite3.Connection, archive_conn: sqlite3.Connection | None
+) -> None:
     """Run lightweight non-blocking maintenance on cache and archive databases."""
     try:
         cache_conn.execute("PRAGMA incremental_vacuum(500)")
@@ -1158,31 +1255,29 @@ def _source_changed(cache_conn: sqlite3.Connection, source_path: str) -> bool:
             "SELECT key, value FROM sync_meta WHERE key IN ('source_mtime', 'source_size')"
         ).fetchall()
     }
-    return (
-        rows.get("source_mtime") != current_mtime
-        or rows.get("source_size") != current_size
-    )
+    return rows.get("source_mtime") != current_mtime or rows.get("source_size") != current_size
 
 
 def _save_source_stamp(cache_conn: sqlite3.Connection, source_path: str):
     st = os.stat(source_path)
     cache_conn.execute(
         "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('source_mtime', ?)",
-        (str(st.st_mtime),)
+        (str(st.st_mtime),),
     )
     cache_conn.execute(
         "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('source_size', ?)",
-        (str(st.st_size),)
+        (str(st.st_size),),
     )
     cache_conn.execute(
         "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_scanned_at', ?)",
-        (str(int(time.time())),)
+        (str(int(time.time())),),
     )
     cache_conn.commit()
 
 
-def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2000,
-                     on_progress=None):
+def _stream_fts_rows(
+    cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2000, on_progress=None
+):
     idx_sql = """
         INSERT OR IGNORE INTO message_index (rowid, chat_id, chat_type, timestamp_ms)
         VALUES (?, ?, ?, ?)
@@ -1196,9 +1291,18 @@ def _stream_fts_rows(cursor, cache_conn: sqlite3.Connection, chunk_size: int = 2
     for row in cursor:
         text_body = row["text_body"] or ""
         msg_type = row["message_type"]
-        if msg_type in (6, 7) and ("@lid" in text_body or text_body.startswith("{") or text_body.isdigit() or text_body in ("true", "false")):
+        if msg_type in (6, 7) and (
+            "@lid" in text_body
+            or text_body.startswith("{")
+            or text_body.isdigit()
+            or text_body in ("true", "false")
+        ):
             continue
-        is_media = row["message_type"] is not None and row["message_type"] != 0 and row["media_file"] is not None
+        is_media = (
+            row["message_type"] is not None
+            and row["message_type"] != 0
+            and row["media_file"] is not None
+        )
         if not text_body and not is_media:
             continue
         idx_batch.append((row["rowid"], row["chat_id"], row["chat_type"], row["timestamp_ms"]))
@@ -1229,15 +1333,21 @@ def _clear_fts_index(cache_conn: sqlite3.Connection):
     cache_conn.commit()
 
 
-def _fts_android_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
-                      chat_id: str, chat_type: str, on_progress=None):
+def _fts_android_chat(
+    wa_conn: sqlite3.Connection,
+    cache_conn: sqlite3.Connection,
+    chat_id: str,
+    chat_type: str,
+    on_progress=None,
+):
     if chat_type == "group":
         where = "WHERE CAST(m.chat_row_id AS TEXT) = ?"
         params = (chat_id,)
     else:
         where = "WHERE c.subject IS NULL AND COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT)) = ?"
         params = (chat_id,)
-    cursor = wa_conn.execute(f"""
+    cursor = wa_conn.execute(
+        f"""
         SELECT
             m._id                                                    AS rowid,
             CASE
@@ -1255,7 +1365,9 @@ def _fts_android_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connectio
         LEFT JOIN message_media mm ON mm.message_row_id = m._id
         {where}
         ORDER BY m.timestamp ASC
-    """, params)
+    """,
+        params,
+    )
     _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
 
 
@@ -1281,11 +1393,13 @@ def _find_ios_db(wa_db_path: str, rel_path: str, output_root: Path | None) -> Pa
         db_p.parent / "ExtChatDB" / rel_path,
     ]
     if output_root is not None:
-        candidates.extend([
-            output_root / "Whatsapp Databases" / rel_path,
-            output_root / rel_path,
-            output_root / "ExtChatDB" / rel_path,
-        ])
+        candidates.extend(
+            [
+                output_root / "Whatsapp Databases" / rel_path,
+                output_root / rel_path,
+                output_root / "ExtChatDB" / rel_path,
+            ]
+        )
     for cand in candidates:
         if cand.is_file():
             return cand
@@ -1313,8 +1427,13 @@ def _check_ios_hd_association(wa_db_path: str, ext_db_path: Path | None) -> bool
         return False
 
 
-def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
-                  chat_id: str, on_progress, hd_clause: str):
+def _fts_ios_chat(
+    wa_conn: sqlite3.Connection,
+    cache_conn: sqlite3.Connection,
+    chat_id: str,
+    on_progress,
+    hd_clause: str,
+):
     sql = f"""
         SELECT
             m.Z_PK                                                      AS rowid,
@@ -1336,8 +1455,14 @@ def _fts_ios_chat(wa_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
     _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
 
 
-def _build_fts_chat(cache_conn: sqlite3.Connection, source_type: str, wa_db_path: str,
-                    chat_id: str, chat_type: str, on_progress=None):
+def _build_fts_chat(
+    cache_conn: sqlite3.Connection,
+    source_type: str,
+    wa_db_path: str,
+    chat_id: str,
+    chat_type: str,
+    on_progress=None,
+):
     wa_conn = sqlite3.connect(wa_db_path)
     wa_conn.row_factory = sqlite3.Row
     if source_type == "android":
@@ -1362,8 +1487,9 @@ def _build_fts_chat(cache_conn: sqlite3.Connection, source_type: str, wa_db_path
     cache_conn.commit()
 
 
-def _ensure_chat_indexed(cache_conn: sqlite3.Connection, source_type: str, wa_db_path: str,
-                         chat_id: str, chat_type: str):
+def _ensure_chat_indexed(
+    cache_conn: sqlite3.Connection, source_type: str, wa_db_path: str, chat_id: str, chat_type: str
+):
     row = cache_conn.execute(
         "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?",
         (chat_id, chat_type),
@@ -1372,10 +1498,16 @@ def _ensure_chat_indexed(cache_conn: sqlite3.Connection, source_type: str, wa_db
         _build_fts_chat(cache_conn, source_type, wa_db_path, chat_id, chat_type)
 
 
-def _maybe_start_indexing(chat_id: str, chat_type: str,
-                          cache_conn, source_type: str, wa_db_path: str,
-                          output_root: Path,
-                          indexing_state: dict, indexing_lock):
+def _maybe_start_indexing(
+    chat_id: str,
+    chat_type: str,
+    cache_conn,
+    source_type: str,
+    wa_db_path: str,
+    output_root: Path,
+    indexing_state: dict,
+    indexing_lock,
+):
     key = (chat_id, chat_type)
     already = cache_conn.execute(
         "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key
@@ -1388,15 +1520,22 @@ def _maybe_start_indexing(chat_id: str, chat_type: str,
         indexing_state[key] = "indexing"
     threading.Thread(
         target=_bg_index_chat,
-        args=(str(get_cache_db_path(output_root)), source_type,
-              wa_db_path, chat_id, chat_type,
-              indexing_state, indexing_lock),
+        args=(
+            str(get_cache_db_path(output_root)),
+            source_type,
+            wa_db_path,
+            chat_id,
+            chat_type,
+            indexing_state,
+            indexing_lock,
+        ),
         daemon=True,
     ).start()
 
 
-def _build_media_only(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Connection,
-                      output_root: Path):
+def _build_media_only(
+    archive_conn: sqlite3.Connection, cache_conn: sqlite3.Connection, output_root: Path
+):
     archive_map = {
         row["original_path"]: row["archive_path"]
         for row in archive_conn.execute(
@@ -1406,15 +1545,15 @@ def _build_media_only(archive_conn: sqlite3.Connection, cache_conn: sqlite3.Conn
 
     group_folders = {
         r["folder"]: ("group", str(r["chat_row_id"]))
-        for r in archive_conn.execute(
-            "SELECT folder, chat_row_id FROM groups"
-        ).fetchall()
+        for r in archive_conn.execute("SELECT folder, chat_row_id FROM groups").fetchall()
     }
-    folder_map = {**{r["folder"]: ("contact", str(r["number"]))
-                     for r in archive_conn.execute(
-                         "SELECT folder, number FROM contacts"
-                     ).fetchall()},
-                  **group_folders}
+    folder_map = {
+        **{
+            r["folder"]: ("contact", str(r["number"]))
+            for r in archive_conn.execute("SELECT folder, number FROM contacts").fetchall()
+        },
+        **group_folders,
+    }
 
     cache_conn.execute("DELETE FROM message_index")
     cache_conn.execute("DELETE FROM message_index_fts")
@@ -1628,9 +1767,15 @@ def _ios_chat_filter(chat_id: str) -> tuple[str, list]:
     return "m.ZCHATSESSION = CAST(? AS INTEGER)", [chat_id]
 
 
-def _bg_index_chat(cache_db_path: str, source_type: str, wa_db_path: str,
-                   chat_id: str, chat_type: str,
-                   state: dict, lock: threading.Lock):
+def _bg_index_chat(
+    cache_db_path: str,
+    source_type: str,
+    wa_db_path: str,
+    chat_id: str,
+    chat_type: str,
+    state: dict,
+    lock: threading.Lock,
+):
     try:
         cache_conn = sqlite3.connect(cache_db_path)
         try:
@@ -1661,6 +1806,7 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
                  (compact format: no base_ts, no field 5 => delivered-only, read blank)
       field 4  = unrelated large value; NOT a delivered/read gate => ignored
     """
+
     def _read_varint(data, pos):
         result = 0
         shift = 0
@@ -1709,7 +1855,7 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
             wire = tag_byte & 0x07
             if wire == 2:
                 length, pos = _read_varint(data, pos)
-                value = data[pos:pos + length]
+                value = data[pos : pos + length]
                 pos += length
                 if field == 1:
                     if len(value) > 1:
@@ -1756,7 +1902,7 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
                 length, pos = _read_varint(blob, pos)
             except Exception:
                 break
-            value = blob[pos:pos + length]
+            value = blob[pos : pos + length]
             pos += length
             if field == 2:
                 entries.append(value)
@@ -1790,13 +1936,17 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
         read_deltas = [rd for _, _, rd in parsed if rd is not None]
         if not delivered_deltas and not read_deltas:
             return []
-        return [{
-            "name": "",
-            "jid": "",
-            "delivered_ts": (anchor + min(delivered_deltas)) * 1000 if delivered_deltas else None,
-            "read_ts": (anchor + min(read_deltas)) * 1000 if read_deltas else None,
-            "played_ts": None,
-        }]
+        return [
+            {
+                "name": "",
+                "jid": "",
+                "delivered_ts": (anchor + min(delivered_deltas)) * 1000
+                if delivered_deltas
+                else None,
+                "read_ts": (anchor + min(read_deltas)) * 1000 if read_deltas else None,
+                "played_ts": None,
+            }
+        ]
 
     members = []
     for lid, delivered_delta, read_delta in parsed:
@@ -1813,13 +1963,17 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
                 ).fetchone()
                 if row and row[0]:
                     name = row[0]
-        members.append({
-            "name": name or lid or "",
-            "jid": lid or "",
-            "delivered_ts": (anchor + delivered_delta) * 1000 if delivered_delta is not None else None,
-            "read_ts": (anchor + read_delta) * 1000 if read_delta is not None else None,
-            "played_ts": None,
-        })
+        members.append(
+            {
+                "name": name or lid or "",
+                "jid": lid or "",
+                "delivered_ts": (anchor + delivered_delta) * 1000
+                if delivered_delta is not None
+                else None,
+                "read_ts": (anchor + read_delta) * 1000 if read_delta is not None else None,
+                "played_ts": None,
+            }
+        )
     return members
 
 
@@ -1852,14 +2006,24 @@ def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> li
         else:
             entry = by_user[ujid]
             if deliv is not None:
-                entry["delivered_sec"] = min(entry["delivered_sec"], deliv) if entry["delivered_sec"] is not None else deliv
+                entry["delivered_sec"] = (
+                    min(entry["delivered_sec"], deliv)
+                    if entry["delivered_sec"] is not None
+                    else deliv
+                )
             if read is not None:
-                entry["read_sec"] = min(entry["read_sec"], read) if entry["read_sec"] is not None else read
+                entry["read_sec"] = (
+                    min(entry["read_sec"], read) if entry["read_sec"] is not None else read
+                )
             if played is not None:
-                entry["played_sec"] = min(entry["played_sec"], played) if entry["played_sec"] is not None else played
+                entry["played_sec"] = (
+                    min(entry["played_sec"], played) if entry["played_sec"] is not None else played
+                )
 
     if not is_group:
-        delivered_secs = [d["delivered_sec"] for d in by_user.values() if d["delivered_sec"] is not None]
+        delivered_secs = [
+            d["delivered_sec"] for d in by_user.values() if d["delivered_sec"] is not None
+        ]
         read_secs = [d["read_sec"] for d in by_user.values() if d["read_sec"] is not None]
         played_secs = [d["played_sec"] for d in by_user.values() if d["played_sec"] is not None]
         if not delivered_secs and not read_secs and not played_secs:
@@ -1867,28 +2031,36 @@ def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> li
         deliv_ts = min(delivered_secs) * 1000 if delivered_secs else None
         read_ts = min(read_secs) * 1000 if read_secs else None
         played_ts = min(played_secs) * 1000 if played_secs else None
-        return [{
-            "name": "",
-            "jid": "",
-            "delivered_ts": deliv_ts,
-            "read_ts": read_ts,
-            "played_ts": played_ts,
-            "read_known": read_ts is not None,
-        }]
+        return [
+            {
+                "name": "",
+                "jid": "",
+                "delivered_ts": deliv_ts,
+                "read_ts": read_ts,
+                "played_ts": played_ts,
+                "read_known": read_ts is not None,
+            }
+        ]
 
     members = []
     for ujid, data in by_user.items():
         name = None
-        c_row = conn.execute("SELECT full_name FROM _ios_contacts WHERE jid = ?", (ujid,)).fetchone()
+        c_row = conn.execute(
+            "SELECT full_name FROM _ios_contacts WHERE jid = ?", (ujid,)
+        ).fetchone()
         if c_row and c_row[0]:
             name = c_row[0]
         else:
             prefix = ujid.split("@")[0]
-            c_row2 = conn.execute("SELECT full_name FROM _ios_contacts WHERE jid = ?", (prefix,)).fetchone()
+            c_row2 = conn.execute(
+                "SELECT full_name FROM _ios_contacts WHERE jid = ?", (prefix,)
+            ).fetchone()
             if c_row2 and c_row2[0]:
                 name = c_row2[0]
             else:
-                p_row = conn.execute("SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ?", (ujid,)).fetchone()
+                p_row = conn.execute(
+                    "SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ?", (ujid,)
+                ).fetchone()
                 if p_row and p_row[0]:
                     name = p_row[0]
                 else:
@@ -1899,20 +2071,23 @@ def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> li
         read_ts = data["read_sec"] * 1000 if data["read_sec"] is not None else None
         played_ts = data["played_sec"] * 1000 if data["played_sec"] is not None else None
 
-        members.append({
-            "name": name or jid_clean or "",
-            "jid": jid_clean,
-            "delivered_ts": deliv_ts,
-            "read_ts": read_ts,
-            "played_ts": played_ts,
-            "read_known": read_ts is not None,
-        })
+        members.append(
+            {
+                "name": name or jid_clean or "",
+                "jid": jid_clean,
+                "delivered_ts": deliv_ts,
+                "read_ts": read_ts,
+                "played_ts": played_ts,
+                "read_known": read_ts is not None,
+            }
+        )
     return members
 
 
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
+
 
 def create_app(output_root: Path, rescan: bool = False):
     app = Flask(__name__)
@@ -1937,7 +2112,6 @@ def create_app(output_root: Path, rescan: bool = False):
         archive_conn_tmp.row_factory = sqlite3.Row
         _build_media_only(archive_conn_tmp, cache_conn, output_root)
         archive_conn_tmp.close()
-        wa_conn = None
     else:
         print(f"[wab_viewer] Source DB: {source_type} at {wa_db_path}")
 
@@ -1957,20 +2131,22 @@ def create_app(output_root: Path, rescan: bool = False):
         if source_type == "ios" and wa_db_path is not None:
             ext_db_init = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", output_root)
             if not ext_db_init:
-                ext_db_init = _find_ios_db(wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", output_root)
+                ext_db_init = _find_ios_db(
+                    wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", output_root
+                )
             has_ios_hd = _check_ios_hd_association(wa_db_path, ext_db_init)
 
         if has_ios_hd:
-            globals()['_IOS_FILTER'] = _BASE_IOS_FILTER + _IOS_HD_DEDUP_CLAUSE
-            globals()['_IOS_FILTER_TS'] = _BASE_IOS_FILTER_TS + _IOS_HD_DEDUP_CLAUSE
+            globals()["_IOS_FILTER"] = _BASE_IOS_FILTER + _IOS_HD_DEDUP_CLAUSE
+            globals()["_IOS_FILTER_TS"] = _BASE_IOS_FILTER_TS + _IOS_HD_DEDUP_CLAUSE
         else:
-            globals()['_IOS_FILTER'] = _BASE_IOS_FILTER
-            globals()['_IOS_FILTER_TS'] = _BASE_IOS_FILTER_TS
+            globals()["_IOS_FILTER"] = _BASE_IOS_FILTER
+            globals()["_IOS_FILTER_TS"] = _BASE_IOS_FILTER_TS
 
     def get_wa():
         if source_type is None:
             return None
-        conn = getattr(_wa_local, 'conn', None)
+        conn = getattr(_wa_local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(wa_db_path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
@@ -1979,8 +2155,12 @@ def create_app(output_root: Path, rescan: bool = False):
             conn.execute("PRAGMA temp_store = MEMORY")
             conn.execute("ATTACH DATABASE ? AS arch", (str(archive_db_path),))
             if source_type == "android":
-                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)")
-                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _lid_map_resolved (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)")
+                conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
+                )
+                conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _lid_map_resolved (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
+                )
                 try:
                     conn.execute("""
                         INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
@@ -1995,12 +2175,19 @@ def create_app(output_root: Path, rescan: bool = False):
                 except sqlite3.OperationalError:
                     pass
             if source_type == "ios":
-                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT PRIMARY KEY, full_name TEXT, phone_number TEXT)")
+                conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT PRIMARY KEY, full_name TEXT, phone_number TEXT)"
+                )
 
                 contacts_v2 = _find_ios_db(wa_db_path, "ContactsV2.sqlite", output_root)
                 if contacts_v2:
                     conn.execute("ATTACH DATABASE ? AS cv", (str(contacts_v2),))
-                    cv_cols = {r["name"] for r in conn.execute("PRAGMA cv.table_info(ZWAADDRESSBOOKCONTACT)").fetchall()}
+                    cv_cols = {
+                        r["name"]
+                        for r in conn.execute(
+                            "PRAGMA cv.table_info(ZWAADDRESSBOOKCONTACT)"
+                        ).fetchall()
+                    }
                     if "ZLID" in cv_cols:
                         conn.execute("""
                             INSERT INTO _ios_contacts (jid, full_name, phone_number)
@@ -2065,7 +2252,10 @@ def create_app(output_root: Path, rescan: bool = False):
                 lid_db = _find_ios_db(wa_db_path, "LID.sqlite", output_root)
                 if lid_db:
                     conn.execute("ATTACH DATABASE ? AS lid_db", (str(lid_db),))
-                    lid_cols = {r["name"] for r in conn.execute("PRAGMA lid_db.table_info(ZWAZACCOUNT)").fetchall()}
+                    lid_cols = {
+                        r["name"]
+                        for r in conn.execute("PRAGMA lid_db.table_info(ZWAZACCOUNT)").fetchall()
+                    }
                     if "ZIDENTIFIER" in lid_cols and "ZPHONENUMBER" in lid_cols:
                         conn.execute("""
                             INSERT INTO _ios_contacts (jid, full_name, phone_number)
@@ -2199,22 +2389,33 @@ def create_app(output_root: Path, rescan: bool = False):
                     if user_row and user_row[0]:
                         u_jid = user_row[0]
                         u_phone = u_jid.split("@")[0]
-                        conn.execute("INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)", (u_jid, u_phone))
-                        conn.execute("INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)", (u_phone, u_phone))
-                        conn.execute("INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)", (f"+{u_phone}", u_phone))
+                        conn.execute(
+                            "INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)",
+                            (u_jid, u_phone),
+                        )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)",
+                            (u_phone, u_phone),
+                        )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO _ios_contacts (jid, full_name, phone_number) VALUES (?, 'You', ?)",
+                            (f"+{u_phone}", u_phone),
+                        )
                 except sqlite3.OperationalError:
                     pass
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS _ios_contacts_jid ON _ios_contacts(jid)"
-                )
+                conn.execute("CREATE INDEX IF NOT EXISTS _ios_contacts_jid ON _ios_contacts(jid)")
                 infra_db = _find_ios_db(wa_db_path, "MessagingInfraDatabase.sqlite", output_root)
                 if not infra_db:
-                    infra_db = _find_ios_db(wa_db_path, "MessagingInfraDB_v2/MessagingInfraDatabase.sqlite", output_root)
+                    infra_db = _find_ios_db(
+                        wa_db_path, "MessagingInfraDB_v2/MessagingInfraDatabase.sqlite", output_root
+                    )
                 if infra_db:
                     conn.execute("ATTACH DATABASE ? AS infra", (str(infra_db),))
                 ext_db = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", output_root)
                 if not ext_db:
-                    ext_db = _find_ios_db(wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", output_root)
+                    ext_db = _find_ios_db(
+                        wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", output_root
+                    )
                 if ext_db:
                     try:
                         conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db),))
@@ -2227,7 +2428,7 @@ def create_app(output_root: Path, rescan: bool = False):
     def _close_wa_conn(exc):
         if source_type is None:
             return
-        conn = getattr(_wa_local, 'conn', None)
+        conn = getattr(_wa_local, "conn", None)
         if conn is not None:
             try:
                 conn.commit()
@@ -2242,7 +2443,7 @@ def create_app(output_root: Path, rescan: bool = False):
     _archive_conn.execute("PRAGMA journal_mode = WAL")
     _archive_conn.execute("PRAGMA busy_timeout = 5000")
     _archive_conn.row_factory = sqlite3.Row
-    _archive_conn.executescript(f"""
+    _archive_conn.executescript("""
         CREATE TABLE IF NOT EXISTS contacts (
             number TEXT PRIMARY KEY,
             folder TEXT NOT NULL DEFAULT '',
@@ -2285,8 +2486,7 @@ def create_app(output_root: Path, rescan: bool = False):
             PRIMARY KEY (chat_id, msg_id)
         );
     """)
-    cols = [r[1] for r in _archive_conn.execute(
-        "PRAGMA table_info(recent_messages)").fetchall()]
+    cols = [r[1] for r in _archive_conn.execute("PRAGMA table_info(recent_messages)").fetchall()]
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
 
@@ -2303,18 +2503,27 @@ def create_app(output_root: Path, rescan: bool = False):
     has_jid_raw_string = False
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
-        _wa_tables = {r[0] for r in _tmp_wa.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
+        _wa_tables = {
+            r[0]
+            for r in _tmp_wa.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
         has_reactions = "message_add_on" in _wa_tables
         has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
         has_lid_dn = "lid_display_name" in _wa_tables
         has_message_system = "message_system" in _wa_tables
         has_mcp = "message_system_chat_participant" in _wa_tables
-        _jid_cols = {r[1] for r in _tmp_wa.execute("PRAGMA table_info(jid)").fetchall()} if "jid" in _wa_tables else set()
+        _jid_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(jid)").fetchall()}
+            if "jid" in _wa_tables
+            else set()
+        )
         has_jid_server = "server" in _jid_cols
         has_jid_raw_string = "raw_string" in _jid_cols
-        _zwa_cols = {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()} if "ZWAMESSAGE" in _wa_tables else set()
+        _zwa_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
+            if "ZWAMESSAGE" in _wa_tables
+            else set()
+        )
         has_ios_group_event = "ZGROUPEVENTTYPE" in _zwa_cols
         _tmp_wa.close()
 
@@ -2322,23 +2531,27 @@ def create_app(output_root: Path, rescan: bool = False):
         group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
         has_ios_sort = "ZSORT" in _zwa_cols
         sort_col_ios = "COALESCE(m.ZSORT, m.Z_PK)" if has_ios_sort else "m.Z_PK"
-        ios_service_filter = "OR (m.ZMESSAGETYPE = 6 AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))" if has_ios_group_event else "OR (m.ZMESSAGETYPE = 6)"
-        globals()['_BASE_IOS_FILTER'] = f"""
+        ios_service_filter = (
+            "OR (m.ZMESSAGETYPE = 6 AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))"
+            if has_ios_group_event
+            else "OR (m.ZMESSAGETYPE = 6)"
+        )
+        globals()["_BASE_IOS_FILTER"] = f"""
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
         OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
         {ios_service_filter}
     )
 """
-        globals()['_BASE_IOS_FILTER_TS'] = globals()['_BASE_IOS_FILTER']
+        globals()["_BASE_IOS_FILTER_TS"] = globals()["_BASE_IOS_FILTER"]
         if has_ios_hd:
-            globals()['_IOS_FILTER'] = globals()['_BASE_IOS_FILTER'] + _IOS_HD_DEDUP_CLAUSE
-            globals()['_IOS_FILTER_TS'] = globals()['_BASE_IOS_FILTER_TS'] + _IOS_HD_DEDUP_CLAUSE
+            globals()["_IOS_FILTER"] = globals()["_BASE_IOS_FILTER"] + _IOS_HD_DEDUP_CLAUSE
+            globals()["_IOS_FILTER_TS"] = globals()["_BASE_IOS_FILTER_TS"] + _IOS_HD_DEDUP_CLAUSE
         else:
-            globals()['_IOS_FILTER'] = globals()['_BASE_IOS_FILTER']
-            globals()['_IOS_FILTER_TS'] = globals()['_BASE_IOS_FILTER_TS']
+            globals()["_IOS_FILTER"] = globals()["_BASE_IOS_FILTER"]
+            globals()["_IOS_FILTER_TS"] = globals()["_BASE_IOS_FILTER_TS"]
 
-        globals()['_IOS_SELECT'] = f"""
+        globals()["_IOS_SELECT"] = f"""
     SELECT
         m.Z_PK                                                       AS msg_id,
         {sort_col_ios}                                               AS sort_id,
@@ -2421,20 +2634,27 @@ def create_app(output_root: Path, rescan: bool = False):
           ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
 """
 
-    ms_join = "LEFT JOIN message_system ms ON ms.message_row_id = m._id" if has_message_system else ""
+    ms_join = (
+        "LEFT JOIN message_system ms ON ms.message_row_id = m._id" if has_message_system else ""
+    )
     ms_col = "ms.action_type" if has_message_system else "NULL"
 
-    ms_action_clause = "ms.action_type IN (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79)" if has_message_system else "(m.text_data IS NOT NULL AND m.text_data != '')"
-    globals()['_ANDROID_FILTER'] = f"""
+    ms_action_clause = (
+        "ms.action_type IN (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79)"
+        if has_message_system
+        else "(m.text_data IS NOT NULL AND m.text_data != '')"
+    )
+    globals()["_ANDROID_FILTER"] = f"""
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
         OR (m.message_type = 7 AND {ms_action_clause})
     )
     """
-    globals()['_ANDROID_FILTER_TS'] = globals()['_ANDROID_FILTER']
+    globals()["_ANDROID_FILTER_TS"] = globals()["_ANDROID_FILTER"]
 
-    ldn_select_joins = """
+    ldn_select_joins = (
+        """
     LEFT JOIN _lid_map_resolved jm_lid_s ON jm_lid_s.jid_row_id = m.sender_jid_row_id
     LEFT JOIN lid_display_name ldn_s_direct ON ldn_s_direct.lid_row_id = m.sender_jid_row_id
     LEFT JOIN lid_display_name ldn_s_mapped ON ldn_s_mapped.lid_row_id = jm_lid_s.lid_row_id
@@ -2442,22 +2662,33 @@ def create_app(output_root: Path, rescan: bool = False):
     LEFT JOIN _lid_map_resolved jm_lid_sq ON jm_lid_sq.jid_row_id = mq.sender_jid_row_id
     LEFT JOIN lid_display_name ldn_sq_direct ON ldn_sq_direct.lid_row_id = mq.sender_jid_row_id
     LEFT JOIN lid_display_name ldn_sq_mapped ON ldn_sq_mapped.lid_row_id = jm_lid_sq.lid_row_id
-""" if has_lid_dn else ""
+"""
+        if has_lid_dn
+        else ""
+    )
 
-    ldn_sender_arm = """
+    ldn_sender_arm = (
+        """
             NULLIF(ldn_s_direct.display_name, ''),
             NULLIF(ldn_s_mapped.display_name, ''),
-""" if has_lid_dn else ""
+"""
+        if has_lid_dn
+        else ""
+    )
 
-    ldn_quoted_sender_arm = """
+    ldn_quoted_sender_arm = (
+        """
                  NULLIF(ldn_sq_direct.display_name, ''),
                  NULLIF(ldn_sq_mapped.display_name, ''),
-""" if has_lid_dn else ""
+"""
+        if has_lid_dn
+        else ""
+    )
 
     j_is_lid = "j.server = 'lid'" if has_jid_server else "0"
     jq_is_lid = "jq.server = 'lid'" if has_jid_server else "0"
 
-    globals()['_ANDROID_SELECT'] = f"""
+    globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
         {_ANDROID_CHAT_ID}                                           AS chat_id,
@@ -2480,7 +2711,7 @@ def create_app(output_root: Path, rescan: bool = False):
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
                            OR INSTR(LOWER(m.text_data), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
-            ELSE {_MEDIA_TYPE_EXPR.format(col='mm.file_path')}
+            ELSE {_MEDIA_TYPE_EXPR.format(col="mm.file_path")}
         END                                                          AS media_type,
         COALESCE(mm.media_name, '')                                  AS media_name,
         COALESCE(m.text_data, '')                                    AS text_body,
@@ -2521,35 +2752,57 @@ def create_app(output_root: Path, rescan: bool = False):
     def api_chats():
         conn = get_wa()
         if conn is None:
-            rows = get_cache().execute("""
+            rows = (
+                get_cache()
+                .execute("""
                 SELECT chat_id AS id, chat_type AS type,
                        MAX(NULLIF(timestamp_ms, 0)) AS newest_ts
                 FROM message_index
                 GROUP BY chat_id, chat_type
                 ORDER BY newest_ts DESC
-            """).fetchall()
-            return jsonify([{
-                "id": r["id"], "type": r["type"],
-                "display_name": r["id"],
-                "newest_ts": r["newest_ts"],
-                "last_msg_preview": "",
-                "last_msg_type": "text",
-                "last_msg_from_me": 0,
-            } for r in rows])
+            """)
+                .fetchall()
+            )
+            return jsonify(
+                [
+                    {
+                        "id": r["id"],
+                        "type": r["type"],
+                        "display_name": r["id"],
+                        "newest_ts": r["newest_ts"],
+                        "last_msg_preview": "",
+                        "last_msg_type": "text",
+                        "last_msg_from_me": 0,
+                    }
+                    for r in rows
+                ]
+            )
 
         if source_type == "android":
             j_s_is_lid = "j_s.server = 'lid'" if has_jid_server else "0"
             ms_chat_col = "ms.action_type" if has_message_system else "NULL"
-            ms_chat_join = "LEFT JOIN message_system ms ON ms.message_row_id = m._id" if has_message_system else ""
-            ldn_s_join = """
+            ms_chat_join = (
+                "LEFT JOIN message_system ms ON ms.message_row_id = m._id"
+                if has_message_system
+                else ""
+            )
+            ldn_s_join = (
+                """
                 LEFT JOIN _lid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id
                 LEFT JOIN lid_display_name ldn_s_direct ON ldn_s_direct.lid_row_id = m.sender_jid_row_id
                 LEFT JOIN lid_display_name ldn_s_mapped ON ldn_s_mapped.lid_row_id = jm_s.lid_row_id
-            """ if has_lid_dn else "LEFT JOIN _jid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id"
-            ldn_s_arm = """
+            """
+                if has_lid_dn
+                else "LEFT JOIN _jid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id"
+            )
+            ldn_s_arm = (
+                """
                 NULLIF(ldn_s_direct.display_name, ''),
                 NULLIF(ldn_s_mapped.display_name, ''),
-            """ if has_lid_dn else ""
+            """
+                if has_lid_dn
+                else ""
+            )
             rows = conn.execute(f"""
                 SELECT
                     CASE WHEN c.subject IS NOT NULL THEN CAST(c._id AS TEXT)
@@ -2602,7 +2855,8 @@ def create_app(output_root: Path, rescan: bool = False):
             group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
             ios_service_filter_last_real = (
                 "OR (msg.ZMESSAGETYPE = 6 AND msg.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))"
-                if has_ios_group_event else "OR (msg.ZMESSAGETYPE = 6)"
+                if has_ios_group_event
+                else "OR (msg.ZMESSAGETYPE = 6)"
             )
             rows = conn.execute(f"""
                 SELECT
@@ -2675,7 +2929,9 @@ def create_app(output_root: Path, rescan: bool = False):
                             author = data.get("author")
                             if author:
                                 needed_jids.add(author)
-                                if not author.endswith("@s.whatsapp.net") and not author.endswith("@lid"):
+                                if not author.endswith("@s.whatsapp.net") and not author.endswith(
+                                    "@lid"
+                                ):
                                     needed_jids.add(f"{author}@s.whatsapp.net")
                                     needed_jids.add(f"{author}@lid")
                                 elif author.endswith("@s.whatsapp.net"):
@@ -2710,7 +2966,10 @@ def create_app(output_root: Path, rescan: bool = False):
                     for ar in arch_rows:
                         if ar["display_name"]:
                             ios_contacts_map[ar["number"]] = (ar["display_name"], ar["number"])
-                            ios_contacts_map[f"{ar['number']}@s.whatsapp.net"] = (ar["display_name"], ar["number"])
+                            ios_contacts_map[f"{ar['number']}@s.whatsapp.net"] = (
+                                ar["display_name"],
+                                ar["number"],
+                            )
                 except sqlite3.OperationalError:
                     pass
                 try:
@@ -2748,7 +3007,8 @@ def create_app(output_root: Path, rescan: bool = False):
         android_p_map = {}
         if source_type == "android" and has_mcp:
             svc_mids = [
-                r["last_msg_id"] for r in rows
+                r["last_msg_id"]
+                for r in rows
                 if r["last_msg_type"] == 7
                 and r["last_msg_action_type"] in (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79)
                 and r["last_msg_id"]
@@ -2792,8 +3052,26 @@ def create_app(output_root: Path, rescan: bool = False):
                     d["last_msg_preview"] = ""
                     d["last_msg_type"] = "text"
             elif source_type == "ios" and raw_type == 6:
-                if not has_ios_group_event or last_msg_group_event_type in (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50):
-                    sender_name = _resolve_ios_jid(last_msg_sender_jid, ios_contacts_map) if last_msg_sender_jid else ""
+                if not has_ios_group_event or last_msg_group_event_type in (
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    7,
+                    9,
+                    12,
+                    15,
+                    26,
+                    36,
+                    37,
+                    50,
+                ):
+                    sender_name = (
+                        _resolve_ios_jid(last_msg_sender_jid, ios_contacts_map)
+                        if last_msg_sender_jid
+                        else ""
+                    )
                     s_row = {
                         "group_event_type": last_msg_group_event_type,
                         "text_body": d.get("last_msg_preview", ""),
@@ -2825,25 +3103,42 @@ def create_app(output_root: Path, rescan: bool = False):
         limit = min(int(request.args.get("limit", 50)), 200)
 
         if not before and not after and source_type == "android":
-            rows = get_archive().execute(
-                """SELECT * FROM recent_messages
+            rows = (
+                get_archive()
+                .execute(
+                    """SELECT * FROM recent_messages
                    WHERE chat_id = ? AND chat_type = ?
                    ORDER BY timestamp_ms DESC LIMIT ?""",
-                (chat_id, chat_type, limit)
-            ).fetchall()
+                    (chat_id, chat_type, limit),
+                )
+                .fetchall()
+            )
             if rows:
-                _maybe_start_indexing(chat_id, chat_type, get_cache(), source_type,
-                                     wa_db_path, output_root,
-                                     _indexing_state, _indexing_lock)
+                _maybe_start_indexing(
+                    chat_id,
+                    chat_type,
+                    get_cache(),
+                    source_type,
+                    wa_db_path,
+                    output_root,
+                    _indexing_state,
+                    _indexing_lock,
+                )
                 if source_type == "android" and rows:
                     rows = [dict(r) for r in rows]
                     missing_rx = [r["msg_id"] for r in rows if r.get("reactions") is None]
                     if missing_rx:
-                        rx_cache = get_archive().execute(
-                            """SELECT msg_id, reactions FROM reactions_cache
-                               WHERE chat_id = ? AND msg_id IN (""" + ",".join("?" * len(missing_rx)) + """)""",
-                            [chat_id] + missing_rx
-                        ).fetchall()
+                        rx_cache = (
+                            get_archive()
+                            .execute(
+                                """SELECT msg_id, reactions FROM reactions_cache
+                               WHERE chat_id = ? AND msg_id IN ("""
+                                + ",".join("?" * len(missing_rx))
+                                + """)""",
+                                [chat_id] + missing_rx,
+                            )
+                            .fetchall()
+                        )
                         rx_map = {r["msg_id"]: r["reactions"] for r in rx_cache}
                         for row in rows:
                             if row["msg_id"] in rx_map:
@@ -2855,9 +3150,16 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify([])
 
         if not before and not after:
-            _maybe_start_indexing(chat_id, chat_type, get_cache(), source_type,
-                                 wa_db_path, output_root,
-                                 _indexing_state, _indexing_lock)
+            _maybe_start_indexing(
+                chat_id,
+                chat_type,
+                get_cache(),
+                source_type,
+                wa_db_path,
+                output_root,
+                _indexing_state,
+                _indexing_lock,
+            )
 
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
@@ -2882,34 +3184,43 @@ def create_app(output_root: Path, rescan: bool = False):
             rows = conn.execute(sql, chat_params + [limit]).fetchall()
 
         rows = [dict(r) for r in rows]
-        _format_service_rows(rows, source_type, conn, has_mcp, has_lid_dn, has_jid_server, has_jid_raw_string)
+        _format_service_rows(
+            rows, source_type, conn, has_mcp, has_lid_dn, has_jid_server, has_jid_raw_string
+        )
 
         if source_type == "android" and rows and has_reactions:
             msg_ids = [r["msg_id"] for r in rows]
             placeholders = ",".join("?" * len(msg_ids))
-            cached = get_archive().execute(
-                f"SELECT msg_id, reactions FROM reactions_cache "
-                f"WHERE chat_id = ? AND msg_id IN ({placeholders})",
-                [chat_id] + msg_ids
-            ).fetchall()
+            cached = (
+                get_archive()
+                .execute(
+                    f"SELECT msg_id, reactions FROM reactions_cache "
+                    f"WHERE chat_id = ? AND msg_id IN ({placeholders})",
+                    [chat_id] + msg_ids,
+                )
+                .fetchall()
+            )
             cached_map = {r["msg_id"]: r["reactions"] for r in cached}
             missing = [mid for mid in msg_ids if mid not in cached_map]
             if missing:
                 missing_ph = ",".join("?" * len(missing))
-                from_wa = conn.execute(f"""
+                from_wa = conn.execute(
+                    f"""
                     SELECT ao.parent_message_row_id AS msg_id,
                            GROUP_CONCAT(r.reaction) AS reactions
                     FROM message_add_on ao
                     JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
                     WHERE ao.parent_message_row_id IN ({missing_ph})
                     GROUP BY ao.parent_message_row_id
-                """, missing).fetchall()
+                """,
+                    missing,
+                ).fetchall()
                 wa_map = {r["msg_id"]: r["reactions"] for r in from_wa}
                 if from_wa:
                     get_archive().executemany(
                         "INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions) "
                         "VALUES (?, ?, ?)",
-                        [(chat_id, r["msg_id"], r["reactions"]) for r in from_wa]
+                        [(chat_id, r["msg_id"], r["reactions"]) for r in from_wa],
                     )
                     get_archive().commit()
                 cached_map.update(wa_map)
@@ -2979,15 +3290,17 @@ def create_app(output_root: Path, rescan: bool = False):
 
         before_rows = conn.execute(
             f"{select} WHERE {chat_pred} AND {ts_col} <= ? {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?",
-            chat_params + [ts, half]
+            chat_params + [ts, half],
         ).fetchall()
         after_rows = conn.execute(
             f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC, {sort_phys_col} ASC LIMIT ?",
-            chat_params + [ts, half]
+            chat_params + [ts, half],
         ).fetchall()
 
         combined = [dict(r) for r in reversed(before_rows)] + [dict(r) for r in after_rows]
-        _format_service_rows(combined, source_type, conn, has_mcp, has_lid_dn, has_jid_server, has_jid_raw_string)
+        _format_service_rows(
+            combined, source_type, conn, has_mcp, has_lid_dn, has_jid_server, has_jid_raw_string
+        )
         if source_type == "android" and combined and has_reactions:
             _resolve_and_cache_reactions(source_type, conn, get_archive(), combined)
         elif source_type == "ios" and combined and has_ios_reactions:
@@ -3096,16 +3409,13 @@ def create_app(output_root: Path, rescan: bool = False):
             is_link = _IOS_IS_LINK
             is_doc_undownloaded = _IOS_IS_DOCUMENT_UNDOWNLOADED
         rows = conn.execute(
-            f"{select} WHERE {chat_pred} {extra} AND {is_media}",
-            chat_params
+            f"{select} WHERE {chat_pred} {extra} AND {is_media}", chat_params
         ).fetchall()
         link_rows = conn.execute(
-            f"{select} WHERE {chat_pred} AND {is_link}",
-            chat_params
+            f"{select} WHERE {chat_pred} AND {is_link}", chat_params
         ).fetchall()
         doc_rows = conn.execute(
-            f"{select} WHERE {chat_pred} AND {is_doc_undownloaded}",
-            chat_params
+            f"{select} WHERE {chat_pred} AND {is_doc_undownloaded}", chat_params
         ).fetchall()
         all_rows = list(rows) + list(doc_rows) + list(link_rows)
         total = len(all_rows)
@@ -3138,30 +3448,39 @@ def create_app(output_root: Path, rescan: bool = False):
 
         try:
             if chat_id and chat_type:
-                idx_rows = fts_conn.execute("""
+                idx_rows = fts_conn.execute(
+                    """
                     SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
                     FROM message_index_fts fts
                     JOIN message_index mi ON mi.rowid = fts.rowid
                     WHERE message_index_fts MATCH ?
                       AND mi.chat_id = ? AND mi.chat_type = ?
                     ORDER BY mi.timestamp_ms ASC LIMIT 500
-                """, (q, chat_id, chat_type)).fetchall()
+                """,
+                    (q, chat_id, chat_type),
+                ).fetchall()
             elif chat_id:
-                idx_rows = fts_conn.execute("""
+                idx_rows = fts_conn.execute(
+                    """
                     SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
                     FROM message_index_fts fts
                     JOIN message_index mi ON mi.rowid = fts.rowid
                     WHERE message_index_fts MATCH ? AND mi.chat_id = ?
                     ORDER BY mi.timestamp_ms ASC LIMIT 500
-                """, (q, chat_id)).fetchall()
+                """,
+                    (q, chat_id),
+                ).fetchall()
             else:
-                idx_rows = fts_conn.execute("""
+                idx_rows = fts_conn.execute(
+                    """
                     SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
                     FROM message_index_fts fts
                     JOIN message_index mi ON mi.rowid = fts.rowid
                     WHERE message_index_fts MATCH ?
                     ORDER BY mi.timestamp_ms ASC LIMIT 100
-                """, (q,)).fetchall()
+                """,
+                    (q,),
+                ).fetchall()
         except sqlite3.OperationalError as e:
             return jsonify({"error": f"Invalid search query: {e}"}), 400
 
@@ -3180,8 +3499,7 @@ def create_app(output_root: Path, rescan: bool = False):
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
 
         rows = wa.execute(
-            f"{select} WHERE {id_col} IN ({placeholders}) {extra} ORDER BY timestamp_ms ASC",
-            rowids
+            f"{select} WHERE {id_col} IN ({placeholders}) {extra} ORDER BY timestamp_ms ASC", rowids
         ).fetchall()
 
         indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
@@ -3201,7 +3519,8 @@ def create_app(output_root: Path, rescan: bool = False):
             ).fetchone()
             if not table_exists:
                 return jsonify({"available": False})
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT ru.receipt_timestamp, ru.read_timestamp, ru.played_timestamp,
                        COALESCE(j_real.raw_string, j.raw_string) AS jid,
                        COALESCE(j_real.user, j.user)             AS phone,
@@ -3221,7 +3540,9 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN arch.contacts con  ON con.number  = j_real.user
                 LEFT JOIN arch.contacts con2 ON con2.number = j.user
                 WHERE ru.message_row_id = ?
-            """, (message_id,)).fetchall()
+            """,
+                (message_id,),
+            ).fetchall()
 
             if not rows:
                 return jsonify({"available": True, "members": []})
@@ -3264,7 +3585,7 @@ def create_app(output_root: Path, rescan: bool = False):
                    LEFT JOIN ZWAMESSAGEINFO mi ON mi.ZMESSAGE = m.Z_PK
                    JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
                    WHERE m.Z_PK = ?""",
-                (message_id,)
+                (message_id,),
             ).fetchone()
             if not row:
                 return jsonify({"available": False})
@@ -3284,7 +3605,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     """SELECT user_jid, device_id, delivered_timestamp, read_timestamp, played_timestamp
                        FROM infra.receipt_device
                        WHERE stanza_id = ?""",
-                    (row["stanza_id"],)
+                    (row["stanza_id"],),
                 ).fetchall()
                 if infra_rows:
                     members = _parse_ios_receipt_device_rows(infra_rows, conn, is_group)
@@ -3307,14 +3628,16 @@ def create_app(output_root: Path, rescan: bool = False):
                            JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
                            WHERE m.ZCHATSESSION = ?
                              AND gm.ZMEMBERJID IS NOT NULL""",
-                        (row["chat_session_pk"],)
+                        (row["chat_session_pk"],),
                     ).fetchall()
                 }
                 members = [m for m in members if m["jid"] in known_jids]
 
             for m in members:
                 if m.get("read_known") is None:
-                    m["read_known"] = _ios_read_without_timestamp(row["msg_status"], m.get("read_ts"))
+                    m["read_known"] = _ios_read_without_timestamp(
+                        row["msg_status"], m.get("read_ts")
+                    )
 
             result = {"available": True, "members": members}
             if len(members) == 1:
@@ -3333,20 +3656,34 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify({"available": False})
 
         if source_type == "android":
-            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
             if "message_add_on" not in tables:
                 return jsonify({"available": False})
             has_lid_dn = "lid_display_name" in tables
-            ldn_rx_join = """
+            ldn_rx_join = (
+                """
                 LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = ao.sender_jid_row_id
                 LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = ao.sender_jid_row_id
                 LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
-            """ if has_lid_dn else ""
-            ldn_rx_arm = """
+            """
+                if has_lid_dn
+                else ""
+            )
+            ldn_rx_arm = (
+                """
                            NULLIF(ldn_direct.display_name, ''),
                            NULLIF(ldn_mapped.display_name, ''),
-            """ if has_lid_dn else ""
-            rows = conn.execute(f"""
+            """
+                if has_lid_dn
+                else ""
+            )
+            rows = conn.execute(
+                f"""
                 SELECT r.reaction AS emoji,
                        ao.from_me,
                        COALESCE(
@@ -3365,7 +3702,9 @@ def create_app(output_root: Path, rescan: bool = False):
                 {ldn_rx_join}
                 LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)
                 WHERE ao.parent_message_row_id = ?
-            """, (message_id,)).fetchall()
+            """,
+                (message_id,),
+            ).fetchall()
             reactors = [
                 {"name": r["name"] or "", "emoji": r["emoji"] or "", "from_me": r["from_me"] or 0}
                 for r in rows
@@ -3379,12 +3718,15 @@ def create_app(output_root: Path, rescan: bool = False):
             if not table_exists:
                 return jsonify({"available": False})
 
-            row = conn.execute("""
+            row = conn.execute(
+                """
                 SELECT mi.ZRECEIPTINFO, m.ZCHATSESSION AS chat_session_pk
                 FROM ZWAMESSAGEINFO mi
                 JOIN ZWAMESSAGE m ON m.Z_PK = mi.ZMESSAGE
                 WHERE mi.ZMESSAGE = ?
-            """, (message_id,)).fetchone()
+            """,
+                (message_id,),
+            ).fetchone()
             if not row or not row[0]:
                 return jsonify({"available": False})
 
@@ -3394,13 +3736,16 @@ def create_app(output_root: Path, rescan: bool = False):
                 return jsonify({"available": True, "total": 0, "reactors": []})
 
             # Resolve "me" from a sent message in this chat, and the 1-to-1 partner.
-            my_row = conn.execute("""
+            my_row = conn.execute(
+                """
                 SELECT COALESCE(gm.ZMEMBERJID, m.ZFROMJID) AS me_jid
                 FROM ZWAMESSAGE m
                 LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
                 WHERE m.ZCHATSESSION = ? AND m.ZISFROMME = 1
                 LIMIT 1
-            """, (row["chat_session_pk"],)).fetchone()
+            """,
+                (row["chat_session_pk"],),
+            ).fetchone()
             my_phone = None
             if my_row and my_row["me_jid"]:
                 at = my_row["me_jid"].find("@")
@@ -3409,8 +3754,7 @@ def create_app(output_root: Path, rescan: bool = False):
 
             def _resolve_number(num):
                 r = conn.execute(
-                    "SELECT full_name FROM _ios_contacts WHERE jid = ?",
-                    (f"{num}@s.whatsapp.net",)
+                    "SELECT full_name FROM _ios_contacts WHERE jid = ?", (f"{num}@s.whatsapp.net",)
                 ).fetchone()
                 if r and r[0]:
                     return r[0]
@@ -3434,14 +3778,14 @@ def create_app(output_root: Path, rescan: bool = False):
                     r_cs = conn.execute(
                         "SELECT ZPARTNERNAME FROM ZWACHATSESSION WHERE ZCONTACTJID = ? "
                         "AND ZPARTNERNAME IS NOT NULL AND ZPARTNERNAME != '' LIMIT 1",
-                        (lid_jid,)
+                        (lid_jid,),
                     ).fetchone()
                     if r_cs and r_cs[0]:
                         return r_cs[0]
                     r_pp = conn.execute(
                         "SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ? "
                         "AND ZPUSHNAME IS NOT NULL AND ZPUSHNAME != '' LIMIT 1",
-                        (lid_jid,)
+                        (lid_jid,),
                     ).fetchone()
                     if r_pp and r_pp[0]:
                         return r_pp[0]
@@ -3483,35 +3827,57 @@ def create_app(output_root: Path, rescan: bool = False):
         # In standard msgstore.db backups, lid_display_name only contains Meta's privacy-masked
         # phone strings (e.g. +39••••••••04), so unsaved members resolve to their real phone number
         # when mapped via jid_map, falling back to lid_display_name only if completely unmapped.
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        jid_cols = {r["name"] for r in conn.execute("PRAGMA table_info(jid)").fetchall()} if "jid" in tables else set()
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        jid_cols = (
+            {r["name"] for r in conn.execute("PRAGMA table_info(jid)").fetchall()}
+            if "jid" in tables
+            else set()
+        )
         has_server = "server" in jid_cols
         has_raw_string = "raw_string" in jid_cols
         has_lid_dn = "lid_display_name" in tables
         has_gpu = "group_participant_user" in tables
-        j_phone_fallback = "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END" if has_server else "j.user"
+        j_phone_fallback = (
+            "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END" if has_server else "j.user"
+        )
 
-        ldn_arm = """
+        ldn_arm = (
+            """
             NULLIF(ldn_direct.display_name, ''),
             NULLIF(ldn_mapped.display_name, ''),
-        """ if has_lid_dn else ""
+        """
+            if has_lid_dn
+            else ""
+        )
 
         # 1. Modern WhatsApp: group_participant_user
         if has_gpu:
             try:
-                phone_expr_gpu = """
+                phone_expr_gpu = (
+                    """
                     COALESCE(
                         j_phone.user,
                         CASE WHEN j_user.server = 's.whatsapp.net' THEN j_user.user END
                     )
-                """ if has_server else "COALESCE(j_phone.user, j_user.user)"
-                ldn_gpu_join = """
+                """
+                    if has_server
+                    else "COALESCE(j_phone.user, j_user.user)"
+                )
+                ldn_gpu_join = (
+                    """
                     LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = gpu.user_jid_row_id
                     LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = gpu.user_jid_row_id
                     LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
-                """ if has_lid_dn else ""
+                """
+                    if has_lid_dn
+                    else ""
+                )
 
-                rows = conn.execute(f"""
+                rows = conn.execute(
+                    f"""
                     SELECT
                         COALESCE({phone_expr_gpu}, '') AS number,
                         CASE WHEN j_user.raw_string = 'lid_me' THEN 'You'
@@ -3535,7 +3901,9 @@ def create_app(output_root: Path, rescan: bool = False):
                     LEFT JOIN arch.contacts con_lid ON con_lid.number = j_user.user
                     WHERE gpu.group_jid_row_id = c.jid_row_id
                     ORDER BY name
-                """, (chat_id,)).fetchall()
+                """,
+                    (chat_id,),
+                ).fetchall()
                 if rows:
                     return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
             except sqlite3.OperationalError as e:
@@ -3543,8 +3911,16 @@ def create_app(output_root: Path, rescan: bool = False):
                     raise
 
         # 2. Legacy WhatsApp: group_participants
-        join_gp_jid = "j_gp.raw_string = gp.jid" if has_raw_string else "j_gp.user = NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')"
-        gjid_pred = "gp.gjid = (SELECT j.raw_string FROM jid j WHERE j._id = c.jid_row_id)" if has_raw_string else "1=1"
+        join_gp_jid = (
+            "j_gp.raw_string = gp.jid"
+            if has_raw_string
+            else "j_gp.user = NULLIF(SUBSTR(gp.jid, 1, INSTR(gp.jid || '@', '@') - 1), '')"
+        )
+        gjid_pred = (
+            "gp.gjid = (SELECT j.raw_string FROM jid j WHERE j._id = c.jid_row_id)"
+            if has_raw_string
+            else "1=1"
+        )
         try:
             phone_expr_gp = """
                 COALESCE(
@@ -3554,13 +3930,18 @@ def create_app(output_root: Path, rescan: bool = False):
                     END
                 )
             """
-            ldn_gp_join = """
+            ldn_gp_join = (
+                """
                 LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = j_gp._id
                 LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = j_gp._id
                 LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
-            """ if has_lid_dn else ""
+            """
+                if has_lid_dn
+                else ""
+            )
 
-            rows = conn.execute(f"""
+            rows = conn.execute(
+                f"""
                 SELECT
                     COALESCE({phone_expr_gp}, '') AS number,
                     COALESCE(
@@ -3583,7 +3964,9 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHERE {gjid_pred}
                   AND gp.jid != ''
                 ORDER BY name
-            """, (chat_id,)).fetchall()
+            """,
+                (chat_id,),
+            ).fetchall()
             if rows:
                 return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
         except sqlite3.OperationalError as e:
@@ -3591,14 +3974,19 @@ def create_app(output_root: Path, rescan: bool = False):
                 raise
 
         # 3. Fallback: message history
-        ldn_msg_join = """
+        ldn_msg_join = (
+            """
             LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = m.sender_jid_row_id
             LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id
             LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
-        """ if has_lid_dn else ""
+        """
+            if has_lid_dn
+            else ""
+        )
         phone_expr_msg = f"COALESCE(j2.user, {j_phone_fallback})"
 
-        rows = conn.execute(f"""
+        rows = conn.execute(
+            f"""
             SELECT DISTINCT
                 COALESCE({phone_expr_msg}, '') AS number,
                 COALESCE(
@@ -3622,7 +4010,9 @@ def create_app(output_root: Path, rescan: bool = False):
               AND m.from_me = 0
               AND m.sender_jid_row_id IS NOT NULL
             ORDER BY name
-        """, (chat_id,)).fetchall()
+        """,
+            (chat_id,),
+        ).fetchall()
         return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
 
     def _group_members_ios(conn, chat_id: str) -> list:
@@ -3671,16 +4061,22 @@ def create_app(output_root: Path, rescan: bool = False):
         """
         try:
             # 1. Try active members from ZWAGROUPMEMBER
-            rows = conn.execute(query_template.format(
-                source_table="ZWAGROUPMEMBER gm",
-                where_clause="gm.ZCHATSESSION = CAST(? AS INTEGER) AND gm.ZISACTIVE = 1",
-            ), (chat_id,)).fetchall()
+            rows = conn.execute(
+                query_template.format(
+                    source_table="ZWAGROUPMEMBER gm",
+                    where_clause="gm.ZCHATSESSION = CAST(? AS INTEGER) AND gm.ZISACTIVE = 1",
+                ),
+                (chat_id,),
+            ).fetchall()
             if not rows:
                 # 2. Try all members from ZWAGROUPMEMBER
-                rows = conn.execute(query_template.format(
-                    source_table="ZWAGROUPMEMBER gm",
-                    where_clause="gm.ZCHATSESSION = CAST(? AS INTEGER)",
-                ), (chat_id,)).fetchall()
+                rows = conn.execute(
+                    query_template.format(
+                        source_table="ZWAGROUPMEMBER gm",
+                        where_clause="gm.ZCHATSESSION = CAST(? AS INTEGER)",
+                    ),
+                    (chat_id,),
+                ).fetchall()
             if rows:
                 return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
         except sqlite3.OperationalError as e:
@@ -3689,10 +4085,13 @@ def create_app(output_root: Path, rescan: bool = False):
 
         # 3. Fallback to message history senders via ZWAGROUPMEMBER
         try:
-            rows = conn.execute(query_template.format(
-                source_table="ZWAMESSAGE m JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER",
-                where_clause="m.ZCHATSESSION = CAST(? AS INTEGER)",
-            ), (chat_id,)).fetchall()
+            rows = conn.execute(
+                query_template.format(
+                    source_table="ZWAMESSAGE m JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER",
+                    where_clause="m.ZCHATSESSION = CAST(? AS INTEGER)",
+                ),
+                (chat_id,),
+            ).fetchall()
             if rows:
                 return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
         except sqlite3.OperationalError as e:
@@ -3712,7 +4111,8 @@ def create_app(output_root: Path, rescan: bool = False):
         phone_jid_m = f"({phone_expr_m} || '@s.whatsapp.net')"
 
         try:
-            rows = conn.execute(f"""
+            rows = conn.execute(
+                f"""
                 SELECT DISTINCT
                     COALESCE(
                         {phone_expr_m},
@@ -3743,7 +4143,9 @@ def create_app(output_root: Path, rescan: bool = False):
                   AND m.ZFROMJID IS NOT NULL
                   AND m.ZFROMJID != ''
                 ORDER BY name
-            """, (chat_id,)).fetchall()
+            """,
+                (chat_id,),
+            ).fetchall()
             return [{"name": r["name"] or "", "number": r["number"] or ""} for r in rows]
         except sqlite3.OperationalError as e:
             if "no such table" not in str(e).lower():
@@ -3813,7 +4215,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 received = count_row["received"] or 0 if count_row else 0
 
                 if chat_type == "contact":
-                    row = conn.execute("""
+                    row = conn.execute(
+                        """
                         SELECT COALESCE(j_real.user, j.user) AS user
                         FROM chat c
                         LEFT JOIN jid j ON j._id = c.jid_row_id
@@ -3825,16 +4228,21 @@ def create_app(output_root: Path, rescan: bool = False):
                         WHERE c.subject IS NULL
                           AND COALESCE(j_real.user, j.user) = ?
                         LIMIT 1
-                    """, (chat_id,)).fetchone()
+                    """,
+                        (chat_id,),
+                    ).fetchone()
                     number = row["user"] if row else chat_id
 
-                    name_row = conn.execute("""
+                    name_row = conn.execute(
+                        """
                         SELECT COALESCE(NULLIF(con.display_name,''), con.folder) AS name
                         FROM arch.contacts con
                         WHERE con.number = ?
-                    """, (chat_id,)).fetchone()
-                    if chat_id == '0':
-                        display_name = 'WhatsApp'
+                    """,
+                        (chat_id,),
+                    ).fetchone()
+                    if chat_id == "0":
+                        display_name = "WhatsApp"
                     elif name_row and name_row["name"]:
                         display_name = name_row["name"]
                     else:
@@ -3858,9 +4266,15 @@ def create_app(output_root: Path, rescan: bool = False):
                     display_name = grp_row["name"] if grp_row else None
 
                     try:
-                        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                        tables = {
+                            r[0]
+                            for r in conn.execute(
+                                "SELECT name FROM sqlite_master WHERE type='table'"
+                            ).fetchall()
+                        }
                         if "message_system" in tables:
-                            desc_row = conn.execute("""
+                            desc_row = conn.execute(
+                                """
                                 SELECT m.text_data
                                 FROM message m
                                 JOIN message_system ms ON ms.message_row_id = m._id
@@ -3868,12 +4282,17 @@ def create_app(output_root: Path, rescan: bool = False):
                                   AND ms.action_type = 27
                                 ORDER BY m.timestamp DESC, m._id DESC
                                 LIMIT 1
-                            """, (chat_id,)).fetchone()
+                            """,
+                                (chat_id,),
+                            ).fetchone()
                             if desc_row and desc_row["text_data"]:
                                 description = desc_row["text_data"].strip() or None
 
                         if not description:
-                            arch_grp_cols = {c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()}
+                            arch_grp_cols = {
+                                c[1]
+                                for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()
+                            }
                             if "description" in arch_grp_cols:
                                 arch_desc_row = conn.execute(
                                     "SELECT NULLIF(description, '') AS description FROM arch.groups WHERE chat_row_id = ?",
@@ -3882,39 +4301,62 @@ def create_app(output_root: Path, rescan: bool = False):
                                 if arch_desc_row and arch_desc_row["description"]:
                                     description = arch_desc_row["description"].strip() or None
 
-                        jid_cols = {c[1] for c in conn.execute("PRAGMA table_info(jid)").fetchall()} if "jid" in tables else set()
-                        j_fallback = "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END" if "server" in jid_cols else "j.user"
+                        jid_cols = (
+                            {c[1] for c in conn.execute("PRAGMA table_info(jid)").fetchall()}
+                            if "jid" in tables
+                            else set()
+                        )
+                        j_fallback = (
+                            "CASE WHEN j.server = 's.whatsapp.net' THEN j.user END"
+                            if "server" in jid_cols
+                            else "j.user"
+                        )
 
                         has_jid_map = "jid_map" in tables
                         has_lid_dn = "lid_display_name" in tables
 
-                        jm_join = """
+                        jm_join = (
+                            """
                             LEFT JOIN (
                                 SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
                                 FROM jid_map GROUP BY lid_row_id
                             ) jm ON jm.lid_row_id = m.sender_jid_row_id
                             LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
-                        """ if has_jid_map else ""
-                        creator_expr = f"COALESCE(j_real.user, {j_fallback})" if has_jid_map else j_fallback
+                        """
+                            if has_jid_map
+                            else ""
+                        )
+                        creator_expr = (
+                            f"COALESCE(j_real.user, {j_fallback})" if has_jid_map else j_fallback
+                        )
 
-                        ldn_creator_join = """
+                        ldn_creator_join = (
+                            """
                             LEFT JOIN (
                                 SELECT jid_row_id, MIN(lid_row_id) AS lid_row_id
                                 FROM jid_map GROUP BY jid_row_id
                             ) jm_lid ON jm_lid.jid_row_id = m.sender_jid_row_id
                             LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id
                             LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
-                        """ if has_lid_dn and has_jid_map else (
-                            "LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id" if has_lid_dn else ""
+                        """
+                            if has_lid_dn and has_jid_map
+                            else (
+                                "LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id"
+                                if has_lid_dn
+                                else ""
+                            )
                         )
-                        ldn_creator_arm = """
+                        ldn_creator_arm = (
+                            """
                             NULLIF(ldn_direct.display_name, ''),
                             NULLIF(ldn_mapped.display_name, ''),
-                        """ if has_lid_dn and has_jid_map else (
-                            "NULLIF(ldn_direct.display_name, '')," if has_lid_dn else ""
+                        """
+                            if has_lid_dn and has_jid_map
+                            else ("NULLIF(ldn_direct.display_name, '')," if has_lid_dn else "")
                         )
 
-                        cre_row = conn.execute(f"""
+                        cre_row = conn.execute(
+                            f"""
                             SELECT c.created_timestamp,
                                    {creator_expr} AS creator,
                                    COALESCE(
@@ -3934,7 +4376,9 @@ def create_app(output_root: Path, rescan: bool = False):
                             LEFT JOIN arch.contacts con ON con.number = {creator_expr}
                             WHERE c._id = CAST(? AS INTEGER)
                             LIMIT 1
-                        """, (chat_id,)).fetchone()
+                        """,
+                            (chat_id,),
+                        ).fetchone()
                         if cre_row:
                             created_ts = cre_row["created_timestamp"]
                             creator_number = cre_row["creator"]
@@ -3959,7 +4403,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 received = count_row["received"] or 0 if count_row else 0
 
                 if chat_type == "contact":
-                    row = conn.execute("""
+                    row = conn.execute(
+                        """
                         SELECT
                             NULLIF(SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                          INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '') AS user,
@@ -3976,7 +4421,9 @@ def create_app(output_root: Path, rescan: bool = False):
                             SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                    INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '')
                         WHERE cs.Z_PK = CAST(? AS INTEGER) AND cs.ZGROUPINFO IS NULL
-                    """, (chat_id,)).fetchone()
+                    """,
+                        (chat_id,),
+                    ).fetchone()
                     number = row["user"] if row else None
                     display_name = row["name"] if row else None
                 else:
@@ -4003,10 +4450,14 @@ def create_app(output_root: Path, rescan: bool = False):
                             ic.phone_number
                         )
                     """
-                    raw_prefix_c = "SUBSTR(gi.ZCREATORJID, 1, INSTR(gi.ZCREATORJID || '@', '@') - 1)"
+                    raw_prefix_c = (
+                        "SUBSTR(gi.ZCREATORJID, 1, INSTR(gi.ZCREATORJID || '@', '@') - 1)"
+                    )
                     phone_jid_c = f"({phone_expr_c} || '@s.whatsapp.net')"
 
-                    gi_cols = {c[1] for c in conn.execute("PRAGMA table_info(ZWAGROUPINFO)").fetchall()}
+                    gi_cols = {
+                        c[1] for c in conn.execute("PRAGMA table_info(ZWAGROUPINFO)").fetchall()
+                    }
                     extra_gi_cols = []
                     if "ZPICTUREID" in gi_cols:
                         extra_gi_cols.append("gi.ZPICTUREID AS picture_id")
@@ -4016,7 +4467,8 @@ def create_app(output_root: Path, rescan: bool = False):
                         extra_gi_cols.append("gi.ZGROUPDESCRIPTION AS direct_desc")
                     extra_gi_select = (", " + ", ".join(extra_gi_cols)) if extra_gi_cols else ""
 
-                    cre_row = conn.execute(f"""
+                    cre_row = conn.execute(
+                        f"""
                         SELECT CAST((gi.ZCREATIONDATE + 978307200) * 1000 AS INTEGER) AS created_ms,
                                COALESCE({phone_expr_c}, '') AS creator_number,
                                COALESCE(
@@ -4040,7 +4492,9 @@ def create_app(output_root: Path, rescan: bool = False):
                         LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = gi.ZCREATORJID
                         LEFT JOIN ZWACHATSESSION cs_phone ON cs_phone.ZCONTACTJID = {phone_jid_c}
                         WHERE cs.Z_PK = CAST(? AS INTEGER)
-                    """, (chat_id,)).fetchone()
+                    """,
+                        (chat_id,),
+                    ).fetchone()
                     if cre_row:
                         created_ts = cre_row["created_ms"]
                         creator_number = cre_row["creator_number"] or None
@@ -4052,7 +4506,9 @@ def create_app(output_root: Path, rescan: bool = False):
                             description = _extract_ios_group_description(cre_row["picture_id"])
 
                     if not description:
-                        arch_grp_cols = {c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()}
+                        arch_grp_cols = {
+                            c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()
+                        }
                         if "description" in arch_grp_cols:
                             arch_desc_row = conn.execute(
                                 "SELECT NULLIF(description, '') AS description FROM arch.groups WHERE chat_row_id = ?",
@@ -4101,12 +4557,11 @@ def create_app(output_root: Path, rescan: bool = False):
             if prefix is None:
                 return jsonify({"bytes": 0})
 
-            safe_prefix = prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            safe_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             paths = [
                 r["archive_path"]
                 for r in archive_conn.execute(
-                    "SELECT archive_path FROM archive_copies"
-                    " WHERE archive_path LIKE ? ESCAPE '\\'",
+                    "SELECT archive_path FROM archive_copies WHERE archive_path LIKE ? ESCAPE '\\'",
                     (safe_prefix + "%",),
                 ).fetchall()
             ]
@@ -4136,9 +4591,11 @@ def create_app(output_root: Path, rescan: bool = False):
         chat_type = request.args.get("chat_type", "")
         key = (chat_id, chat_type)
         with _indexing_lock:
-            if get_cache().execute(
-                "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key
-            ).fetchone():
+            if (
+                get_cache()
+                .execute("SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?", key)
+                .fetchone()
+            ):
                 return jsonify({"status": "done"})
             state = _indexing_state.get(key, "idle")
             if state == "done":
@@ -4148,9 +4605,9 @@ def create_app(output_root: Path, rescan: bool = False):
 
     @app.route("/api/index/source-size")
     def api_index_source_size():
-        row = get_cache().execute(
-            "SELECT value FROM sync_meta WHERE key = 'source_size'"
-        ).fetchone()
+        row = (
+            get_cache().execute("SELECT value FROM sync_meta WHERE key = 'source_size'").fetchone()
+        )
         size = int(row["value"]) if row and row["value"] else 0
         return jsonify({"bytes": size})
 
@@ -4175,18 +4632,14 @@ def create_app(output_root: Path, rescan: bool = False):
                     LEFT JOIN jid j ON j._id = c.jid_row_id
                     WHERE c.hidden = 0
                 """).fetchall()
-                total = wa_conn_bulk.execute(
-                    "SELECT COUNT(*) FROM message"
-                ).fetchone()[0]
+                total = wa_conn_bulk.execute("SELECT COUNT(*) FROM message").fetchone()[0]
             else:
                 chat_rows = wa_conn_bulk.execute("""
                     SELECT CAST(cs.Z_PK AS TEXT) AS id,
                            CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END AS type
                     FROM ZWACHATSESSION cs
                 """).fetchall()
-                total = wa_conn_bulk.execute(
-                    "SELECT COUNT(*) FROM ZWAMESSAGE"
-                ).fetchone()[0]
+                total = wa_conn_bulk.execute("SELECT COUNT(*) FROM ZWAMESSAGE").fetchone()[0]
             wa_conn_bulk.close()
 
             with _indexing_lock:
@@ -4205,13 +4658,21 @@ def create_app(output_root: Path, rescan: bool = False):
             for row in chat_rows:
                 already = cache_bulk.execute(
                     "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?",
-                    (row["id"], row["type"])
+                    (row["id"], row["type"]),
                 ).fetchone()
                 if not already:
-                    _build_fts_chat(cache_bulk, source_type, wa_db_path,
-                                    row["id"], row["type"], on_progress=_on_progress)
+                    _build_fts_chat(
+                        cache_bulk,
+                        source_type,
+                        wa_db_path,
+                        row["id"],
+                        row["type"],
+                        on_progress=_on_progress,
+                    )
 
-            cache_bulk.execute("INSERT INTO message_index_fts(message_index_fts) VALUES('optimize')")
+            cache_bulk.execute(
+                "INSERT INTO message_index_fts(message_index_fts) VALUES('optimize')"
+            )
             cache_bulk.execute("PRAGMA optimize")
             cache_bulk.execute("PRAGMA wal_checkpoint(PASSIVE)")
             cache_bulk.commit()
@@ -4267,12 +4728,14 @@ def create_app(output_root: Path, rescan: bool = False):
         c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         c.execute("PRAGMA optimize")
         size_after = _calc_size()
-        return jsonify({
-            "ok": True,
-            "size_before": size_before,
-            "size_after": size_after,
-            "reclaimed": max(0, size_before - size_after),
-        })
+        return jsonify(
+            {
+                "ok": True,
+                "size_before": size_before,
+                "size_after": size_after,
+                "reclaimed": max(0, size_before - size_after),
+            }
+        )
 
     # ---- API: preferences --------------------------------------------------
 
@@ -4363,7 +4826,9 @@ def create_app(output_root: Path, rescan: bool = False):
 
     @app.route("/")
     def index():
-        return render_template_string(HTML_TEMPLATE, output_root=str(output_root), version=_get_version())
+        return render_template_string(
+            HTML_TEMPLATE, output_root=str(output_root), version=_get_version()
+        )
 
     return app
 
@@ -4372,10 +4837,10 @@ def create_app(output_root: Path, rescan: bool = False):
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def validate_output_root(output_root: Path) -> None:
     hint = (
-        "Run 'wab-archiver' first to create an archive, "
-        "or pass a different path as the argument."
+        "Run 'wab-archiver' first to create an archive, or pass a different path as the argument."
     )
 
     if not output_root.exists():
@@ -4411,7 +4876,7 @@ def main():
 
     url = f"http://{args.host}:{args.port}"
     print(f"[wab_viewer] Starting server at {url}")
-    print(f"[wab_viewer] Press Ctrl+C to stop")
+    print("[wab_viewer] Press Ctrl+C to stop")
 
     if not args.no_browser:
         browser_url = resolve_browser_url(args.host, args.port)

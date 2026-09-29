@@ -1,6 +1,5 @@
 import os
 
-
 WA_DATABASES_DIR_NAME = "Whatsapp Databases"
 
 
@@ -18,4 +17,3 @@ def detect_source(output_root: str):
         if os.path.exists(chat_storage):
             return ("ios", chat_storage)
     return (None, None)
-

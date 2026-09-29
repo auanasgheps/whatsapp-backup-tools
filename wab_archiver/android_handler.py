@@ -8,30 +8,38 @@ import sqlite3
 # Knows nothing about ADB or backup format; handles only WhatsApp DB schema.
 # ==============================================================================
 
-_REQUIRED_TABLES = {'message', 'message_media', 'chat', 'jid', 'jid_map'}
+_REQUIRED_TABLES = {"message", "message_media", "chat", "jid", "jid_map"}
 
 _REQUIRED_COLUMNS = {
-    'message':       {'_id', 'timestamp', 'sender_jid_row_id', 'from_me'},
-    'message_media': {'file_path', 'mime_type', 'chat_row_id', 'message_row_id',
-                      'message_url', 'media_name'},
-    'chat':          {'_id', 'subject', 'jid_row_id'},
-    'jid':           {'_id', 'user'},
-    'jid_map':       {'lid_row_id', 'jid_row_id'},
+    "message": {"_id", "timestamp", "sender_jid_row_id", "from_me"},
+    "message_media": {
+        "file_path",
+        "mime_type",
+        "chat_row_id",
+        "message_row_id",
+        "message_url",
+        "media_name",
+    },
+    "chat": {"_id", "subject", "jid_row_id"},
+    "jid": {"_id", "user"},
+    "jid_map": {"lid_row_id", "jid_row_id"},
 }
 
 _MEDIA_SUBFOLDERS = {
-    'WhatsApp Images', 'WhatsApp Video', 'WhatsApp Audio',
-    'WhatsApp Voice Notes', 'WhatsApp Video Notes', 'WhatsApp Animated Gifs',
-    'WhatsApp Documents',
+    "WhatsApp Images",
+    "WhatsApp Video",
+    "WhatsApp Audio",
+    "WhatsApp Voice Notes",
+    "WhatsApp Video Notes",
+    "WhatsApp Animated Gifs",
+    "WhatsApp Documents",
 }
 
 
 def _check_hd_association(cursor: sqlite3.Cursor, logger: logging.Logger) -> bool:
     """Return True if message_association exists and supports HD dedup (types 12 and 7)."""
-    tables = {row[0] for row in cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )}
-    if 'message_association' not in tables:
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "message_association" not in tables:
         logger.debug("message_association table absent — HD dedup disabled.")
         return False
     logger.debug("message_association table found — HD dedup enabled.")
@@ -40,25 +48,18 @@ def _check_hd_association(cursor: sqlite3.Cursor, logger: logging.Logger) -> boo
 
 def validate_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
     """Abort with a clear error if any required table or column is missing."""
-    tables = {row[0] for row in cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )}
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     missing_tables = _REQUIRED_TABLES - tables
     if missing_tables:
-        logger.error(
-            f"Schema validation failed — missing tables: {sorted(missing_tables)}"
-        )
+        logger.error(f"Schema validation failed — missing tables: {sorted(missing_tables)}")
         raise SystemExit(1)
 
     for table, required_cols in _REQUIRED_COLUMNS.items():
-        actual_cols = {row[1] for row in cursor.execute(
-            f"PRAGMA table_info({table})"
-        )}
+        actual_cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
         missing_cols = required_cols - actual_cols
         if missing_cols:
             logger.error(
-                f"Schema validation failed — missing columns in '{table}': "
-                f"{sorted(missing_cols)}"
+                f"Schema validation failed — missing columns in '{table}': {sorted(missing_cols)}"
             )
             raise SystemExit(1)
 
@@ -77,14 +78,16 @@ def validate_wa_root(wa_roots: list, logger: logging.Logger):
             logger.error(f"--wa-root does not exist or is not a directory: {wa_root}")
             continue
 
-        media_dir = os.path.join(wa_root, 'Media')
+        media_dir = os.path.join(wa_root, "Media")
         if not os.path.isdir(media_dir):
             folder_name = os.path.basename(os.path.normpath(wa_root))
-            if folder_name == 'Media':
+            if folder_name == "Media":
                 hint = "It looks like you passed the Media/ folder — pass its parent instead."
             elif any(os.path.isdir(os.path.join(wa_root, s)) for s in _MEDIA_SUBFOLDERS):
-                hint = ("It looks like you passed a subfolder inside Media/ — "
-                        "pass the WhatsApp/ folder that contains Media/ instead.")
+                hint = (
+                    "It looks like you passed a subfolder inside Media/ — "
+                    "pass the WhatsApp/ folder that contains Media/ instead."
+                )
             else:
                 hint = "Expected structure: <wa_root>/Media/WhatsApp Images/ etc."
             logger.error(f"--wa-root has no Media/ subfolder: {wa_root}\n  {hint}")
@@ -103,8 +106,7 @@ def validate_wa_root(wa_roots: list, logger: logging.Logger):
         raise SystemExit(1)
 
 
-def build_number_map(cursor: sqlite3.Cursor,
-                     logger: logging.Logger) -> dict:
+def build_number_map(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict:
     """
     Build a map of old_number -> new_number from WhatsApp's own
     number change records. This ensures all media for a contact
@@ -179,14 +181,18 @@ def build_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> str:
     """
     block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
     since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
-    hd_dedup_clause = """
+    hd_dedup_clause = (
+        """
         AND NOT EXISTS (
             SELECT 1 FROM message_association ma
             JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
             WHERE ma.parent_message_row_id = message_media.message_row_id
               AND ma.association_type IN (12, 7)
               AND mm_hd.file_path IS NOT NULL
-        )""" if hd_dedup else ""
+        )"""
+        if hd_dedup
+        else ""
+    )
 
     return f"""
 SELECT * FROM (
@@ -276,22 +282,22 @@ def get_media_file_paths(cursor: sqlite3.Cursor, since_ms: int | None, hd_dedup:
     rows = cursor.execute(
         f"SELECT DISTINCT file_path FROM ({query}) WHERE file_path IS NOT NULL"
     ).fetchall()
-    return {row[0].replace('\\', '/') for row in rows if row[0]}
+    return {row[0].replace("\\", "/") for row in rows if row[0]}
 
 
 def _clean_phone_number(raw: str) -> str:
     """Strip formatting characters and return clean numeric string."""
-    cleaned = re.sub(r'[\s\-\(\)\.\+]', '', raw)
-    if cleaned.startswith('00'):
+    cleaned = re.sub(r"[\s\-\(\)\.\+]", "", raw)
+    if cleaned.startswith("00"):
         cleaned = cleaned[2:]
     if cleaned.isdigit():
         return cleaned
-    return ''
+    return ""
 
 
 def _parse_adb_row(line: str) -> dict[str, str]:
     """Parse key=value columns from an ADB content query row."""
-    pattern = re.compile(r'([a-zA-Z0-9_]+)=')
+    pattern = re.compile(r"([a-zA-Z0-9_]+)=")
     matches = list(pattern.finditer(line))
     if not matches:
         return {}
@@ -300,7 +306,7 @@ def _parse_adb_row(line: str) -> dict[str, str]:
         key = m.group(1)
         val_start = m.end()
         val_end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
-        val = line[val_start:val_end].rstrip(', \r\n')
+        val = line[val_start:val_end].rstrip(", \r\n")
         fields[key] = val
     return fields
 
@@ -308,9 +314,9 @@ def _parse_adb_row(line: str) -> dict[str, str]:
 def _parse_delimited_contact(line: str) -> tuple[str, str] | None:
     """Parse a manual contact entry formatted as 'number,name' or 'name: number'."""
     trimmed = line.strip()
-    if not trimmed or trimmed.startswith('#'):
+    if not trimmed or trimmed.startswith("#"):
         return None
-    for delimiter in (',', ':', '\t'):
+    for delimiter in (",", ":", "\t"):
         if delimiter in trimmed:
             parts = trimmed.split(delimiter, 1)
             p1, p2 = parts[0].strip(), parts[1].strip()
@@ -333,7 +339,7 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
     if not file_path:
         return {}
     try:
-        with open(file_path, encoding='utf-8', errors='replace') as f:
+        with open(file_path, encoding="utf-8", errors="replace") as f:
             content = f.read()
     except OSError as e:
         logger.warning(f"Could not read contacts file ({e}); proceeding without names.")
@@ -344,28 +350,26 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
 
     for line in content.splitlines():
         fields = _parse_adb_row(line)
-        if fields and 'display_name' in fields and ('data1' in fields or 'data4' in fields):
-            name = fields['display_name'].strip()
+        if fields and "display_name" in fields and ("data1" in fields or "data4" in fields):
+            name = fields["display_name"].strip()
             if not name:
                 continue
-            data1 = fields.get('data1', '').strip()
-            data4 = fields.get('data4', '').strip()
-            mimetype = fields.get('mimetype', '').strip()
+            data1 = fields.get("data1", "").strip()
+            data4 = fields.get("data4", "").strip()
+            mimetype = fields.get("mimetype", "").strip()
 
-            if data1 in ('NULL', 'null'):
-                data1 = ''
-            if data4 in ('NULL', 'null'):
-                data4 = ''
+            if data1 in ("NULL", "null"):
+                data1 = ""
+            if data4 in ("NULL", "null"):
+                data4 = ""
 
             is_wa_profile = (
-                'vnd.com.whatsapp' in mimetype
-                or '@s.whatsapp.net' in data1
-                or '@w4b' in data1
+                "vnd.com.whatsapp" in mimetype or "@s.whatsapp.net" in data1 or "@w4b" in data1
             )
-            is_phone = mimetype == 'vnd.android.cursor.item/phone_v2'
+            is_phone = mimetype == "vnd.android.cursor.item/phone_v2"
 
             if is_wa_profile:
-                raw_num = data1.split('@')[0] if '@' in data1 else data1
+                raw_num = data1.split("@")[0] if "@" in data1 else data1
                 clean = _clean_phone_number(raw_num)
                 if clean:
                     wa_contacts[clean] = name
@@ -374,15 +378,15 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
                     clean4 = _clean_phone_number(data4)
                     if clean4:
                         phone_contacts[clean4] = name
-                if data1 and '@' not in data1:
+                if data1 and "@" not in data1:
                     clean1 = _clean_phone_number(data1)
                     if clean1:
                         phone_contacts[clean1] = name
             elif not mimetype:
                 # Legacy projection (display_name:data1)
-                if '@' in data1:
-                    if '@s.whatsapp.net' in data1 or '@w4b' in data1:
-                        raw_num = data1.split('@')[0]
+                if "@" in data1:
+                    if "@s.whatsapp.net" in data1 or "@w4b" in data1:
+                        raw_num = data1.split("@")[0]
                         clean = _clean_phone_number(raw_num)
                         if clean:
                             wa_contacts[clean] = name
@@ -412,5 +416,5 @@ def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
         logger.info(
             f"Loaded {len(contacts)} phone number(s) across {unique_contacts} Android contact(s)."
         )
-    contacts.setdefault('0', 'WhatsApp')
+    contacts.setdefault("0", "WhatsApp")
     return contacts

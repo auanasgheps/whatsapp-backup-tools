@@ -1,5 +1,4 @@
 import csv
-import datetime
 import os
 import shutil
 import sqlite3
@@ -10,32 +9,31 @@ import time
 from .progress import ProgressReporter
 
 _MSGSTORE_PATH = (
-    '/storage/emulated/0/Android/media/com.whatsapp'
-    '/WhatsApp/Databases/msgstore.db.crypt15'
+    "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Databases/msgstore.db.crypt15"
 )
 _MSGSTORE_BUSINESS_PATH = (
-    '/storage/emulated/0/Android/media/com.whatsapp.w4b'
-    '/WhatsApp Business/Databases/msgstore.db.crypt15'
+    "/storage/emulated/0/Android/media/com.whatsapp.w4b"
+    "/WhatsApp Business/Databases/msgstore.db.crypt15"
 )
-_WA_MEDIA_ROOT = '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media'
+_WA_MEDIA_ROOT = "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media"
 _WA_BUSINESS_MEDIA_ROOT = (
-    '/storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp Business/Media'
+    "/storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp Business/Media"
 )
-_CONTACTS_URI = 'content://com.android.contacts/data'
-_CONTACTS_PROJECTION = 'display_name:data1:data4:mimetype'
+_CONTACTS_URI = "content://com.android.contacts/data"
+_CONTACTS_PROJECTION = "display_name:data1:data4:mimetype"
 
 _TRANSIENT_ERRORS = (
-    'error: closed',
-    'Connection reset by peer',
-    'Broken pipe',
-    'device offline',
+    "error: closed",
+    "Connection reset by peer",
+    "Broken pipe",
+    "device offline",
 )
 _ADB_TIMEOUT = 120  # seconds per adb call; WiFi ADB can hang silently
 _ADB_RETRIES = 2
 
 
 def check_adb(logger) -> bool:
-    if shutil.which('adb'):
+    if shutil.which("adb"):
         return True
     logger.error(
         "ADB not found on PATH. Install Android SDK Platform Tools and add it to your PATH.\n"
@@ -47,15 +45,16 @@ def check_adb(logger) -> bool:
 def check_device_connected(logger) -> bool:
     try:
         result = subprocess.run(
-            ['adb', 'devices'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            ["adb", "devices"],
+            capture_output=True,
+            check=True,
         )
     except subprocess.CalledProcessError as e:
         logger.error(f"'adb devices' failed: {e.stderr.decode(errors='replace').strip()}")
         return False
 
-    lines = result.stdout.decode(errors='replace').splitlines()
-    connected = [line for line in lines if line.strip().endswith('device')]
+    lines = result.stdout.decode(errors="replace").splitlines()
+    connected = [line for line in lines if line.strip().endswith("device")]
     if connected:
         return True
 
@@ -70,13 +69,14 @@ def check_device_connected(logger) -> bool:
 
 def pull_msgstore(output_dir: str, business: bool = False, logger=None) -> str:
     remote = _MSGSTORE_BUSINESS_PATH if business else _MSGSTORE_PATH
-    dest = os.path.join(output_dir, 'msgstore.db.crypt15')
+    dest = os.path.join(output_dir, "msgstore.db.crypt15")
     if logger:
         logger.info("Pulling msgstore backup via ADB...")
     try:
         subprocess.run(
-            ['adb', 'pull', remote, dest],
-            check=True, stderr=subprocess.PIPE,
+            ["adb", "pull", remote, dest],
+            check=True,
+            stderr=subprocess.PIPE,
         )
     except subprocess.CalledProcessError as e:
         if logger:
@@ -91,35 +91,43 @@ def pull_msgstore(output_dir: str, business: bool = False, logger=None) -> str:
 
 
 def pull_contacts(output_dir: str, logger=None) -> str:
-    dest = os.path.join(output_dir, 'wa_contacts')
+    dest = os.path.join(output_dir, "wa_contacts")
     if logger:
         logger.info("Pulling contacts via ADB...")
     try:
         result = subprocess.run(
-            ['adb', 'shell', 'content', 'query',
-             '--uri', _CONTACTS_URI,
-             '--projection', _CONTACTS_PROJECTION],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            [
+                "adb",
+                "shell",
+                "content",
+                "query",
+                "--uri",
+                _CONTACTS_URI,
+                "--projection",
+                _CONTACTS_PROJECTION,
+            ],
+            capture_output=True,
+            check=True,
         )
     except subprocess.CalledProcessError as e:
         if logger:
             logger.error(
-                f"ADB contacts query failed.\n"
-                f"  {e.stderr.decode(errors='replace').strip()}"
+                f"ADB contacts query failed.\n  {e.stderr.decode(errors='replace').strip()}"
             )
         raise
 
-    lines = result.stdout.decode(errors='replace').splitlines()
+    lines = result.stdout.decode(errors="replace").splitlines()
     relevant_lines = [
-        line for line in lines
-        if 'vnd.com.whatsapp' in line
-        or '@s.whatsapp.net' in line
-        or 'vnd.android.cursor.item/phone_v2' in line
+        line
+        for line in lines
+        if "vnd.com.whatsapp" in line
+        or "@s.whatsapp.net" in line
+        or "vnd.android.cursor.item/phone_v2" in line
     ]
     # If no lines matched known mimetypes, write all lines as fallback
     output_lines = relevant_lines if relevant_lines else lines
-    with open(dest, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(output_lines) + '\n')
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write("\n".join(output_lines) + "\n")
     return dest
 
 
@@ -127,15 +135,16 @@ def pull_contacts(output_dir: str, logger=None) -> str:
 # ADB media pull helpers
 # ---------------------------------------------------------------------------
 
+
 def get_device_serial(logger) -> str:
     """Return the serial number of the connected ADB device."""
     result = subprocess.run(
-        ['adb', 'get-serialno'],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ["adb", "get-serialno"],
+        capture_output=True,
         timeout=_ADB_TIMEOUT,
     )
-    serial = result.stdout.decode(errors='replace').strip()
-    if result.returncode != 0 or not serial or serial == 'unknown':
+    serial = result.stdout.decode(errors="replace").strip()
+    if result.returncode != 0 or not serial or serial == "unknown":
         raise RuntimeError(
             f"Could not get device serial: {result.stderr.decode(errors='replace').strip()}"
         )
@@ -146,15 +155,14 @@ def get_device_serial(logger) -> str:
 def probe_md5_binary(logger) -> str:
     """Return the name of the md5 binary available on the device ('md5sum' or 'md5')."""
     result = subprocess.run(
-        ['adb', 'shell', 'which md5sum || which md5'],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ["adb", "shell", "which md5sum || which md5"],
+        capture_output=True,
         timeout=_ADB_TIMEOUT,
     )
-    path = result.stdout.decode(errors='replace').strip().splitlines()
+    path = result.stdout.decode(errors="replace").strip().splitlines()
     if not path or result.returncode == 127:
         raise RuntimeError(
-            "Neither md5sum nor md5 found on device — "
-            "cannot verify file hashes for ADB pull."
+            "Neither md5sum nor md5 found on device — cannot verify file hashes for ADB pull."
         )
     binary = os.path.basename(path[0])
     logger.debug(f"md5 binary on device: {binary}")
@@ -168,12 +176,12 @@ def _run_adb(cmd: list, logger) -> subprocess.CompletedProcess:
         try:
             result = subprocess.run(
                 cmd,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                capture_output=True,
                 timeout=_ADB_TIMEOUT,
             )
             if result.returncode == 0:
                 return result
-            stderr = result.stderr.decode(errors='replace')
+            stderr = result.stderr.decode(errors="replace")
             if any(e in stderr for e in _TRANSIENT_ERRORS):
                 if attempt < _ADB_RETRIES:
                     logger.warning(
@@ -182,14 +190,14 @@ def _run_adb(cmd: list, logger) -> subprocess.CompletedProcess:
                     )
                     time.sleep(2)
                     continue
-            raise subprocess.CalledProcessError(result.returncode, cmd,
-                                                result.stdout, result.stderr)
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, result.stdout, result.stderr
+            )
         except subprocess.TimeoutExpired as e:
             last_exc = e
             if attempt < _ADB_RETRIES:
                 logger.warning(
-                    f"ADB command timed out (attempt {attempt + 1}/{_ADB_RETRIES + 1}), "
-                    f"retrying..."
+                    f"ADB command timed out (attempt {attempt + 1}/{_ADB_RETRIES + 1}), retrying..."
                 )
                 time.sleep(2)
                 continue
@@ -201,13 +209,13 @@ def _run_adb(cmd: list, logger) -> subprocess.CompletedProcess:
 
 def _classify_adb_error(stderr: str) -> str:
     """Return a human-readable explanation of an ADB pull failure."""
-    if 'does not exist' in stderr:
+    if "does not exist" in stderr:
         return "Remote path not found"
-    if 'Permission denied' in stderr or 'open failed' in stderr:
+    if "Permission denied" in stderr or "open failed" in stderr:
         return "Permission denied — file not accessible without root"
-    if 'device not found' in stderr or 'device offline' in stderr:
+    if "device not found" in stderr or "device offline" in stderr:
         return "Device disconnected or offline"
-    if 'No space left on device' in stderr:
+    if "No space left on device" in stderr:
         return "Host disk is full"
     return stderr.strip()
 
@@ -216,19 +224,19 @@ def enumerate_remote_files(wa_media_root: str, logger) -> list:
     """Return list of (remote_path, size_bytes) for all files under wa_media_root."""
     logger.info(f"Enumerating remote files under {wa_media_root}...")
     result = _run_adb(
-        ['adb', 'shell', f'find "{wa_media_root}" -type f -printf "%p\\t%s\\n"'],
+        ["adb", "shell", f'find "{wa_media_root}" -type f -printf "%p\\t%s\\n"'],
         logger,
     )
     entries = []
-    for line in result.stdout.decode(errors='replace').splitlines():
+    for line in result.stdout.decode(errors="replace").splitlines():
         line = line.strip()
         if not line:
             continue
         # Filter find error lines mixed into stdout
-        if 'Permission denied' in line or 'No such file or directory' in line:
+        if "Permission denied" in line or "No such file or directory" in line:
             logger.debug(f"find: skipped inaccessible path: {line}")
             continue
-        parts = line.rsplit('\t', 1)
+        parts = line.rsplit("\t", 1)
         if len(parts) != 2:
             continue
         remote_path, size_str = parts
@@ -243,14 +251,14 @@ def enumerate_remote_files(wa_media_root: str, logger) -> list:
 def _remote_md5(remote_path: str, md5_binary: str, logger) -> bytes:
     """Return the MD5 hash of a remote file as bytes."""
     result = _run_adb(
-        ['adb', 'shell', f'{md5_binary} "{remote_path}"'],
+        ["adb", "shell", f'{md5_binary} "{remote_path}"'],
         logger,
     )
-    out = result.stdout.decode(errors='replace').strip()
+    out = result.stdout.decode(errors="replace").strip()
     # md5sum: "<hash>  <path>"; md5 (older): "<hash> <path>" or "<path>: <hash>"
-    if ':' in out and not out.startswith('/'):
+    if ":" in out and not out.startswith("/"):
         # "<path>: <hash>" format
-        hex_str = out.split(':', 1)[1].strip()
+        hex_str = out.split(":", 1)[1].strip()
     else:
         hex_str = out.split()[0]
     return bytes.fromhex(hex_str)
@@ -258,13 +266,17 @@ def _remote_md5(remote_path: str, md5_binary: str, logger) -> bytes:
 
 def _staging_path(remote_path: str, remote_root: str, staging_dir: str) -> str:
     """Map a remote absolute path to a local staging path under Media/."""
-    rel = remote_path[len(remote_root):].lstrip('/')
-    return os.path.join(staging_dir, 'Media', rel.replace('/', os.sep))
+    rel = remote_path[len(remote_root) :].lstrip("/")
+    return os.path.join(staging_dir, "Media", rel.replace("/", os.sep))
 
 
-def pull_media(staging_dir: str, business: bool,
-               conn: sqlite3.Connection, logger,
-               target_paths: set[str] | None) -> tuple:
+def pull_media(
+    staging_dir: str,
+    business: bool,
+    conn: sqlite3.Connection,
+    logger,
+    target_paths: set[str] | None,
+) -> tuple:
     """
     Pull WhatsApp media from a connected device to staging_dir.
 
@@ -307,8 +319,9 @@ def pull_media(staging_dir: str, business: bool,
         prefix_len = len(wa_media_root)
         candidate_files = []
         for remote_path, remote_size in remote_files:
-            rel = remote_path[prefix_len:].lstrip('/')
-            db_path = f"Media/{rel.replace('\\', '/')}"
+            rel = remote_path[prefix_len:].lstrip("/")
+            clean_rel = rel.replace("\\", "/")
+            db_path = f"Media/{clean_rel}"
             if db_path in target_paths:
                 candidate_files.append((remote_path, remote_size))
         logger.info(
@@ -332,24 +345,28 @@ def pull_media(staging_dir: str, business: bool,
     skip_count = 0
     conflicts = []
 
-    progress_eval = ProgressReporter(
-        "Evaluating media", len(remote_files), logger, sys.stderr, 0.2
-    )
+    progress_eval = ProgressReporter("Evaluating media", len(remote_files), logger, sys.stderr, 0.2)
 
     for i, (remote_path, remote_size) in enumerate(remote_files, 1):
         if remote_path in done_paths:
             skip_count += 1
-            progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
+            progress_eval.update(
+                i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)}
+            )
             continue
         basename = os.path.basename(remote_path)
         if basename not in filename_index:
             pull_list.append((remote_path, remote_size))
-            progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
+            progress_eval.update(
+                i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)}
+            )
             continue
         db_size, db_md5 = filename_index[basename]
         if db_size is not None and db_size != remote_size:
             pull_list.append((remote_path, remote_size))
-            progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
+            progress_eval.update(
+                i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)}
+            )
             continue
         # Size matches (or DB has no size for old record): verify via remote md5
         try:
@@ -357,24 +374,32 @@ def pull_media(staging_dir: str, business: bool,
         except Exception as e:
             logger.warning(f"Could not hash remote file {remote_path}: {e} — will pull")
             pull_list.append((remote_path, remote_size))
-            progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
+            progress_eval.update(
+                i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)}
+            )
             continue
         if remote_md5 == db_md5:
             skip_count += 1
-            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'done')
+            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, "done")
         else:
-            conflicts.append({
-                'remote_path': remote_path,
-                'remote_md5': remote_md5.hex(),
-                'archived_md5': db_md5.hex(),
-            })
+            conflicts.append(
+                {
+                    "remote_path": remote_path,
+                    "remote_md5": remote_md5.hex(),
+                    "archived_md5": db_md5.hex(),
+                }
+            )
             logger.warning(
                 f"CONFLICT: {basename} has different content on device vs archive "
                 f"(same {'name+size' if db_size == remote_size else 'name'}) — skipped"
             )
-        progress_eval.update(i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
+        progress_eval.update(
+            i, {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)}
+        )
 
-    progress_eval.finish({"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)})
+    progress_eval.finish(
+        {"To pull": len(pull_list), "Skipped": skip_count, "Conflicts": len(conflicts)}
+    )
 
     logger.info(
         f"Delta pre-filter: {len(pull_list):,} to pull, "
@@ -384,42 +409,41 @@ def pull_media(staging_dir: str, business: bool,
 
     pulled = 0
     failed = 0
-    progress_pull = ProgressReporter(
-        "Pulling media", len(pull_list), logger, sys.stderr, 0.2
-    )
+    progress_pull = ProgressReporter("Pulling media", len(pull_list), logger, sys.stderr, 0.2)
 
     for i, (remote_path, remote_size) in enumerate(pull_list, 1):
         local = _staging_path(remote_path, wa_media_root, staging_dir)
         os.makedirs(os.path.dirname(local), exist_ok=True)
-        _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+        _arc.upsert_adb_pull_state(conn, remote_path, device_serial, "partial")
         try:
-            _run_adb(['adb', 'pull', remote_path, local], logger)
+            _run_adb(["adb", "pull", remote_path, local], logger)
         except KeyboardInterrupt:
-            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, "partial")
             progress_pull.finish({"Pulled": pulled, "Failed": failed})
             raise
         except Exception as e:
-            stderr = ''
-            if hasattr(e, 'stderr') and e.stderr:
-                stderr = e.stderr.decode(errors='replace')
+            stderr = ""
+            if hasattr(e, "stderr") and e.stderr:
+                stderr = e.stderr.decode(errors="replace")
             reason = _classify_adb_error(stderr)
-            if 'device not found' in stderr or 'device offline' in stderr or \
-                    'error: closed' in stderr:
-                _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            if (
+                "device not found" in stderr
+                or "device offline" in stderr
+                or "error: closed" in stderr
+            ):
+                _arc.upsert_adb_pull_state(conn, remote_path, device_serial, "partial")
                 progress_pull.finish({"Pulled": pulled, "Failed": failed})
                 raise RuntimeError(
                     f"Device disconnected during pull of {remote_path}: {reason}"
                 ) from e
             logger.error(f"Failed to pull {remote_path}: {reason}")
-            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, "partial")
             failed += 1
             progress_pull.update(i, {"Pulled": pulled, "Failed": failed})
             continue
         if not os.path.exists(local):
-            logger.error(
-                f"ADB pull reported success but file not found locally: {local}"
-            )
-            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            logger.error(f"ADB pull reported success but file not found locally: {local}")
+            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, "partial")
             failed += 1
             progress_pull.update(i, {"Pulled": pulled, "Failed": failed})
             continue
@@ -428,11 +452,11 @@ def pull_media(staging_dir: str, business: bool,
                 f"Pulled file is truncated (expected {remote_size} B, "
                 f"got {os.path.getsize(local)} B): {remote_path}"
             )
-            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'partial')
+            _arc.upsert_adb_pull_state(conn, remote_path, device_serial, "partial")
             failed += 1
             progress_pull.update(i, {"Pulled": pulled, "Failed": failed})
             continue
-        _arc.upsert_adb_pull_state(conn, remote_path, device_serial, 'done')
+        _arc.upsert_adb_pull_state(conn, remote_path, device_serial, "done")
         pulled += 1
         logger.debug(f"Pulled: {remote_path}")
         progress_pull.update(i, {"Pulled": pulled, "Failed": failed})
@@ -447,8 +471,8 @@ def write_adb_conflicts_report(report_path: str, conflicts: list, logger):
     """Write ADB pull conflicts to a CSV file — requires user intervention."""
     if not conflicts:
         return
-    fieldnames = ['remote_path', 'remote_md5', 'archived_md5']
-    with open(report_path, 'w', newline='', encoding='utf-8') as f:
+    fieldnames = ["remote_path", "remote_md5", "archived_md5"]
+    with open(report_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(conflicts)
