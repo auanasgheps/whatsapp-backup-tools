@@ -5157,6 +5157,7 @@ class TestViewerEntrypoint:
             text=True,
         )
         assert res.returncode == 0
+
     def test_validate_output_root_checks(self, tmp_path):
         with pytest.raises(SystemExit) as exc:
             viewer.validate_output_root(tmp_path / "nonexistent")
@@ -5384,7 +5385,6 @@ class TestDatabaseOptimizationsAndMaintenance:
                     app._bulk_index_state["running"] = False
 
     def test_api_index_all_endpoint_validation(self, tmp_path):
-        from unittest.mock import patch
 
         make_archive_db(tmp_path / ".wa_media_archiver.db")
         app = viewer.create_app(tmp_path, rescan=False)
@@ -5437,12 +5437,20 @@ class TestStandaloneMediaOnlyMode:
     def test_build_media_only_and_api_chats(self, tmp_path):
         arc_path = tmp_path / ".wa_media_archiver.db"
         arc_conn = make_archive_db(arc_path)
-        arc_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('1001', 'Alice (001)', 'Alice')")
-        arc_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('2001', 'Family Group (002)', 'Family')")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('1001', 'Alice (001)', 'Alice')"
+        )
+        arc_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('2001', 'Family Group (002)', 'Family')"
+        )
         arc_conn.execute("INSERT INTO files (original_path, md5) VALUES ('orig1.jpg', X'01020304')")
         arc_conn.execute("INSERT INTO files (original_path, md5) VALUES ('orig2.jpg', X'05060708')")
-        arc_conn.execute("INSERT INTO archive_copies (original_path, archive_path) VALUES ('orig1.jpg', 'Contacts/Alice (001)/photo.jpg')")
-        arc_conn.execute("INSERT INTO archive_copies (original_path, archive_path) VALUES ('orig2.jpg', 'Groups/Family Group (002)/doc.pdf')")
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('orig1.jpg', 'Contacts/Alice (001)/photo.jpg')"
+        )
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('orig2.jpg', 'Groups/Family Group (002)/doc.pdf')"
+        )
         arc_conn.commit()
 
         c_file = tmp_path / "Contacts" / "Alice (001)" / "photo.jpg"
@@ -5456,7 +5464,9 @@ class TestStandaloneMediaOnlyMode:
         cache_conn = viewer._open_cache_db(tmp_path)
         viewer._build_media_only(arc_conn, cache_conn, tmp_path)
 
-        idx_rows = cache_conn.execute("SELECT chat_id, chat_type FROM message_index ORDER BY chat_id").fetchall()
+        idx_rows = cache_conn.execute(
+            "SELECT chat_id, chat_type FROM message_index ORDER BY chat_id"
+        ).fetchall()
         assert len(idx_rows) == 2
         assert (idx_rows[0]["chat_id"], idx_rows[0]["chat_type"]) == ("1001", "contact")
         assert (idx_rows[1]["chat_id"], idx_rows[1]["chat_type"]) == ("2001", "group")
@@ -5509,7 +5519,9 @@ class TestAndroidMessageReceiptsApi:
             assert resp.status_code == 200
             assert resp.get_json() == {"available": True, "members": []}
 
-            wa_conn.execute("INSERT INTO jid (_id, user, raw_string) VALUES (2, '987654321', '987654321@s.whatsapp.net')")
+            wa_conn.execute(
+                "INSERT INTO jid (_id, user, raw_string) VALUES (2, '987654321', '987654321@s.whatsapp.net')"
+            )
             wa_conn.execute(
                 "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
                 "VALUES (1, 2, 1700000005000, 1700000010000, NULL)"
@@ -5573,10 +5585,18 @@ class TestIosMessageReceiptsGroupFilter:
             );
         """)
         conn.execute("INSERT INTO ZWAGROUPINFO (Z_PK) VALUES (1)")
-        conn.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, 'group1@g.us', 1, 'Group 1')")
-        conn.execute("INSERT INTO ZWAGROUPMEMBER (Z_PK, ZMEMBERJID, ZCONTACTNAME) VALUES (10, 'member1@s.whatsapp.net', 'Member One')")
-        conn.execute("INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZMESSAGESTATUS, ZSTANZAID, ZGROUPMEMBER) VALUES (100, 1, 1, 1, 700000000.0, 3, 'stanza1', 10)")
-        conn.execute("INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (1, 100, X'0102')")
+        conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, 'group1@g.us', 1, 'Group 1')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAGROUPMEMBER (Z_PK, ZMEMBERJID, ZCONTACTNAME) VALUES (10, 'member1@s.whatsapp.net', 'Member One')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZMESSAGESTATUS, ZSTANZAID, ZGROUPMEMBER) VALUES (100, 1, 1, 1, 700000000.0, 3, 'stanza1', 10)"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (1, 100, X'0102')"
+        )
         conn.commit()
         conn.close()
 
@@ -5598,7 +5618,9 @@ class TestIosMessageReceiptsGroupFilter:
 class TestIosChatSummary:
     def test_ios_contact_summary_endpoint(self, tmp_path):
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        arc_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('44123456', 'Alice', 'Alice')")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('44123456', 'Alice', 'Alice')"
+        )
         arc_conn.commit()
         arc_conn.close()
 
@@ -5639,9 +5661,15 @@ class TestIosChatSummary:
                 ZGROUPMEMBER INTEGER
             );
         """)
-        conn.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Partner')")
-        conn.execute("INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT) VALUES (1, 1, 1, 700000000.0, 0, 'Hi')")
-        conn.execute("INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT) VALUES (2, 1, 0, 700000010.0, 0, 'Hey')")
+        conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Partner')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT) VALUES (1, 1, 1, 700000000.0, 0, 'Hi')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT) VALUES (2, 1, 0, 700000010.0, 0, 'Hey')"
+        )
         conn.commit()
         conn.close()
 
@@ -5672,14 +5700,18 @@ class TestAndroidReactionsResolution:
             );
         """)
         wa_conn.execute("INSERT INTO message_add_on (_id, parent_message_row_id) VALUES (10, 100)")
-        wa_conn.execute("INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction) VALUES (10, '👍')")
+        wa_conn.execute(
+            "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction) VALUES (10, '👍')"
+        )
         wa_conn.commit()
 
         rows = [{"chat_id": "123", "msg_id": 100}]
         viewer._resolve_and_cache_reactions("android", wa_conn, arc_conn, rows)
         assert rows[0]["reactions"] == "👍"
 
-        cached = arc_conn.execute("SELECT reactions FROM reactions_cache WHERE msg_id = 100").fetchone()
+        cached = arc_conn.execute(
+            "SELECT reactions FROM reactions_cache WHERE msg_id = 100"
+        ).fetchone()
         assert cached is not None
         assert cached[0] == "👍"
 
@@ -5704,6 +5736,7 @@ class TestProtobufParserEdgeCases:
 
     def test_extract_ios_group_description_wire_types_and_subfields(self):
         import base64
+
         sub = bytes([32, 5, 41]) + b"12345678" + bytes([53]) + b"1234" + bytes([26, 4]) + b"Desc"
         top = bytes([16, 2, 25]) + b"abcdefgh" + bytes([37]) + b"abcd" + bytes([10, len(sub)]) + sub
         b64 = "+" + base64.b64encode(top).decode("ascii")
@@ -5734,58 +5767,231 @@ class TestServiceEventFormattingAndJidResolution:
         assert viewer._resolve_ios_jid("random_string", cmap) == "random_string"
 
     def test_format_ios_service_row_branches(self):
-        cmap = {"12345@s.whatsapp.net": ("Alice", "12345"), "99999@s.whatsapp.net": ("Bob", "99999")}
-        assert viewer._format_ios_service_row({"group_event_type": 12, "from_me": 1}, cmap) == "You created this group"
-        assert viewer._format_ios_service_row({"group_event_type": 12, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap) == "Alice created this group"
-        assert viewer._format_ios_service_row({"group_event_type": 1, "from_me": 1}, cmap) == "You changed the group subject"
-        assert viewer._format_ios_service_row({"group_event_type": 1, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap) == "Alice changed the group subject"
-        assert viewer._format_ios_service_row({"group_event_type": 3, "from_me": 1}, cmap) == "You changed this group's icon"
-        assert viewer._format_ios_service_row({"group_event_type": 4, "from_me": 1}, cmap) == "You left"
-        assert viewer._format_ios_service_row({"group_event_type": 4, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap) == "Alice left"
-        assert viewer._format_ios_service_row({"group_event_type": 15, "from_me": 1}, cmap) == "You joined using this group's invite link"
-        assert viewer._format_ios_service_row({"group_event_type": 15, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap) == "Alice joined using this group's invite link"
-        assert viewer._format_ios_service_row({"group_event_type": 2, "from_me": 1, "text_body": "12345@s.whatsapp.net"}, cmap) == "You added Alice"
-        assert viewer._format_ios_service_row({"group_event_type": 2, "from_me": 0, "sender": "WhatsApp", "text_body": "12345@s.whatsapp.net"}, cmap) == "WhatsApp added Alice"
-        assert viewer._format_ios_service_row({"group_event_type": 50, "from_me": 1, "text_body": "12345@s.whatsapp.net, 99999@s.whatsapp.net"}, cmap) == "You added Alice, Bob"
-        assert viewer._format_ios_service_row({"group_event_type": 7, "from_me": 1, "text_body": "12345@s.whatsapp.net"}, cmap) == "You removed Alice"
-        assert viewer._format_ios_service_row({"group_event_type": 9, "from_me": 1}, cmap) == "You're now an admin"
-        assert viewer._format_ios_service_row({"group_event_type": 5, "from_me": 1}, cmap) == "You're no longer an admin"
-        assert viewer._format_ios_service_row({"group_event_type": 9, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap) == "Alice is now an admin"
-        assert viewer._format_ios_service_row({"group_event_type": 26, "text_body": "86400"}, cmap) == "Disappearing messages set to 1 days"
-        assert viewer._format_ios_service_row({"group_event_type": 26, "text_body": "3600"}, cmap) == "Disappearing messages set to 1 hours"
-        assert viewer._format_ios_service_row({"group_event_type": 26, "text_body": "0"}, cmap) == "Disappearing messages turned off"
-        assert viewer._format_ios_service_row({"group_event_type": 36}, cmap) == "Group settings changed"
-        assert viewer._format_ios_service_row({"group_event_type": 99, "text_body": "System Announcement"}, cmap) == "System Announcement"
+        cmap = {
+            "12345@s.whatsapp.net": ("Alice", "12345"),
+            "99999@s.whatsapp.net": ("Bob", "99999"),
+        }
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 12, "from_me": 1}, cmap)
+            == "You created this group"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {"group_event_type": 12, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap
+            )
+            == "Alice created this group"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 1, "from_me": 1}, cmap)
+            == "You changed the group subject"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {"group_event_type": 1, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap
+            )
+            == "Alice changed the group subject"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 3, "from_me": 1}, cmap)
+            == "You changed this group's icon"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 4, "from_me": 1}, cmap)
+            == "You left"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {"group_event_type": 4, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap
+            )
+            == "Alice left"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 15, "from_me": 1}, cmap)
+            == "You joined using this group's invite link"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {"group_event_type": 15, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap
+            )
+            == "Alice joined using this group's invite link"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {"group_event_type": 2, "from_me": 1, "text_body": "12345@s.whatsapp.net"}, cmap
+            )
+            == "You added Alice"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {
+                    "group_event_type": 2,
+                    "from_me": 0,
+                    "sender": "WhatsApp",
+                    "text_body": "12345@s.whatsapp.net",
+                },
+                cmap,
+            )
+            == "WhatsApp added Alice"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {
+                    "group_event_type": 50,
+                    "from_me": 1,
+                    "text_body": "12345@s.whatsapp.net, 99999@s.whatsapp.net",
+                },
+                cmap,
+            )
+            == "You added Alice, Bob"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {"group_event_type": 7, "from_me": 1, "text_body": "12345@s.whatsapp.net"}, cmap
+            )
+            == "You removed Alice"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 9, "from_me": 1}, cmap)
+            == "You're now an admin"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 5, "from_me": 1}, cmap)
+            == "You're no longer an admin"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {"group_event_type": 9, "from_me": 0, "member_jid": "12345@s.whatsapp.net"}, cmap
+            )
+            == "Alice is now an admin"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 26, "text_body": "86400"}, cmap)
+            == "Disappearing messages set to 1 days"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 26, "text_body": "3600"}, cmap)
+            == "Disappearing messages set to 1 hours"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 26, "text_body": "0"}, cmap)
+            == "Disappearing messages turned off"
+        )
+        assert (
+            viewer._format_ios_service_row({"group_event_type": 36}, cmap)
+            == "Group settings changed"
+        )
+        assert (
+            viewer._format_ios_service_row(
+                {"group_event_type": 99, "text_body": "System Announcement"}, cmap
+            )
+            == "System Announcement"
+        )
 
     def test_format_android_service_row_branches(self):
-        assert viewer._format_android_service_row({"action_type": 11, "from_me": 1}) == "You created this group"
-        assert viewer._format_android_service_row({"action_type": 11, "sender": "Alice"}) == "Alice created this group"
-        assert viewer._format_android_service_row({"action_type": 1, "from_me": 1}) == "You changed the group subject"
-        assert viewer._format_android_service_row({"action_type": 1, "sender": "Alice"}) == "Alice changed the group subject"
-        assert viewer._format_android_service_row({"action_type": 12, "from_me": 1, "participant_name": "You"}) == "You joined"
-        assert viewer._format_android_service_row({"action_type": 12, "from_me": 0, "sender": "Alice", "participant_name": "Bob"}) == "Alice added Bob"
-        assert viewer._format_android_service_row({"action_type": 79, "from_me": 1}) == "You joined using this group's invite link"
-        assert viewer._format_android_service_row({"action_type": 79, "from_me": 0, "sender": "Alice"}) == "Alice joined using this group's invite link"
+        assert (
+            viewer._format_android_service_row({"action_type": 11, "from_me": 1})
+            == "You created this group"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 11, "sender": "Alice"})
+            == "Alice created this group"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 1, "from_me": 1})
+            == "You changed the group subject"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 1, "sender": "Alice"})
+            == "Alice changed the group subject"
+        )
+        assert (
+            viewer._format_android_service_row(
+                {"action_type": 12, "from_me": 1, "participant_name": "You"}
+            )
+            == "You joined"
+        )
+        assert (
+            viewer._format_android_service_row(
+                {"action_type": 12, "from_me": 0, "sender": "Alice", "participant_name": "Bob"}
+            )
+            == "Alice added Bob"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 79, "from_me": 1})
+            == "You joined using this group's invite link"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 79, "from_me": 0, "sender": "Alice"})
+            == "Alice joined using this group's invite link"
+        )
         assert viewer._format_android_service_row({"action_type": 13, "from_me": 1}) == "You left"
-        assert viewer._format_android_service_row({"action_type": 13, "from_me": 0, "sender": "Alice"}) == "Alice left"
-        assert viewer._format_android_service_row({"action_type": 14, "from_me": 1, "participant_name": "You"}) == "You were removed"
-        assert viewer._format_android_service_row({"action_type": 14, "from_me": 0, "sender": "Alice", "participant_name": "Bob"}) == "Alice removed Bob"
-        assert viewer._format_android_service_row({"action_type": 6, "from_me": 1}) == "You changed this group's icon"
-        assert viewer._format_android_service_row({"action_type": 27, "from_me": 1}) == "You changed the group description"
-        assert viewer._format_android_service_row({"action_type": 15, "from_me": 1, "participant_name": "You"}) == "You're now an admin"
-        assert viewer._format_android_service_row({"action_type": 15, "participant_name": "Bob"}) == "Bob is now an admin"
-        assert viewer._format_android_service_row({"action_type": 20, "from_me": 1, "participant_name": "You"}) == "You're no longer an admin"
-        assert viewer._format_android_service_row({"action_type": 58, "text_body": "true"}) == "Only admins can send messages in this group"
-        assert viewer._format_android_service_row({"action_type": 58, "text_body": "false"}) == "All participants can send messages in this group"
-        assert viewer._format_android_service_row({"action_type": 99, "text_body": "Custom security notice"}) == "Custom security notice"
+        assert (
+            viewer._format_android_service_row({"action_type": 13, "from_me": 0, "sender": "Alice"})
+            == "Alice left"
+        )
+        assert (
+            viewer._format_android_service_row(
+                {"action_type": 14, "from_me": 1, "participant_name": "You"}
+            )
+            == "You were removed"
+        )
+        assert (
+            viewer._format_android_service_row(
+                {"action_type": 14, "from_me": 0, "sender": "Alice", "participant_name": "Bob"}
+            )
+            == "Alice removed Bob"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 6, "from_me": 1})
+            == "You changed this group's icon"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 27, "from_me": 1})
+            == "You changed the group description"
+        )
+        assert (
+            viewer._format_android_service_row(
+                {"action_type": 15, "from_me": 1, "participant_name": "You"}
+            )
+            == "You're now an admin"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 15, "participant_name": "Bob"})
+            == "Bob is now an admin"
+        )
+        assert (
+            viewer._format_android_service_row(
+                {"action_type": 20, "from_me": 1, "participant_name": "You"}
+            )
+            == "You're no longer an admin"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 58, "text_body": "true"})
+            == "Only admins can send messages in this group"
+        )
+        assert (
+            viewer._format_android_service_row({"action_type": 58, "text_body": "false"})
+            == "All participants can send messages in this group"
+        )
+        assert (
+            viewer._format_android_service_row(
+                {"action_type": 99, "text_body": "Custom security notice"}
+            )
+            == "Custom security notice"
+        )
 
 
 class TestBulkIndexAndMaintenanceApi:
     def test_bg_index_all_execution_ios(self, tmp_path):
         from tests.test_wa_chat_viewer import make_archive_db
+
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        arc_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550000001', 'Alice', 'Alice')")
-        arc_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550000001', 'Alice', 'Alice')"
+        )
+        arc_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         arc_conn.commit()
         arc_conn.close()
 
@@ -5853,6 +6059,7 @@ class TestBulkIndexAndMaintenanceApi:
 
     def test_api_index_clear_and_optimize(self, tmp_path):
         from tests.test_wa_chat_viewer import make_archive_db
+
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
 
@@ -5887,6 +6094,7 @@ class TestBulkIndexAndMaintenanceApi:
 class TestPreferencesEndpoint:
     def test_preferences_flow(self, tmp_path):
         from tests.test_wa_chat_viewer import make_archive_db
+
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
 
@@ -5920,6 +6128,7 @@ class TestPreferencesEndpoint:
 class TestMediaServingEndpoint:
     def test_serve_media_full_and_range_requests(self, tmp_path):
         from tests.test_wa_chat_viewer import make_archive_db
+
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
 
@@ -5964,13 +6173,16 @@ class TestMediaServingEndpoint:
             assert resp_bad_unit.status_code == 416
 
             # 416 invalid range values
-            resp_bad_vals = client.get("/media/Media/sample.txt", headers={"Range": "bytes=abc-xyz"})
+            resp_bad_vals = client.get(
+                "/media/Media/sample.txt", headers={"Range": "bytes=abc-xyz"}
+            )
             assert resp_bad_vals.status_code == 416
 
 
 class TestStaticAssetsAndUiRoutes:
     def test_static_assets_and_index_html(self, tmp_path):
         from tests.test_wa_chat_viewer import make_archive_db
+
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
 
@@ -6019,6 +6231,7 @@ class TestMainEntrypointValidation:
 
     def test_main_cli_execution(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
+
         from tests.test_wa_chat_viewer import make_archive_db
 
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
@@ -6031,15 +6244,22 @@ class TestMainEntrypointValidation:
         monkeypatch.setattr(viewer, "create_app", MagicMock(return_value=mock_app))
 
         viewer.main()
-        mock_app.run.assert_called_once_with(host="127.0.0.1", port=5099, debug=False, threaded=True)
+        mock_app.run.assert_called_once_with(
+            host="127.0.0.1", port=5099, debug=False, threaded=True
+        )
 
 
 class TestIosChatListServiceEventsResolution:
     def test_ios_chats_service_event_name_resolution(self, tmp_path):
         from tests.test_wa_chat_viewer import make_archive_db
+
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        arc_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550000001', 'Alice (001)', 'Alice')")
-        arc_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550000002', 'Bob (002)', 'Bob')")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550000001', 'Alice (001)', 'Alice')"
+        )
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550000002', 'Bob (002)', 'Bob')"
+        )
         arc_conn.commit()
         arc_conn.close()
 
@@ -6131,8 +6351,12 @@ class TestProtobufWireTypesInReceiptBlob:
 
         # Event delta (field 9: fallback delta) containing wire 1, 2, 5
         event_inner = _encode_varint((1 << 3) | 0) + _encode_varint(45)  # delta = 45s
-        event_inner += _encode_varint((2 << 3) | 2) + _encode_varint(3) + b"foo"  # wire 2 inside event
-        event_inner += _encode_varint((3 << 3) | 1) + b"\x11\x22\x33\x44\x55\x66\x77\x88"  # wire 1 inside event
+        event_inner += (
+            _encode_varint((2 << 3) | 2) + _encode_varint(3) + b"foo"
+        )  # wire 2 inside event
+        event_inner += (
+            _encode_varint((3 << 3) | 1) + b"\x11\x22\x33\x44\x55\x66\x77\x88"
+        )  # wire 1 inside event
         event_inner += _encode_varint((4 << 3) | 5) + b"\xaa\xbb\xcc\xdd"  # wire 5 inside event
         entry += _encode_varint((9 << 3) | 2) + _encode_varint(len(event_inner)) + event_inner
 
@@ -6150,13 +6374,22 @@ class TestProtobufWireTypesInReceiptBlob:
 class TestChatInfoMediaSizeAndStatus:
     def test_chat_info_media_size_contact_and_group(self, tmp_path):
         from tests.test_wa_chat_viewer import make_archive_db
+
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        arc_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('1001', 'Alice', 'Alice')")
-        arc_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('2001', 'Friends', 'Friends')")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('1001', 'Alice', 'Alice')"
+        )
+        arc_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('2001', 'Friends', 'Friends')"
+        )
         arc_conn.execute("INSERT INTO files (original_path, md5) VALUES ('p1.jpg', X'0102')")
         arc_conn.execute("INSERT INTO files (original_path, md5) VALUES ('p2.jpg', X'0304')")
-        arc_conn.execute("INSERT INTO archive_copies (original_path, archive_path) VALUES ('p1.jpg', 'Contacts/Alice/pic.jpg')")
-        arc_conn.execute("INSERT INTO archive_copies (original_path, archive_path) VALUES ('p2.jpg', 'Groups/Friends/pic.jpg')")
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('p1.jpg', 'Contacts/Alice/pic.jpg')"
+        )
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('p2.jpg', 'Groups/Friends/pic.jpg')"
+        )
         arc_conn.commit()
         arc_conn.close()
 
