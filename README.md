@@ -19,8 +19,8 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 
 **Whatsapp Backup Viewer screenshots**
 <p float="left">
-  <img src="docs/images/viewer_dark.png" width="500" />
-  <img src="docs/images/viewer_clean.png" width="500" /> 
+  <img src="docs/images/viewer_dark.png" width="700" />
+  <img src="docs/images/viewer_clean.png" width="700" /> 
 </p>
 
 ---

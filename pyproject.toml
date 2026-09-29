@@ -12,9 +12,13 @@ archiver = [
     "wa-crypt-tools",
     "iphone-backup-decrypt",
 ]
+lint = [
+    "ruff>=0.9.0",
+]
 all = [
     "wa-crypt-tools",
     "iphone-backup-decrypt",
+    "ruff>=0.9.0",
 ]
 
 [project.scripts]
@@ -27,4 +31,34 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["shared*", "wab_archiver*", "wab_viewer*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["shared", "wab_archiver", "wab_viewer", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (delegated to ruff format)
+    "UP036", # outdated version block (tested explicitly in unit tests)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "E402", # module import not at top of file (sys.path manipulation)
+    "F841", # local variable assigned but never used (test assertions)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
 

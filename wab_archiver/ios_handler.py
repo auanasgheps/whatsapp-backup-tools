@@ -11,42 +11,49 @@ import sqlite3
 # Seconds between 1970-01-01 (Unix epoch) and 2001-01-01 (Apple Core Data epoch)
 APPLE_EPOCH_OFFSET = 978307200
 
-_IOS_REQUIRED_TABLES = {'ZWAMESSAGE', 'ZWACHATSESSION', 'ZWAMEDIAITEM', 'ZWAGROUPMEMBER'}
+_IOS_REQUIRED_TABLES = {"ZWAMESSAGE", "ZWACHATSESSION", "ZWAMEDIAITEM", "ZWAGROUPMEMBER"}
 
 _IOS_REQUIRED_COLUMNS = {
-    'ZWAMESSAGE': {
-        'Z_PK', 'ZMESSAGEDATE', 'ZISFROMME',
-        'ZCHATSESSION', 'ZMEDIAITEM', 'ZGROUPMEMBER', 'ZPUSHNAME',
+    "ZWAMESSAGE": {
+        "Z_PK",
+        "ZMESSAGEDATE",
+        "ZISFROMME",
+        "ZCHATSESSION",
+        "ZMEDIAITEM",
+        "ZGROUPMEMBER",
+        "ZPUSHNAME",
     },
-    'ZWACHATSESSION': {
-        'Z_PK', 'ZCONTACTJID', 'ZGROUPINFO', 'ZPARTNERNAME',
-        'ZCONTACTABID', 'ZLASTMESSAGEDATE',
+    "ZWACHATSESSION": {
+        "Z_PK",
+        "ZCONTACTJID",
+        "ZGROUPINFO",
+        "ZPARTNERNAME",
+        "ZCONTACTABID",
+        "ZLASTMESSAGEDATE",
     },
-    'ZWAMEDIAITEM': {
-        'Z_PK', 'ZMEDIALOCALPATH', 'ZMEDIAURL', 'ZTITLE',
+    "ZWAMEDIAITEM": {
+        "Z_PK",
+        "ZMEDIALOCALPATH",
+        "ZMEDIAURL",
+        "ZTITLE",
     },
-    'ZWAGROUPMEMBER': {
-        'Z_PK', 'ZMEMBERJID',
+    "ZWAGROUPMEMBER": {
+        "Z_PK",
+        "ZMEMBERJID",
     },
 }
 
 
 def validate_ios_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
     """Abort with a clear error if any required iOS table or column is missing."""
-    tables = {row[0] for row in cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )}
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     missing_tables = _IOS_REQUIRED_TABLES - tables
     if missing_tables:
-        logger.error(
-            f"iOS schema validation failed — missing tables: {sorted(missing_tables)}"
-        )
+        logger.error(f"iOS schema validation failed — missing tables: {sorted(missing_tables)}")
         raise SystemExit(1)
 
     for table, required_cols in _IOS_REQUIRED_COLUMNS.items():
-        actual_cols = {row[1] for row in cursor.execute(
-            f"PRAGMA table_info({table})"
-        )}
+        actual_cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
         missing_cols = required_cols - actual_cols
         if missing_cols:
             logger.error(
@@ -68,7 +75,7 @@ def validate_ios_wa_root(wa_root: str, logger: logging.Logger):
         logger.error(f"--wa-root does not exist or is not a directory: {wa_root}")
         raise SystemExit(1)
 
-    message_dir = os.path.join(wa_root, 'Message')
+    message_dir = os.path.join(wa_root, "Message")
     if not os.path.isdir(message_dir):
         logger.error(
             f"--wa-root has no Message/ subfolder: {wa_root}\n"
@@ -114,9 +121,9 @@ def find_ios_ext_db(candidate_dirs: list[str]) -> str | None:
     return None
 
 
-def check_ios_hd_association(cursor: sqlite3.Cursor,
-                             ext_db_path: str | None,
-                             logger: logging.Logger) -> bool:
+def check_ios_hd_association(
+    cursor: sqlite3.Cursor, ext_db_path: str | None, logger: logging.Logger
+) -> bool:
     """
     Check if ExtChatDatabase is available and has HD media associations (types 10 or 5).
     Attaches the database as 'ext' to the cursor connection if valid.
@@ -136,11 +143,15 @@ def check_ios_hd_association(cursor: sqlite3.Cursor,
             "SELECT 1 FROM ext.message_parent_association WHERE type IN (10, 5) LIMIT 1"
         ).fetchone()
         if has_hd:
-            logger.info("Found ExtChatDatabase with HD media associations. HD deduplication enabled.")
+            logger.info(
+                "Found ExtChatDatabase with HD media associations. HD deduplication enabled."
+            )
             return True
         return False
     except sqlite3.OperationalError as e:
-        logger.debug(f"Could not inspect ExtChatDatabase ({e}); proceeding without HD deduplication.")
+        logger.debug(
+            f"Could not inspect ExtChatDatabase ({e}); proceeding without HD deduplication."
+        )
         return False
 
 
@@ -168,7 +179,8 @@ def build_ios_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> 
     else:
         since_clause = ""
 
-    hd_dedup_clause = """
+    hd_dedup_clause = (
+        """
         AND NOT EXISTS (
             SELECT 1 FROM ext.message_parent_association mpa
             JOIN ZWAMESSAGE m_hd ON m_hd.ZSTANZAID = mpa.stanza_id
@@ -176,7 +188,10 @@ def build_ios_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> 
             WHERE mpa.parent_stanza_id = m.ZSTANZAID
               AND mpa.type IN (10, 5)
               AND mi_hd.ZMEDIALOCALPATH IS NOT NULL
-        )""" if hd_dedup else ""
+        )"""
+        if hd_dedup
+        else ""
+    )
 
     return f"""
 SELECT * FROM (
@@ -244,8 +259,7 @@ SELECT * FROM (
 """
 
 
-def build_ios_number_map(cursor: sqlite3.Cursor,
-                         logger: logging.Logger) -> dict[str, str]:
+def build_ios_number_map(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, str]:
     """
     Build a map of old_number -> new_number for contacts that changed their
     WhatsApp number. Uses ZCONTACTABID session grouping: when a contact changes
@@ -321,8 +335,7 @@ def build_ios_number_map(cursor: sqlite3.Cursor,
     return consolidated
 
 
-def build_ios_pushname_map(cursor: sqlite3.Cursor,
-                           logger: logging.Logger) -> dict[str, str]:
+def build_ios_pushname_map(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, str]:
     """
     Build a {jid_prefix: pushname} map from ZWAPROFILEPUSHNAME.
     Used as a fallback for contacts not in ContactsV2.sqlite — e.g. group
@@ -339,15 +352,14 @@ def build_ios_pushname_map(cursor: sqlite3.Cursor,
 
     result = {}
     for jid, name in rows:
-        prefix = jid.split('@')[0] if '@' in jid else jid
+        prefix = jid.split("@")[0] if "@" in jid else jid
         if prefix:
             result[prefix] = name
     logger.debug(f"iOS push name map: {len(result)} entries.")
     return result
 
 
-def load_ios_contacts(sqlite_path: str,
-                      logger: logging.Logger) -> dict[str, str]:
+def load_ios_contacts(sqlite_path: str, logger: logging.Logger) -> dict[str, str]:
     """
     Load WhatsApp contacts from ContactsV2.sqlite.
     Returns {phone_number: display_name} — same format as Android contacts dict.
@@ -375,8 +387,6 @@ def load_ios_contacts(sqlite_path: str,
 
     contacts = {number: name for number, name in rows if number}
     unique_contacts = len({name for name in contacts.values() if name})
-    logger.info(
-        f"Loaded {len(contacts)} phone number(s) across {unique_contacts} iOS contact(s)."
-    )
-    contacts.setdefault('0', 'WhatsApp')
+    logger.info(f"Loaded {len(contacts)} phone number(s) across {unique_contacts} iOS contact(s).")
+    contacts.setdefault("0", "WhatsApp")
     return contacts

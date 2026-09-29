@@ -1,20 +1,24 @@
 import logging
 import os
 import sqlite3
+
 from shared.db import (
-    sanitize_filename as _sanitize_filename,
-    escape_like as _escape_like,
-    format_phone as _format_phone,
     build_contact_folder_name as _build_contact_folder_name,
 )
-
+from shared.db import (
+    escape_like as _escape_like,
+)
+from shared.db import (
+    sanitize_filename as _sanitize_filename,
+)
 
 # ---------------------------------------------------------------------------
 # Open / schema
 # ---------------------------------------------------------------------------
 
+
 def open_archive_db(output_root: str) -> sqlite3.Connection:
-    db_path = os.path.join(output_root, '.wa_media_archiver.db')
+    db_path = os.path.join(output_root, ".wa_media_archiver.db")
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -76,7 +80,7 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
     """)
     # Migrate existing DBs: add size column if absent (safe no-op on new DBs)
     existing = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
-    if 'size' not in existing:
+    if "size" not in existing:
         conn.execute("ALTER TABLE files ADD COLUMN size INTEGER")
     if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
         conn.execute("PRAGMA user_version = 1")
@@ -86,7 +90,7 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
 
 def check_db_health(conn: sqlite3.Connection, logger: logging.Logger):
     results = conn.execute("PRAGMA quick_check").fetchall()
-    if results != [('ok',)]:
+    if results != [("ok",)]:
         for row in results:
             logger.error(f"Database integrity issue: {row[0]}")
         raise SystemExit(1)
@@ -107,15 +111,18 @@ def check_db_health(conn: sqlite3.Connection, logger: logging.Logger):
 # Contacts persistence
 # ---------------------------------------------------------------------------
 
+
 def load_contacts_from_db(conn: sqlite3.Connection) -> dict:
-    return {row[0]: (row[1], row[2])
-            for row in conn.execute("SELECT number, folder, display_name FROM contacts")}
+    return {
+        row[0]: (row[1], row[2])
+        for row in conn.execute("SELECT number, folder, display_name FROM contacts")
+    }
 
 
 def save_contacts_to_db(conn: sqlite3.Connection, index: dict):
     conn.executemany(
         "INSERT OR REPLACE INTO contacts (number, folder, display_name) VALUES (?, ?, ?)",
-        ((number, folder, display_name) for number, (folder, display_name) in index.items())
+        ((number, folder, display_name) for number, (folder, display_name) in index.items()),
     )
 
 
@@ -123,19 +130,18 @@ def save_contacts_to_db(conn: sqlite3.Connection, index: dict):
 # Groups persistence
 # ---------------------------------------------------------------------------
 
+
 def load_groups_from_db(conn: sqlite3.Connection) -> dict:
     return {
-        row[0]: {'folder': row[1], 'subject': row[2]}
-        for row in conn.execute(
-            "SELECT chat_row_id, folder, subject FROM groups"
-        )
+        row[0]: {"folder": row[1], "subject": row[2]}
+        for row in conn.execute("SELECT chat_row_id, folder, subject FROM groups")
     }
 
 
 def save_groups_to_db(conn: sqlite3.Connection, index: dict):
     conn.executemany(
         "INSERT OR REPLACE INTO groups (chat_row_id, folder, subject) VALUES (?, ?, ?)",
-        ((key, val['folder'], val['subject']) for key, val in index.items())
+        ((key, val["folder"], val["subject"]) for key, val in index.items()),
     )
 
 
@@ -143,23 +149,25 @@ def save_groups_to_db(conn: sqlite3.Connection, index: dict):
 # File archive tracking
 # ---------------------------------------------------------------------------
 
-def record_file_archived(cursor: sqlite3.Cursor,
-                         original_path: str, md5: bytes, archive_path: str,
-                         size: int):
+
+def record_file_archived(
+    cursor: sqlite3.Cursor, original_path: str, md5: bytes, archive_path: str, size: int
+):
     cursor.execute(
         "INSERT INTO files (original_path, md5, size) VALUES (?, ?, ?) "
         "ON CONFLICT(original_path) DO UPDATE SET md5 = excluded.md5, size = excluded.size",
-        (original_path, md5, size)
+        (original_path, md5, size),
     )
     cursor.execute(
         "INSERT OR IGNORE INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
-        (original_path, archive_path)
+        (original_path, archive_path),
     )
 
 
 # ---------------------------------------------------------------------------
 # Folder name sync and resolution
 # ---------------------------------------------------------------------------
+
 
 def _unique_group_name(desired: str, existing: set) -> str:
     if desired not in existing:
@@ -172,11 +180,15 @@ def _unique_group_name(desired: str, existing: set) -> str:
         counter += 1
 
 
-def sync_group_names(group_subjects: dict, output_root: str,
-                     group_index: dict, logger: logging.Logger,
-                     conn: sqlite3.Connection | None = None,
-                     dry_run: bool = False) -> dict:
-    groups_root = os.path.join(output_root, 'Groups')
+def sync_group_names(
+    group_subjects: dict,
+    output_root: str,
+    group_index: dict,
+    logger: logging.Logger,
+    conn: sqlite3.Connection | None = None,
+    dry_run: bool = False,
+) -> dict:
+    groups_root = os.path.join(output_root, "Groups")
     updated = dict(group_index)
 
     for key, current_subject in group_subjects.items():
@@ -184,15 +196,16 @@ def sync_group_names(group_subjects: dict, output_root: str,
             continue
 
         entry = updated[key]
-        old_folder = entry['folder']
-        old_subject = entry.get('subject', '')
+        old_folder = entry["folder"]
+        old_subject = entry.get("subject", "")
 
         if current_subject == old_subject:
             continue
 
-        desired = _sanitize_filename(current_subject) if current_subject \
-            else f"Unknown Group ({key})"
-        existing = {v['folder'] for k2, v in updated.items() if k2 != key}
+        desired = (
+            _sanitize_filename(current_subject) if current_subject else f"Unknown Group ({key})"
+        )
+        existing = {v["folder"] for k2, v in updated.items() if k2 != key}
         new_folder = _unique_group_name(desired, existing)
 
         old_path = os.path.join(groups_root, old_folder)
@@ -201,12 +214,13 @@ def sync_group_names(group_subjects: dict, output_root: str,
         if os.path.exists(old_path):
             if os.path.exists(new_path):
                 logger.warning(
-                    f"RENAME skipped — target already exists: "
-                    f"{old_folder} -> {new_folder}"
+                    f"RENAME skipped — target already exists: {old_folder} -> {new_folder}"
                 )
             else:
                 if dry_run:
-                    logger.info(f"[DRY RUN] Would rename group folder: {old_folder} -> {new_folder}")
+                    logger.info(
+                        f"[DRY RUN] Would rename group folder: {old_folder} -> {new_folder}"
+                    )
                     continue
                 else:
                     os.rename(old_path, new_path)
@@ -218,39 +232,40 @@ def sync_group_names(group_subjects: dict, output_root: str,
                             "UPDATE archive_copies "
                             "SET archive_path = ? || SUBSTR(archive_path, ?) "
                             "WHERE archive_path LIKE ? ESCAPE '\\'",
-                            (new_prefix, len(old_prefix) + 1,
-                             f"{_escape_like(old_prefix)}%")
+                            (new_prefix, len(old_prefix) + 1, f"{_escape_like(old_prefix)}%"),
                         )
         else:
             logger.debug(
-                f"Group folder name changed but no folder on disk yet: "
-                f"{old_folder} -> {new_folder}"
+                f"Group folder name changed but no folder on disk yet: {old_folder} -> {new_folder}"
             )
 
-        updated[key] = {'folder': new_folder, 'subject': current_subject}
+        updated[key] = {"folder": new_folder, "subject": current_subject}
 
     return updated
 
 
-def resolve_group_folder(chat_row_id: int, chat_subject: str | None,
-                         group_index: dict) -> str:
+def resolve_group_folder(chat_row_id: int, chat_subject: str | None, group_index: dict) -> str:
     key = str(chat_row_id)
     if key in group_index:
-        return group_index[key]['folder']
+        return group_index[key]["folder"]
 
-    desired = _sanitize_filename(chat_subject) if chat_subject \
-        else f"Unknown Group ({chat_row_id})"
-    existing = {v['folder'] for v in group_index.values()}
+    desired = _sanitize_filename(chat_subject) if chat_subject else f"Unknown Group ({chat_row_id})"
+    existing = {v["folder"] for v in group_index.values()}
     folder = _unique_group_name(desired, existing)
-    group_index[key] = {'folder': folder, 'subject': chat_subject or ''}
+    group_index[key] = {"folder": folder, "subject": chat_subject or ""}
     return folder
 
 
-def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
-                      folder_index: dict, logger: logging.Logger,
-                      conn: sqlite3.Connection | None = None,
-                      dry_run: bool = False) -> dict:
-    contacts_root = os.path.join(output_root, 'Contacts')
+def sync_folder_names(
+    contacts: dict,
+    number_map: dict,
+    output_root: str,
+    folder_index: dict,
+    logger: logging.Logger,
+    conn: sqlite3.Connection | None = None,
+    dry_run: bool = False,
+) -> dict:
+    contacts_root = os.path.join(output_root, "Contacts")
     updated_index = dict(folder_index)
 
     for number, display_name in contacts.items():
@@ -273,12 +288,13 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
         if os.path.exists(old_path):
             if os.path.exists(new_path):
                 logger.warning(
-                    f"RENAME skipped — target already exists: "
-                    f"{old_folder} -> {new_folder}"
+                    f"RENAME skipped — target already exists: {old_folder} -> {new_folder}"
                 )
             else:
                 if dry_run:
-                    logger.info(f"[DRY RUN] Would rename contact folder: {old_folder} -> {new_folder}")
+                    logger.info(
+                        f"[DRY RUN] Would rename contact folder: {old_folder} -> {new_folder}"
+                    )
                     continue
                 else:
                     os.rename(old_path, new_path)
@@ -290,13 +306,11 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
                             "UPDATE archive_copies "
                             "SET archive_path = ? || SUBSTR(archive_path, ?) "
                             "WHERE archive_path LIKE ? ESCAPE '\\'",
-                            (new_prefix, len(old_prefix) + 1,
-                             f"{_escape_like(old_prefix)}%")
+                            (new_prefix, len(old_prefix) + 1, f"{_escape_like(old_prefix)}%"),
                         )
         else:
             logger.debug(
-                f"Folder name changed but no folder on disk yet: "
-                f"{old_folder} -> {new_folder}"
+                f"Folder name changed but no folder on disk yet: {old_folder} -> {new_folder}"
             )
 
         updated_index[canonical] = (new_folder, display_name)
@@ -308,6 +322,7 @@ def sync_folder_names(contacts: dict, number_map: dict, output_root: str,
 # ADB pull state
 # ---------------------------------------------------------------------------
 
+
 def build_archive_filename_index(conn: sqlite3.Connection) -> dict:
     """Return {basename: (size_or_none, md5)} for all archived files.
 
@@ -316,10 +331,8 @@ def build_archive_filename_index(conn: sqlite3.Connection) -> dict:
     match is sufficient to identify a file as already archived.
     """
     index = {}
-    for original_path, md5, size in conn.execute(
-        "SELECT original_path, md5, size FROM files"
-    ):
-        basename = os.path.basename(original_path.replace('\\', '/'))
+    for original_path, md5, size in conn.execute("SELECT original_path, md5, size FROM files"):
+        basename = os.path.basename(original_path.replace("\\", "/"))
         index[basename] = (size, md5)
     return index
 
@@ -329,8 +342,7 @@ def get_adb_done_paths(conn: sqlite3.Connection, device_serial: str) -> set:
     return {
         row[0]
         for row in conn.execute(
-            "SELECT remote_path FROM adb_pull_state "
-            "WHERE device_serial = ? AND status = 'done'",
+            "SELECT remote_path FROM adb_pull_state WHERE device_serial = ? AND status = 'done'",
             (device_serial,),
         )
     }
@@ -341,29 +353,28 @@ def get_adb_partial_paths(conn: sqlite3.Connection, device_serial: str) -> list:
     return [
         row[0]
         for row in conn.execute(
-            "SELECT remote_path FROM adb_pull_state "
-            "WHERE device_serial = ? AND status = 'partial'",
+            "SELECT remote_path FROM adb_pull_state WHERE device_serial = ? AND status = 'partial'",
             (device_serial,),
         )
     ]
 
 
-def upsert_adb_pull_state(conn: sqlite3.Connection, remote_path: str,
-                          device_serial: str, status: str):
+def upsert_adb_pull_state(
+    conn: sqlite3.Connection, remote_path: str, device_serial: str, status: str
+):
     import datetime
+
     conn.execute(
         "INSERT INTO adb_pull_state (remote_path, device_serial, status, pulled_at) "
         "VALUES (?, ?, ?, ?) "
         "ON CONFLICT(remote_path, device_serial) DO UPDATE SET "
         "status = excluded.status, pulled_at = excluded.pulled_at",
-        (remote_path, device_serial, status,
-         datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        (remote_path, device_serial, status, datetime.datetime.now(datetime.UTC).isoformat()),
     )
     conn.commit()
 
 
-def remove_adb_pull_state(conn: sqlite3.Connection, remote_path: str,
-                          device_serial: str):
+def remove_adb_pull_state(conn: sqlite3.Connection, remote_path: str, device_serial: str):
     conn.execute(
         "DELETE FROM adb_pull_state WHERE remote_path = ? AND device_serial = ?",
         (remote_path, device_serial),

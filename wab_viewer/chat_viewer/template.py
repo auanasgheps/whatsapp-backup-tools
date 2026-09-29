@@ -4,9 +4,10 @@ from pathlib import Path
 
 _PICO_CSS = (Path(__file__).parent / "pico.min.css").read_text(encoding="utf-8")
 # Strip @charset — invalid inside @layer
-_PICO_CSS = _PICO_CSS.replace('@charset "UTF-8";', '', 1)
+_PICO_CSS = _PICO_CSS.replace('@charset "UTF-8";', "", 1)
 
-HTML_TEMPLATE = r"""
+HTML_TEMPLATE = (
+    r"""
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -15,7 +16,9 @@ HTML_TEMPLATE = r"""
   <meta id="meta-color-scheme" name="color-scheme" content="dark">
   <title>WhatsApp Backup Tools</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <style>""" + _PICO_CSS + r"""</style>
+  <style>"""
+    + _PICO_CSS
+    + r"""</style>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -182,3 +185,4 @@ HTML_TEMPLATE = r"""
 </body>
 </html>
 """
+)

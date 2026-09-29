@@ -11,6 +11,7 @@ def _enable_windows_vt() -> None:
         return
     try:
         import ctypes
+
         kernel32 = ctypes.windll.kernel32
         for handle_id in (-11, -12):
             handle = kernel32.GetStdHandle(handle_id)
@@ -29,7 +30,7 @@ class _ConsoleFilter(logging.Filter):
         self._is_tty = is_tty
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if getattr(record, 'is_progress', False) and self._is_tty:
+        if getattr(record, "is_progress", False) and self._is_tty:
             return False
         return True
 
@@ -107,7 +108,7 @@ class ProgressReporter:
 
                 def _make_wrapped_emit(orig: typing.Callable) -> typing.Callable:
                     def wrapped_emit(record: logging.LogRecord) -> None:
-                        if getattr(record, 'is_progress', False):
+                        if getattr(record, "is_progress", False):
                             orig(record)
                             return
 
@@ -121,7 +122,12 @@ class ProgressReporter:
 
                         orig(record)
 
-                        if had_progress and reporter_self._stream is not None and saved_line and not reporter_self._finished:
+                        if (
+                            had_progress
+                            and reporter_self._stream is not None
+                            and saved_line
+                            and not reporter_self._finished
+                        ):
                             reporter_self._stream.write(saved_line)
                             reporter_self._stream.flush()
                             reporter_self._last_len = len(saved_line)
@@ -209,16 +215,18 @@ class ProgressReporter:
             return
 
         now = time.monotonic()
-        is_first_or_last = (current == 1 or current == self._total)
+        is_first_or_last = current == 1 or current == self._total
 
         if self._should_log_milestone(current, self._total):
             self._last_milestone = current
             if self._logger is not None:
                 log_msg = self._format_milestone_log(current, stats)
-                self._logger.info(log_msg, extra={'is_progress': True})
+                self._logger.info(log_msg, extra={"is_progress": True})
 
-        if self._is_tty and self._stream is not None and (
-            is_first_or_last or (now - self._last_update_time >= self._min_interval_seconds)
+        if (
+            self._is_tty
+            and self._stream is not None
+            and (is_first_or_last or (now - self._last_update_time >= self._min_interval_seconds))
         ):
             line = self._format_status_line(current, stats)
             if line == self._last_rendered_line and not is_first_or_last:
@@ -243,7 +251,7 @@ class ProgressReporter:
             self._last_milestone = self._total
             if self._logger is not None:
                 log_msg = self._format_milestone_log(self._total, stats)
-                self._logger.info(log_msg, extra={'is_progress': True})
+                self._logger.info(log_msg, extra={"is_progress": True})
 
         if self._is_tty and self._stream is not None:
             self._show_cursor()

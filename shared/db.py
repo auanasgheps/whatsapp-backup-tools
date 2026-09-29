@@ -3,17 +3,17 @@ import re
 
 def sanitize_filename(name: str) -> str:
     """Remove filesystem-unsafe characters from a name."""
-    return re.sub(r'[\\/:*?"<>|]', '_', name).strip()
+    return re.sub(r'[\\/:*?"<>|]', "_", name).strip()
 
 
 def escape_like(s: str) -> str:
     """Escape SQLite LIKE special characters so the string is treated literally."""
-    return s.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def format_phone(number: str) -> str:
     """Format phone number for display: prepend '00' if no prefix."""
-    return '00' + number if number else ''
+    return "00" + number if number else ""
 
 
 def build_contact_folder_name(display_name: str, number: str) -> str:

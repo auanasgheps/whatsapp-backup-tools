@@ -6,7 +6,6 @@ import os
 import re
 import sqlite3
 import sys
-import tempfile
 import time
 from collections import Counter
 from pathlib import Path
@@ -18,10 +17,10 @@ sys.path.insert(0, _ROOT)
 
 from wab_viewer import main as viewer
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_archive_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
@@ -154,6 +153,7 @@ def make_cache_db(path: Path) -> sqlite3.Connection:
 # Tests: _media_type_from_path
 # ---------------------------------------------------------------------------
 
+
 class TestMediaTypeFromPath:
     def test_image_jpg(self):
         assert viewer._media_type_from_path("foo/bar.jpg") == "image"
@@ -203,6 +203,7 @@ class TestMediaTypeFromPath:
 # Tests: _detect_source_db
 # ---------------------------------------------------------------------------
 
+
 class TestDetectSourceDb:
     def test_android_detected(self, tmp_path):
         (tmp_path / "msgstore.db").touch()
@@ -244,10 +245,10 @@ class TestDetectSourceDb:
         assert path == str(db_dir / "ChatStorage.sqlite")
 
 
-
 # ---------------------------------------------------------------------------
 # Tests: cache schema
 # ---------------------------------------------------------------------------
+
 
 class TestCacheSchema:
     def test_schema_creates_tables(self, tmp_path):
@@ -255,28 +256,36 @@ class TestCacheSchema:
         conn = sqlite3.connect(str(cache_path))
         conn.executescript(viewer.CACHE_SCHEMA)
 
-        tables = {t[0] for t in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
+        tables = {
+            t[0]
+            for t in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
         assert "message_index" in tables
         assert "sync_meta" in tables
         assert "indexed_chats" in tables
         assert "user_preferences" in tables
 
-        indexes = {i[0] for i in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()}
+        indexes = {
+            i[0]
+            for i in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
         assert "idx_midx_chat_ts" in indexes
 
-        virtuals = [r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%fts5%'"
-        ).fetchall()]
+        virtuals = [
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%fts5%'"
+            ).fetchall()
+        ]
         assert "message_index_fts" in virtuals
 
 
 # ---------------------------------------------------------------------------
 # Tests: freshness check
 # ---------------------------------------------------------------------------
+
 
 class TestFreshnessCheck:
     def test_changed_when_no_stamp(self, tmp_path):
@@ -304,6 +313,7 @@ class TestFreshnessCheck:
 # ---------------------------------------------------------------------------
 # Tests: FTS index build (Android)
 # ---------------------------------------------------------------------------
+
 
 class TestFtsBuildAndroid:
     def test_fts_index_populated(self, tmp_path):
@@ -375,6 +385,7 @@ class TestFtsBuildAndroid:
 # ---------------------------------------------------------------------------
 # Tests: Flask routes
 # ---------------------------------------------------------------------------
+
 
 class TestFlaskRoutes:
     @pytest.fixture
@@ -450,7 +461,9 @@ class TestFlaskRoutes:
 
     def test_api_messages_cursor_before(self, app_and_tmp):
         client, tmp = app_and_tmp
-        resp = client.get("/api/messages?chat_id=123456789&chat_type=contact&before=1800000000000&limit=10")
+        resp = client.get(
+            "/api/messages?chat_id=123456789&chat_type=contact&before=1800000000000&limit=10"
+        )
         assert resp.status_code == 200
         assert isinstance(resp.get_json(), list)
 
@@ -468,13 +481,18 @@ class TestFlaskRoutes:
 
     def test_api_search_finds_message(self, app_and_tmp):
         import time
+
         client, tmp = app_and_tmp
         # Open the chat; wait for background indexing to complete
         client.get("/api/messages?chat_id=123456789&chat_type=contact")
         deadline = time.time() + 5
         while time.time() < deadline:
-            if client.get("/api/chat-index-status?chat_id=123456789&chat_type=contact"
-                          ).get_json()["status"] == "done":
+            if (
+                client.get("/api/chat-index-status?chat_id=123456789&chat_type=contact").get_json()[
+                    "status"
+                ]
+                == "done"
+            ):
                 break
             time.sleep(0.05)
         resp = client.get("/api/search?q=Hello&chat_id=123456789&chat_type=contact")
@@ -603,6 +621,7 @@ class TestFlaskRoutes:
 
         # Wait for the background daemon to finish indexing (macOS can be slower)
         import time
+
         deadline = time.time() + 5
         while time.time() < deadline:
             cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
@@ -626,6 +645,7 @@ class TestFlaskRoutes:
 # ---------------------------------------------------------------------------
 # Tests: user preferences
 # ---------------------------------------------------------------------------
+
 
 class TestPreferences:
     def _make_app(self, tmp_path):
@@ -651,8 +671,7 @@ class TestPreferences:
     def test_post_persists_value(self, tmp_path):
         app = self._make_app(tmp_path)
         with app.test_client() as client:
-            resp = client.post("/api/preferences",
-                               json={"key": "theme", "value": "light"})
+            resp = client.post("/api/preferences", json={"key": "theme", "value": "light"})
             assert resp.get_json()["ok"] is True
             data = client.get("/api/preferences").get_json()
         assert data["theme"] == "light"
@@ -660,8 +679,7 @@ class TestPreferences:
     def test_post_persists_across_restarts(self, tmp_path):
         app1 = self._make_app(tmp_path)
         with app1.test_client() as client:
-            client.post("/api/preferences",
-                        json={"key": "date_format", "value": "MM/DD/YYYY"})
+            client.post("/api/preferences", json={"key": "date_format", "value": "MM/DD/YYYY"})
 
         app2 = viewer.create_app(tmp_path, rescan=False)
         app2.config["TESTING"] = True
@@ -672,8 +690,7 @@ class TestPreferences:
     def test_post_invalid_key_returns_400(self, tmp_path):
         app = self._make_app(tmp_path)
         with app.test_client() as client:
-            resp = client.post("/api/preferences",
-                               json={"key": "unknown_key", "value": "x"})
+            resp = client.post("/api/preferences", json={"key": "unknown_key", "value": "x"})
         assert resp.status_code == 400
 
     def test_cache_db_filename(self, tmp_path):
@@ -687,6 +704,7 @@ class TestPreferences:
 # ---------------------------------------------------------------------------
 # Tests: lazy per-chat indexing
 # ---------------------------------------------------------------------------
+
 
 class TestLazyIndexing:
     def _setup(self, tmp_path):
@@ -757,6 +775,7 @@ class TestLazyIndexing:
 
     def test_source_change_clears_indexed_chats(self, tmp_path):
         import time
+
         wa_path = self._setup(tmp_path)
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
@@ -764,8 +783,12 @@ class TestLazyIndexing:
             # Wait for background thread to finish before simulating source change
             deadline = time.time() + 5
             while time.time() < deadline:
-                if client.get("/api/chat-index-status?chat_id=123456789&chat_type=contact"
-                              ).get_json()["status"] == "done":
+                if (
+                    client.get(
+                        "/api/chat-index-status?chat_id=123456789&chat_type=contact"
+                    ).get_json()["status"]
+                    == "done"
+                ):
                     break
                 time.sleep(0.05)
 
@@ -781,21 +804,26 @@ class TestLazyIndexing:
         self._setup(tmp_path)
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
-            count_before = sqlite3.connect(
-                str(tmp_path / ".wa_viewer.db")
-            ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            count_before = (
+                sqlite3.connect(str(tmp_path / ".wa_viewer.db"))
+                .execute("SELECT COUNT(*) FROM indexed_chats")
+                .fetchone()[0]
+            )
             assert count_before == 0
 
             client.get("/api/messages?chat_id=123456789&chat_type=contact")
 
             # Background thread — poll until done (max 5 s)
             import time
+
             deadline = time.time() + 5
             count_after = 0
             while time.time() < deadline:
-                count_after = sqlite3.connect(
-                    str(tmp_path / ".wa_viewer.db")
-                ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+                count_after = (
+                    sqlite3.connect(str(tmp_path / ".wa_viewer.db"))
+                    .execute("SELECT COUNT(*) FROM indexed_chats")
+                    .fetchone()[0]
+                )
                 if count_after == 1:
                     break
                 time.sleep(0.05)
@@ -803,6 +831,7 @@ class TestLazyIndexing:
 
     def test_concurrent_messages_requests_do_not_double_index(self, tmp_path):
         import time
+
         self._setup(tmp_path)
         app = viewer.create_app(tmp_path, rescan=False)
         app.config["TESTING"] = True
@@ -813,22 +842,29 @@ class TestLazyIndexing:
 
             deadline = time.time() + 5
             while time.time() < deadline:
-                if client.get(
-                    "/api/chat-index-status?chat_id=123456789&chat_type=contact"
-                ).get_json()["status"] == "done":
+                if (
+                    client.get(
+                        "/api/chat-index-status?chat_id=123456789&chat_type=contact"
+                    ).get_json()["status"]
+                    == "done"
+                ):
                     break
                 time.sleep(0.05)
 
             # Exactly one entry in indexed_chats — not doubled
-            count = sqlite3.connect(
-                str(tmp_path / ".wa_viewer.db")
-            ).execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+            count = (
+                sqlite3.connect(str(tmp_path / ".wa_viewer.db"))
+                .execute("SELECT COUNT(*) FROM indexed_chats")
+                .fetchone()[0]
+            )
             assert count == 1
 
             # Exactly one indexing run worth of rows in message_index
-            rows = sqlite3.connect(
-                str(tmp_path / ".wa_viewer.db")
-            ).execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
+            rows = (
+                sqlite3.connect(str(tmp_path / ".wa_viewer.db"))
+                .execute("SELECT COUNT(*) FROM message_index")
+                .fetchone()[0]
+            )
             assert rows == 1  # matches the single seeded message
 
     def test_chat_index_status_idle_then_done(self, tmp_path):
@@ -842,6 +878,7 @@ class TestLazyIndexing:
             client.get("/api/messages?chat_id=123456789&chat_type=contact")
 
             import time
+
             deadline = time.time() + 5
             status = "indexing"
             while time.time() < deadline and status != "done":
@@ -855,6 +892,7 @@ class TestLazyIndexing:
 # ---------------------------------------------------------------------------
 # Helper: seed a media message with an archive_copies entry
 # ---------------------------------------------------------------------------
+
 
 def seed_android_db_with_media(wa_conn, archive_conn, tmp_path):
     """Add one archived image message to the seeded chat (jid 1, chat 10)."""
@@ -887,6 +925,7 @@ def seed_android_db_with_media(wa_conn, archive_conn, tmp_path):
 # ---------------------------------------------------------------------------
 # Tests: /api/media
 # ---------------------------------------------------------------------------
+
 
 class TestApiMedia:
     @pytest.fixture
@@ -972,7 +1011,9 @@ class TestApiMedia:
             wa_conn.execute(
                 f"INSERT INTO message_media (message_row_id, file_path, media_name) VALUES ({msg_id}, '{orig}', 'p.jpg')"
             )
-            archive_conn.execute(f"INSERT INTO files (original_path, md5) VALUES ('{orig}', x'deadbeef')")
+            archive_conn.execute(
+                f"INSERT INTO files (original_path, md5) VALUES ('{orig}', x'deadbeef')"
+            )
             archive_conn.execute(
                 f"INSERT INTO archive_copies (original_path, archive_path) VALUES ('{orig}', '{arch}')"
             )
@@ -1006,7 +1047,9 @@ class TestApiMedia:
             wa_conn.execute(
                 f"INSERT INTO message_media (message_row_id, file_path, media_name) VALUES ({msg_id}, '{orig}', 'p.jpg')"
             )
-            archive_conn.execute(f"INSERT INTO files (original_path, md5) VALUES ('{orig}', x'deadbeef')")
+            archive_conn.execute(
+                f"INSERT INTO files (original_path, md5) VALUES ('{orig}', x'deadbeef')"
+            )
             archive_conn.execute(
                 f"INSERT INTO archive_copies (original_path, archive_path) VALUES ('{orig}', '{arch}')"
             )
@@ -1306,9 +1349,7 @@ class TestAndroidReactions:
         wa_path = tmp_path / "msgstore.db"
         # Add a second chat with a message (no reactions)
         wa_conn = sqlite3.connect(str(wa_path))
-        wa_conn.execute(
-            "INSERT INTO jid (_id, user) VALUES (2, '987654321')"
-        )
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '987654321')")
         wa_conn.execute(
             "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
             "VALUES (20, 2, NULL, 0, 1700000002000, 10)"
@@ -1385,8 +1426,10 @@ def _make_receipt_blob(base_ts: int, members: list) -> bytes:
             entry += _encode_varint((5 << 3) | 0) + _encode_varint(m["read_delta"])
         if m["delivered_delta"] is not None:
             event = (
-                _encode_varint((1 << 3) | 0) + _encode_varint(m["delivered_delta"]) +
-                _encode_varint((2 << 3) | 0) + _encode_varint(1)  # code (ignored)
+                _encode_varint((1 << 3) | 0)
+                + _encode_varint(m["delivered_delta"])
+                + _encode_varint((2 << 3) | 0)
+                + _encode_varint(1)  # code (ignored)
             )
             entry += _encode_varint((10 << 3) | 2) + _encode_varint(len(event)) + event
         blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
@@ -1404,8 +1447,10 @@ def _make_compact_receipt_blob(members: list) -> bytes:
         lid_bytes = _lid_field1_bytes(m["lid"])
         entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(lid_bytes)) + lid_bytes
         event = (
-            _encode_varint((1 << 3) | 0) + _encode_varint(m["delivered_delta"]) +
-            _encode_varint((2 << 3) | 0) + _encode_varint(3)  # code (ignored)
+            _encode_varint((1 << 3) | 0)
+            + _encode_varint(m["delivered_delta"])
+            + _encode_varint((2 << 3) | 0)
+            + _encode_varint(3)  # code (ignored)
         )
         entry += _encode_varint((9 << 3) | 2) + _encode_varint(len(event)) + event
         blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
@@ -1414,6 +1459,7 @@ def _make_compact_receipt_blob(members: list) -> bytes:
 
 class _NoOpConn:
     """Minimal connection stub — no contacts to look up."""
+
     def execute(self, sql, params=()):
         return self
 
@@ -1427,9 +1473,12 @@ class TestIosReceiptBlobParser:
 
     def test_group_delivered_only(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1234567890123", "delivered_delta": 10, "read_delta": None, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1234567890123", "delivered_delta": 10, "read_delta": None, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == (base_ts + 10) * 1000
@@ -1437,9 +1486,12 @@ class TestIosReceiptBlobParser:
 
     def test_group_delivered_and_read(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 20, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 20, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000  # delta 0 is a real delivery
@@ -1448,9 +1500,12 @@ class TestIosReceiptBlobParser:
     def test_group_read_at_send_delta_zero(self):
         # read_delta == 0 means read at send time — must not collapse to None.
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 0, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 0, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert members[0]["delivered_ts"] == base_ts * 1000
         assert members[0]["read_ts"] == base_ts * 1000
@@ -1458,9 +1513,17 @@ class TestIosReceiptBlobParser:
     def test_group_field4_is_ignored(self):
         # A large field-4 value (read receipts disabled) must not gate delivered/read.
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1234567890123", "delivered_delta": 17, "read_delta": None, "noise4": 1089263},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {
+                    "lid": "1234567890123",
+                    "delivered_delta": 17,
+                    "read_delta": None,
+                    "noise4": 1089263,
+                },
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert members[0]["delivered_ts"] == (base_ts + 17) * 1000
         assert members[0]["read_ts"] is None
@@ -1468,18 +1531,24 @@ class TestIosReceiptBlobParser:
     def test_group_lid_trailing_f_stripped(self):
         # Odd-length LID is padded with an 'f' nibble; parser must strip it.
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": None, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1234567890123", "delivered_delta": 0, "read_delta": None, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert members[0]["jid"] == "1234567890123"
 
     def test_group_multiple_members(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 5, "noise4": None},
-            {"lid": "2222222222222", "delivered_delta": 15, "read_delta": None, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 5, "noise4": None},
+                {"lid": "2222222222222", "delivered_delta": 15, "read_delta": None, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 2
         assert members[0]["read_ts"] == (base_ts + 5) * 1000
@@ -1490,11 +1559,19 @@ class TestIosReceiptBlobParser:
         # Mirrors two real ground-truth messages (synthetic LIDs, real validated deltas):
         #   read 5926s / 4708s / 1462s after send; a member with read receipts off (no field 5).
         base_ts = 1768325919
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 5926, "noise4": 2},
-            {"lid": "2222222222222", "delivered_delta": 17, "read_delta": None, "noise4": 1089263},
-            {"lid": "3333333333333", "delivered_delta": 0, "read_delta": 0, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 5926, "noise4": 2},
+                {
+                    "lid": "2222222222222",
+                    "delivered_delta": 17,
+                    "read_delta": None,
+                    "noise4": 1089263,
+                },
+                {"lid": "3333333333333", "delivered_delta": 0, "read_delta": 0, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert members[0]["read_ts"] == (base_ts + 5926) * 1000
         assert members[1]["read_ts"] is None  # read receipts disabled
@@ -1505,9 +1582,12 @@ class TestIosReceiptBlobParser:
 
     def test_1to1_delivered_and_read(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 120, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 120, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000
@@ -1515,9 +1595,12 @@ class TestIosReceiptBlobParser:
 
     def test_1to1_delivered_only(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1234567890123", "delivered_delta": 0, "read_delta": None, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1234567890123", "delivered_delta": 0, "read_delta": None, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000
@@ -1525,10 +1608,13 @@ class TestIosReceiptBlobParser:
 
     def test_1to1_multi_device_collapses_to_earliest(self):
         base_ts = 1700000000
-        blob = _make_receipt_blob(base_ts, [
-            {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 253, "noise4": None},
-            {"lid": "2222222222222", "delivered_delta": 26, "read_delta": None, "noise4": None},
-        ])
+        blob = _make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "1111111111111", "delivered_delta": 0, "read_delta": 253, "noise4": None},
+                {"lid": "2222222222222", "delivered_delta": 26, "read_delta": None, "noise4": None},
+            ],
+        )
         members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000  # min delta = 0
@@ -1538,11 +1624,15 @@ class TestIosReceiptBlobParser:
 
     def test_compact_group_delivered_only(self):
         msg_ts_s = 1784037821
-        blob = _make_compact_receipt_blob([
-            {"lid": "1111111111111", "delivered_delta": 0},
-            {"lid": "2222222222222", "delivered_delta": 60},
-        ])
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True, msg_ts_s=msg_ts_s)
+        blob = _make_compact_receipt_blob(
+            [
+                {"lid": "1111111111111", "delivered_delta": 0},
+                {"lid": "2222222222222", "delivered_delta": 60},
+            ]
+        )
+        members = viewer._parse_ios_receipt_blob(
+            blob, _NoOpConn(), is_group=True, msg_ts_s=msg_ts_s
+        )
         assert len(members) == 2
         assert members[0]["delivered_ts"] == msg_ts_s * 1000
         assert members[0]["read_ts"] is None
@@ -1558,7 +1648,7 @@ class TestIosReceiptBlobParser:
         base_ts = 1700000000
         lid_bytes = _lid_field1_bytes("1234567890123")
         entry = _encode_varint((1 << 3) | 2) + _encode_varint(len(lid_bytes)) + lid_bytes
-        entry += _encode_varint((8 << 3) | 1) + b'\x00' * 8  # unknown field, wire=1 (fixed64)
+        entry += _encode_varint((8 << 3) | 1) + b"\x00" * 8  # unknown field, wire=1 (fixed64)
         entry += _encode_varint((5 << 3) | 0) + _encode_varint(10)  # read delta=10
         event = _encode_varint((1 << 3) | 0) + _encode_varint(0)
         entry += _encode_varint((10 << 3) | 2) + _encode_varint(len(event)) + event
@@ -1595,6 +1685,7 @@ class TestIosReadWithoutTimestamp:
 # Tests: iOS reactions — ZRECEIPTINFO protobuf extraction
 # ---------------------------------------------------------------------------
 
+
 def _make_zreceipt_blob_with_reactions(reactors: list) -> bytes:
     """
     Build a ZRECEIPTINFO blob containing reaction entries.
@@ -1603,6 +1694,7 @@ def _make_zreceipt_blob_with_reactions(reactors: list) -> bytes:
     Length prefixes are varint-encoded, so blobs with field 7 >= 128 bytes
     (many reactors) are represented correctly.
     """
+
     def encode_len_delimited(field, wire, data):
         tag = (field << 3) | wire
         return _encode_varint(tag) + _encode_varint(len(data)) + data
@@ -1640,6 +1732,7 @@ def _make_ios_reaction_blob(entries: list) -> bytes:
                            5, prefixed 0x0a 0x07); present in real data but no longer used
                            as the from_me signal (no identity at all = own reaction)
     """
+
     def ld(field, data):
         tag = (field << 3) | 2
         return _encode_varint(tag) + _encode_varint(len(data)) + data
@@ -1648,9 +1741,9 @@ def _make_ios_reaction_blob(entries: list) -> bytes:
     for e in entries:
         entry = ld(1, e["token"].encode("utf-8"))
         if e.get("phone"):
-            entry += ld(2, f"{e['phone']}@s.whatsapp.net".encode("utf-8"))
+            entry += ld(2, f"{e['phone']}@s.whatsapp.net".encode())
         elif e.get("lid"):
-            entry += ld(2, f"{e['lid']}@lid".encode("utf-8"))
+            entry += ld(2, f"{e['lid']}@lid".encode())
         entry += ld(3, e["emoji"])
         if e.get("from_me"):
             entry += ld(5, b"\x0a\x07" + b"\x81\x39\x34\x00\x00\x00\x00")
@@ -1660,9 +1753,8 @@ def _make_ios_reaction_blob(entries: list) -> bytes:
 
 
 class TestIOSReactions:
-
     def test_parse_heart_reaction(self):
-        blob = _make_zreceipt_blob_with_reactions([("334142384436", "❤️".encode("utf-8"))])
+        blob = _make_zreceipt_blob_with_reactions([("334142384436", "❤️".encode())])
         result = viewer._extract_ios_reactions(blob)
         assert len(result) == 1
         sender, emoji = result[0]
@@ -1670,10 +1762,12 @@ class TestIOSReactions:
         assert emoji == "❤️"
 
     def test_parse_multiple_reactions(self):
-        blob = _make_zreceipt_blob_with_reactions([
-            ("334142384436", "❤️".encode("utf-8")),
-            ("334135434342", "😂".encode("utf-8")),
-        ])
+        blob = _make_zreceipt_blob_with_reactions(
+            [
+                ("334142384436", "❤️".encode()),
+                ("334135434342", "😂".encode()),
+            ]
+        )
         result = viewer._extract_ios_reactions(blob)
         assert len(result) == 2
         assert result[0][1] == "❤️"
@@ -1682,7 +1776,9 @@ class TestIOSReactions:
     def test_parse_various_emoji(self):
         blobs = []
         for emoji in ["😂", "😮", "😭", "👏"]:
-            blobs.append(_make_zreceipt_blob_with_reactions([("334142384436", emoji.encode("utf-8"))]))
+            blobs.append(
+                _make_zreceipt_blob_with_reactions([("334142384436", emoji.encode("utf-8"))])
+            )
         for i, emoji in enumerate(["😂", "😮", "😭", "👏"]):
             result = viewer._extract_ios_reactions(blobs[i])
             assert len(result) == 1, f"Failed for {emoji}"
@@ -1700,9 +1796,11 @@ class TestIOSReactions:
 
     def test_vs16_is_skipped_between_emoji(self):
         # VS16 (efb88f) appears BETWEEN two real emoji — it should not be a separate reaction
-        blob = _make_zreceipt_blob_with_reactions([
-            ("334142384436", "❤️".encode("utf-8") + "👏".encode("utf-8")),
-        ])
+        blob = _make_zreceipt_blob_with_reactions(
+            [
+                ("334142384436", "❤️".encode() + "👏".encode()),
+            ]
+        )
         result = viewer._extract_ios_reactions(blob)
         # Both emoji returned; VS16 is a presentation modifier, not a standalone emoji
         assert len(result) == 2
@@ -1714,7 +1812,7 @@ class TestIOSReactions:
 
         The old single-byte length read truncated field 7 and dropped reactors.
         """
-        reactors = [(f"33414238{i:04d}", "❤️".encode("utf-8")) for i in range(11)]
+        reactors = [(f"33414238{i:04d}", "❤️".encode()) for i in range(11)]
         blob = _make_zreceipt_blob_with_reactions(reactors)
         assert len(blob) > 128  # forces a multi-byte varint length on field 7
         result = viewer._extract_ios_reactions(blob)
@@ -1727,6 +1825,7 @@ class TestIOSReactions:
         Combined with a field 7 that needs a 2-byte varint length, the old parser's
         single-byte length read dropped the trailing byte and discarded this entry.
         """
+
         # Two entries with emoji in sub-field 3, plus a final entry with emoji in
         # sub-field 2. Pad the blob past 128 bytes so field 7 uses a 2-byte varint.
         def entry(field, emoji):
@@ -1735,8 +1834,8 @@ class TestIOSReactions:
             body = sub1 + sub_emoji
             return _encode_varint(0x0A) + _encode_varint(len(body)) + body
 
-        laugh = "😂".encode("utf-8")
-        heart = "❤️".encode("utf-8")
+        laugh = "😂".encode()
+        heart = "❤️".encode()
         field7 = entry(3, heart) + entry(3, laugh) + entry(3, laugh) + entry(2, laugh)
         blob = _encode_varint((7 << 3) | 2) + _encode_varint(len(field7)) + field7
         assert len(field7) > 128  # forces a 2-byte varint length on field 7
@@ -1759,18 +1858,26 @@ class TestIOSReactions:
         wa_path = tmp_path / "ChatStorage.sqlite"
         conn = sqlite3.connect(str(wa_path))
         conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE IF NOT EXISTS ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER, ZMESSAGEINFO INTEGER, ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER)")
-        conn.execute("CREATE TABLE IF NOT EXISTS ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB)")
-        conn.execute("CREATE INDEX IF NOT EXISTS ZWAMESSAGEINFO_ZMESSAGE_INDEX ON ZWAMESSAGEINFO (ZMESSAGE)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER, ZMESSAGEINFO INTEGER, ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ZWAMESSAGEINFO_ZMESSAGE_INDEX ON ZWAMESSAGEINFO (ZMESSAGE)"
+        )
         # ZWAGROUPMEMBER must exist (even if unused for contact chats)
-        conn.execute("CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT)"
+        )
 
         def encode_field7_reactor(phone_hex_str, emoji_bytes):
             phone_data = bytes.fromhex(phone_hex_str)
-            entry = bytes([0x0a, len(phone_data)]) + phone_data
-            entry += bytes([0x1a, len(emoji_bytes)]) + emoji_bytes
-            field7 = bytes([0x0a, len(entry)]) + entry
-            return bytes([0x3a, len(field7)]) + field7  # field 7, wire 2
+            entry = bytes([0x0A, len(phone_data)]) + phone_data
+            entry += bytes([0x1A, len(emoji_bytes)]) + emoji_bytes
+            field7 = bytes([0x0A, len(entry)]) + entry
+            return bytes([0x3A, len(field7)]) + field7  # field 7, wire 2
 
         # Message from "me" (ZISFROMME=1) to identify my JID — no ZMESSAGEINFO needed
         conn.execute(
@@ -1780,7 +1887,7 @@ class TestIOSReactions:
         # A message with reactions (ZISFROMME=0 = received)
         conn.execute(
             "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (100, 2, ?)",
-            (encode_field7_reactor("34393132343536373839", "😂".encode("utf-8")),)
+            (encode_field7_reactor("34393132343536373839", "😂".encode()),),
         )
         conn.execute(
             "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
@@ -1802,17 +1909,25 @@ class TestIOSReactions:
         wa_path = tmp_path / "ChatStorage.sqlite"
         conn = sqlite3.connect(str(wa_path))
         conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE IF NOT EXISTS ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER, ZMESSAGEINFO INTEGER, ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER)")
-        conn.execute("CREATE TABLE IF NOT EXISTS ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB)")
-        conn.execute("CREATE INDEX IF NOT EXISTS ZWAMESSAGEINFO_ZMESSAGE_INDEX ON ZWAMESSAGEINFO (ZMESSAGE)")
-        conn.execute("CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER, ZMESSAGEINFO INTEGER, ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ZWAMESSAGEINFO_ZMESSAGE_INDEX ON ZWAMESSAGEINFO (ZMESSAGE)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT)"
+        )
 
         def encode_field7_reactor(phone_hex_str, emoji_bytes):
             phone_data = bytes.fromhex(phone_hex_str)
-            entry = bytes([0x0a, len(phone_data)]) + phone_data
-            entry += bytes([0x1a, len(emoji_bytes)]) + emoji_bytes
-            field7 = bytes([0x0a, len(entry)]) + entry
-            return bytes([0x3a, len(field7)]) + field7
+            entry = bytes([0x0A, len(phone_data)]) + phone_data
+            entry += bytes([0x1A, len(emoji_bytes)]) + emoji_bytes
+            field7 = bytes([0x0A, len(entry)]) + entry
+            return bytes([0x3A, len(field7)]) + field7
 
         # Sent message with NULL ZFROMJID (system message) — "me" detection must not crash
         conn.execute(
@@ -1822,7 +1937,7 @@ class TestIOSReactions:
         # A message with reactions — reactor phone differs from "me" (which has NULL JID → my_phone=None)
         conn.execute(
             "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (100, 2, ?)",
-            (encode_field7_reactor("34393132343536373839", "😂".encode("utf-8")),)
+            (encode_field7_reactor("34393132343536373839", "😂".encode()),),
         )
         conn.execute(
             "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
@@ -1837,9 +1952,11 @@ class TestIOSReactions:
         assert emoji == "😂"
         assert from_me == 0  # my_phone=None, reactor phone ≠ None → not from me
 
+
 # ---------------------------------------------------------------------------
 # Tests: HTML template integrity
 # ---------------------------------------------------------------------------
+
 
 class TestHtmlTemplate:
     def test_all_getElementById_targets_exist_before_script(self):
@@ -1858,7 +1975,7 @@ class TestHtmlTemplate:
         ids_accessed = set(re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)", script_body))
 
         # ids created dynamically at runtime (not in static HTML) are expected
-        dynamic_ids = {'img-lightbox'}
+        dynamic_ids = {"img-lightbox"}
         missing = ids_accessed - ids_in_html - dynamic_ids
         assert not missing, (
             f"getElementById called for IDs not present in HTML before <script>: {sorted(missing)}"
@@ -1871,13 +1988,14 @@ class TestHtmlTemplate:
         script = app_js_path.read_text(encoding="utf-8")
 
         # isolate the _loadGalleryPage function body
-        fn_start = script.index('async function _loadGalleryPage(')
+        fn_start = script.index("async function _loadGalleryPage(")
         # find the end: next top-level 'async function' or plain 'function' at col 2
         import re as _re
-        next_fn = _re.search(r'\n  (async )?function ', script[fn_start + 1:])
-        fn_body = script[fn_start: fn_start + 1 + (next_fn.start() if next_fn else len(script))]
 
-        assert 'lightboxItems.push' not in fn_body, (
+        next_fn = _re.search(r"\n  (async )?function ", script[fn_start + 1 :])
+        fn_body = script[fn_start : fn_start + 1 + (next_fn.start() if next_fn else len(script))]
+
+        assert "lightboxItems.push" not in fn_body, (
             "_loadGalleryPage must not push to lightboxItems — renderGalleryItem handles that"
         )
 
@@ -1919,6 +2037,7 @@ class TestReactionsFrontendLayout:
 # ---------------------------------------------------------------------------
 # Tests: /api/chat-info and /api/chat-info/media-size
 # ---------------------------------------------------------------------------
+
 
 def _make_android_app(tmp_path, seed_fn=None):
     wa_path = tmp_path / "msgstore.db"
@@ -1983,7 +2102,9 @@ class TestChatInfo:
 
         # Set up a group chat
         wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
-        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)"
+        )
         wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
@@ -2020,7 +2141,9 @@ class TestChatInfo:
         seed_android_db(wa_conn, archive_conn)
 
         wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
-        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)"
+        )
         wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
@@ -2051,13 +2174,17 @@ class TestChatInfo:
         app = _make_android_app(tmp_path)
         # Seed the cache by opening messages (triggers background indexing)
         import time
+
         with app.test_client() as client:
             client.get("/api/messages?chat_id=123456789&chat_type=contact")
             deadline = time.time() + 5
             while time.time() < deadline:
-                if client.get(
-                    "/api/chat-index-status?chat_id=123456789&chat_type=contact"
-                ).get_json()["status"] == "done":
+                if (
+                    client.get(
+                        "/api/chat-index-status?chat_id=123456789&chat_type=contact"
+                    ).get_json()["status"]
+                    == "done"
+                ):
                     break
                 time.sleep(0.05)
             data = client.get("/api/chat-info?chat_id=123456789&chat_type=contact").get_json()
@@ -2084,6 +2211,7 @@ class TestChatInfo:
 
     def test_media_size_returns_bytes(self, tmp_path):
         """media-size sums file sizes for the chat folder."""
+
         def seed_media(wa_conn, archive_conn, tmp_path):
             seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
             # Reorganise the archive copy to use the proper Contacts/ prefix
@@ -2122,13 +2250,17 @@ class TestChatInfo:
         seed_android_db(wa_conn, archive_conn)
 
         wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
-        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)"
+        )
         wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
             "VALUES (10, 20, 0, 3, 1700000000001, 'Hi group', 0)"
         )
-        wa_conn.execute("CREATE TABLE message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER)")
+        wa_conn.execute(
+            "CREATE TABLE message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER)"
+        )
         wa_conn.execute("INSERT INTO message_system VALUES (11, 27)")
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
@@ -2157,7 +2289,9 @@ class TestChatInfo:
         seed_android_db(wa_conn, archive_conn)
 
         wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
-        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)"
+        )
         wa_conn.commit()
         archive_conn.execute(
             "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('20', 'Test Group', 'Test Group')"
@@ -2181,8 +2315,12 @@ class TestChatInfo:
         seed_android_db(wa_conn, archive_conn)
 
         wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
-        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)")
-        wa_conn.execute("CREATE TABLE message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER)")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (20, 2, 'Test Group', 0, 1700000000001, 10)"
+        )
+        wa_conn.execute(
+            "CREATE TABLE message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER)"
+        )
         wa_conn.execute("INSERT INTO message_system VALUES (11, 27)")
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
@@ -2217,6 +2355,7 @@ class TestChatInfo:
 
     def test_ios_group_chat_info_with_description(self, tmp_path):
         import base64
+
         wa_path = tmp_path / "ChatStorage.sqlite"
         archive_path = tmp_path / ".wa_media_archiver.db"
 
@@ -2249,7 +2388,9 @@ class TestChatInfo:
         conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test iOS Group', 'Test iOS Group')")
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test iOS Group', 'Test iOS Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -2287,7 +2428,9 @@ class TestChatInfo:
         conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test iOS Group', 'Test iOS Group')")
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test iOS Group', 'Test iOS Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -2300,16 +2443,17 @@ class TestChatInfo:
 
     def test_protobuf_extract_ios_group_description_edge_cases(self):
         from wab_viewer.main import _extract_ios_group_description
+
         assert _extract_ios_group_description(None) is None
         assert _extract_ios_group_description("") is None
         assert _extract_ios_group_description("not-base64!#$@") is None
         assert _extract_ios_group_description("+") is None
 
 
-
 # ---------------------------------------------------------------------------
 # recent_messages cache
 # ---------------------------------------------------------------------------
+
 
 def _seed_android_db_large(wa_conn):
     """Insert 10 chats × 50 messages each for performance and routing tests.
@@ -2321,12 +2465,12 @@ def _seed_android_db_large(wa_conn):
         jid_row_id = chat_id
         wa_conn.execute(
             "INSERT OR IGNORE INTO jid (_id, user) VALUES (?, ?)",
-            (jid_row_id, str(chat_id * 111111111))
+            (jid_row_id, str(chat_id * 111111111)),
         )
         wa_conn.execute(
             "INSERT OR IGNORE INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
             "VALUES (?, ?, NULL, 0, ?, ?)",
-            (chat_id, jid_row_id, 1700000000000 + chat_id * 1000, chat_id * 50)
+            (chat_id, jid_row_id, 1700000000000 + chat_id * 1000, chat_id * 50),
         )
         for i in range(50):
             msg_id = chat_id * 100 + i
@@ -2334,7 +2478,7 @@ def _seed_android_db_large(wa_conn):
             wa_conn.execute(
                 "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
                 "VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (msg_id, chat_id, i % 2, jid_row_id, ts, f"msg {i}")
+                (msg_id, chat_id, i % 2, jid_row_id, ts, f"msg {i}"),
             )
     wa_conn.commit()
 
@@ -2353,9 +2497,7 @@ class TestWaDbIndex:
 
         conn = sqlite3.connect(str(wa_path))
         try:
-            idxs = [r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index'"
-            )]
+            idxs = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")]
         finally:
             conn.close()
         assert "idx_message_chat_ts" in idxs
@@ -2373,9 +2515,12 @@ class TestWaDbIndex:
 
         conn = sqlite3.connect(str(wa_path))
         try:
-            idxs = [r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_message_chat_ts'"
-            )]
+            idxs = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_message_chat_ts'"
+                )
+            ]
         finally:
             conn.close()
         assert len(idxs) == 1  # one index, not duplicated
@@ -2393,9 +2538,19 @@ class TestRecentMessagesSchema:
         finally:
             conn.close()
         expected = {
-            "chat_id", "chat_type", "msg_id", "timestamp_ms", "sender", "from_me",
-            "archive_path", "media_type", "media_name", "text_body",
-            "quoted_text", "quoted_sender", "quoted_ts"
+            "chat_id",
+            "chat_type",
+            "msg_id",
+            "timestamp_ms",
+            "sender",
+            "from_me",
+            "archive_path",
+            "media_type",
+            "media_name",
+            "text_body",
+            "quoted_text",
+            "quoted_sender",
+            "quoted_ts",
         }
         assert expected.issubset(cols), f"Missing columns: {expected - cols}"
 
@@ -2433,10 +2588,13 @@ class TestRecentMessagesSchema:
 
         conn = sqlite3.connect(str(archive_path))
         try:
-            idxs = [(r[0], r[1]) for r in conn.execute(
-                "SELECT name, sql FROM sqlite_master WHERE type='index' "
-                "AND tbl_name='recent_messages'"
-            )]
+            idxs = [
+                (r[0], r[1])
+                for r in conn.execute(
+                    "SELECT name, sql FROM sqlite_master WHERE type='index' "
+                    "AND tbl_name='recent_messages'"
+                )
+            ]
         finally:
             conn.close()
         assert any("timestamp_ms" in (sql or "") for _, sql in idxs)
@@ -2452,11 +2610,14 @@ class TestRecentMessagesRouting:
         _seed_android_db_large(wa_conn)
         # Pre-populate recent_messages with known sender names (distinct from WA DB)
         for i in range(10):
-            archive_conn.execute("""
+            archive_conn.execute(
+                """
                 INSERT OR REPLACE INTO recent_messages
                 (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body)
                 VALUES (?, 'contact', ?, ?, 'FROM_CACHE', 0, NULL, 'text', '', ?)
-            """, ("111111111", i + 1, 1700000000000 + i, f"cached msg {i}"))
+            """,
+                ("111111111", i + 1, 1700000000000 + i, f"cached msg {i}"),
+            )
         archive_conn.commit()
         wa_conn.close()
         archive_conn.close()
@@ -2514,11 +2675,14 @@ class TestRecentMessagesRouting:
         # Pre-populate recent_messages with the 5 OLDEST messages (timestamps 1700000000000..)
         # WA DB will return the 50 NEWEST messages (timestamps 170000045000..) — no overlap
         for i in range(5):
-            archive_conn.execute("""
+            archive_conn.execute(
+                """
                 INSERT OR REPLACE INTO recent_messages
                 (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body)
                 VALUES (?, 'contact', ?, ?, 'FROM_CACHE', 0, NULL, 'text', '', ?)
-            """, ("111111111", 100 + i, 1700000000000 + i * 1000, f"cached {i}"))
+            """,
+                ("111111111", 100 + i, 1700000000000 + i * 1000, f"cached {i}"),
+            )
         archive_conn.commit()
         wa_conn.close()
         archive_conn.close()
@@ -2536,8 +2700,9 @@ class TestRecentMessagesRouting:
             )
         data = resp.get_json()
         assert len(data) > 0, "pagination should hit WA DB and return messages"
-        assert all(r["sender"] != "FROM_CACHE" for r in data), \
+        assert all(r["sender"] != "FROM_CACHE" for r in data), (
             "pagination returned cached messages — WA DB was not used"
+        )
 
     def test_recent_messages_response_schema(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
@@ -2556,9 +2721,20 @@ class TestRecentMessagesRouting:
         data = resp.get_json()
         assert len(data) > 0
         expected_keys = {
-            "msg_id", "chat_id", "chat_type", "timestamp_ms", "sender",
-            "from_me", "archive_path", "media_type", "media_name", "text_body",
-            "quoted_text", "quoted_sender", "quoted_ts", "reactions"
+            "msg_id",
+            "chat_id",
+            "chat_type",
+            "timestamp_ms",
+            "sender",
+            "from_me",
+            "archive_path",
+            "media_type",
+            "media_name",
+            "text_body",
+            "quoted_text",
+            "quoted_sender",
+            "quoted_ts",
+            "reactions",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -2566,6 +2742,7 @@ class TestRecentMessagesRouting:
 # ---------------------------------------------------------------------------
 # Tests: /api/reaction_details endpoint
 # ---------------------------------------------------------------------------
+
 
 class TestReactionDetailsEndpoint:
     """Tests for /api/reaction_details/<message_id> — Android and iOS."""
@@ -2699,13 +2876,14 @@ class TestReactionDetailsEndpoint:
             "VALUES (1, 10, 1, NULL, 1000, '15550001111@s.whatsapp.net')"
         )
         # Two reactors identified by phone JID (sub-field 2); sub-field 1 is an opaque token.
-        blob = _make_ios_reaction_blob([
-            {"token": "3EB0903616E9C7C36F7B", "phone": "15550003333", "emoji": "👍".encode("utf-8")},
-            {"token": "3AB0BA8A4CA7122CA06A", "phone": "15550004444", "emoji": "❤️".encode("utf-8")},
-        ])
+        blob = _make_ios_reaction_blob(
+            [
+                {"token": "3EB0903616E9C7C36F7B", "phone": "15550003333", "emoji": "👍".encode()},
+                {"token": "3AB0BA8A4CA7122CA06A", "phone": "15550004444", "emoji": "❤️".encode()},
+            ]
+        )
         conn.execute(
-            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (100, 2, ?)",
-            (blob,)
+            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (100, 2, ?)", (blob,)
         )
         conn.execute(
             "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
@@ -2791,7 +2969,7 @@ class TestReactionDetailsEndpoint:
         """)
         conn.execute(
             "INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO, ZCONTACTJID) VALUES (10, NULL, ?)",
-            (contact_jid,)
+            (contact_jid,),
         )
         conn.execute(
             "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZFROMJID) "
@@ -2810,14 +2988,16 @@ class TestReactionDetailsEndpoint:
     def test_ios_phone_resolves_to_name(self, tmp_path):
         """Reactor identified by phone JID (sub-field 2) is resolved via arch.contacts."""
         phone = "41234567890"
-        blob = _make_ios_reaction_blob([
-            {"token": "3EB0903616E9C7C36F7B", "phone": phone, "emoji": "👍".encode("utf-8")},
-        ])
+        blob = _make_ios_reaction_blob(
+            [
+                {"token": "3EB0903616E9C7C36F7B", "phone": phone, "emoji": "👍".encode()},
+            ]
+        )
         self._ios_db_with_blob(tmp_path, "88@g.us", blob)
         archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         archive_conn.execute(
             "INSERT INTO contacts (number, folder, display_name) VALUES (?, 'Contacts', ?)",
-            (phone, "Bob")
+            (phone, "Bob"),
         )
         archive_conn.commit()
         archive_conn.close()
@@ -2832,9 +3012,11 @@ class TestReactionDetailsEndpoint:
 
     def test_ios_no_identity_is_from_me(self, tmp_path):
         """Reactor entry with no phone and no @lid JID is the current user's own reaction."""
-        blob = _make_ios_reaction_blob([
-            {"token": "3EB0903616E9C7C36F7B", "phone": None, "emoji": "👍".encode("utf-8")},
-        ])
+        blob = _make_ios_reaction_blob(
+            [
+                {"token": "3EB0903616E9C7C36F7B", "phone": None, "emoji": "👍".encode()},
+            ]
+        )
         self._ios_db_with_blob(tmp_path, "88@g.us", blob)
         archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         archive_conn.close()
@@ -2848,16 +3030,18 @@ class TestReactionDetailsEndpoint:
     def test_ios_lid_resolves_via_pushname(self, tmp_path):
         """Group reactor identified by @lid JID resolves to a name via ZWAPROFILEPUSHNAME."""
         lid = "271936022126772"
-        blob = _make_ios_reaction_blob([
-            {"token": "3A77C1478A60D1C41588", "lid": lid, "emoji": "❤️".encode("utf-8")},
-        ])
+        blob = _make_ios_reaction_blob(
+            [
+                {"token": "3A77C1478A60D1C41588", "lid": lid, "emoji": "❤️".encode()},
+            ]
+        )
         self._ios_db_with_blob(tmp_path, "99@g.us", blob)
         # Insert a push-name row keyed by the @lid JID
         wa_path = tmp_path / "ChatStorage.sqlite"
         conn = sqlite3.connect(str(wa_path))
         conn.execute(
             "INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES (1, ?, 'Elena')",
-            (f"{lid}@lid",)
+            (f"{lid}@lid",),
         )
         conn.commit()
         conn.close()
@@ -2874,9 +3058,11 @@ class TestReactionDetailsEndpoint:
 
     def test_ios_lid_unknown_when_no_name_source(self, tmp_path):
         """@lid reactor with no matching entry in any name table resolves to 'Unknown'."""
-        blob = _make_ios_reaction_blob([
-            {"token": "3A42C9813B3F02D513AA", "lid": "999000111222333", "emoji": "👍".encode("utf-8")},
-        ])
+        blob = _make_ios_reaction_blob(
+            [
+                {"token": "3A42C9813B3F02D513AA", "lid": "999000111222333", "emoji": "👍".encode()},
+            ]
+        )
         self._ios_db_with_blob(tmp_path, "99@g.us", blob)
         archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         archive_conn.close()
@@ -2893,6 +3079,7 @@ class TestReactionDetailsEndpoint:
 # iOS MessagingInfraDatabase & LID.sqlite Tests
 # ===========================================================================
 
+
 class TestIosReceiptDeviceParser:
     def test_1to1_receipt_device_timestamps_converted_to_ms(self):
         class _MockConn:
@@ -2900,6 +3087,7 @@ class TestIosReceiptDeviceParser:
                 class _Row:
                     def fetchone(self):
                         return None
+
                 return _Row()
 
         infra_rows = [
@@ -2984,11 +3172,15 @@ class TestIosLidDatabaseResolution:
 
         # Reaction from @lid user not in ContactsV2
         lid_val = "999888777666555"
-        blob = _make_ios_reaction_blob([
-            {"token": "3AB0BA8A4CA7122CA06A", "lid": lid_val, "emoji": "🎉".encode("utf-8")},
-        ])
+        blob = _make_ios_reaction_blob(
+            [
+                {"token": "3AB0BA8A4CA7122CA06A", "lid": lid_val, "emoji": "🎉".encode()},
+            ]
+        )
         conn.execute("INSERT INTO ZWAMESSAGEINFO VALUES (100, 2, ?)", (blob,))
-        conn.execute("INSERT INTO ZWAMESSAGE VALUES (2, 10, 0, 100, 2000, '15550002222@s.whatsapp.net', NULL)")
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (2, 10, 0, 100, 2000, '15550002222@s.whatsapp.net', NULL)"
+        )
         conn.commit()
         conn.close()
 
@@ -3366,18 +3558,26 @@ class TestIosHdDeduplication:
             hd_file = f"Media/hd_{i}.jpg"
 
             conn.execute("INSERT INTO ZWAMEDIAITEM VALUES (?, ?, NULL)", (lq_mi, lq_file))
-            conn.execute("INSERT INTO ZWAMESSAGE VALUES (?, 10, 0, ?, ?, 1, ?, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net')",
-                         (lq_pk, 1000.0 + i, lq_stanza, lq_mi))
+            conn.execute(
+                "INSERT INTO ZWAMESSAGE VALUES (?, 10, 0, ?, ?, 1, ?, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net')",
+                (lq_pk, 1000.0 + i, lq_stanza, lq_mi),
+            )
 
             conn.execute("INSERT INTO ZWAMEDIAITEM VALUES (?, ?, NULL)", (hd_mi, hd_file))
-            conn.execute("INSERT INTO ZWAMESSAGE VALUES (?, 10, 0, ?, ?, 1, ?, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net')",
-                         (hd_pk, 1000.0 + i + 0.1, hd_stanza, hd_mi))
+            conn.execute(
+                "INSERT INTO ZWAMESSAGE VALUES (?, 10, 0, ?, ?, 1, ?, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net')",
+                (hd_pk, 1000.0 + i + 0.1, hd_stanza, hd_mi),
+            )
 
-            ext_conn.execute("INSERT INTO message_parent_association VALUES (?, ?, 10, ?, 'group1@g.us')",
-                             (hd_stanza, lq_stanza, i))
+            ext_conn.execute(
+                "INSERT INTO message_parent_association VALUES (?, ?, 10, ?, 'group1@g.us')",
+                (hd_stanza, lq_stanza, i),
+            )
 
-            archive_conn.execute("INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
-                                 (f"Message/{hd_file}", f"photos/{hd_file}"))
+            archive_conn.execute(
+                "INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
+                (f"Message/{hd_file}", f"photos/{hd_file}"),
+            )
 
         conn.commit()
         conn.close()
@@ -3516,9 +3716,15 @@ class TestGroupMembersLidResolution:
         c_conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Alice', 'Alice Tester')")
-        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Bob', 'Bob Standard')")
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Alice', 'Alice Tester')"
+        )
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Bob', 'Bob Standard')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -3574,8 +3780,12 @@ class TestGroupMembersLidResolution:
         lid_conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550003333', 'Charlie', 'Charlie Tester')")
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550003333', 'Charlie', 'Charlie Tester')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -3620,7 +3830,9 @@ class TestGroupMembersLidResolution:
         conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -3671,9 +3883,15 @@ class TestGroupMembersLidResolution:
         conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Active User', 'Active User')")
-        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Left User', 'Left User')")
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Active User', 'Active User')"
+        )
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', 'Left User', 'Left User')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -3748,8 +3966,12 @@ class TestGroupMembersLidResolution:
         conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550005555', 'Dave', 'Dave Android')")
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Android Group', 'Android Group')")
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550005555', 'Dave', 'Dave Android')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Android Group', 'Android Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -3814,7 +4036,9 @@ class TestGroupMembersLidResolution:
 
         # Not saved in arch.contacts
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -3876,8 +4100,12 @@ class TestGroupMembersLidResolution:
 
         # In arch.contacts, build_ios_pushname_map stored the push name keyed by the LID string
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('103624826949008', 'Dave Folder', 'Archived Friendly Dave')")
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('103624826949008', 'Dave Folder', 'Archived Friendly Dave')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -3977,8 +4205,12 @@ class TestGroupMembersLidResolution:
         conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Alice', 'Alice Saved')")
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Android Modern Group', 'Android Modern Group')")
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', 'Alice', 'Alice Saved')"
+        )
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Android Modern Group', 'Android Modern Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -4087,7 +4319,9 @@ class TestGroupMembersLidResolution:
         conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -4458,7 +4692,11 @@ class TestServiceMessages:
             # In descending order (newest first): msgs returned by /api/messages
             # For same timestamp (700000000.0), sort_id 3 (Bob added) comes before sort_id 2 (Group created)
             # When reversed (chronological order), Group Created (sort_id 2) comes BEFORE Participant Added (sort_id 3)
-            same_ts_msgs = [m for m in reversed(msgs) if m["timestamp_ms"] == int((700000000.0 + 978307200) * 1000)]
+            same_ts_msgs = [
+                m
+                for m in reversed(msgs)
+                if m["timestamp_ms"] == int((700000000.0 + 978307200) * 1000)
+            ]
             assert len(same_ts_msgs) == 2
             assert same_ts_msgs[0]["msg_id"] == 101  # Group created (ZSORT = 2)
             assert same_ts_msgs[1]["msg_id"] == 100  # Bob added (ZSORT = 3, despite PK 100 < 101)
@@ -4745,7 +4983,9 @@ class TestServiceMessages:
             assert len(chats) == 1
             # display_message_row_id in chat was 3 (subject changed)
             assert chats[0]["last_msg_type"] == "service"
-            assert chats[0]["last_msg_preview"] == 'You changed the subject to "Renamed Android Group"'
+            assert (
+                chats[0]["last_msg_preview"] == 'You changed the subject to "Renamed Android Group"'
+            )
 
             # /api/chat-info stats
             info_resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
@@ -4781,7 +5021,9 @@ class TestServiceMessages:
         conn.close()
 
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute("INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')")
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
         archive_conn.commit()
         archive_conn.close()
 
@@ -4789,7 +5031,9 @@ class TestServiceMessages:
         app.config["TESTING"] = True
 
         with app.test_client() as client:
-            resp = client.get("/api/messages/at?chat_id=10&chat_type=group&ts=1700000002000&limit=10")
+            resp = client.get(
+                "/api/messages/at?chat_id=10&chat_type=group&ts=1700000002000&limit=10"
+            )
             msgs = resp.get_json()
             assert len(msgs) == 3
             by_id = {m["msg_id"]: m for m in msgs}
@@ -4813,18 +5057,45 @@ class TestServiceMessages:
         cache_conn.row_factory = sqlite3.Row
 
         raw_rows = [
-            {"rowid": 1, "chat_id": "1", "chat_type": "group", "timestamp_ms": 1000, "message_type": 6, "text_body": "103624826949010@lid", "media_file": None},
-            {"rowid": 2, "chat_id": "1", "chat_type": "group", "timestamp_ms": 2000, "message_type": 6, "text_body": '{"subject": "Secret", "author": "123"}', "media_file": None},
-            {"rowid": 3, "chat_id": "1", "chat_type": "group", "timestamp_ms": 3000, "message_type": 0, "text_body": "Important meeting tomorrow", "media_file": None},
+            {
+                "rowid": 1,
+                "chat_id": "1",
+                "chat_type": "group",
+                "timestamp_ms": 1000,
+                "message_type": 6,
+                "text_body": "103624826949010@lid",
+                "media_file": None,
+            },
+            {
+                "rowid": 2,
+                "chat_id": "1",
+                "chat_type": "group",
+                "timestamp_ms": 2000,
+                "message_type": 6,
+                "text_body": '{"subject": "Secret", "author": "123"}',
+                "media_file": None,
+            },
+            {
+                "rowid": 3,
+                "chat_id": "1",
+                "chat_type": "group",
+                "timestamp_ms": 3000,
+                "message_type": 0,
+                "text_body": "Important meeting tomorrow",
+                "media_file": None,
+            },
         ]
 
         viewer._stream_fts_rows(raw_rows, cache_conn, 2000, None)
 
-        indexed_fts = cache_conn.execute("SELECT rowid, text_body FROM message_index_fts").fetchall()
+        indexed_fts = cache_conn.execute(
+            "SELECT rowid, text_body FROM message_index_fts"
+        ).fetchall()
         assert len(indexed_fts) == 1
         assert indexed_fts[0]["rowid"] == 3
         assert indexed_fts[0]["text_body"] == "Important meeting tomorrow"
         cache_conn.close()
+
 
 class TestFaviconAndStaticAssets:
     def test_favicon_served(self, tmp_path):
@@ -4853,17 +5124,21 @@ class TestFaviconAndStaticAssets:
 # wab_viewer entrypoint tests
 # ===========================================================================
 
+
 class TestViewerEntrypoint:
     def test_import_main_does_not_execute(self):
-        from unittest.mock import patch
         import importlib
+        from unittest.mock import patch
+
         with patch("wab_viewer.main.main") as mock_main:
             import wab_viewer.__main__
+
             importlib.reload(wab_viewer.__main__)
             mock_main.assert_not_called()
 
     def test_run_as_directory_help(self):
         import subprocess
+
         res = subprocess.run(
             [sys.executable, "wab_viewer", "--help"],
             capture_output=True,
@@ -4874,6 +5149,7 @@ class TestViewerEntrypoint:
 
     def test_run_as_module_help(self):
         import subprocess
+
         res = subprocess.run(
             [sys.executable, "-m", "wab_viewer", "--help"],
             capture_output=True,
@@ -4891,6 +5167,7 @@ class TestViewerEntrypoint:
 
     def test_parse_args_browser_options(self, tmp_path):
         from unittest.mock import patch
+
         archive_dir = str(tmp_path)
         with patch.object(sys, "argv", ["wab-viewer", archive_dir]):
             args = viewer.parse_args()
@@ -4900,7 +5177,20 @@ class TestViewerEntrypoint:
             assert args.no_browser is False
             assert args.verbose is False
 
-        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "192.168.1.50", "--port", "8080", "--no-browser", "--verbose"]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "wab-viewer",
+                archive_dir,
+                "--host",
+                "192.168.1.50",
+                "--port",
+                "8080",
+                "--no-browser",
+                "--verbose",
+            ],
+        ):
             args = viewer.parse_args()
             assert args.host == "192.168.1.50"
             assert args.port == 8080
@@ -4912,60 +5202,78 @@ class TestViewerEntrypoint:
             assert args.verbose is True
 
     def test_main_browser_launch(self, tmp_path):
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         archive_dir = str(tmp_path)
         mock_app = MagicMock()
 
         # 1. Host 192.168.1.50 opens http://192.168.1.50:5000
-        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "192.168.1.50"]), \
-             patch("wab_viewer.main.validate_output_root"), \
-             patch("wab_viewer.main.create_app", return_value=mock_app), \
-             patch("wab_viewer.main.webbrowser.open") as mock_open:
+        with (
+            patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "192.168.1.50"]),
+            patch("wab_viewer.main.validate_output_root"),
+            patch("wab_viewer.main.create_app", return_value=mock_app),
+            patch("wab_viewer.main.webbrowser.open") as mock_open,
+        ):
             viewer.main()
             mock_open.assert_called_once_with("http://192.168.1.50:5000")
-            mock_app.run.assert_called_once_with(host="192.168.1.50", port=5000, debug=False, threaded=True)
+            mock_app.run.assert_called_once_with(
+                host="192.168.1.50", port=5000, debug=False, threaded=True
+            )
 
         mock_app.reset_mock()
 
         # 2. Host 0.0.0.0 opens http://127.0.0.1:5000
-        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "0.0.0.0"]), \
-             patch("wab_viewer.main.validate_output_root"), \
-             patch("wab_viewer.main.create_app", return_value=mock_app), \
-             patch("wab_viewer.main.webbrowser.open") as mock_open:
+        with (
+            patch.object(sys, "argv", ["wab-viewer", archive_dir, "--host", "0.0.0.0"]),
+            patch("wab_viewer.main.validate_output_root"),
+            patch("wab_viewer.main.create_app", return_value=mock_app),
+            patch("wab_viewer.main.webbrowser.open") as mock_open,
+        ):
             viewer.main()
             mock_open.assert_called_once_with("http://127.0.0.1:5000")
-            mock_app.run.assert_called_once_with(host="0.0.0.0", port=5000, debug=False, threaded=True)
+            mock_app.run.assert_called_once_with(
+                host="0.0.0.0", port=5000, debug=False, threaded=True
+            )
 
         mock_app.reset_mock()
 
         # 3. With --no-browser, webbrowser.open is not called
-        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--no-browser"]), \
-             patch("wab_viewer.main.validate_output_root"), \
-             patch("wab_viewer.main.create_app", return_value=mock_app), \
-             patch("wab_viewer.main.webbrowser.open") as mock_open:
+        with (
+            patch.object(sys, "argv", ["wab-viewer", archive_dir, "--no-browser"]),
+            patch("wab_viewer.main.validate_output_root"),
+            patch("wab_viewer.main.create_app", return_value=mock_app),
+            patch("wab_viewer.main.webbrowser.open") as mock_open,
+        ):
             viewer.main()
             mock_open.assert_not_called()
-            mock_app.run.assert_called_once_with(host="127.0.0.1", port=5000, debug=False, threaded=True)
+            mock_app.run.assert_called_once_with(
+                host="127.0.0.1", port=5000, debug=False, threaded=True
+            )
 
     def test_main_logging_level(self, tmp_path):
         import logging
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         archive_dir = str(tmp_path)
         mock_app = MagicMock()
 
         # Default log level should be ERROR
-        with patch.object(sys, "argv", ["wab-viewer", archive_dir]), \
-             patch("wab_viewer.main.validate_output_root"), \
-             patch("wab_viewer.main.create_app", return_value=mock_app), \
-             patch("wab_viewer.main.webbrowser.open"):
+        with (
+            patch.object(sys, "argv", ["wab-viewer", archive_dir]),
+            patch("wab_viewer.main.validate_output_root"),
+            patch("wab_viewer.main.create_app", return_value=mock_app),
+            patch("wab_viewer.main.webbrowser.open"),
+        ):
             viewer.main()
             assert logging.getLogger("werkzeug").level == logging.ERROR
 
         # With --verbose, log level should be INFO
-        with patch.object(sys, "argv", ["wab-viewer", archive_dir, "--verbose"]), \
-             patch("wab_viewer.main.validate_output_root"), \
-             patch("wab_viewer.main.create_app", return_value=mock_app), \
-             patch("wab_viewer.main.webbrowser.open"):
+        with (
+            patch.object(sys, "argv", ["wab-viewer", archive_dir, "--verbose"]),
+            patch("wab_viewer.main.validate_output_root"),
+            patch("wab_viewer.main.create_app", return_value=mock_app),
+            patch("wab_viewer.main.webbrowser.open"),
+        ):
             viewer.main()
             assert logging.getLogger("werkzeug").level == logging.INFO
 
@@ -4977,7 +5285,10 @@ class TestDatabaseOptimizationsAndMaintenance:
         assert user_version == 1
         auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
         assert auto_vacuum == 2  # INCREMENTAL
-        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        indexes = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+        }
         assert "idx_midx_chat_type_ts" in indexes
         conn.close()
 
@@ -4990,24 +5301,28 @@ class TestDatabaseOptimizationsAndMaintenance:
 
     def test_recent_messages_reactions_persisted(self, tmp_path):
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        rows = [{
-            "chat_id": "12345",
-            "chat_type": "contact",
-            "msg_id": 100,
-            "timestamp_ms": 1000,
-            "sender": "Alice",
-            "from_me": 0,
-            "archive_path": "path.jpg",
-            "media_type": "image",
-            "media_name": "pic.jpg",
-            "text_body": "hello",
-            "quoted_text": None,
-            "quoted_sender": None,
-            "quoted_ts": None,
-            "reactions": "❤️",
-        }]
+        rows = [
+            {
+                "chat_id": "12345",
+                "chat_type": "contact",
+                "msg_id": 100,
+                "timestamp_ms": 1000,
+                "sender": "Alice",
+                "from_me": 0,
+                "archive_path": "path.jpg",
+                "media_type": "image",
+                "media_name": "pic.jpg",
+                "text_body": "hello",
+                "quoted_text": None,
+                "quoted_sender": None,
+                "quoted_ts": None,
+                "reactions": "❤️",
+            }
+        ]
         viewer._backfill_recent_messages(arc_conn, rows)
-        saved = arc_conn.execute("SELECT reactions FROM recent_messages WHERE msg_id = 100").fetchone()[0]
+        saved = arc_conn.execute(
+            "SELECT reactions FROM recent_messages WHERE msg_id = 100"
+        ).fetchone()[0]
         assert saved == "❤️"
         arc_conn.close()
 
@@ -5036,4 +5351,3 @@ class TestDatabaseOptimizationsAndMaintenance:
             finally:
                 with app._indexing_lock:
                     app._bulk_index_state["running"] = False
-
