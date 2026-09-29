@@ -56,6 +56,7 @@ python -m wab_viewer --help
 ```
 
 When using manual execution, you must manually install required packages.
+
 ---
 
 ## 3. Platform-Specific Prerequisites
