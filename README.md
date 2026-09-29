@@ -132,7 +132,7 @@ wab-archiver archive \
 
 > 💡 Repeat `--wa-root` to search multiple media folders and automatically select the best copy of each file.
 
-See [docs/archiver/](docs/archiver/index.md) for full setup instructions and command reference.
+See [documentation](docs/archiver/index.md) for full setup instructions and command reference.
 
 ### wab-viewer quick start
 
@@ -142,7 +142,7 @@ First, run `wab-archiver` to create the archive. Then point `wab-viewer` to your
 wab-viewer /path/to/archive
 ```
 
-Opens in your browser at `http://127.0.0.1:5000`. See [docs/viewer/](docs/viewer/index.md) for full usage.
+Opens in your browser at `http://127.0.0.1:5000`. See [documentation](docs/viewer/index.md) for full usage.
 
 ---
 
