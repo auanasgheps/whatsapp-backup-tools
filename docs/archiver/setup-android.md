@@ -25,10 +25,21 @@ When asked, create the end-to-end encrypted backup.
 
 You need a local copy of your `WhatsApp/` folder (the one **containing** the `Media` subfolder) to run the archiver. There are two ways to get it.
 
-### Syncthing (recommended)
+### Method 1: Syncthing (Recommended)
 
-[Syncthing](https://syncthing.net/) keeps a live copy of the folder in sync over your local network — no manual steps after the initial setup.
+[Syncthing](https://syncthing.net/) is a free, open-source tool that continuously syncs your WhatsApp media from your phone to your computer over your local Wi-Fi. Once set up, it keeps your media backup up to date automatically in the background.
 
+1. **Install Syncthing on your computer**: Download it from [syncthing.net](https://syncthing.net/).
+2. **Install Syncthing on your Android phone**: Install [Syncthing for Android (Google Play)](https://play.google.com/store/apps/details?id=com.github.catfriend1.syncthingandroid).
+3. **Connect your devices**: Open Syncthing on both devices and pair them (e.g. by scanning the computer's pairing QR code from the phone app).
+4. **Share your WhatsApp folder**: In the phone app, add a new folder, browse to:
+   ```
+   Android/media/com.whatsapp/WhatsApp
+   ```
+   and share it with your computer.
+5. **Accept on your computer**: Accept the shared folder on your computer.
+
+The synchronized folder on your computer will look like this:
 ```
 /path/to/WhatsApp/
 ├── Databases/
@@ -38,9 +49,9 @@ You need a local copy of your `WhatsApp/` folder (the one **containing** the `Me
     └── WhatsApp Audio/
 ```
 
-Pass the path to the `WhatsApp/` folder (not `Media/`) to the archiver via `--wa-root`.
+Pass this synced `WhatsApp/` path (the folder containing `Media/`) to the archiver using `--wa-root`.
 
-### ADB Pull Media (optional)
+### ADB Pull Media (alternative)
 
 If you prefer not to set up Syncthing, the archiver can pull your media files directly from the device over USB. This is significantly **slower and less reliable** — ADB overhead per file makes it impractical for large collections, and connections can drop mid-transfer.
 
