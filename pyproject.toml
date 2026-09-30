@@ -20,8 +20,11 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Chat",
     "Topic :: System :: Archiving :: Backup",
+    "Topic :: Communications :: Chat",
+    "Topic :: Utilities",
+    "Topic :: Database"
 ]
-keywords = ["whatsapp", "backup", "archiver", "viewer", "chat", "media", "ios", "android"]
+keywords = ["whatsapp", "backup", "archiver", "viewer", "chat", "media", "ios", "android", "history", "whatsapp-export", "whastapp-archiving", "whatsapp-conversations", "whatsapp-media", "whatsapp-database"]
 dependencies = [
     "flask",
     "wa-crypt-tools",
