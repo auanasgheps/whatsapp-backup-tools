@@ -23,28 +23,27 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
   <img src="docs/images/viewer_clean.png" width="700" /> 
 </p>
 
+> 🚀 **Ready to begin?** Skip directly to [Installation & Quick Start](#installation--quick-start).
+
 ---
 
-### WhatsApp Backup Archiver Features
+## Features
 
+### WhatsApp Backup Archiver
 Organise and preserve your WhatsApp media in a clean, human-readable structure.
 
 - **Structured & Human-Readable**: Organises media into `Contacts/` and `Groups/` sorted by year and `Sent/Received`, with original WhatsApp message timestamps preserved.
 - **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
-- **Cross-Platform Support**: Works with both Android (no root required) and iOS (via iTunes backups), with optional restore mode to reconstruct Android media layouts.
+- **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
+- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, and Documents.
 
-#### Supported Media Types
-
-The archiver handles: Images, Videos, Audio, Voice messages, Video Messages, Animated GIFs, and Documents.
-
-### WhatsApp Backup Viewer Features
-
+### WhatsApp Backup Viewer
 Explore and search your archived chats through a local web UI replicating WhatsApp Web.
 
 - **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, customizable font size, and regional date formats.
-- **Rich Chat Timeline**: Chronological chat history with reactions, quoted replies, delivery/read receipts, and smooth, lag-free scrolling even in massive conversations.
-- **In-Browser Media Player & Gallery**: Stream video and voice notes with seeking, open photos in a lightbox, and explore chat media via thumbnail grid or archive folder tree.
+- **Rich Chat Timeline**: Chronological chat history with reactions, quoted replies, delivery/read receipts, and smooth scrolling even in massive conversations.
+- **In-Browser Media Player & Gallery**: Stream video and voice notes with seeking, open photos in a lightbox, and explore chat media via thumbnail grid or folder tree.
 - **Full-Text Search & Navigation**: Search across all chats or within a single conversation, jump directly to matches, or jump to specific dates with the date picker.
 
 ---
@@ -91,75 +90,97 @@ After a successful run, the archive is organised as follows:
 
 ---
 
-## Installation
+## Installation & Quick Start
 
-See [docs/prerequisites.md](docs/prerequisites.md) for system requirements and platform-specific backup preparation (Android / iOS).
+To organize and view your WhatsApp data on your computer, the tool needs two things from your phone: your **WhatsApp Database** and your **WhatsApp Media**.
 
-Install directly from GitHub:
+Everything is processed **100% locally on your computer** — no data leaves your machine. See [docs/prerequisites.md](docs/prerequisites.md) for full system requirements.
+
+---
+
+### Step 1: Install the Tool
+
+Ensure **Python 3.11+** is installed, then install directly from GitHub:
 
 ```bash
 pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"
 ```
 
-Or clone the repository and install locally:
+> 💡 **Windows users:** If `pip` is not recognized, run `py -m pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"` instead.
 
-```bash
-git clone https://github.com/auanasgheps/whatsapp-backup-tools.git
-cd whatsapp-backup-tools
-pip install .
-```
+<details>
+<summary><b>Alternative installation methods (offline wheel, clone, or running without pip)</b></summary>
 
-You can also download the pre-built `.whl` package attached to the [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and install it:
+- **Pre-built wheel (.whl):** Download from [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and run:
+  ```bash
+  pip install wab_tools-x.xx-py3-none-any.whl
+  ```
+- **Local clone:**
+  ```bash
+  git clone https://github.com/auanasgheps/whatsapp-backup-tools.git
+  cd whatsapp-backup-tools
+  pip install .
+  ```
+- **Manual execution without pip:**
+  ```bash
+  python -m wab_archiver --help
+  python -m wab_viewer --help
+  ```
+</details>
 
-```bash
-pip install wab_tools-x-xx-py3-none-any.whl
-```
+---
 
-> ℹ️ *PyPI distribution (`pip install wab-tools`) will be available in an upcoming update.*
+### Step 2: Get the Files from Your Phone
 
-### Manual execution (without pip)
+Follow the step-by-step guide for your device to extract your database and sync your media:
 
-Alternatively, clone the repository and run the tools directly with Python without installing the package:
+- 🤖 **[Android Setup Guide](docs/archiver/setup-android.md)**:
+  - Turn on End-to-End Encrypted Backup in WhatsApp and note your 64-digit key.
+  - Sync your media folder with Syncthing (or pull over USB with ADB).
+- 🍏 **[iOS / iPhone Setup Guide](docs/archiver/setup-ios.md)**:
+  - Turn off in-app WhatsApp encrypted backup.
+  - Create a local device backup on your computer with Finder (macOS) or Apple Devices / iTunes (Windows).
 
-```bash
-git clone https://github.com/auanasgheps/whatsapp-backup-tools.git
-cd whatsapp-backup-tools
-python -m wab_archiver --help
-python -m wab_viewer --help
-```
+---
 
-### wab-archiver quick start
+### Step 3: Archive & View
 
-Always do a dry run first:
+You can run the archiver using command-line arguments as shown below, or simplify recurring runs by using a configuration file (`config.toml`). See the [Command Reference & Config File Guide](docs/archiver/command-reference.md) for details.
 
-> 💡 Without `pip install`, use `python -m wab_archiver` instead of `wab-archiver`.
+#### 1. Run the Archiver
+Run a preview (`--dry-run`) first to verify your paths and encryption key:
 
+**Android example:**
 ```bash
 wab-archiver archive \
-  --msgstore /path/to/msgstore.db \
-  --wa-root /path/to/WhatsApp/storage \
-  --output /path/to/output \
-  --contacts /path/to/wa_contacts \
+  --msgstore /path/to/msgstore.db.crypt15 \
+  --e2e-key YOUR_64_CHAR_KEY \
+  --wa-root /path/to/WhatsApp \
+  --output /path/to/my-archive \
   --dry-run
 ```
 
-> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
-
-> 💡 Repeat `--wa-root` to search multiple media folders and automatically select the best copy of each file.
-
-See [documentation](docs/archiver/index.md) for full setup instructions and command reference.
-
-### wab-viewer quick start
-
-First, run `wab-archiver` to create the archive. Then point `wab-viewer` to your archive folder:
-
-> 💡 Without `pip install`, use `python -m wab_viewer` instead of `wab-viewer`.
-
+**iOS example:**
 ```bash
-wab-viewer /path/to/archive
+wab-archiver archive \
+  --ios-backup /path/to/Backup/<UDID> \
+  --output /path/to/my-archive \
+  --dry-run
 ```
 
-Opens in your browser at `http://127.0.0.1:5000`. See [documentation](docs/viewer/index.md) for full usage.
+Once the dry run completes without errors, remove `--dry-run` to create your archive!
+
+> 💡 On Windows, replace the line continuation `\` with `` ` `` (PowerShell) or `^` (cmd.exe).  
+> 💡 **Tip:** Avoid repeating long terminal commands by generating a settings file with `wab-archiver config generate`. See [Configuration Files](docs/archiver/command-reference.md).
+
+#### 2. Open the Local Chat Viewer
+Point `wab-viewer` to your archive folder:
+
+```bash
+wab-viewer /path/to/my-archive
+```
+
+Open your browser at `http://127.0.0.1:5000` to browse, search, and relive your chats. See the [Viewer Guide](docs/viewer/index.md) for all features.
 
 ---
 
