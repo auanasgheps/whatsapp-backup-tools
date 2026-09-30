@@ -1,0 +1,99 @@
+[project]
+name = "wab-tools"
+version = "0.50"
+description = "Archive and browse your WhatsApp data offline. Archive media from Android and iOS backups into a structured folder hierarchy. View chats in a WebUI that mirrors WhatsApp Web."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "auanasgheps" },
+]
+license = "GPL-3.0-or-later"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: System :: Archiving :: Backup",
+    "Topic :: Communications :: Chat",
+    "Topic :: Utilities",
+    "Topic :: Database"
+]
+keywords = ["whatsapp", "backup", "archiver", "viewer", "chat", "media", "ios", "android", "history", "whatsapp-export", "whastapp-archiving", "whatsapp-conversations", "whatsapp-media", "whatsapp-database"]
+dependencies = [
+    "flask",
+    "wa-crypt-tools",
+    "iphone-backup-decrypt",
+]
+
+[project.optional-dependencies]
+lint = [
+    "ruff>=0.9.0",
+]
+test = [
+    "pytest",
+    "pytest-cov",
+    "tzdata",
+]
+all = [
+    "ruff>=0.9.0",
+    "pytest",
+    "pytest-cov",
+    "tzdata",
+]
+
+[project.urls]
+Homepage = "https://github.com/auanasgheps/whatsapp-backup-tools"
+Documentation = "https://github.com/auanasgheps/whatsapp-backup-tools#readme"
+Repository = "https://github.com/auanasgheps/whatsapp-backup-tools"
+Issues = "https://github.com/auanasgheps/whatsapp-backup-tools/issues"
+
+[project.scripts]
+wab-archiver = "wab_archiver.__main__:main"
+wab-viewer = "wab_viewer.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["shared*", "wab_archiver*", "wab_viewer*"]
+
+[tool.setuptools.package-data]
+"wab_viewer.chat_viewer" = ["*.css", "*.js", "*.svg"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["shared", "wab_archiver", "wab_viewer", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (delegated to ruff format)
+    "UP036", # outdated version block (tested explicitly in unit tests)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "E402", # module import not at top of file (sys.path manipulation)
+    "F841", # local variable assigned but never used (test assertions)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+

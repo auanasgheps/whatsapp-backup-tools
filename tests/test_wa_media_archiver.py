@@ -1,13 +1,9 @@
 """
-Tests for wa_media_archiver.py
-
-Run with:
-    pytest tests/ -v
-
-Requires:
-    pip install pytest
+Tests for wab_archiver
 """
 
+import argparse
+import hashlib
 import logging
 import os
 import plistlib
@@ -19,57 +15,25 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# Import the script as a module.
-# We skip the if __name__ == '__main__' block because we import, not run it.
+# Import the modules from their new package locations.
 # ---------------------------------------------------------------------------
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
-import importlib.util
 
-spec = importlib.util.spec_from_file_location(
-    "wa_media_archiver",
-    os.path.join(_ROOT, "wa_media_archiver.py"),
-)
-wa = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(wa)
-
-import importlib.util as _ilu
-
-_ios_spec = _ilu.spec_from_file_location(
-    "ios_handler", os.path.join(_ROOT, "ios_handler.py")
-)
-ios = _ilu.module_from_spec(_ios_spec)
-_ios_spec.loader.exec_module(ios)
-
-_br_spec = _ilu.spec_from_file_location(
-    "backup_reader", os.path.join(_ROOT, "backup_reader.py")
-)
-br = _ilu.module_from_spec(_br_spec)
-_br_spec.loader.exec_module(br)
-
-_android_spec = _ilu.spec_from_file_location(
-    "android_handler", os.path.join(_ROOT, "android_handler.py")
-)
-android_handler = _ilu.module_from_spec(_android_spec)
-_android_spec.loader.exec_module(android_handler)
-
-_adb_spec = _ilu.spec_from_file_location(
-    "adb_extractor", os.path.join(_ROOT, "adb_extractor.py")
-)
-adb = _ilu.module_from_spec(_adb_spec)
-_adb_spec.loader.exec_module(adb)
-
-_archive_db_spec = _ilu.spec_from_file_location(
-    "archive_db", os.path.join(_ROOT, "archive_db.py")
-)
-arc = _ilu.module_from_spec(_archive_db_spec)
-_archive_db_spec.loader.exec_module(arc)
-
+import shared.source_detection as sd
+import wab_archiver.adb_extractor as adb
+import wab_archiver.android_handler as android_handler
+import wab_archiver.archive_db as arc
+import wab_archiver.backup_reader as br
+import wab_archiver.ios_handler as ios
+import wab_archiver.main as wa
+import wab_archiver.progress as prg
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a silent logger so test output stays clean
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def logger():
@@ -82,15 +46,16 @@ def logger():
 # Pure helper functions
 # ===========================================================================
 
+
 class TestSanitizeFilename:
     def test_safe_name_unchanged(self):
         assert wa.sanitize_filename("Family Chat") == "Family Chat"
 
     def test_forbidden_chars_replaced(self):
         # All of \  /  :  *  ?  "  <  >  | are replaced with _
-        assert wa.sanitize_filename('bad:name?') == "bad_name_"
-        assert wa.sanitize_filename('a/b\\c') == "a_b_c"
-        assert wa.sanitize_filename('<pipe>|test') == "_pipe__test"
+        assert wa.sanitize_filename("bad:name?") == "bad_name_"
+        assert wa.sanitize_filename("a/b\\c") == "a_b_c"
+        assert wa.sanitize_filename("<pipe>|test") == "_pipe__test"
 
     def test_strips_leading_trailing_spaces(self):
         assert wa.sanitize_filename("  padded  ") == "padded"
@@ -145,46 +110,6 @@ class TestBuildContactFolderName:
         assert "/" not in result
 
 
-class TestGetYear:
-    def test_known_timestamp(self):
-        # 2024-01-15 00:00:00 UTC in milliseconds: 1705276800000
-        # Year should be 2024 regardless of timezone (UTC+0 or later)
-        # Use a timestamp that is unambiguously in 2024
-        ts_ms = 1705276800000  # 2024-01-15 00:00:00 UTC
-        year = wa.get_year(ts_ms)
-        assert year == "2024"
-
-    def test_utc_timezone(self):
-        pytest.importorskip('zoneinfo', reason="zoneinfo unavailable")
-        from zoneinfo import ZoneInfo
-        try:
-            tz = ZoneInfo('UTC')
-        except Exception:
-            pytest.skip("tzdata not installed")
-        # 2024-12-31 23:30:00 UTC → still 2024 in UTC
-        ts_ms = 1735688200000  # 2024-12-31 23:36:40 UTC
-        assert wa.get_year(ts_ms, tz=tz) == "2024"
-
-    def test_timezone_crosses_year_boundary(self):
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-        try:
-            rome = ZoneInfo('Europe/Rome')
-            utc  = ZoneInfo('UTC')
-        except ZoneInfoNotFoundError:
-            pytest.skip("tzdata not installed (required on Windows)")
-        # 2024-12-31 23:30:00 UTC = 2025-01-01 00:30:00 in UTC+1 (Europe/Rome in winter)
-        ts_ms = 1735687800000  # 2024-12-31 23:30:00 UTC exactly
-        assert wa.get_year(ts_ms, tz=rome) == "2025"
-        assert wa.get_year(ts_ms, tz=utc)  == "2024"
-
-    def test_no_tz_returns_string(self):
-        # Without tz, returns a 4-digit year string (value depends on local time, just check format)
-        ts_ms = 1705276800000
-        year = wa.get_year(ts_ms)
-        assert len(year) == 4
-        assert year.isdigit()
-
-
 class TestAppendSenderToFilename:
     def test_normal_case(self):
         result = wa.append_sender_to_filename("IMG-20260512-WA0003.jpg", "JohnDoe")
@@ -216,13 +141,14 @@ class TestUniqueGroupName:
 # Query builder
 # ===========================================================================
 
+
 class TestBuildQuery:
     def test_documents_included(self):
-        query = android_handler.build_query(None, None)
+        query = android_handler.build_query(None, None, False)
         assert "Media/WhatsApp Documents/%" in query
 
     def test_all_media_types_present(self):
-        query = android_handler.build_query(None, None)
+        query = android_handler.build_query(None, None, False)
         for path in [
             "Media/WhatsApp Images/%",
             "Media/WhatsApp Video/%",
@@ -235,36 +161,121 @@ class TestBuildQuery:
             assert path in query, f"Missing from query: {path}"
 
     def test_limit_clause_included(self):
-        query = android_handler.build_query(limit=100, since_ms=None)
+        query = android_handler.build_query(limit=100, since_ms=None, hd_dedup=False)
         assert "LIMIT 50" in query  # N//2 per block
 
     def test_no_limit_when_none(self):
-        query = android_handler.build_query(limit=None, since_ms=None)
+        query = android_handler.build_query(limit=None, since_ms=None, hd_dedup=False)
         assert "LIMIT" not in query
 
     def test_since_clause_included(self):
-        query = android_handler.build_query(limit=None, since_ms=1700000000000)
+        query = android_handler.build_query(limit=None, since_ms=1700000000000, hd_dedup=False)
         assert "1700000000000" in query
 
     def test_both_union_blocks_have_documents(self):
-        query = android_handler.build_query(None, None)
+        query = android_handler.build_query(None, None, False)
         # 2 occurrences in WHERE clauses + 2 in CASE WHEN guards = 4
         assert query.count("Media/WhatsApp Documents/%") == 4
 
     def test_limit_applies_to_combined_result(self):
         # LIMIT N//2 must appear twice (once per block), not on the outer wrapper
-        query = android_handler.build_query(limit=50, since_ms=None)
+        query = android_handler.build_query(limit=50, since_ms=None, hd_dedup=False)
         assert query.count("LIMIT 25") == 2
         assert not query.strip().endswith("LIMIT 50")
 
+    def test_hd_dedup_injects_not_exists(self):
+        query = android_handler.build_query(None, None, True)
+        assert query.count("NOT EXISTS") == 2  # one per block
+        assert "association_type IN (12, 7)" in query
+
+    def test_hd_dedup_false_excludes_not_exists(self):
+        query = android_handler.build_query(None, None, False)
+        assert "NOT EXISTS" not in query
+
+    def test_check_hd_association_returns_true_when_table_exists(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE message_association (id INTEGER)")
+        result = android_handler._check_hd_association(conn.cursor(), logging.getLogger())
+        conn.close()
+        assert result is True
+
+    def test_check_hd_association_returns_false_when_table_absent(self):
+        conn = sqlite3.connect(":memory:")
+        result = android_handler._check_hd_association(conn.cursor(), logging.getLogger())
+        conn.close()
+        assert result is False
+
     def test_group_subjects_query_has_no_date_filter(self):
         query = android_handler.build_group_subjects_query()
-        assert 'timestamp >=' not in query
+        assert "timestamp >=" not in query
+
+
+class TestGetMediaFilePaths:
+    def test_get_media_file_paths_since_filter(self):
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, 'Group 1', 10)")
+        conn.execute("INSERT INTO chat VALUES (2, NULL, 20)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO jid VALUES (20, '123456')")
+        conn.execute("INSERT INTO message VALUES (1, 1000, 10, 0)")
+        conn.execute("INSERT INTO message VALUES (2, 2000, 20, 0)")
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Images/old.jpg', 'image/jpeg', 1, 1, 'url', NULL)"
+        )
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Images/new.jpg', 'image/jpeg', 2, 2, 'url', NULL)"
+        )
+        conn.commit()
+
+        paths = android_handler.get_media_file_paths(conn.cursor(), 1500, False)
+        assert paths == {"Media/WhatsApp Images/new.jpg"}
+        conn.close()
+
+    def test_get_media_file_paths_no_filter_returns_all(self):
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, 'Group 1', 10)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO message VALUES (1, 1000, 10, 0)")
+        conn.execute("INSERT INTO message VALUES (2, 2000, 10, 0)")
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Images/img1.jpg', 'image/jpeg', 1, 1, 'url', NULL)"
+        )
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Video/clip.mp4', 'video/mp4', 1, 2, 'url', NULL)"
+        )
+        conn.commit()
+
+        paths = android_handler.get_media_file_paths(conn.cursor(), None, False)
+        assert paths == {"Media/WhatsApp Images/img1.jpg", "Media/WhatsApp Video/clip.mp4"}
+        conn.close()
+
+    def test_get_media_file_paths_hd_dedup(self):
+        conn = _make_msgstore(extra_tables=["message_association"])
+        conn.execute("ALTER TABLE message_association ADD COLUMN parent_message_row_id INTEGER")
+        conn.execute("ALTER TABLE message_association ADD COLUMN child_message_row_id INTEGER")
+        conn.execute("ALTER TABLE message_association ADD COLUMN association_type INTEGER")
+        conn.execute("INSERT INTO chat VALUES (1, 'Group 1', 10)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO message VALUES (1, 1000, 10, 0)")
+        conn.execute("INSERT INTO message VALUES (2, 1000, 10, 0)")
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Images/lq.jpg', 'image/jpeg', 1, 1, 'url', NULL)"
+        )
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Images/hd.jpg', 'image/jpeg', 1, 2, 'url', NULL)"
+        )
+        conn.execute("INSERT INTO message_association VALUES (1, 1, 2, 12)")
+        conn.commit()
+
+        paths = android_handler.get_media_file_paths(conn.cursor(), None, True)
+        assert paths == {"Media/WhatsApp Images/hd.jpg"}
+        conn.close()
 
 
 # ===========================================================================
 # Schema validation (needs an in-memory SQLite DB)
 # ===========================================================================
+
 
 def _make_msgstore(extra_tables=None, missing_col=None):
     """
@@ -343,6 +354,7 @@ class TestValidateSchema:
 # Number consolidation map
 # ===========================================================================
 
+
 def _make_number_change_db(pairs):
     """
     Build an in-memory DB with jid and message_system_number_change tables.
@@ -401,30 +413,29 @@ class TestBuildNumberMap:
 # Android: load_contacts
 # ===========================================================================
 
+
 class TestLoadAndroidContacts:
     def test_parses_display_name_and_number(self, tmp_path, logger):
         f = tmp_path / "contacts.txt"
-        f.write_text("Row: display_name=Alice, data1=391234567890\n", encoding='utf-8')
+        f.write_text("Row: display_name=Alice, data1=391234567890\n", encoding="utf-8")
         result = android_handler.load_contacts(str(f), logger)
-        assert result == {"391234567890": "Alice"}
+        assert result == {"391234567890": "Alice", "0": "WhatsApp"}
 
     def test_multiple_contacts(self, tmp_path, logger):
         f = tmp_path / "contacts.txt"
         f.write_text(
-            "Row: display_name=Alice, data1=111\n"
-            "Row: display_name=Bob, data1=222\n",
-            encoding='utf-8',
+            "Row: display_name=Alice, data1=111\nRow: display_name=Bob, data1=222\n",
+            encoding="utf-8",
         )
         result = android_handler.load_contacts(str(f), logger)
-        assert result == {"111": "Alice", "222": "Bob"}
+        assert result == {"111": "Alice", "222": "Bob", "0": "WhatsApp"}
 
     def test_email_addresses_excluded(self, tmp_path, logger):
         # data1 values containing @ are skipped by the regex
         f = tmp_path / "contacts.txt"
         f.write_text(
-            "Row: display_name=Alice, data1=alice@example.com\n"
-            "Row: display_name=Bob, data1=222\n",
-            encoding='utf-8',
+            "Row: display_name=Alice, data1=alice@example.com\nRow: display_name=Bob, data1=222\n",
+            encoding="utf-8",
         )
         result = android_handler.load_contacts(str(f), logger)
         assert "alice@example.com" not in result
@@ -432,9 +443,9 @@ class TestLoadAndroidContacts:
 
     def test_empty_file_returns_empty(self, tmp_path, logger):
         f = tmp_path / "contacts.txt"
-        f.write_text("", encoding='utf-8')
+        f.write_text("", encoding="utf-8")
         result = android_handler.load_contacts(str(f), logger)
-        assert result == {}
+        assert result == {"0": "WhatsApp"}
 
     def test_missing_file_returns_empty(self, tmp_path, logger):
         result = android_handler.load_contacts(str(tmp_path / "nonexistent.txt"), logger)
@@ -446,18 +457,109 @@ class TestLoadAndroidContacts:
 
     def test_empty_contacts_emits_warning(self, tmp_path, caplog):
         import logging as _logging
+
         f = tmp_path / "contacts.txt"
-        f.write_text("", encoding='utf-8')
+        f.write_text("", encoding="utf-8")
         log = _logging.getLogger("warn_test")
         log.setLevel(_logging.WARNING)
         with caplog.at_level(_logging.WARNING, logger="warn_test"):
             android_handler.load_contacts(str(f), log)
         assert any("no WhatsApp contacts" in r.message for r in caplog.records)
 
+    def test_parses_projection_with_data4_and_mimetype(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=Charlie, data1=0170 1234567, data4=+491701234567, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n",
+            encoding="utf-8",
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("491701234567") == "Charlie"
+        assert result.get("01701234567") == "Charlie"
+
+    def test_phone_number_cleaning(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=Bob, data1=+1 (555) 123-4567, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n"
+            "Row: 1 display_name=Alice, data1=0044 20 7946 0999, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n",
+            encoding="utf-8",
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("15551234567") == "Bob"
+        assert result.get("442079460999") == "Alice"
+
+    def test_whatsapp_profile_precedence(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=David Phone, data1=+15550001111, data4=+15550001111, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n"
+            "Row: 1 display_name=David WA, data1=15550001111@s.whatsapp.net, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/vnd.com.whatsapp.profile\n",
+            encoding="utf-8",
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("15550001111") == "David WA"
+
+    def test_display_name_with_comma(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=Smith, John, data1=+15559876543, data4=+15559876543, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n",
+            encoding="utf-8",
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("15559876543") == "Smith, John"
+
+    def test_csv_and_delimited_format(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "+39 340 1234567, Mario Rossi\nLuigi Verdi: +393409876543\n",
+            encoding="utf-8",
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert result.get("393401234567") == "Mario Rossi"
+        assert result.get("393409876543") == "Luigi Verdi"
+
+    def test_non_phone_mimetypes_ignored(self, tmp_path, logger):
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: 0 display_name=Eve, data1=eve@company.com, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/email_v2\n"
+            "Row: 1 display_name=Frank, data1=+15551112222, data4=NULL, "
+            "mimetype=vnd.android.cursor.item/phone_v2\n",
+            encoding="utf-8",
+        )
+        result = android_handler.load_contacts(str(f), logger)
+        assert "eve@company.com" not in result
+        assert "eve" not in result
+        assert result.get("15551112222") == "Frank"
+
+    def test_logs_phone_numbers_and_unique_contacts(self, tmp_path, caplog):
+        import logging as _logging
+
+        f = tmp_path / "contacts.txt"
+        f.write_text(
+            "Row: display_name=Alice, data1=111\n"
+            "Row: display_name=Alice, data1=222\n"
+            "Row: display_name=Bob, data1=333\n",
+            encoding="utf-8",
+        )
+        log = _logging.getLogger("test_android_log")
+        log.setLevel(_logging.INFO)
+        with caplog.at_level(_logging.INFO, logger="test_android_log"):
+            android_handler.load_contacts(str(f), log)
+        assert any(
+            "Loaded 3 phone number(s) across 2 Android contact(s)." in r.message
+            for r in caplog.records
+        )
+
 
 # ===========================================================================
 # iOS: validate_ios_schema
 # ===========================================================================
+
 
 def _make_ios_msgstore(missing_table=None, missing_col=None):
     """
@@ -467,32 +569,32 @@ def _make_ios_msgstore(missing_table=None, missing_col=None):
     """
     conn = sqlite3.connect(":memory:")
     schema = {
-        'ZWAMESSAGE': [
-            'Z_PK INTEGER PRIMARY KEY',
-            'ZMESSAGEDATE REAL',
-            'ZISFROMME INTEGER',
-            'ZCHATSESSION INTEGER',
-            'ZMEDIAITEM INTEGER',
-            'ZGROUPMEMBER INTEGER',
-            'ZPUSHNAME TEXT',
+        "ZWAMESSAGE": [
+            "Z_PK INTEGER PRIMARY KEY",
+            "ZMESSAGEDATE REAL",
+            "ZISFROMME INTEGER",
+            "ZCHATSESSION INTEGER",
+            "ZMEDIAITEM INTEGER",
+            "ZGROUPMEMBER INTEGER",
+            "ZPUSHNAME TEXT",
         ],
-        'ZWACHATSESSION': [
-            'Z_PK INTEGER PRIMARY KEY',
-            'ZCONTACTJID TEXT',
-            'ZGROUPINFO INTEGER',
-            'ZPARTNERNAME TEXT',
-            'ZCONTACTABID INTEGER',
-            'ZLASTMESSAGEDATE REAL',
+        "ZWACHATSESSION": [
+            "Z_PK INTEGER PRIMARY KEY",
+            "ZCONTACTJID TEXT",
+            "ZGROUPINFO INTEGER",
+            "ZPARTNERNAME TEXT",
+            "ZCONTACTABID INTEGER",
+            "ZLASTMESSAGEDATE REAL",
         ],
-        'ZWAMEDIAITEM': [
-            'Z_PK INTEGER PRIMARY KEY',
-            'ZMEDIALOCALPATH TEXT',
-            'ZMEDIAURL TEXT',
-            'ZTITLE TEXT',
+        "ZWAMEDIAITEM": [
+            "Z_PK INTEGER PRIMARY KEY",
+            "ZMEDIALOCALPATH TEXT",
+            "ZMEDIAURL TEXT",
+            "ZTITLE TEXT",
         ],
-        'ZWAGROUPMEMBER': [
-            'Z_PK INTEGER PRIMARY KEY',
-            'ZMEMBERJID TEXT',
+        "ZWAGROUPMEMBER": [
+            "Z_PK INTEGER PRIMARY KEY",
+            "ZMEMBERJID TEXT",
         ],
     }
     for table, cols in schema.items():
@@ -511,22 +613,22 @@ class TestValidateIosSchema:
         ios.validate_ios_schema(conn.cursor(), logger)  # should not raise
 
     def test_missing_zwamessage_aborts(self, logger):
-        conn = _make_ios_msgstore(missing_table='ZWAMESSAGE')
+        conn = _make_ios_msgstore(missing_table="ZWAMESSAGE")
         with pytest.raises(SystemExit):
             ios.validate_ios_schema(conn.cursor(), logger)
 
     def test_missing_zwachatsession_aborts(self, logger):
-        conn = _make_ios_msgstore(missing_table='ZWACHATSESSION')
+        conn = _make_ios_msgstore(missing_table="ZWACHATSESSION")
         with pytest.raises(SystemExit):
             ios.validate_ios_schema(conn.cursor(), logger)
 
     def test_missing_zwamediaitem_aborts(self, logger):
-        conn = _make_ios_msgstore(missing_table='ZWAMEDIAITEM')
+        conn = _make_ios_msgstore(missing_table="ZWAMEDIAITEM")
         with pytest.raises(SystemExit):
             ios.validate_ios_schema(conn.cursor(), logger)
 
     def test_missing_column_aborts(self, logger):
-        conn = _make_ios_msgstore(missing_col=('ZWAMESSAGE', 'ZMESSAGEDATE'))
+        conn = _make_ios_msgstore(missing_col=("ZWAMESSAGE", "ZMESSAGEDATE"))
         with pytest.raises(SystemExit):
             ios.validate_ios_schema(conn.cursor(), logger)
 
@@ -541,9 +643,10 @@ class TestValidateIosSchema:
 # iOS: validate_ios_wa_root
 # ===========================================================================
 
+
 class TestValidateIosWaRoot:
     def test_valid_root_with_message_dir_passes(self, tmp_path, logger):
-        (tmp_path / 'Message').mkdir()
+        (tmp_path / "Message").mkdir()
         ios.validate_ios_wa_root(str(tmp_path), logger)  # should not raise
 
     def test_missing_message_dir_aborts(self, tmp_path, logger):
@@ -553,55 +656,19 @@ class TestValidateIosWaRoot:
 
     def test_nonexistent_path_aborts(self, tmp_path, logger):
         with pytest.raises(SystemExit):
-            ios.validate_ios_wa_root(str(tmp_path / 'nonexistent'), logger)
+            ios.validate_ios_wa_root(str(tmp_path / "nonexistent"), logger)
 
 
 # ===========================================================================
 # iOS: build_ios_query structural checks
 # ===========================================================================
 
+# ===========================================================================
+# iOS: build_ios_query — functional integration tests
+# ===========================================================================
+
+
 class TestBuildIosQuery:
-    def test_zpartnername_not_null_in_group_block(self):
-        query = ios.build_ios_query(None, None)
-        assert 'ZPARTNERNAME IS NOT NULL' in query
-
-    def test_media_name_restricted_to_documents_paths(self):
-        query = ios.build_ios_query(None, None)
-        # ZTITLE is wrapped in a CASE guarded by the Documents path check
-        assert "LIKE '%Documents%'" in query
-        assert 'ZTITLE' in query
-
-    def test_group_detection_uses_zgroupinfo_not_null(self):
-        query = ios.build_ios_query(None, None)
-        assert 'ZGROUPINFO IS NOT NULL' in query
-
-    def test_one_to_one_detection_uses_zgroupinfo_null(self):
-        query = ios.build_ios_query(None, None)
-        assert 'ZGROUPINFO IS NULL' in query
-
-    def test_union_all_present(self):
-        query = ios.build_ios_query(None, None)
-        assert 'UNION ALL' in query
-
-    def test_limit_clause_included(self):
-        query = ios.build_ios_query(limit=50, since_ms=None)
-        assert 'LIMIT 25' in query  # N//2 per block
-
-    def test_no_limit_when_none(self):
-        query = ios.build_ios_query(limit=None, since_ms=None)
-        assert 'LIMIT' not in query
-
-    def test_since_clause_included(self):
-        since_ms = 1704067200000
-        query = ios.build_ios_query(None, since_ms)
-        apple_since = (since_ms / 1000.0) - ios.APPLE_EPOCH_OFFSET
-        # The float value appears literally in the query string
-        assert str(apple_since) in query
-
-    def test_no_since_no_date_filter(self):
-        query = ios.build_ios_query(None, None)
-        assert 'ZMESSAGEDATE >=' not in query
-
     def test_group_sender_jid_without_at_uses_full_jid(self):
         # ZMEMBERJID with no '@' returns the full JID as sender.
         conn = _make_ios_msgstore()
@@ -611,10 +678,10 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, 'nojid');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert len(rows) == 1
         sender = rows[0][6]  # sender column
-        assert sender == 'nojid'
+        assert sender == "nojid"
 
     def test_1to1_sender_jid_without_at_uses_full_jid(self):
         conn = _make_ios_msgstore()
@@ -623,10 +690,10 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert len(rows) == 1
         sender = rows[0][6]  # sender column
-        assert sender == 'nojid'
+        assert sender == "nojid"
 
     def test_group_sender_normal_jid_strips_at_suffix(self):
         conn = _make_ios_msgstore()
@@ -636,8 +703,8 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
-        assert rows[0][6] == '447700900123'
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        assert rows[0][6] == "447700900123"
 
     def test_1to1_sender_normal_jid_strips_at_suffix(self):
         conn = _make_ios_msgstore()
@@ -646,8 +713,8 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
-        assert rows[0][6] == '447700900456'
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        assert rows[0][6] == "447700900456"
 
     def test_status_media_excluded_from_group_query(self):
         conn = _make_ios_msgstore()
@@ -657,7 +724,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert len(rows) == 0
 
     def test_status_media_excluded_from_1to1_query(self):
@@ -667,75 +734,55 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Media/393384259462@status/6/d/photo.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
         assert len(rows) == 0
-
-
-# ===========================================================================
-# iOS: build_ios_group_subjects_query structural checks
-# ===========================================================================
-
-class TestBuildIosGroupSubjectsQuery:
-    def test_only_groups_returned(self):
-        query = ios.build_ios_group_subjects_query()
-        assert 'ZGROUPINFO IS NOT NULL' in query
-
-    def test_zpartnername_not_null_filter_present(self):
-        query = ios.build_ios_group_subjects_query()
-        assert 'ZPARTNERNAME IS NOT NULL' in query
-
-    def test_no_date_filter(self):
-        query = ios.build_ios_group_subjects_query()
-        assert 'ZMESSAGEDATE >=' not in query
-
-    def test_status_media_excluded(self):
-        query = ios.build_ios_group_subjects_query()
-        assert "@status%" in query
 
 
 # ===========================================================================
 # Platform detection
 # ===========================================================================
 
+
 class TestDetectDbPlatform:
     def test_ios_db_detected(self, tmp_path):
-        db_path = str(tmp_path / 'ios.db')
+        db_path = str(tmp_path / "ios.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY)")
         conn.commit()
         conn.close()
-        assert wa.detect_db_platform(db_path) == 'ios'
+        assert wa.detect_db_platform(db_path) == "ios"
 
     def test_android_db_detected(self, tmp_path):
-        db_path = str(tmp_path / 'android.db')
+        db_path = str(tmp_path / "android.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE message (_id INTEGER PRIMARY KEY)")
         conn.commit()
         conn.close()
-        assert wa.detect_db_platform(db_path) == 'android'
+        assert wa.detect_db_platform(db_path) == "android"
 
 
 # ===========================================================================
 # Backup reader: detect_encrypted
 # ===========================================================================
 
+
 class TestDetectEncrypted:
     def test_unencrypted_manifest_plist_returns_false(self, tmp_path, logger):
-        with open(tmp_path / 'Manifest.plist', 'wb') as f:
-            plistlib.dump({'IsEncrypted': False}, f)
+        with open(tmp_path / "Manifest.plist", "wb") as f:
+            plistlib.dump({"IsEncrypted": False}, f)
         assert br.detect_encrypted(str(tmp_path), logger) is False
 
     def test_encrypted_manifest_plist_returns_true(self, tmp_path, logger):
-        with open(tmp_path / 'Manifest.plist', 'wb') as f:
-            plistlib.dump({'IsEncrypted': True}, f)
+        with open(tmp_path / "Manifest.plist", "wb") as f:
+            plistlib.dump({"IsEncrypted": True}, f)
         assert br.detect_encrypted(str(tmp_path), logger) is True
 
     def test_info_plist_without_flag_falls_back_to_manifest(self, tmp_path, logger):
         # Info.plist exists but has no IsEncrypted key → fall back to Manifest.plist
-        with open(tmp_path / 'Info.plist', 'wb') as f:
-            plistlib.dump({'DeviceName': 'iPhone'}, f)
-        with open(tmp_path / 'Manifest.plist', 'wb') as f:
-            plistlib.dump({'IsEncrypted': True}, f)
+        with open(tmp_path / "Info.plist", "wb") as f:
+            plistlib.dump({"DeviceName": "iPhone"}, f)
+        with open(tmp_path / "Manifest.plist", "wb") as f:
+            plistlib.dump({"IsEncrypted": True}, f)
         assert br.detect_encrypted(str(tmp_path), logger) is True
 
     def test_missing_plist_files_exits(self, tmp_path, logger):
@@ -745,60 +792,63 @@ class TestDetectEncrypted:
 
     def test_nonexistent_directory_exits(self, tmp_path, logger):
         with pytest.raises(SystemExit):
-            br.detect_encrypted(str(tmp_path / 'nonexistent'), logger)
+            br.detect_encrypted(str(tmp_path / "nonexistent"), logger)
 
 
 # ===========================================================================
 # Backup reader: extract_to_temp
 # ===========================================================================
 
+
 class TestExtractToTemp:
     def test_copies_file_to_temp_and_returns_path(self, tmp_path, logger):
-        hash_dir = tmp_path / 'ab'
+        hash_dir = tmp_path / "ab"
         hash_dir.mkdir()
-        fake_file = hash_dir / ('ab' + 'c' * 38)
-        fake_file.write_bytes(b'sqlite data')
-        manifest_map = {'ChatStorage.sqlite': str(fake_file)}
+        fake_file = hash_dir / ("ab" + "c" * 38)
+        fake_file.write_bytes(b"sqlite data")
+        manifest_map = {"ChatStorage.sqlite": str(fake_file)}
 
-        temp_path = br.extract_to_temp(manifest_map, 'ChatStorage.sqlite', logger)
+        temp_path = br.extract_to_temp(manifest_map, "ChatStorage.sqlite", logger)
         try:
             assert os.path.isfile(temp_path)
-            with open(temp_path, 'rb') as f:
-                assert f.read() == b'sqlite data'
+            with open(temp_path, "rb") as f:
+                assert f.read() == b"sqlite data"
         finally:
             os.unlink(temp_path)
 
     def test_preserves_file_extension(self, tmp_path, logger):
-        src = tmp_path / 'srcfile'
-        src.write_bytes(b'data')
-        manifest_map = {'ContactsV2.sqlite': str(src)}
+        src = tmp_path / "srcfile"
+        src.write_bytes(b"data")
+        manifest_map = {"ContactsV2.sqlite": str(src)}
 
-        temp_path = br.extract_to_temp(manifest_map, 'ContactsV2.sqlite', logger)
+        temp_path = br.extract_to_temp(manifest_map, "ContactsV2.sqlite", logger)
         try:
-            assert temp_path.endswith('.sqlite')
+            assert temp_path.endswith(".sqlite")
         finally:
             os.unlink(temp_path)
 
     def test_file_not_in_manifest_exits(self, logger):
         with pytest.raises(SystemExit):
-            br.extract_to_temp({}, 'ChatStorage.sqlite', logger)
+            br.extract_to_temp({}, "ChatStorage.sqlite", logger)
 
     def test_hash_file_missing_from_disk_exits(self, tmp_path, logger):
-        manifest_map = {'ChatStorage.sqlite': str(tmp_path / 'nonexistent_hash')}
+        manifest_map = {"ChatStorage.sqlite": str(tmp_path / "nonexistent_hash")}
         with pytest.raises(SystemExit):
-            br.extract_to_temp(manifest_map, 'ChatStorage.sqlite', logger)
+            br.extract_to_temp(manifest_map, "ChatStorage.sqlite", logger)
 
 
 # ===========================================================================
 # Backup reader: extract_plaintext
 # ===========================================================================
 
+
 class TestExtractPlaintext:
     def _make_backup(self, tmp_path):
         """Minimal fake backup: Manifest.db + hash files for ChatStorage and a media file."""
         import sqlite3 as _sq
+
         tmp_path.mkdir(parents=True, exist_ok=True)
-        manifest_db = tmp_path / 'Manifest.db'
+        manifest_db = tmp_path / "Manifest.db"
         conn = _sq.connect(str(manifest_db))
         conn.execute("""
             CREATE TABLE Files (
@@ -806,68 +856,77 @@ class TestExtractPlaintext:
             )
         """)
         # ChatStorage.sqlite
-        chat_id = 'aa' + 'b' * 38
-        conn.execute("INSERT INTO Files VALUES (?,?,?,1)",
-                     (chat_id, 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared',
-                      'ChatStorage.sqlite'))
+        chat_id = "aa" + "b" * 38
+        conn.execute(
+            "INSERT INTO Files VALUES (?,?,?,1)",
+            (chat_id, "AppDomainGroup-group.net.whatsapp.WhatsApp.shared", "ChatStorage.sqlite"),
+        )
         # Media file
-        media_id = 'cc' + 'd' * 38
-        conn.execute("INSERT INTO Files VALUES (?,?,?,1)",
-                     (media_id, 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared',
-                      'Message/Media/WhatsApp Images/IMG001.jpg'))
+        media_id = "cc" + "d" * 38
+        conn.execute(
+            "INSERT INTO Files VALUES (?,?,?,1)",
+            (
+                media_id,
+                "AppDomainGroup-group.net.whatsapp.WhatsApp.shared",
+                "Message/Media/WhatsApp Images/IMG001.jpg",
+            ),
+        )
         conn.commit()
         conn.close()
         # Create hash directories and files
-        for fid, content in [(chat_id, b'SQLITE'), (media_id, b'JPEGDATA')]:
+        for fid, content in [(chat_id, b"SQLITE"), (media_id, b"JPEGDATA")]:
             d = tmp_path / fid[:2]
             d.mkdir(exist_ok=True)
             (d / fid).write_bytes(content)
         return tmp_path
 
     def test_returns_manifest_map_msgstore_path(self, tmp_path, logger):
-        backup_dir = self._make_backup(tmp_path / 'backup')
-        output_dir = tmp_path / 'output'
+        backup_dir = self._make_backup(tmp_path / "backup")
+        output_dir = tmp_path / "output"
         manifest_map, msgstore_path, contacts_path = br.extract_plaintext(
             str(backup_dir), str(output_dir), None, False, logger
         )
-        assert 'ChatStorage.sqlite' in manifest_map
-        assert 'Message/Media/WhatsApp Images/IMG001.jpg' in manifest_map
+        assert "ChatStorage.sqlite" in manifest_map
+        assert "Message/Media/WhatsApp Images/IMG001.jpg" in manifest_map
         assert os.path.isfile(msgstore_path)
-        assert msgstore_path == str(output_dir / 'ChatStorage.sqlite')
+        assert msgstore_path == str(output_dir / "Whatsapp Databases" / "ChatStorage.sqlite")
 
     def test_contacts_none_when_not_in_backup(self, tmp_path, logger):
-        backup_dir = self._make_backup(tmp_path / 'backup')
-        output_dir = tmp_path / 'output'
+        backup_dir = self._make_backup(tmp_path / "backup")
+        output_dir = tmp_path / "output"
         _, _, contacts_path = br.extract_plaintext(
             str(backup_dir), str(output_dir), None, False, logger
         )
         assert contacts_path is None
 
     def test_contacts_override_respected(self, tmp_path, logger):
-        backup_dir = self._make_backup(tmp_path / 'backup')
-        output_dir = tmp_path / 'output'
-        fake_contacts = str(tmp_path / 'contacts.sqlite')
+        backup_dir = self._make_backup(tmp_path / "backup")
+        output_dir = tmp_path / "output"
+        fake_contacts = str(tmp_path / "contacts.sqlite")
         _, _, contacts_path = br.extract_plaintext(
             str(backup_dir), str(output_dir), fake_contacts, False, logger
         )
         assert contacts_path == fake_contacts
 
     def test_overwrite_warning_logged(self, tmp_path, logger):
-        backup_dir = self._make_backup(tmp_path / 'backup')
-        output_dir = tmp_path / 'output'
-        output_dir.mkdir()
+        backup_dir = self._make_backup(tmp_path / "backup")
+        output_dir = tmp_path / "output"
+        db_dir = output_dir / "Whatsapp Databases"
+        db_dir.mkdir(parents=True, exist_ok=True)
         # Pre-create the DB file so overwrite warning fires
-        (output_dir / 'ChatStorage.sqlite').write_bytes(b'OLD')
+        (db_dir / "ChatStorage.sqlite").write_bytes(b"OLD")
         import unittest.mock as mock
-        with mock.patch.object(logger, 'warning') as mock_warn:
+
+        with mock.patch.object(logger, "warning") as mock_warn:
             br.extract_plaintext(str(backup_dir), str(output_dir), None, False, logger)
-        warning_msgs = ' '.join(str(c) for c in mock_warn.call_args_list)
-        assert 'Overwriting' in warning_msgs or 'overwriting' in warning_msgs.lower()
+        warning_msgs = " ".join(str(c) for c in mock_warn.call_args_list)
+        assert "Overwriting" in warning_msgs or "overwriting" in warning_msgs.lower()
 
 
 # ===========================================================================
 # Backup reader: extract_encrypted
 # ===========================================================================
+
 
 class TestExtractEncrypted:
     def _make_mock_backup(self, tmp_path):
@@ -875,15 +934,15 @@ class TestExtractEncrypted:
         import unittest.mock as mock
 
         def fake_extract_file(*, relative_path, domain_like, output_filename):
-            if relative_path == 'ChatStorage.sqlite':
-                with open(output_filename, 'wb') as f:
-                    f.write(b'SQLITE')
-            elif relative_path == 'ContactsV2.sqlite':
-                with open(output_filename, 'wb') as f:
-                    f.write(b'CONTACTS')
-            elif relative_path == 'Message/Media/WhatsApp Images/IMG001.jpg':
-                with open(output_filename, 'wb') as f:
-                    f.write(b'MEDIAFILE')
+            if relative_path == "ChatStorage.sqlite":
+                with open(output_filename, "wb") as f:
+                    f.write(b"SQLITE")
+            elif relative_path == "ContactsV2.sqlite":
+                with open(output_filename, "wb") as f:
+                    f.write(b"CONTACTS")
+            elif relative_path == "Message/Media/WhatsApp Images/IMG001.jpg":
+                with open(output_filename, "wb") as f:
+                    f.write(b"MEDIAFILE")
             else:
                 raise FileNotFoundError(relative_path)
 
@@ -902,147 +961,173 @@ class TestExtractEncrypted:
         import types
         import unittest.mock as mock
 
-        fake_mod = types.ModuleType('iphone_backup_decrypt')
+        fake_mod = types.ModuleType("iphone_backup_decrypt")
         fake_mod.EncryptedBackup = mock.MagicMock(return_value=mock_backup)
         fake_mod.DomainLike = mock.MagicMock()
-        return mock.patch.dict(sys.modules, {'iphone_backup_decrypt': fake_mod})
+        return mock.patch.dict(sys.modules, {"iphone_backup_decrypt": fake_mod})
 
     def test_returns_resolver_and_msgstore(self, tmp_path, logger):
         mock_backup = self._make_mock_backup(tmp_path)
-        output_dir = tmp_path / 'output'
+        output_dir = tmp_path / "output"
 
         with self._patch_library(mock_backup):
             msgstore_path, contacts_path, resolver = br.extract_encrypted(
-                str(tmp_path / 'backup'), 'secret', str(output_dir),
-                None, False, logger,
+                str(tmp_path / "backup"),
+                "secret",
+                str(output_dir),
+                None,
+                False,
+                logger,
             )
 
         assert os.path.isfile(msgstore_path)
-        assert msgstore_path == str(output_dir / 'ChatStorage.sqlite')
-        assert contacts_path is not None
+        assert msgstore_path == str(output_dir / "Whatsapp Databases" / "ChatStorage.sqlite")
+        assert contacts_path == str(output_dir / "Whatsapp Databases" / "ContactsV2.sqlite")
         # Resolver decrypts on demand
-        media_path = resolver('Message/Media/WhatsApp Images/IMG001.jpg')
+        media_path = resolver("Message/Media/WhatsApp Images/IMG001.jpg")
         assert media_path is not None
         assert os.path.isfile(media_path)
         # Second call returns the cached path without re-decrypting
         mock_backup.extract_file.reset_mock()
-        media_path2 = resolver('Message/Media/WhatsApp Images/IMG001.jpg')
+        media_path2 = resolver("Message/Media/WhatsApp Images/IMG001.jpg")
         assert media_path2 == media_path
         mock_backup.extract_file.assert_not_called()
 
     def test_resolver_returns_none_for_missing_file(self, tmp_path, logger):
         mock_backup = self._make_mock_backup(tmp_path)
-        output_dir = tmp_path / 'output'
+        output_dir = tmp_path / "output"
 
         with self._patch_library(mock_backup):
             _, _, resolver = br.extract_encrypted(
-                str(tmp_path / 'backup'), 'secret', str(output_dir),
-                None, False, logger,
+                str(tmp_path / "backup"),
+                "secret",
+                str(output_dir),
+                None,
+                False,
+                logger,
             )
 
-        result = resolver('Message/Media/nonexistent.jpg')
+        result = resolver("Message/Media/nonexistent.jpg")
         assert result is None
 
     def test_wrong_password_exits(self, tmp_path, logger):
         import unittest.mock as mock
+
         mock_backup = mock.MagicMock()
         mock_backup.test_decryption.side_effect = ValueError("incorrect passphrase")
-        output_dir = tmp_path / 'output'
+        output_dir = tmp_path / "output"
 
         with self._patch_library(mock_backup):
             with pytest.raises(SystemExit):
                 br.extract_encrypted(
-                    str(tmp_path / 'backup'), 'wrongpw', str(output_dir),
-                    None, False, logger,
+                    str(tmp_path / "backup"),
+                    "wrongpw",
+                    str(output_dir),
+                    None,
+                    False,
+                    logger,
                 )
 
     def test_missing_library_exits(self, tmp_path, logger):
         import sys
         import unittest.mock as mock
-        output_dir = tmp_path / 'output'
 
-        with mock.patch.dict(sys.modules, {'iphone_backup_decrypt': None}):
+        output_dir = tmp_path / "output"
+
+        with mock.patch.dict(sys.modules, {"iphone_backup_decrypt": None}):
             with pytest.raises(SystemExit):
                 br.extract_encrypted(
-                    str(tmp_path / 'backup'), 'secret', str(output_dir),
-                    None, False, logger,
+                    str(tmp_path / "backup"),
+                    "secret",
+                    str(output_dir),
+                    None,
+                    False,
+                    logger,
                 )
 
     def test_contacts_override_skips_extraction(self, tmp_path, logger):
         mock_backup = self._make_mock_backup(tmp_path)
-        output_dir = tmp_path / 'output'
-        fake_contacts = str(tmp_path / 'my_contacts.sqlite')
+        output_dir = tmp_path / "output"
+        fake_contacts = str(tmp_path / "my_contacts.sqlite")
 
         with self._patch_library(mock_backup):
             _, contacts_path, _ = br.extract_encrypted(
-                str(tmp_path / 'backup'), 'secret', str(output_dir),
-                fake_contacts, False, logger,
+                str(tmp_path / "backup"),
+                "secret",
+                str(output_dir),
+                fake_contacts,
+                False,
+                logger,
             )
 
         assert contacts_path == fake_contacts
         # extract_file should only have been called for ChatStorage, not ContactsV2
-        calls = [c.kwargs.get('relative_path') for c in mock_backup.extract_file.call_args_list]
-        assert 'ContactsV2.sqlite' not in calls
+        calls = [c.kwargs.get("relative_path") for c in mock_backup.extract_file.call_args_list]
+        assert "ContactsV2.sqlite" not in calls
+
 
 class TestResolveGroupFolder:
     def test_new_group_assigned_sanitized_name(self):
         index = {}
-        folder = arc.resolve_group_folder('42', 'Family Chat', index)
-        assert folder == 'Family Chat'
-        assert index['42']['folder'] == 'Family Chat'
+        folder = arc.resolve_group_folder("42", "Family Chat", index)
+        assert folder == "Family Chat"
+        assert index["42"]["folder"] == "Family Chat"
 
     def test_existing_group_returns_stable_name(self):
         # Even if subject has changed, the stable folder from the index is returned.
-        index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
-        folder = arc.resolve_group_folder('42', 'NewName', index)
-        assert folder == 'OldName'
+        index = {"42": {"folder": "OldName", "subject": "OldName"}}
+        folder = arc.resolve_group_folder("42", "NewName", index)
+        assert folder == "OldName"
 
     def test_none_subject_gets_unknown_fallback(self):
         index = {}
-        folder = arc.resolve_group_folder('99', None, index)
-        assert 'Unknown Group' in folder
-        assert '99' in folder
+        folder = arc.resolve_group_folder("99", None, index)
+        assert "Unknown Group" in folder
+        assert "99" in folder
 
     def test_name_collision_with_existing_group_disambiguated(self):
-        index = {'10': {'folder': 'Friends', 'subject': 'Friends'}}
-        folder = arc.resolve_group_folder('20', 'Friends', index)
-        assert folder == 'Friends (2)'
+        index = {"10": {"folder": "Friends", "subject": "Friends"}}
+        folder = arc.resolve_group_folder("20", "Friends", index)
+        assert folder == "Friends (2)"
 
     def test_special_chars_in_subject_sanitized(self):
         index = {}
-        folder = arc.resolve_group_folder('1', 'Chat: Family/Work', index)
-        assert '/' not in folder
-        assert ':' not in folder
+        folder = arc.resolve_group_folder("1", "Chat: Family/Work", index)
+        assert "/" not in folder
+        assert ":" not in folder
 
 
 # ===========================================================================
 # Archive DB: record_file_archived and check_db_health
 # ===========================================================================
 
+
 class TestRecordFileArchived:
     def test_creates_file_and_copy_records(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
-        md5 = b'\x01' * 16
-        arc.record_file_archived(cursor, 'orig.jpg', md5,
-                                'Contacts/Alice (00111)/2024/Received/orig.jpg')
+        md5 = b"\x01" * 16
+        arc.record_file_archived(
+            cursor, "orig.jpg", md5, "Contacts/Alice (00111)/2024/Received/orig.jpg", 1024
+        )
         conn.commit()
         row = conn.execute(
-            "SELECT md5 FROM files WHERE original_path = 'orig.jpg'"
+            "SELECT md5, size FROM files WHERE original_path = 'orig.jpg'"
         ).fetchone()
         assert row[0] == md5
+        assert row[1] == 1024
         copy = conn.execute(
             "SELECT archive_path FROM archive_copies WHERE original_path = 'orig.jpg'"
         ).fetchone()
-        assert 'Contacts/Alice (00111)/2024/Received/orig.jpg' == copy[0]
+        assert "Contacts/Alice (00111)/2024/Received/orig.jpg" == copy[0]
         conn.close()
 
     def test_duplicate_archive_path_silently_ignored(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
-        md5 = b'\x01' * 16
-        arc.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
-        arc.record_file_archived(cursor, 'orig.jpg', md5, 'Contacts/path.jpg')
+        md5 = b"\x01" * 16
+        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512)
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -1053,9 +1138,9 @@ class TestRecordFileArchived:
     def test_multiple_archive_paths_for_same_original(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
-        md5 = b'\x01' * 16
-        arc.record_file_archived(cursor, 'orig.jpg', md5, 'path1.jpg')
-        arc.record_file_archived(cursor, 'orig.jpg', md5, 'path2.jpg')
+        md5 = b"\x01" * 16
+        arc.record_file_archived(cursor, "orig.jpg", md5, "path1.jpg", 256)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "path2.jpg", 256)
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -1070,188 +1155,295 @@ class TestCheckDbHealth:
         arc.check_db_health(conn, logger)  # should not raise
         conn.close()
 
+    def test_archive_db_user_version_and_reactions_cache(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert user_version == 1
+        auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
+        assert auto_vacuum == 2  # INCREMENTAL
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        assert "reactions_cache" in tables
+        assert "recent_messages" in tables
+        conn.close()
+
 
 # ===========================================================================
-# CSV reports
+# Archive DB: ADB pull state + filename index
 # ===========================================================================
+
+
+class TestAdbPullState:
+    def test_upsert_and_get_done_paths(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/a.jpg", "ABC123", "done")
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/b.jpg", "ABC123", "done")
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/c.jpg", "ABC123", "partial")
+        done = arc.get_adb_done_paths(conn, "ABC123")
+        assert done == {"/sdcard/Media/a.jpg", "/sdcard/Media/b.jpg"}
+        conn.close()
+
+    def test_partial_paths_returned(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/x.jpg", "DEV1", "partial")
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/y.jpg", "DEV1", "done")
+        partials = arc.get_adb_partial_paths(conn, "DEV1")
+        assert partials == ["/sdcard/Media/x.jpg"]
+        conn.close()
+
+    def test_upsert_updates_status(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/a.jpg", "DEV1", "partial")
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/a.jpg", "DEV1", "done")
+        done = arc.get_adb_done_paths(conn, "DEV1")
+        assert "/sdcard/Media/a.jpg" in done
+        partials = arc.get_adb_partial_paths(conn, "DEV1")
+        assert partials == []
+        conn.close()
+
+    def test_different_devices_isolated(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/a.jpg", "DEV1", "done")
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/a.jpg", "DEV2", "partial")
+        assert "/sdcard/Media/a.jpg" in arc.get_adb_done_paths(conn, "DEV1")
+        assert "/sdcard/Media/a.jpg" not in arc.get_adb_done_paths(conn, "DEV2")
+        assert "/sdcard/Media/a.jpg" in arc.get_adb_partial_paths(conn, "DEV2")
+        conn.close()
+
+    def test_remove_pull_state(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        arc.upsert_adb_pull_state(conn, "/sdcard/Media/a.jpg", "DEV1", "done")
+        arc.remove_adb_pull_state(conn, "/sdcard/Media/a.jpg", "DEV1")
+        assert arc.get_adb_done_paths(conn, "DEV1") == set()
+        conn.close()
+
+
+class TestBuildArchiveFilenameIndex:
+    def test_returns_basename_size_md5(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+        md5a = b"\x01" * 16
+        md5b = b"\x02" * 16
+        arc.record_file_archived(
+            cursor, "/staging/WhatsApp Images/photo.jpg", md5a, "Contacts/Alice/photo.jpg", 2048
+        )
+        arc.record_file_archived(
+            cursor, "/staging/WhatsApp Video/clip.mp4", md5b, "Contacts/Bob/clip.mp4", 512000
+        )
+        conn.commit()
+        index = arc.build_archive_filename_index(conn)
+        assert "photo.jpg" in index
+        assert index["photo.jpg"] == (2048, md5a)
+        assert "clip.mp4" in index
+        assert index["clip.mp4"] == (512000, md5b)
+        conn.close()
+
+    def test_null_size_preserved(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        # Simulate a pre-size-column record by inserting with NULL size directly
+        conn.execute(
+            "INSERT INTO files (original_path, md5, size) VALUES (?, ?, NULL)",
+            ("/old/path/legacy.jpg", b"\xaa" * 16),
+        )
+        conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
+            ("/old/path/legacy.jpg", "Contacts/old/legacy.jpg"),
+        )
+        conn.commit()
+        index = arc.build_archive_filename_index(conn)
+        assert "legacy.jpg" in index
+        size, md5 = index["legacy.jpg"]
+        assert size is None
+        assert md5 == b"\xaa" * 16
+        conn.close()
+
+    def test_migration_adds_size_column_to_existing_db(self, tmp_path):
+        # Create a DB without size column, then re-open — migration should add it
+        import sqlite3 as _sqlite3
+
+        db_path = str(tmp_path / ".wa_media_archiver.db")
+        old_conn = _sqlite3.connect(db_path)
+        old_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS files (
+                original_path TEXT PRIMARY KEY,
+                md5 BLOB NOT NULL
+            );
+        """)
+        old_conn.close()
+        conn = arc.open_archive_db(str(tmp_path))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+        assert "size" in cols
+        conn.close()
+
 
 class TestWriteMissingReport:
     def test_no_rows_does_not_create_file(self, tmp_path, logger):
-        path = str(tmp_path / 'missing.csv')
+        path = str(tmp_path / "missing.csv")
         wa.write_missing_report(path, [], logger)
         assert not os.path.exists(path)
 
     def test_rows_written_to_csv_with_correct_fields(self, tmp_path, logger):
-        rows = [{
-            'message_id': 1,
-            'timestamp_human': '2024-01-15 00:00:00',
-            'original_filename': 'img.jpg',
-            'mime_type': 'image/jpeg',
-            'sender': 'Alice',
-            'chat_name': 'Family',
-            'direction': 'Received',
-            'file_path': 'Media/WhatsApp Images/img.jpg',
-            'message_url': 'https://mmg.whatsapp.net/v/example',
-            'media_name': '',
-        }]
-        path = str(tmp_path / 'missing.csv')
+        rows = [
+            {
+                "message_id": 1,
+                "timestamp_human": "2024-01-15 00:00:00",
+                "original_filename": "img.jpg",
+                "mime_type": "image/jpeg",
+                "sender": "Alice",
+                "chat_name": "Family",
+                "direction": "Received",
+                "file_path": "Media/WhatsApp Images/img.jpg",
+                "message_url": "https://mmg.whatsapp.net/v/example",
+                "media_name": "",
+            }
+        ]
+        path = str(tmp_path / "missing.csv")
         wa.write_missing_report(path, rows, logger)
         assert os.path.isfile(path)
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding="utf-8") as f:
             content = f.read()
-        assert 'message_id' in content
-        assert 'img.jpg' in content
-        assert 'Alice' in content
+        assert "message_id" in content
+        assert "img.jpg" in content
+        assert "Alice" in content
 
 
 class TestWriteDuplicateReport:
     def test_no_duplicates_does_not_create_file(self, tmp_path, logger):
         conn = arc.open_archive_db(str(tmp_path))
-        path = str(tmp_path / 'dups.csv')
+        path = str(tmp_path / "dups.csv")
         wa.write_duplicate_report(path, conn, logger)
         conn.close()
         assert not os.path.exists(path)
 
     def test_duplicates_written_to_csv(self, tmp_path, logger):
         import hashlib
+
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
-        md5 = hashlib.md5(b'data').digest()
-        cursor.execute("INSERT INTO files VALUES (?, ?)", ('orig.jpg', md5))
-        cursor.execute("INSERT INTO archive_copies VALUES (?, ?)",
-                       ('orig.jpg', 'Contacts/Alice (00111)/2024/Received/orig.jpg'))
-        cursor.execute("INSERT INTO archive_copies VALUES (?, ?)",
-                       ('orig.jpg', 'Groups/Family/2024/orig_Alice.jpg'))
+        md5 = hashlib.md5(b"data").digest()
+        cursor.execute("INSERT INTO files (original_path, md5) VALUES (?, ?)", ("orig.jpg", md5))
+        cursor.execute(
+            "INSERT INTO archive_copies VALUES (?, ?)",
+            ("orig.jpg", "Contacts/Alice (00111)/2024/Received/orig.jpg"),
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies VALUES (?, ?)",
+            ("orig.jpg", "Groups/Family/2024/orig_Alice.jpg"),
+        )
         conn.commit()
-        path = str(tmp_path / 'dups.csv')
+        path = str(tmp_path / "dups.csv")
         wa.write_duplicate_report(path, conn, logger)
         conn.close()
         assert os.path.isfile(path)
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding="utf-8") as f:
             content = f.read()
-        assert 'md5_hex' in content
-        assert 'file_count' in content
+        assert "md5_hex" in content
+        assert "file_count" in content
 
 
 # ===========================================================================
 # Contact/group rename sync
 # ===========================================================================
 
+
 class TestSyncFolderNames:
     def test_unchanged_name_leaves_folder_intact(self, tmp_path, logger):
-        contacts_root = tmp_path / 'Contacts'
+        contacts_root = tmp_path / "Contacts"
         contacts_root.mkdir()
-        (contacts_root / 'Alice (00111)').mkdir()
-        folder_index = {'111': ('Alice (00111)', 'Alice')}
-        contacts = {'111': 'Alice'}
-        result = arc.sync_folder_names(
-            contacts, {}, str(tmp_path), folder_index, logger
-        )
-        assert result['111'][0] == 'Alice (00111)'
-        assert (contacts_root / 'Alice (00111)').exists()
+        (contacts_root / "Alice (00111)").mkdir()
+        folder_index = {"111": ("Alice (00111)", "Alice")}
+        contacts = {"111": "Alice"}
+        result = arc.sync_folder_names(contacts, {}, str(tmp_path), folder_index, logger)
+        assert result["111"][0] == "Alice (00111)"
+        assert (contacts_root / "Alice (00111)").exists()
 
     def test_changed_name_renames_folder_on_disk(self, tmp_path, logger):
-        contacts_root = tmp_path / 'Contacts'
+        contacts_root = tmp_path / "Contacts"
         contacts_root.mkdir()
-        (contacts_root / 'OldName (00111)').mkdir()
-        folder_index = {'111': ('OldName (00111)', 'OldName')}
-        contacts = {'111': 'NewName'}
-        result = arc.sync_folder_names(
-            contacts, {}, str(tmp_path), folder_index, logger
-        )
-        assert result['111'][0] == 'NewName (00111)'
-        assert not (contacts_root / 'OldName (00111)').exists()
-        assert (contacts_root / 'NewName (00111)').exists()
+        (contacts_root / "OldName (00111)").mkdir()
+        folder_index = {"111": ("OldName (00111)", "OldName")}
+        contacts = {"111": "NewName"}
+        result = arc.sync_folder_names(contacts, {}, str(tmp_path), folder_index, logger)
+        assert result["111"][0] == "NewName (00111)"
+        assert not (contacts_root / "OldName (00111)").exists()
+        assert (contacts_root / "NewName (00111)").exists()
 
     def test_rename_skipped_when_target_exists_index_updated(self, tmp_path, logger):
-        contacts_root = tmp_path / 'Contacts'
+        contacts_root = tmp_path / "Contacts"
         contacts_root.mkdir()
-        (contacts_root / 'OldName (00111)').mkdir()
-        (contacts_root / 'NewName (00111)').mkdir()  # target already exists
-        folder_index = {'111': ('OldName (00111)', 'OldName')}
-        contacts = {'111': 'NewName'}
-        result = arc.sync_folder_names(
-            contacts, {}, str(tmp_path), folder_index, logger
-        )
+        (contacts_root / "OldName (00111)").mkdir()
+        (contacts_root / "NewName (00111)").mkdir()  # target already exists
+        folder_index = {"111": ("OldName (00111)", "OldName")}
+        contacts = {"111": "NewName"}
+        result = arc.sync_folder_names(contacts, {}, str(tmp_path), folder_index, logger)
         # Index is updated to the new name even though the on-disk rename was skipped,
         # so future runs don't re-detect the mismatch and re-fire the warning.
-        assert result['111'][0] == 'NewName (00111)'
+        assert result["111"][0] == "NewName (00111)"
 
     def test_name_changed_no_folder_on_disk_index_updated(self, tmp_path, logger):
         # Name changed but folder has never been created; index should update anyway
-        folder_index = {'111': ('OldName (00111)', 'OldName')}
-        contacts = {'111': 'NewName'}
-        result = arc.sync_folder_names(
-            contacts, {}, str(tmp_path), folder_index, logger
-        )
-        assert result['111'][0] == 'NewName (00111)'
+        folder_index = {"111": ("OldName (00111)", "OldName")}
+        contacts = {"111": "NewName"}
+        result = arc.sync_folder_names(contacts, {}, str(tmp_path), folder_index, logger)
+        assert result["111"][0] == "NewName (00111)"
 
     def test_new_contact_registered_in_index(self, tmp_path, logger):
-        result = arc.sync_folder_names(
-            {'111': 'Alice'}, {}, str(tmp_path), {}, logger
-        )
-        assert '111' in result
+        result = arc.sync_folder_names({"111": "Alice"}, {}, str(tmp_path), {}, logger)
+        assert "111" in result
 
     def test_number_map_resolves_old_to_canonical(self, tmp_path, logger):
         # Contact is known by old number '111'; canonical is '222'
-        contacts = {'111': 'Alice'}
-        number_map = {'111': '222'}
-        result = arc.sync_folder_names(
-            contacts, number_map, str(tmp_path), {}, logger
-        )
+        contacts = {"111": "Alice"}
+        number_map = {"111": "222"}
+        result = arc.sync_folder_names(contacts, number_map, str(tmp_path), {}, logger)
         # Registered under canonical '222', folder uses canonical number
-        assert '222' in result
-        assert result['222'][0] == 'Alice (00222)'
+        assert "222" in result
+        assert result["222"][0] == "Alice (00222)"
 
 
 class TestSyncGroupNames:
     def test_unchanged_subject_leaves_folder_intact(self, tmp_path, logger):
-        groups_root = tmp_path / 'Groups'
+        groups_root = tmp_path / "Groups"
         groups_root.mkdir()
-        (groups_root / 'Family').mkdir()
-        group_index = {'42': {'folder': 'Family', 'subject': 'Family'}}
-        result = arc.sync_group_names(
-            {'42': 'Family'}, str(tmp_path), group_index, logger
-        )
-        assert result['42']['folder'] == 'Family'
-        assert (groups_root / 'Family').exists()
+        (groups_root / "Family").mkdir()
+        group_index = {"42": {"folder": "Family", "subject": "Family"}}
+        result = arc.sync_group_names({"42": "Family"}, str(tmp_path), group_index, logger)
+        assert result["42"]["folder"] == "Family"
+        assert (groups_root / "Family").exists()
 
     def test_changed_subject_renames_folder_on_disk(self, tmp_path, logger):
-        groups_root = tmp_path / 'Groups'
+        groups_root = tmp_path / "Groups"
         groups_root.mkdir()
-        (groups_root / 'OldName').mkdir()
-        group_index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
-        result = arc.sync_group_names(
-            {'42': 'NewName'}, str(tmp_path), group_index, logger
-        )
-        assert result['42']['folder'] == 'NewName'
-        assert not (groups_root / 'OldName').exists()
-        assert (groups_root / 'NewName').exists()
+        (groups_root / "OldName").mkdir()
+        group_index = {"42": {"folder": "OldName", "subject": "OldName"}}
+        result = arc.sync_group_names({"42": "NewName"}, str(tmp_path), group_index, logger)
+        assert result["42"]["folder"] == "NewName"
+        assert not (groups_root / "OldName").exists()
+        assert (groups_root / "NewName").exists()
 
     def test_rename_skipped_when_target_exists_index_updated(self, tmp_path, logger):
-        groups_root = tmp_path / 'Groups'
+        groups_root = tmp_path / "Groups"
         groups_root.mkdir()
-        (groups_root / 'OldName').mkdir()
-        (groups_root / 'NewName').mkdir()  # target already exists
-        group_index = {'42': {'folder': 'OldName', 'subject': 'OldName'}}
-        result = arc.sync_group_names(
-            {'42': 'NewName'}, str(tmp_path), group_index, logger
-        )
+        (groups_root / "OldName").mkdir()
+        (groups_root / "NewName").mkdir()  # target already exists
+        group_index = {"42": {"folder": "OldName", "subject": "OldName"}}
+        result = arc.sync_group_names({"42": "NewName"}, str(tmp_path), group_index, logger)
         # Index is updated even when the on-disk rename is skipped,
         # so future runs don't re-detect the mismatch and repeat the warning.
-        assert result['42']['folder'] == 'NewName'
+        assert result["42"]["folder"] == "NewName"
 
     def test_new_group_not_in_index_is_skipped(self, tmp_path, logger):
         # New groups are not yet in group_index; sync_group_names skips them
-        result = arc.sync_group_names(
-            {'99': 'Brand New Group'}, str(tmp_path), {}, logger
-        )
-        assert '99' not in result
+        result = arc.sync_group_names({"99": "Brand New Group"}, str(tmp_path), {}, logger)
+        assert "99" not in result
 
 
 # ===========================================================================
 # Core processing: process_rows
 # ===========================================================================
+
 
 class TestProcessRows:
     """
@@ -1261,15 +1453,34 @@ class TestProcessRows:
 
     _TS = 1705276800000  # 2024-01-15 00:00:00 UTC
 
-    def _row(self, msg_id=1, timestamp=None, file_path='img.jpg',
-             mime_type=None, chat_row_id='42', chat_subject='Family',
-             sender='111', key_from_me=0, message_url=None, media_name=None):
-        return (msg_id, timestamp if timestamp is not None else self._TS,
-                file_path, mime_type, chat_row_id, chat_subject,
-                sender, key_from_me, message_url, media_name)
+    def _row(
+        self,
+        msg_id=1,
+        timestamp=None,
+        file_path="img.jpg",
+        mime_type=None,
+        chat_row_id="42",
+        chat_subject="Family",
+        sender="111",
+        key_from_me=0,
+        message_url=None,
+        media_name=None,
+    ):
+        return (
+            msg_id,
+            timestamp if timestamp is not None else self._TS,
+            file_path,
+            mime_type,
+            chat_row_id,
+            chat_subject,
+            sender,
+            key_from_me,
+            message_url,
+            media_name,
+        )
 
-    def _setup_src(self, tmp_path, name='img.jpg', content=b'image data'):
-        src_dir = tmp_path / 'src'
+    def _setup_src(self, tmp_path, name="img.jpg", content=b"image data"):
+        src_dir = tmp_path / "src"
         src_dir.mkdir(exist_ok=True)
         (src_dir / name).write_bytes(content)
         return str(src_dir)
@@ -1281,176 +1492,263 @@ class TestProcessRows:
 
     def test_group_chat_routed_to_groups_folder(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
-        rows = [self._row(chat_subject='Family', sender='111', key_from_me=0)]
+        rows = [self._row(chat_subject="Family", sender="111", key_from_me=0)]
         stats, _, _, missing = wa.process_rows(
-            rows, 1, {'111': 'Alice'}, {}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=False,
+            rows,
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=False,
         )
-        assert stats['copied'] == 1
-        assert stats['missing'] == 0
-        assert os.path.isfile(
-            os.path.join(out, 'Groups', 'Family', '2024', 'img_Alice.jpg')
-        )
+        assert stats["copied"] == 1
+        assert stats["missing"] == 0
+        assert os.path.isfile(os.path.join(out, "Groups", "Family", "2024", "img_Alice.jpg"))
 
     def test_group_own_message_tagged_me(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
         # key_from_me=1, sender=None — own group message
-        rows = [self._row(chat_subject='Family', sender=None, key_from_me=1)]
+        rows = [self._row(chat_subject="Family", sender=None, key_from_me=1)]
         stats, _, _, _ = wa.process_rows(
-            rows, 1, {}, {}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=False,
+            rows,
+            1,
+            {},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=False,
         )
-        assert stats['copied'] == 1
-        assert os.path.isfile(
-            os.path.join(out, 'Groups', 'Family', '2024', 'img_Me.jpg')
-        )
+        assert stats["copied"] == 1
+        assert os.path.isfile(os.path.join(out, "Groups", "Family", "2024", "img_Me.jpg"))
 
     def test_one_to_one_received_routed_to_received_folder(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
         # chat_subject=None → 1-to-1 chat
-        rows = [self._row(chat_subject=None, sender='111', key_from_me=0)]
+        rows = [self._row(chat_subject=None, sender="111", key_from_me=0)]
         stats, _, _, _ = wa.process_rows(
-            rows, 1, {'111': 'Alice'}, {}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=False,
+            rows,
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=False,
         )
-        assert stats['copied'] == 1
+        assert stats["copied"] == 1
         assert os.path.isfile(
-            os.path.join(out, 'Contacts', 'Alice (00111)', '2024', 'Received', 'img.jpg')
+            os.path.join(out, "Contacts", "Alice (00111)", "2024", "Received", "img.jpg")
         )
 
     def test_one_to_one_sent_routed_to_sent_folder(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
-        rows = [self._row(chat_subject=None, sender='111', key_from_me=1)]
+        rows = [self._row(chat_subject=None, sender="111", key_from_me=1)]
         wa.process_rows(
-            rows, 1, {'111': 'Alice'}, {}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=False,
+            rows,
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=False,
         )
         assert os.path.isfile(
-            os.path.join(out, 'Contacts', 'Alice (00111)', '2024', 'Sent', 'img.jpg')
+            os.path.join(out, "Contacts", "Alice (00111)", "2024", "Sent", "img.jpg")
         )
 
     def test_unknown_sender_falls_back_to_phone_number(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
-        rows = [self._row(chat_subject=None, sender='999', key_from_me=0)]
+        rows = [self._row(chat_subject=None, sender="999", key_from_me=0)]
         wa.process_rows(
-            rows, 1, {}, {}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=False,
+            rows,
+            1,
+            {},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=False,
         )
         assert os.path.isfile(
-            os.path.join(out, 'Contacts', 'Unknown (00999)', '2024', 'Received', 'img.jpg')
+            os.path.join(out, "Contacts", "Unknown (00999)", "2024", "Received", "img.jpg")
         )
 
     def test_number_map_consolidates_old_number_to_canonical(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
-        rows = [self._row(chat_subject=None, sender='111', key_from_me=0)]
+        rows = [self._row(chat_subject=None, sender="111", key_from_me=0)]
         # 111 is the old number; 222 is canonical; contacts only knows 222
         wa.process_rows(
-            rows, 1, {'222': 'Alice'}, {'111': '222'}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=False,
+            rows,
+            1,
+            {"222": "Alice"},
+            {"111": "222"},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=False,
         )
         assert os.path.isfile(
-            os.path.join(out, 'Contacts', 'Alice (00222)', '2024', 'Received', 'img.jpg')
+            os.path.join(out, "Contacts", "Alice (00222)", "2024", "Received", "img.jpg")
         )
 
     # --- Missing / invalid rows ---
 
     def test_missing_source_file_added_to_missing_rows(self, tmp_path, logger):
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
-        rows = [self._row(file_path='nonexistent.jpg')]
+        rows = [self._row(file_path="nonexistent.jpg")]
         stats, _, _, missing = wa.process_rows(
-            rows, 1, {}, {}, {}, {},
-            lambda fp: str(tmp_path / 'nowhere' / fp),
-            out, logger, dry_run=False,
+            rows,
+            1,
+            {},
+            {},
+            {},
+            {},
+            lambda fp: str(tmp_path / "nowhere" / fp),
+            out,
+            logger,
+            dry_run=False,
         )
-        assert stats['missing'] == 1
-        assert stats['copied'] == 0
+        assert stats["missing"] == 1
+        assert stats["copied"] == 0
         assert len(missing) == 1
 
     def test_null_file_path_added_to_missing_rows(self, tmp_path, logger):
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
         rows = [self._row(file_path=None)]
         stats, _, _, missing = wa.process_rows(
-            rows, 1, {}, {}, {}, {},
+            rows,
+            1,
+            {},
+            {},
+            {},
+            {},
             lambda fp: fp,
-            out, logger, dry_run=False,
+            out,
+            logger,
+            dry_run=False,
         )
-        assert stats['missing'] == 1
+        assert stats["missing"] == 1
         assert len(missing) == 1
 
     def test_null_timestamp_added_to_missing_rows(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
-        row = (1, None, 'img.jpg', None, '42', 'Family', '111', 0, None, None)
+        row = (1, None, "img.jpg", None, "42", "Family", "111", 0, None, None)
         stats, _, _, missing = wa.process_rows(
-            [row], 1, {}, {}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=False,
+            [row],
+            1,
+            {},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=False,
         )
-        assert stats['missing'] == 1
-        assert stats['copied'] == 0
+        assert stats["missing"] == 1
+        assert stats["copied"] == 0
         assert len(missing) == 1
 
     # --- Dry run ---
 
     def test_dry_run_increments_copied_but_writes_no_file(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
-        rows = [self._row(chat_subject='Family', sender='111')]
+        rows = [self._row(chat_subject="Family", sender="111")]
         stats, _, _, _ = wa.process_rows(
-            rows, 1, {'111': 'Alice'}, {}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=True,
+            rows,
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=True,
         )
-        assert stats['copied'] == 1
-        assert not os.path.isfile(
-            os.path.join(out, 'Groups', 'Family', '2024', 'img_Alice.jpg')
-        )
+        assert stats["copied"] == 1
+        assert not os.path.isfile(os.path.join(out, "Groups", "Family", "2024", "img_Alice.jpg"))
 
     # --- Re-run / deduplication ---
 
     def test_identical_file_skipped_on_rerun(self, tmp_path, logger):
-        src_dir = self._setup_src(tmp_path, content=b'same data')
-        out = str(tmp_path / 'out')
+        src_dir = self._setup_src(tmp_path, content=b"same data")
+        out = str(tmp_path / "out")
         # Pre-place identical file at the expected destination
-        dest_dir = os.path.join(out, 'Groups', 'Family', '2024')
+        dest_dir = os.path.join(out, "Groups", "Family", "2024")
         os.makedirs(dest_dir)
-        with open(os.path.join(dest_dir, 'img_Alice.jpg'), 'wb') as f:
-            f.write(b'same data')
-        rows = [self._row(chat_subject='Family', sender='111')]
+        with open(os.path.join(dest_dir, "img_Alice.jpg"), "wb") as f:
+            f.write(b"same data")
+        rows = [self._row(chat_subject="Family", sender="111")]
         stats, _, _, _ = wa.process_rows(
-            rows, 1, {'111': 'Alice'}, {}, {}, {},
-            self._resolver(src_dir), out, logger, dry_run=False,
+            rows,
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            dry_run=False,
         )
-        assert stats['skipped'] == 1
-        assert stats['copied'] == 0
+        assert stats["skipped"] == 1
+        assert stats["copied"] == 0
 
     # --- Archive DB integration ---
 
     def test_archive_db_updated_on_new_copy(self, tmp_path, logger):
         src_dir = self._setup_src(tmp_path)
-        out = str(tmp_path / 'out')
+        out = str(tmp_path / "out")
         os.makedirs(out)
-        rows = [self._row(chat_subject=None, sender='111', key_from_me=0,
-                          file_path='img.jpg')]
+        rows = [self._row(chat_subject=None, sender="111", key_from_me=0, file_path="img.jpg")]
         archive_conn = arc.open_archive_db(out)
         try:
             wa.process_rows(
-                rows, 1, {'111': 'Alice'}, {}, {}, {},
-                self._resolver(src_dir), out, logger, dry_run=False,
+                rows,
+                1,
+                {"111": "Alice"},
+                {},
+                {},
+                {},
+                self._resolver(src_dir),
+                out,
+                logger,
+                dry_run=False,
                 conn=archive_conn,
             )
             archive_conn.commit()
@@ -1465,6 +1763,7 @@ class TestProcessRows:
 # ===========================================================================
 # Filesystem: resolve_unique_dest
 # ===========================================================================
+
 
 class TestResolveUniqueDest:
     def test_new_path_returned_as_is(self, tmp_path, logger):
@@ -1504,28 +1803,29 @@ class TestResolveUniqueDest:
 # Filesystem: validate_wa_root
 # ===========================================================================
 
+
 class TestValidateWaRoot:
     def test_valid_root_passes(self, tmp_path, logger):
         media = tmp_path / "Media"
         media.mkdir()
         (media / "WhatsApp Images").mkdir()
-        android_handler.validate_wa_root(str(tmp_path), logger)  # should not raise
+        android_handler.validate_wa_root([str(tmp_path)], logger)  # should not raise
 
     def test_nonexistent_path_aborts(self, tmp_path, logger):
         with pytest.raises(SystemExit):
-            android_handler.validate_wa_root(str(tmp_path / "does_not_exist"), logger)
+            android_handler.validate_wa_root([str(tmp_path / "does_not_exist")], logger)
 
     def test_media_folder_passed_directly_aborts(self, tmp_path, logger):
         media = tmp_path / "Media"
         media.mkdir()
         with pytest.raises(SystemExit):
-            android_handler.validate_wa_root(str(media), logger)
+            android_handler.validate_wa_root([str(media)], logger)
 
     def test_subfolder_of_media_passed_aborts(self, tmp_path, logger):
         images = tmp_path / "WhatsApp Images"
         images.mkdir()
         with pytest.raises(SystemExit):
-            android_handler.validate_wa_root(str(images), logger)
+            android_handler.validate_wa_root([str(images)], logger)
 
     def test_root_with_no_subfolders_warns_but_continues(self, tmp_path, logger):
         # Media/ exists but is empty — should warn, not abort
@@ -1539,13 +1839,75 @@ class TestValidateWaRoot:
                 handler_called.append(record.levelno)
 
         caplog_logger.addHandler(Capture())
-        android_handler.validate_wa_root(str(tmp_path), caplog_logger)  # must not raise SystemExit
+        android_handler.validate_wa_root(
+            [str(tmp_path)], caplog_logger
+        )  # must not raise SystemExit
         assert logging.WARNING in handler_called
+
+    def test_second_root_valid_when_first_invalid(self, tmp_path, logger):
+        # First root missing entirely, second valid — should not abort
+        root2 = tmp_path / "root2"
+        media2 = root2 / "Media"
+        media2.mkdir(parents=True)
+        (media2 / "WhatsApp Images").mkdir()
+        android_handler.validate_wa_root(
+            [str(tmp_path / "nonexistent"), str(root2)], logger
+        )  # should not raise
+
+    def test_all_roots_invalid_aborts(self, tmp_path, logger):
+        with pytest.raises(SystemExit):
+            android_handler.validate_wa_root([str(tmp_path / "a"), str(tmp_path / "b")], logger)
+
+
+# ===========================================================================
+# Multi-root resolver
+# ===========================================================================
+
+
+def _make_wa_file(root, rel_path, content: bytes):
+    """Write content to <root>/<rel_path>, creating parent dirs."""
+    full = root / rel_path.replace("/", os.sep)
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_bytes(content)
+    return str(full)
+
+
+# ===========================================================================
+# write_conflict_report
+# ===========================================================================
+
+
+class TestWriteConflictReport:
+    def test_no_rows_does_not_create_file(self, tmp_path, logger):
+        path = str(tmp_path / "conflicts.csv")
+        wa.write_conflict_report(path, [], logger)
+        assert not os.path.exists(path)
+
+    def test_rows_written_with_correct_fields(self, tmp_path, logger):
+        rows = [
+            {
+                "file_path": "Media/WhatsApp Images/img.jpg",
+                "chosen_source": "/root1/Media/WhatsApp Images/img.jpg",
+                "chosen_size": 12345,
+                "rejected_source": "/root2/Media/WhatsApp Images/img.jpg",
+                "rejected_size": "9000",
+                "reason": "largest_wins",
+            }
+        ]
+        path = str(tmp_path / "conflicts.csv")
+        wa.write_conflict_report(path, rows, logger)
+        assert os.path.isfile(path)
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        assert "file_path" in content
+        assert "largest_wins" in content
+        assert "Media/WhatsApp Images/img.jpg" in content
 
 
 # ===========================================================================
 # Archive DB: contact and group persistence round-trip
 # ===========================================================================
+
 
 class TestContactPersistence:
     def test_save_and_load_round_trip(self, tmp_path):
@@ -1582,26 +1944,10 @@ class TestGroupPersistence:
 # iOS: timestamp conversion
 # ===========================================================================
 
-class TestIosTimestampConversion:
-    def test_apple_epoch_offset_value(self):
-        assert ios.APPLE_EPOCH_OFFSET == 978307200
-
-    def test_query_contains_epoch_conversion(self):
-        query = ios.build_ios_query(None, None)
-        assert "978307200" in query
-        assert "1000" in query
-
-    def test_since_converted_to_apple_epoch(self):
-        # Unix epoch ms for 2024-01-01 00:00:00 UTC = 1704067200000
-        since_ms = 1704067200000
-        query = ios.build_ios_query(None, since_ms)
-        expected_apple = (since_ms / 1000.0) - ios.APPLE_EPOCH_OFFSET
-        assert str(int(expected_apple)) in query or f"{expected_apple:.1f}" in query
-
-
 # ===========================================================================
 # iOS: build_manifest_map
 # ===========================================================================
+
 
 def _make_manifest_db(tmp_path, rows):
     """
@@ -1618,10 +1964,7 @@ def _make_manifest_db(tmp_path, rows):
         )
     """)
     for file_id, relative_path in rows:
-        conn.execute(
-            "INSERT INTO Files VALUES (?, ?, ?)",
-            (file_id, br._WA_DOMAIN, relative_path)
-        )
+        conn.execute("INSERT INTO Files VALUES (?, ?, ?)", (file_id, br._WA_DOMAIN, relative_path))
     conn.commit()
     conn.close()
     return tmp_path
@@ -1660,6 +2003,7 @@ class TestBuildManifestMap:
 # Backup reader: build_manifest_map domain filtering (WhatsApp Business)
 # ===========================================================================
 
+
 def _make_manifest_db_multi_domain(tmp_path, rows):
     """
     Create a Manifest.db with rows as (fileID, domain, relativePath) tuples.
@@ -1682,31 +2026,37 @@ def _make_manifest_db_multi_domain(tmp_path, rows):
 
 class TestBuildManifestMapDomain:
     def test_default_domain_excludes_business_files(self, tmp_path, logger):
-        _make_manifest_db_multi_domain(tmp_path, [
-            ("aa" + "1" * 38, br._WA_DOMAIN,          "ChatStorage.sqlite"),
-            ("bb" + "2" * 38, br._WA_BUSINESS_DOMAIN, "ChatStorage.sqlite"),
-        ])
+        _make_manifest_db_multi_domain(
+            tmp_path,
+            [
+                ("aa" + "1" * 38, br._WA_DOMAIN, "ChatStorage.sqlite"),
+                ("bb" + "2" * 38, br._WA_BUSINESS_DOMAIN, "ChatStorage.sqlite"),
+            ],
+        )
         result = br.build_manifest_map(str(tmp_path), logger)
         assert len(result) == 1
         assert list(result.values())[0].endswith("aa" + "1" * 38)
 
     def test_business_domain_excludes_regular_files(self, tmp_path, logger):
-        _make_manifest_db_multi_domain(tmp_path, [
-            ("aa" + "1" * 38, br._WA_DOMAIN,          "ChatStorage.sqlite"),
-            ("bb" + "2" * 38, br._WA_BUSINESS_DOMAIN, "ChatStorage.sqlite"),
-        ])
+        _make_manifest_db_multi_domain(
+            tmp_path,
+            [
+                ("aa" + "1" * 38, br._WA_DOMAIN, "ChatStorage.sqlite"),
+                ("bb" + "2" * 38, br._WA_BUSINESS_DOMAIN, "ChatStorage.sqlite"),
+            ],
+        )
         result = br.build_manifest_map(str(tmp_path), logger, domain=br._WA_BUSINESS_DOMAIN)
         assert len(result) == 1
         assert list(result.values())[0].endswith("bb" + "2" * 38)
 
     def test_business_domain_constant_value(self):
-        assert br._WA_BUSINESS_DOMAIN == \
-            'AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared'
+        assert br._WA_BUSINESS_DOMAIN == "AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared"
 
 
 # ===========================================================================
 # iOS: load_ios_contacts
 # ===========================================================================
+
 
 def _make_contacts_db(tmp_path, rows):
     """
@@ -1730,34 +2080,41 @@ def _make_contacts_db(tmp_path, rows):
 
 class TestLoadIosContacts:
     def test_parses_jid_to_number(self, tmp_path, logger):
-        path = _make_contacts_db(tmp_path, [
-            ("393357214425@s.whatsapp.net", "Alice")
-        ])
+        path = _make_contacts_db(tmp_path, [("393357214425@s.whatsapp.net", "Alice")])
         result = ios.load_ios_contacts(path, logger)
-        assert result == {"393357214425": "Alice"}
+        assert result == {"393357214425": "Alice", "0": "WhatsApp"}
 
     def test_multiple_contacts(self, tmp_path, logger):
-        path = _make_contacts_db(tmp_path, [
-            ("111@s.whatsapp.net", "Alice"),
-            ("222@s.whatsapp.net", "Bob"),
-        ])
+        path = _make_contacts_db(
+            tmp_path,
+            [
+                ("111@s.whatsapp.net", "Alice"),
+                ("222@s.whatsapp.net", "Bob"),
+            ],
+        )
         result = ios.load_ios_contacts(path, logger)
-        assert result == {"111": "Alice", "222": "Bob"}
+        assert result == {"111": "Alice", "222": "Bob", "0": "WhatsApp"}
 
     def test_non_whatsapp_jids_excluded(self, tmp_path, logger):
-        path = _make_contacts_db(tmp_path, [
-            ("111@s.whatsapp.net", "Alice"),
-            ("222@other.net", "Bob"),
-        ])
+        path = _make_contacts_db(
+            tmp_path,
+            [
+                ("111@s.whatsapp.net", "Alice"),
+                ("222@other.net", "Bob"),
+            ],
+        )
         result = ios.load_ios_contacts(path, logger)
         assert "222" not in result
         assert "111" in result
 
     def test_null_name_excluded(self, tmp_path, logger):
-        path = _make_contacts_db(tmp_path, [
-            ("111@s.whatsapp.net", None),
-            ("222@s.whatsapp.net", "Bob"),
-        ])
+        path = _make_contacts_db(
+            tmp_path,
+            [
+                ("111@s.whatsapp.net", None),
+                ("222@s.whatsapp.net", "Bob"),
+            ],
+        )
         result = ios.load_ios_contacts(path, logger)
         assert "111" not in result
         assert result["222"] == "Bob"
@@ -1766,10 +2123,30 @@ class TestLoadIosContacts:
         result = ios.load_ios_contacts(str(tmp_path / "nonexistent.sqlite"), logger)
         assert result == {}
 
+    def test_logs_phone_numbers_and_unique_contacts(self, tmp_path, caplog):
+        import logging as _logging
+
+        path = _make_contacts_db(
+            tmp_path,
+            [
+                ("111@s.whatsapp.net", "Alice"),
+                ("222@s.whatsapp.net", "Alice"),
+                ("333@s.whatsapp.net", "Bob"),
+            ],
+        )
+        log = _logging.getLogger("test_ios_log")
+        log.setLevel(_logging.INFO)
+        with caplog.at_level(_logging.INFO, logger="test_ios_log"):
+            ios.load_ios_contacts(path, log)
+        assert any(
+            "Loaded 3 phone number(s) across 2 iOS contact(s)." in r.message for r in caplog.records
+        )
+
 
 # ===========================================================================
 # iOS: build_ios_number_map
 # ===========================================================================
+
 
 def _make_ios_sessions_db(pairs):
     """
@@ -1791,13 +2168,13 @@ def _make_ios_sessions_db(pairs):
     for old_jid, new_jid, abid in pairs:
         conn.execute(
             "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTABID, ZLASTMESSAGEDATE) VALUES (?, ?, ?, ?)",
-            (pk, old_jid, abid, ts)
+            (pk, old_jid, abid, ts),
         )
         pk += 1
         ts += 100.0
         conn.execute(
             "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTABID, ZLASTMESSAGEDATE) VALUES (?, ?, ?, ?)",
-            (pk, new_jid, abid, ts)
+            (pk, new_jid, abid, ts),
         )
         pk += 1
         ts += 100.0
@@ -1807,18 +2184,18 @@ def _make_ios_sessions_db(pairs):
 
 class TestBuildIosNumberMap:
     def test_single_number_change(self, logger):
-        conn = _make_ios_sessions_db([
-            ("111@s.whatsapp.net", "222@s.whatsapp.net", 42)
-        ])
+        conn = _make_ios_sessions_db([("111@s.whatsapp.net", "222@s.whatsapp.net", 42)])
         result = ios.build_ios_number_map(conn.cursor(), logger)
         assert result == {"111": "222"}
 
     def test_chain_resolved(self, logger):
         # A -> B -> C: use separate abids per pair, share via timestamps
-        conn = _make_ios_sessions_db([
-            ("111@s.whatsapp.net", "222@s.whatsapp.net", 1),
-            ("222@s.whatsapp.net", "333@s.whatsapp.net", 2),
-        ])
+        conn = _make_ios_sessions_db(
+            [
+                ("111@s.whatsapp.net", "222@s.whatsapp.net", 1),
+                ("222@s.whatsapp.net", "333@s.whatsapp.net", 2),
+            ]
+        )
         result = ios.build_ios_number_map(conn.cursor(), logger)
         # 222 -> 333 directly; 111 -> 222 -> 333 via chain resolution
         assert result.get("222") == "333"
@@ -1848,13 +2225,14 @@ class TestBuildIosNumberMap:
 # adb_extractor
 # ===========================================================================
 
+
 class TestCheckAdb:
     def test_found(self, logger):
-        with patch("adb_extractor.shutil.which", return_value="/usr/bin/adb"):
+        with patch("wab_archiver.adb_extractor.shutil.which", return_value="/usr/bin/adb"):
             assert adb.check_adb(logger) is True
 
     def test_not_found(self, logger):
-        with patch("adb_extractor.shutil.which", return_value=None):
+        with patch("wab_archiver.adb_extractor.shutil.which", return_value=None):
             assert adb.check_adb(logger) is False
 
 
@@ -1866,44 +2244,55 @@ class TestCheckDeviceConnected:
 
     def test_device_connected(self, logger):
         output = "List of devices attached\nemulator-5554\tdevice\n"
-        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+        with patch(
+            "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+        ):
             assert adb.check_device_connected(logger) is True
 
     def test_no_devices(self, logger):
         output = "List of devices attached\n"
-        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+        with patch(
+            "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+        ):
             assert adb.check_device_connected(logger) is False
 
     def test_unauthorized_not_counted(self, logger):
         output = "List of devices attached\n98abc123\tunauthorized\n"
-        with patch("adb_extractor.subprocess.run", return_value=self._make_result(output)):
+        with patch(
+            "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+        ):
             assert adb.check_device_connected(logger) is False
 
     def test_adb_failure(self, logger):
-        with patch("adb_extractor.subprocess.run",
-                   side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"error")):
+        with patch(
+            "wab_archiver.adb_extractor.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "adb", stderr=b"error"),
+        ):
             assert adb.check_device_connected(logger) is False
 
 
 class TestPullMsgstore:
     def test_regular_path(self, logger, tmp_path):
-        with patch("adb_extractor.subprocess.run") as mock_run:
+        with patch("wab_archiver.adb_extractor.subprocess.run") as mock_run:
             result = adb.pull_msgstore(str(tmp_path), business=False, logger=logger)
             call_args = mock_run.call_args[0][0]
-            assert 'com.whatsapp/WhatsApp' in call_args[2]
-            assert 'com.whatsapp.w4b' not in call_args[2]
-        assert result == str(tmp_path / 'msgstore.db.crypt15') or \
-               result == os.path.join(str(tmp_path), 'msgstore.db.crypt15')
+            assert "com.whatsapp/WhatsApp" in call_args[2]
+            assert "com.whatsapp.w4b" not in call_args[2]
+        assert result == str(tmp_path / "msgstore.db.crypt15") or result == os.path.join(
+            str(tmp_path), "msgstore.db.crypt15"
+        )
 
     def test_business_path(self, logger, tmp_path):
-        with patch("adb_extractor.subprocess.run") as mock_run:
+        with patch("wab_archiver.adb_extractor.subprocess.run") as mock_run:
             adb.pull_msgstore(str(tmp_path), business=True, logger=logger)
             call_args = mock_run.call_args[0][0]
-            assert 'com.whatsapp.w4b' in call_args[2]
+            assert "com.whatsapp.w4b" in call_args[2]
 
     def test_failure_raises(self, logger, tmp_path):
-        with patch("adb_extractor.subprocess.run",
-                   side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"fail")):
+        with patch(
+            "wab_archiver.adb_extractor.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "adb", stderr=b"fail"),
+        ):
             with pytest.raises(subprocess.CalledProcessError):
                 adb.pull_msgstore(str(tmp_path), logger=logger)
 
@@ -1917,17 +2306,38 @@ class TestPullContacts:
         )
         mock_result = MagicMock()
         mock_result.stdout = raw.encode()
-        with patch("adb_extractor.subprocess.run", return_value=mock_result):
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock_result):
             dest = adb.pull_contacts(str(tmp_path), logger=logger)
 
-        content = open(dest, encoding='utf-8').read()
-        assert '@s.whatsapp.net' in content
-        assert 'bob@gmail.com' not in content
-        assert content.count('@s.whatsapp.net') == 2
+        content = open(dest, encoding="utf-8").read()
+        assert "@s.whatsapp.net" in content
+        assert "bob@gmail.com" not in content
+        assert content.count("@s.whatsapp.net") == 2
+
+    def test_retains_phone_and_whatsapp_lines(self, logger, tmp_path):
+        raw = (
+            "Row: 0 display_name=Alice, data1=391234567890@s.whatsapp.net, "
+            "data4=NULL, mimetype=vnd.android.cursor.item/vnd.com.whatsapp.profile\n"
+            "Row: 1 display_name=Bob, data1=bob@gmail.com, "
+            "data4=NULL, mimetype=vnd.android.cursor.item/email_v2\n"
+            "Row: 2 display_name=Carol, data1=+15551234567, "
+            "data4=+15551234567, mimetype=vnd.android.cursor.item/phone_v2\n"
+        )
+        mock_result = MagicMock()
+        mock_result.stdout = raw.encode()
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock_result):
+            dest = adb.pull_contacts(str(tmp_path), logger=logger)
+
+        content = open(dest, encoding="utf-8").read()
+        assert "Alice" in content
+        assert "Carol" in content
+        assert "bob@gmail.com" not in content
 
     def test_failure_raises(self, logger, tmp_path):
-        with patch("adb_extractor.subprocess.run",
-                   side_effect=subprocess.CalledProcessError(1, 'adb', stderr=b"fail")):
+        with patch(
+            "wab_archiver.adb_extractor.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "adb", stderr=b"fail"),
+        ):
             with pytest.raises(subprocess.CalledProcessError):
                 adb.pull_contacts(str(tmp_path), logger=logger)
 
@@ -1936,12 +2346,14 @@ class TestPullContacts:
 # TestCheckDependencies
 # ---------------------------------------------------------------------------
 
+
 class TestCheckDependencies:
     def _args(self, **kwargs):
         """Return a minimal namespace; only set the fields under test."""
-        defaults = dict(mode=None, e2e_key=None, ios_password=None)
+        defaults = dict(from_adb=False, e2e_key=None, ios_password=None)
         defaults.update(kwargs)
         import argparse
+
         return argparse.Namespace(**defaults)
 
     def test_no_issues_passes_silently(self, logger):
@@ -1949,36 +2361,38 @@ class TestCheckDependencies:
         wa.check_dependencies(args, logger)  # must not raise
 
     def test_adb_missing_raises(self, logger):
-        args = self._args(mode='adb')
-        with patch("wa_media_archiver.shutil.which", return_value=None):
+        args = self._args(from_adb=True)
+        with patch("wab_archiver.main.shutil.which", return_value=None):
             with pytest.raises(SystemExit):
                 wa.check_dependencies(args, logger)
 
     def test_adb_present_passes(self, logger):
-        args = self._args(mode='adb')
-        with patch("wa_media_archiver.shutil.which", return_value="/usr/bin/adb"):
+        args = self._args(from_adb=True)
+        with patch("wab_archiver.main.shutil.which", return_value="/usr/bin/adb"):
             wa.check_dependencies(args, logger)  # must not raise
 
     def test_wa_crypt_tools_missing_raises(self, logger):
-        args = self._args(e2e_key='key.bin')
+        args = self._args(e2e_key="key.bin")
         with patch("importlib.util.find_spec", return_value=None):
             with pytest.raises(SystemExit):
                 wa.check_dependencies(args, logger)
 
     def test_iphone_backup_decrypt_missing_raises(self, logger):
-        args = self._args(ios_password='secret')
+        args = self._args(ios_password="secret")
         with patch("importlib.util.find_spec", return_value=None):
             with pytest.raises(SystemExit):
                 wa.check_dependencies(args, logger)
 
     def test_multiple_missing_reported_together(self, logger, caplog):
-        args = self._args(mode='adb', e2e_key='key.bin')
+        args = self._args(from_adb=True, e2e_key="key.bin")
         # Capture what logger.error receives by inspecting the call
         errors = []
         logger.error = lambda msg, *a, **kw: errors.append(msg)
-        with patch("wa_media_archiver.shutil.which", return_value=None), \
-             patch("importlib.util.find_spec", return_value=None), \
-             pytest.raises(SystemExit):
+        with (
+            patch("wab_archiver.main.shutil.which", return_value=None),
+            patch("importlib.util.find_spec", return_value=None),
+            pytest.raises(SystemExit),
+        ):
             wa.check_dependencies(args, logger)
         assert len(errors) == 1, "Expected a single combined error message"
         assert "adb" in errors[0]
@@ -1989,10 +2403,11 @@ class TestCheckDependencies:
 # Config file
 # ===========================================================================
 
+
 class TestLoadToml:
     def test_valid_toml_returns_dict(self, tmp_path):
         cfg = tmp_path / "config.toml"
-        cfg.write_text('output = "/tmp/archive"\n', encoding='utf-8')
+        cfg.write_text('output = "/tmp/archive"\n', encoding="utf-8")
         result = wa._load_toml(str(cfg))
         assert result == {"output": "/tmp/archive"}
 
@@ -2005,7 +2420,7 @@ class TestLoadToml:
         cfg.write_bytes(b'output = "C:\\Users\\User\\Desktop\\archive"\n')
         result = wa._load_toml(str(cfg))
         assert result["output"] == "C:/Users/User/Desktop/archive"
-        assert 'output = "C:/Users/User/Desktop/archive"' in cfg.read_text(encoding='utf-8')
+        assert 'output = "C:/Users/User/Desktop/archive"' in cfg.read_text(encoding="utf-8")
         captured = capsys.readouterr()
         assert "NOTE" in captured.err
         # File must parse cleanly on a second load (no double line endings introduced)
@@ -2014,7 +2429,7 @@ class TestLoadToml:
 
     def test_genuinely_invalid_toml_exits(self, tmp_path):
         cfg = tmp_path / "config.toml"
-        cfg.write_text('output = [unclosed\n', encoding='utf-8')
+        cfg.write_text("output = [unclosed\n", encoding="utf-8")
         with pytest.raises(SystemExit):
             wa._load_toml(str(cfg))
 
@@ -2025,29 +2440,30 @@ class TestGenerateConfig:
             wa._generate_config(str(tmp_path))
         dest = tmp_path / "example-config.toml"
         assert dest.exists()
-        content = dest.read_text(encoding='utf-8')
+        content = dest.read_text(encoding="utf-8")
         assert "config.toml" in content
         assert "output" in content
+        assert "from_adb" in content
 
     def test_overwrites_existing_file(self, tmp_path):
         dest = tmp_path / "example-config.toml"
-        dest.write_text("old content", encoding='utf-8')
+        dest.write_text("old content", encoding="utf-8")
         with pytest.raises(SystemExit):
             wa._generate_config(str(tmp_path))
-        assert "old content" not in dest.read_text(encoding='utf-8')
+        assert "old content" not in dest.read_text(encoding="utf-8")
 
 
 class TestConfigInParseArgs:
     """Integration tests that exercise config loading through parse_args()."""
 
     def _write_config(self, path, content):
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
     @staticmethod
     def _toml_path(p):
         """Convert a path to forward-slash form for safe TOML string literals."""
-        return str(p).replace('\\', '/')
+        return str(p).replace("\\", "/")
 
     def test_config_values_used_as_defaults(self, tmp_path):
         cfg = tmp_path / "config.toml"
@@ -2055,14 +2471,23 @@ class TestConfigInParseArgs:
         self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\n')
         with patch("sys.argv", ["wa", "--config", str(cfg)]):
             args = wa.parse_args()
-        assert args.wa_root == "/wa"
+        assert args.wa_roots == ["/wa"]
+
+    def test_config_wa_root_list(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = ["/wa1", "/wa2"]\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.wa_roots == ["/wa1", "/wa2"]
 
     def test_cli_overrides_config(self, tmp_path):
         cfg = tmp_path / "config.toml"
         self._write_config(cfg, 'output = "/from/config"\n')
         out = self._toml_path(tmp_path)
-        with patch("sys.argv", ["wa", "--config", str(cfg),
-                                 "-o", str(tmp_path), "--wa_root", "/cli"]):
+        with patch(
+            "sys.argv", ["wa", "--config", str(cfg), "-o", str(tmp_path), "--wa-root", "/cli"]
+        ):
             args = wa.parse_args()
         assert args.output == str(tmp_path)
 
@@ -2082,25 +2507,38 @@ class TestConfigInParseArgs:
             args = wa.parse_args()
         assert args.since == "2024-01-01"
 
+    def test_config_from_adb(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\nfrom_adb = true\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.from_adb is True
+        assert args.wa_roots == ["/wa"]
+
     def test_autodetect_single_config_yes(self, tmp_path):
         cfg = tmp_path / "config.toml"
         out = self._toml_path(tmp_path)
         self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\n')
-        with patch("sys.argv", ["wa"]), \
-             patch("os.path.dirname", return_value=str(tmp_path)), \
-             patch("os.getcwd", return_value=str(tmp_path)), \
-             patch("builtins.input", return_value="y"):
+        with (
+            patch("sys.argv", ["wa"]),
+            patch("os.path.dirname", return_value=str(tmp_path)),
+            patch("os.getcwd", return_value=str(tmp_path)),
+            patch("builtins.input", return_value="y"),
+        ):
             args = wa.parse_args()
-        assert args.wa_root == "/wa"
+        assert args.wa_roots == ["/wa"]
 
     def test_autodetect_single_config_no(self, tmp_path):
         cfg = tmp_path / "config.toml"
         self._write_config(cfg, 'output = "/from/config"\nwa_root = "/wa"\n')
         out = self._toml_path(tmp_path)
-        with patch("sys.argv", ["wa", "-o", str(tmp_path), "--wa_root", "/cli"]), \
-             patch("os.path.dirname", return_value=str(tmp_path)), \
-             patch("os.getcwd", return_value="/different/dir"), \
-             patch("builtins.input", return_value="n"):
+        with (
+            patch("sys.argv", ["wa", "-o", str(tmp_path), "--wa-root", "/cli"]),
+            patch("os.path.dirname", return_value=str(tmp_path)),
+            patch("os.getcwd", return_value="/different/dir"),
+            patch("builtins.input", return_value="n"),
+        ):
             args = wa.parse_args()
         # Config was declined; output comes from CLI
         assert args.output == str(tmp_path)
@@ -2112,9 +2550,11 @@ class TestConfigInParseArgs:
         dir2.mkdir()
         self._write_config(dir1 / "config.toml", 'output = "/a"\n')
         self._write_config(dir2 / "config.toml", 'output = "/b"\n')
-        with patch("sys.argv", ["wa"]), \
-             patch("os.path.dirname", return_value=str(dir1)), \
-             patch("os.getcwd", return_value=str(dir2)):
+        with (
+            patch("sys.argv", ["wa"]),
+            patch("os.path.dirname", return_value=str(dir1)),
+            patch("os.getcwd", return_value=str(dir2)),
+        ):
             with pytest.raises(SystemExit):
                 wa.parse_args()
 
@@ -2124,11 +2564,18 @@ class TestConfigInParseArgs:
         self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\n')
         with patch("sys.argv", ["wa", f"--config={cfg}"]):
             args = wa.parse_args()
-        assert args.wa_root == "/wa"
+        assert args.wa_roots == ["/wa"]
 
     def test_ios_backup_and_wa_root_mutually_exclusive(self, tmp_path):
-        with patch("sys.argv", ["wa", "-o", str(tmp_path),
-                                 "--ios_backup", "/backup", "--wa_root", "/wa"]):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--ios-backup", "/backup", "--wa-root", "/wa"],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_no_source_exits(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path)]):
             with pytest.raises(SystemExit):
                 wa.parse_args()
 
@@ -2139,16 +2586,2674 @@ class TestConfigNormalise:
         cfg.write_bytes(b'output = "/tmp"\nsince = 2024-01-01\n')
         result = wa._load_toml(str(cfg))
         import datetime
-        assert isinstance(result['since'], datetime.date)
+
+        assert isinstance(result["since"], datetime.date)
         # simulate the normalisation that parse_args applies
-        if isinstance(result['since'], datetime.date):
-            result['since'] = result['since'].isoformat()
-        assert result['since'] == "2024-01-01"
+        if isinstance(result["since"], datetime.date):
+            result["since"] = result["since"].isoformat()
+        assert result["since"] == "2024-01-01"
 
     def test_since_wrong_type_exits(self, tmp_path):
         cfg = tmp_path / "config.toml"
-        out = str(tmp_path).replace('\\', '/')
-        cfg.write_text(f'output = "{out}"\nsince = 123\n', encoding='utf-8')
+        out = str(tmp_path).replace("\\", "/")
+        cfg.write_text(f'output = "{out}"\nsince = 123\n', encoding="utf-8")
         with patch("sys.argv", ["wa", "--config", str(cfg)]):
             with pytest.raises(SystemExit):
                 wa.parse_args()
+
+
+# ===========================================================================
+# shared.source_detection
+# ===========================================================================
+
+
+class TestSourceDetection:
+    def test_android_detected(self, tmp_path):
+        (tmp_path / "msgstore.db").touch()
+        source_type, db_path = sd.detect_source(str(tmp_path))
+        assert source_type == "android"
+        assert db_path == str(tmp_path / "msgstore.db")
+
+    def test_ios_detected(self, tmp_path):
+        (tmp_path / "ChatStorage.sqlite").touch()
+        source_type, db_path = sd.detect_source(str(tmp_path))
+        assert source_type == "ios"
+        assert db_path == str(tmp_path / "ChatStorage.sqlite")
+
+    def test_android_wins_when_both_present(self, tmp_path):
+        (tmp_path / "msgstore.db").touch()
+        (tmp_path / "ChatStorage.sqlite").touch()
+        source_type, _ = sd.detect_source(str(tmp_path))
+        assert source_type == "android"
+
+    def test_returns_none_when_neither(self, tmp_path):
+        assert sd.detect_source(str(tmp_path)) == (None, None)
+
+    def test_android_detected_in_whatsapp_databases_subfolder(self, tmp_path):
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir()
+        (db_dir / "msgstore.db").touch()
+        source_type, db_path = sd.detect_source(str(tmp_path))
+        assert source_type == "android"
+        assert db_path == str(db_dir / "msgstore.db")
+
+    def test_ios_detected_in_whatsapp_databases_subfolder(self, tmp_path):
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir()
+        (db_dir / "ChatStorage.sqlite").touch()
+        source_type, db_path = sd.detect_source(str(tmp_path))
+        assert source_type == "ios"
+        assert db_path == str(db_dir / "ChatStorage.sqlite")
+
+
+# ===========================================================================
+# adb_extractor: get_device_serial
+# ===========================================================================
+
+
+class TestGetDeviceSerial:
+    def test_returns_serial(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"emulator-5554\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            assert adb.get_device_serial(logger) == "emulator-5554"
+
+    def test_nonzero_returncode_raises(self, logger):
+        mock = MagicMock(returncode=1, stdout=b"", stderr=b"no device")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError):
+                adb.get_device_serial(logger)
+
+    def test_empty_output_raises(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError):
+                adb.get_device_serial(logger)
+
+    def test_unknown_output_raises(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"unknown\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError):
+                adb.get_device_serial(logger)
+
+
+# ===========================================================================
+# adb_extractor: probe_md5_binary
+# ===========================================================================
+
+
+class TestProbeMd5Binary:
+    def test_md5sum_found(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"/usr/bin/md5sum\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            assert adb.probe_md5_binary(logger) == "md5sum"
+
+    def test_md5_found(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"/usr/bin/md5\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            assert adb.probe_md5_binary(logger) == "md5"
+
+    def test_neither_found_raises(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"\n", stderr=b"")
+        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError):
+                adb.probe_md5_binary(logger)
+
+
+# ===========================================================================
+# adb_extractor: _run_adb
+# ===========================================================================
+
+
+class TestRunAdb:
+    def test_success_returns_result(self, logger):
+        mock = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        with (
+            patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock),
+            patch("wab_archiver.adb_extractor.time.sleep"),
+        ):
+            result = adb._run_adb(["adb", "pull", "/remote", "/local"], logger)
+        assert result is mock
+
+    def test_transient_error_retries_and_succeeds(self, logger):
+        first = MagicMock(returncode=1, stdout=b"", stderr=b"error: closed")
+        second = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", side_effect=[first, second]
+            ) as mock_run,
+            patch("wab_archiver.adb_extractor.time.sleep"),
+        ):
+            result = adb._run_adb(["adb", "test"], logger)
+        assert mock_run.call_count == 2
+        assert result is second
+
+    def test_non_transient_error_raises_immediately(self, logger):
+        mock = MagicMock(returncode=1, stdout=b"", stderr=b"fatal: something")
+        with (
+            patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock) as mock_run,
+            patch("wab_archiver.adb_extractor.time.sleep"),
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb._run_adb(["adb", "test"], logger)
+        assert mock_run.call_count == 1
+
+    def test_timeout_retries_then_raises(self, logger):
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("adb", 120),
+            ) as mock_run,
+            patch("wab_archiver.adb_extractor.time.sleep"),
+        ):
+            with pytest.raises(RuntimeError):
+                adb._run_adb(["adb", "test"], logger)
+        assert mock_run.call_count == adb._ADB_RETRIES + 1
+
+    def test_transient_exhausted_raises(self, logger):
+        mock = MagicMock(returncode=1, stdout=b"", stderr=b"error: closed")
+        with (
+            patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock) as mock_run,
+            patch("wab_archiver.adb_extractor.time.sleep"),
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb._run_adb(["adb", "test"], logger)
+        assert mock_run.call_count == adb._ADB_RETRIES + 1
+
+
+# ===========================================================================
+# adb_extractor: _classify_adb_error
+# ===========================================================================
+
+
+class TestClassifyAdbError:
+    def test_path_not_found(self):
+        assert adb._classify_adb_error("'/path/foo' does not exist") == "Remote path not found"
+
+    def test_permission_denied(self):
+        result = adb._classify_adb_error("Permission denied")
+        assert "Permission denied" in result
+
+    def test_open_failed(self):
+        result = adb._classify_adb_error("open failed: /path: Operation not permitted")
+        assert "Permission denied" in result
+
+    def test_device_offline(self):
+        result = adb._classify_adb_error("error: device offline")
+        assert "offline" in result or "Disconnected" in result
+
+    def test_disk_full(self):
+        assert adb._classify_adb_error("No space left on device") == "Host disk is full"
+
+    def test_unknown_falls_back_to_stripped_stderr(self):
+        assert adb._classify_adb_error("  some random error  ") == "some random error"
+
+
+# ===========================================================================
+# adb_extractor: enumerate_remote_files
+# ===========================================================================
+
+
+class TestEnumerateRemoteFiles:
+    def test_parses_path_and_size(self, logger):
+        stdout = b"/storage/WA/Media/img.jpg\t12345\n"
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert entries == [("/storage/WA/Media/img.jpg", 12345)]
+
+    def test_multiple_files(self, logger):
+        stdout = b"/storage/WA/Media/img.jpg\t12345\n/storage/WA/Media/vid.mp4\t67890\n"
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert len(entries) == 2
+        assert entries[1] == ("/storage/WA/Media/vid.mp4", 67890)
+
+    def test_skips_permission_denied_lines(self, logger):
+        stdout = b"/storage/WA/Media/img.jpg\t12345\n/storage/WA/restricted: Permission denied\n"
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert entries == [("/storage/WA/Media/img.jpg", 12345)]
+
+    def test_skips_unparseable_lines(self, logger):
+        stdout = b"badline\n/storage/WA/Media/img.jpg\t12345\n"
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert entries == [("/storage/WA/Media/img.jpg", 12345)]
+
+
+# ===========================================================================
+# adb_extractor: _remote_md5
+# ===========================================================================
+
+_EMPTY_MD5_HEX = "d41d8cd98f00b204e9800998ecf8427e"
+
+
+class TestRemoteMd5:
+    def test_md5sum_format(self, logger):
+        stdout = f"{_EMPTY_MD5_HEX}  /path/file\n".encode()
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+            result = adb._remote_md5("/path/file", "md5sum", logger)
+        assert result == bytes.fromhex(_EMPTY_MD5_HEX)
+
+    def test_md5_format(self, logger):
+        # "<name>: <hash>" format produced by older md5 binaries on non-absolute paths
+        stdout = f"img.jpg: {_EMPTY_MD5_HEX}\n".encode()
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+            result = adb._remote_md5("img.jpg", "md5", logger)
+        assert result == bytes.fromhex(_EMPTY_MD5_HEX)
+
+
+# ===========================================================================
+# adb_extractor: _staging_path
+# ===========================================================================
+
+
+class TestStagingPath:
+    def test_strips_prefix_and_joins(self):
+        result = adb._staging_path(
+            "/storage/WA/Media/img.jpg",
+            "/storage/WA/Media",
+            "/tmp/stage",
+        )
+        assert result == os.path.join("/tmp/stage", "Media", "img.jpg")
+
+    def test_nested_subdir(self):
+        result = adb._staging_path(
+            "/storage/WA/Media/WhatsApp Images/img.jpg",
+            "/storage/WA/Media",
+            "/tmp/stage",
+        )
+        assert result == os.path.join("/tmp/stage", "Media", "WhatsApp Images", "img.jpg")
+
+    def test_staging_dir_passes_validate_wa_root(self, tmp_path, logger):
+        stage_dir = str(tmp_path / "stage")
+        remote_path = "/storage/WA/Media/WhatsApp Images/img.jpg"
+        local = adb._staging_path(remote_path, "/storage/WA/Media", stage_dir)
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        # Should validate without error since staging_dir now contains Media/
+        android_handler.validate_wa_root([stage_dir], logger)
+
+
+# ===========================================================================
+# adb_extractor: write_adb_conflicts_report
+# ===========================================================================
+
+
+class TestWriteAdbConflictsReport:
+    def test_no_conflicts_no_file(self, tmp_path, logger):
+        report = str(tmp_path / "conflicts.csv")
+        adb.write_adb_conflicts_report(report, [], logger)
+        assert not os.path.exists(report)
+
+    def test_conflicts_written_as_csv(self, tmp_path, logger):
+        report = str(tmp_path / "conflicts.csv")
+        conflicts = [
+            {
+                "remote_path": "/storage/WA/Media/img.jpg",
+                "remote_md5": "aabbccdd",
+                "archived_md5": "11223344",
+            }
+        ]
+        adb.write_adb_conflicts_report(report, conflicts, logger)
+        assert os.path.exists(report)
+        content = open(report, encoding="utf-8").read()
+        assert "remote_path" in content
+        assert "/storage/WA/Media/img.jpg" in content
+        assert "aabbccdd" in content
+
+
+# ===========================================================================
+# adb_extractor: pull_media
+# ===========================================================================
+
+
+class TestPullMedia:
+    def _make_conn(self, tmp_path):
+        return arc.open_archive_db(str(tmp_path))
+
+    def test_nothing_to_pull_returns_zeros(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch("wab_archiver.adb_extractor.enumerate_remote_files", return_value=[]),
+        ):
+            pulled, skipped, conflicts = adb.pull_media(
+                str(tmp_path / "stage"), False, conn, logger, None
+            )
+        assert pulled == 0
+        assert skipped == 0
+        assert conflicts == []
+
+    def test_already_done_file_skipped(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        remote_path = "/storage/WA/Media/img.jpg"
+        arc.upsert_adb_pull_state(conn, remote_path, "serial-1", "done")
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 1024)],
+            ),
+        ):
+            pulled, skipped, conflicts = adb.pull_media(
+                str(tmp_path / "stage"), False, conn, logger, None
+            )
+        assert pulled == 0
+        assert skipped == 1
+        assert conflicts == []
+
+    def test_new_file_pulled_marks_done(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/img.jpg"
+        stage_dir = str(tmp_path / "stage")
+        remote_size = 100
+        local = adb._staging_path(remote_path, adb._WA_MEDIA_ROOT, stage_dir)
+
+        def _fake_run_adb(cmd, logger):
+            if cmd[1] == "pull":
+                os.makedirs(os.path.dirname(local), exist_ok=True)
+                with open(local, "wb") as f:
+                    f.write(b"\x00" * remote_size)
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, remote_size)],
+            ),
+            patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb),
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert pulled == 1
+        assert skipped == 0
+        assert conflicts == []
+        assert remote_path in arc.get_adb_done_paths(conn, "serial-1")
+
+    def test_target_paths_filters_unmatched_files(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        path1 = adb._WA_MEDIA_ROOT + "/WhatsApp Images/keep.jpg"
+        path2 = adb._WA_MEDIA_ROOT + "/WhatsApp Images/ignore.jpg"
+        stage_dir = str(tmp_path / "stage")
+
+        target_paths = {"Media/WhatsApp Images/keep.jpg"}
+
+        def _fake_run_adb(cmd, logger):
+            if cmd[1] == "pull":
+                local = cmd[3]
+                os.makedirs(os.path.dirname(local), exist_ok=True)
+                with open(local, "wb") as f:
+                    f.write(b"data")
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(path1, 4), (path2, 4)],
+            ),
+            patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb),
+        ):
+            pulled, skipped, conflicts = adb.pull_media(
+                stage_dir, False, conn, logger, target_paths
+            )
+
+        assert pulled == 1
+        assert skipped == 0
+        assert conflicts == []
+        assert path1 in arc.get_adb_done_paths(conn, "serial-1")
+        assert path2 not in arc.get_adb_done_paths(conn, "serial-1")
+        conn.close()
+
+    def test_target_paths_empty_returns_zeros(self, tmp_path, logger):
+        conn = self._make_conn(tmp_path)
+        path1 = adb._WA_MEDIA_ROOT + "/WhatsApp Images/img.jpg"
+        stage_dir = str(tmp_path / "stage")
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value="serial-1"),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch("wab_archiver.adb_extractor.enumerate_remote_files", return_value=[(path1, 100)]),
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, set())
+
+        assert pulled == 0
+        assert skipped == 0
+        assert conflicts == []
+        conn.close()
+
+
+# ===========================================================================
+# wab_archiver.main: setup_logging
+# ===========================================================================
+
+
+class TestSetupLogging:
+    @pytest.fixture(autouse=True)
+    def _clear_handlers(self):
+        logging.getLogger("wab_archiver").handlers.clear()
+        yield
+        logging.getLogger("wab_archiver").handlers.clear()
+
+    def test_creates_file_and_stream_handlers(self, tmp_path):
+        log = wa.setup_logging(str(tmp_path / "app.log"))
+        assert len(log.handlers) == 2
+        handler_types = {type(h).__name__ for h in log.handlers}
+        assert "FileHandler" in handler_types
+        assert "StreamHandler" in handler_types
+
+    def test_file_handler_targets_correct_path(self, tmp_path):
+        log = wa.setup_logging(str(tmp_path / "app.log"))
+        file_handlers = [h for h in log.handlers if isinstance(h, logging.FileHandler)]
+        assert len(file_handlers) == 1
+        assert file_handlers[0].baseFilename.endswith("app.log")
+
+    def test_second_call_does_not_add_handlers(self, tmp_path):
+        wa.setup_logging(str(tmp_path / "app.log"))
+        wa.setup_logging(str(tmp_path / "app.log"))
+        assert len(logging.getLogger("wab_archiver").handlers) == 2
+
+
+# ===========================================================================
+# wab_archiver.main: _build_missing_row (1-to-1 else branch)
+# ===========================================================================
+
+
+class TestBuildMissingRow:
+    def test_1on1_known_sender(self):
+        contacts = {"441234": "Alice"}
+        row = wa._build_missing_row(
+            msg_id=1,
+            timestamp=1705276800000,
+            file_path="img.jpg",
+            mime_type="image/jpeg",
+            chat_subject=None,
+            sender="441234",
+            key_from_me=0,
+            message_url=None,
+            media_name=None,
+            contacts=contacts,
+            number_map={},
+        )
+        assert row["chat_name"] == "Alice"
+        assert row["sender"] == "Alice"
+
+    def test_1on1_null_sender_unknown(self):
+        row = wa._build_missing_row(
+            msg_id=1,
+            timestamp=None,
+            file_path=None,
+            mime_type=None,
+            chat_subject=None,
+            sender=None,
+            key_from_me=0,
+            message_url=None,
+            media_name=None,
+            contacts={},
+            number_map={},
+        )
+        assert row["chat_name"] == "Unknown"
+        assert row["sender"] == "Unknown"
+
+
+# ===========================================================================
+# wab_archiver.main: _route_contact (contact_index fallback)
+# ===========================================================================
+
+
+class TestRouteContact:
+    def test_falls_back_to_contact_index(self, tmp_path):
+        contact_index = {"441234": ("Alice (00441234)", "Alice")}
+        dest_dir, filename = wa._route_contact(
+            sender="441234",
+            key_from_me=0,
+            contacts={},
+            number_map={},
+            filename="img.jpg",
+            year="2024",
+            output_root=str(tmp_path),
+            contact_index=contact_index,
+        )
+        assert "Alice" in dest_dir
+        assert filename == "img.jpg"
+
+
+# ===========================================================================
+# wab_archiver.main: _copy_or_skip (error/edge branches)
+# ===========================================================================
+
+
+class TestCopyOrSkip:
+    def test_dry_run_identical_file_returns_skip(self, tmp_path, logger):
+        src = tmp_path / "src.jpg"
+        src.write_bytes(b"test content")
+        dest_path = tmp_path / "dest.jpg"
+        dest_path.write_bytes(b"test content")
+        result = wa._copy_or_skip(
+            str(src),
+            str(dest_path),
+            str(tmp_path / "dest_dir"),
+            "original/path.jpg",
+            1705276800000,
+            str(tmp_path),
+            dry_run=True,
+            logger=logger,
+            cursor=None,
+        )
+        assert result == (0, 1, 0)
+
+    def test_existing_identical_with_cursor_records_archived(self, tmp_path, logger):
+        src = tmp_path / "src.jpg"
+        src.write_bytes(b"test content")
+        dest_dir = tmp_path / "Contacts" / "Alice"
+        dest_dir.mkdir(parents=True)
+        dest_path = dest_dir / "dest.jpg"
+        dest_path.write_bytes(b"test content")
+        conn = arc.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+        result = wa._copy_or_skip(
+            str(src),
+            str(dest_path),
+            str(dest_dir),
+            "original/path.jpg",
+            1705276800000,
+            str(tmp_path),
+            dry_run=False,
+            logger=logger,
+            cursor=cursor,
+        )
+        conn.commit()
+        assert result == (0, 1, 0)
+        rows = conn.execute("SELECT * FROM archive_copies").fetchall()
+        assert len(rows) == 1
+        conn.close()
+
+    def test_copy_error_returns_warning(self, tmp_path, logger):
+        src = tmp_path / "src.jpg"
+        src.write_bytes(b"test content")
+        dest_path = tmp_path / "out" / "dest.jpg"
+        with patch("wab_archiver.main.shutil.copy", side_effect=OSError("disk full")):
+            result = wa._copy_or_skip(
+                str(src),
+                str(dest_path),
+                str(dest_path.parent),
+                "original/path.jpg",
+                1705276800000,
+                str(tmp_path),
+                dry_run=False,
+                logger=logger,
+                cursor=None,
+            )
+        assert result == (0, 0, 1)
+
+    def test_set_file_times_oserror_does_not_fail(self, tmp_path, logger):
+        src = tmp_path / "src.jpg"
+        src.write_bytes(b"test content")
+        dest_path = tmp_path / "out" / "dest.jpg"
+        with patch("wab_archiver.main.set_file_times", side_effect=OSError("no access")):
+            result = wa._copy_or_skip(
+                str(src),
+                str(dest_path),
+                str(dest_path.parent),
+                "original/path.jpg",
+                1705276800000,
+                str(tmp_path),
+                dry_run=False,
+                logger=logger,
+                cursor=None,
+            )
+        assert result == (1, 0, 0)
+        assert dest_path.exists()
+
+
+# ===========================================================================
+# wab_archiver.main: process_rows progress log
+# ===========================================================================
+
+
+class TestProcessRowsProgress:
+    def test_progress_logged_at_1000_rows(self, tmp_path):
+        rows = [
+            (i, 1705276800000, None, None, "42", "Group", "111", 0, None, None) for i in range(1001)
+        ]
+        mock_logger = MagicMock()
+        info_calls = []
+        mock_logger.info.side_effect = lambda msg, *a, **kw: info_calls.append(str(msg))
+        wa.process_rows(
+            rows,
+            total=1001,
+            contacts={},
+            number_map={},
+            folder_index={},
+            group_index={},
+            media_resolver=lambda fp: fp,
+            output_root=str(tmp_path),
+            logger=mock_logger,
+            dry_run=True,
+        )
+        assert any("Progress: 1000/" in m for m in info_calls)
+
+
+# ===========================================================================
+# wab_archiver.progress: ProgressReporter
+# ===========================================================================
+
+
+class TestProgressReporter:
+    def test_no_default_parameter_values(self):
+        import inspect
+
+        for member_name in dir(prg.ProgressReporter):
+            if member_name.startswith("_") and member_name != "__init__":
+                continue
+            member = getattr(prg.ProgressReporter, member_name)
+            if callable(member):
+                sig = inspect.signature(member)
+                for p_name, param in sig.parameters.items():
+                    assert param.default == inspect.Parameter.empty, (
+                        f"ProgressReporter.{member_name} parameter '{p_name}' "
+                        f"has default value: {param.default}"
+                    )
+
+    def test_isatty_in_place_rendering(self, logger):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        reporter = prg.ProgressReporter("Archiving", 100, logger, stream, 0.0)
+        reporter.update(50, {"Copied": 10, "Skipped": 40})
+        output = stream.getvalue()
+        assert "\rArchiving: 50.0% (50/100) | Copied: 10 | Skipped: 40" in output
+
+        reporter.finish({"Copied": 10, "Skipped": 40})
+        final_output = stream.getvalue()
+        assert final_output.endswith("\n")
+
+    def test_isatty_interleaving_guard(self):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        test_logger = logging.getLogger("test_guard")
+        test_logger.setLevel(logging.INFO)
+        test_logger.handlers = []
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        test_logger.addHandler(handler)
+
+        reporter = prg.ProgressReporter("Archiving", 100, test_logger, stream, 0.0)
+        reporter.update(10, {"Copied": 5})
+
+        test_logger.warning("File missing!")
+
+        output = stream.getvalue()
+        assert "File missing!\n" in output
+
+        reporter.finish({"Copied": 5})
+
+    def test_non_tty_milestone_logging(self, logger):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: False
+
+        mock_logger = MagicMock()
+        info_logs = []
+        mock_logger.info.side_effect = lambda msg, *a, **kw: info_logs.append(str(msg))
+
+        reporter = prg.ProgressReporter("Archiving", 50, mock_logger, stream, 0.0)
+        for i in range(1, 51):
+            reporter.update(i, {"Copied": i})
+        reporter.finish({"Copied": 50})
+
+        # Check that no \r was written to non-tty stream
+        assert "\r" not in stream.getvalue()
+        # Check that milestones were logged
+        assert any("Archiving: 10/50" in msg for msg in info_logs)
+        assert any("Archiving: 50/50" in msg for msg in info_logs)
+
+    def test_zero_total_handling(self, logger):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        reporter = prg.ProgressReporter("Evaluating", 0, logger, stream, 0.0)
+        reporter.update(0, {})
+        reporter.finish({})
+        assert "Evaluating: 0" in stream.getvalue()
+
+    def test_cursor_visibility_management(self, logger):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        reporter = prg.ProgressReporter("Archiving", 100, logger, stream, 0.0)
+        assert not reporter._cursor_hidden
+
+        reporter.update(10, {"Copied": 5})
+        assert reporter._cursor_hidden
+        assert "\033[?25l" in stream.getvalue()
+
+        reporter.finish({"Copied": 5})
+        assert not reporter._cursor_hidden
+        assert "\033[?25h" in stream.getvalue()
+
+    def test_redundant_redraw_skipped(self, logger):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        reporter = prg.ProgressReporter("Archiving", 100, logger, stream, 0.0)
+        reporter.update(10, {"Copied": 5})
+        len_after_first = len(stream.getvalue())
+
+        # Second update with same current and stats should be suppressed
+        reporter.update(10, {"Copied": 5})
+        assert len(stream.getvalue()) == len_after_first
+
+        # Update with changed stats should render
+        reporter.update(11, {"Copied": 6})
+        assert len(stream.getvalue()) > len_after_first
+        reporter.finish({"Copied": 6})
+
+    def test_file_handler_excluded_from_guard_and_filter(self, tmp_path):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        log_file = tmp_path / "test.log"
+        fh = logging.FileHandler(str(log_file), encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+
+        ch = logging.StreamHandler(stream)
+        ch.setLevel(logging.INFO)
+
+        test_logger = logging.getLogger("test_fh_exclusion")
+        test_logger.setLevel(logging.DEBUG)
+        test_logger.handlers = [fh, ch]
+
+        reporter = prg.ProgressReporter("Archiving", 100, test_logger, stream, 0.0)
+        reporter.update(10, {"Copied": 5})
+
+        val_before_debug = stream.getvalue()
+        # Debug logs go to file handler, should NOT clear or alter stream
+        test_logger.debug("COPIED: media.jpg -> archive/media.jpg")
+        assert stream.getvalue() == val_before_debug
+
+        reporter.finish({"Copied": 5})
+        fh.close()
+
+    def test_interleaving_log_immediately_restores_status_line(self):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        test_logger = logging.getLogger("test_restore_status")
+        test_logger.setLevel(logging.INFO)
+        test_logger.handlers = []
+        ch = logging.StreamHandler(stream)
+        ch.setFormatter(logging.Formatter("%(message)s"))
+        test_logger.addHandler(ch)
+
+        reporter = prg.ProgressReporter("Archiving", 100, test_logger, stream, 0.0)
+        reporter.update(10, {"Copied": 5})
+
+        test_logger.warning("Missing source file")
+        output = stream.getvalue()
+        assert "Missing source file\n" in output
+        # Status line must be immediately rewritten after the log line
+        assert output.endswith("Archiving: 10.0% (10/100) | Copied: 5")
+
+        reporter.finish({"Copied": 5})
+
+    def test_file_handler_receives_milestones_when_tty(self, tmp_path):
+        import io
+
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+
+        log_file = tmp_path / "milestones.log"
+        fh = logging.FileHandler(str(log_file), encoding="utf-8")
+        fh.setLevel(logging.INFO)
+
+        test_logger = logging.getLogger("test_milestone_fh")
+        test_logger.setLevel(logging.INFO)
+        test_logger.handlers = [fh]
+
+        reporter = prg.ProgressReporter("Archiving", 10, test_logger, stream, 0.0)
+        reporter.update(10, {"Copied": 10})
+        reporter.finish({"Copied": 10})
+        fh.close()
+
+        log_content = log_file.read_text(encoding="utf-8")
+        assert "Archiving: 10/10 (100.0%) | Copied: 10" in log_content
+
+
+# ===========================================================================
+# wab_archiver.main: _inject_default_archive_command
+# ===========================================================================
+
+
+class TestInjectDefaultArchiveCommand:
+    def test_help_flag_not_injected(self):
+        with patch("sys.argv", ["prog", "--help"]):
+            wa._inject_default_archive_command()
+            assert sys.argv[1] == "--help"
+
+    def test_no_command_injects_archive(self):
+        with patch("sys.argv", ["prog", "--wa-root", "/wa"]):
+            wa._inject_default_archive_command()
+            assert sys.argv[1] == "archive"
+
+
+# ===========================================================================
+# wab_archiver.main: parse_args — uncovered validation branches
+# ===========================================================================
+
+
+class TestParseArgsValidationExtra:
+    @staticmethod
+    def _toml_path(p):
+        return str(p).replace("\\", "/")
+
+    def test_non_toml_config_exits(self, capsys):
+        with patch("sys.argv", ["wa", "--config=cfg.json"]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+        assert "toml" in capsys.readouterr().err.lower()
+
+    def test_since_native_date_normalised(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        cfg.write_bytes(b'output = "/tmp"\nwa_root = "/wa"\nsince = 2024-01-01\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.since == "2024-01-01"
+
+    def test_wa_root_wrong_type_exits(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        cfg.write_text(f'output = "{out}"\nwa_root = 42\n', encoding="utf-8")
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_config_command_exits(self):
+        with patch("wab_archiver.main._generate_config", side_effect=SystemExit(0)) as mock_gen:
+            with patch("sys.argv", ["wa", "config", "generate"]):
+                with pytest.raises(SystemExit):
+                    wa.parse_args()
+            mock_gen.assert_called_once_with(os.path.dirname(os.path.abspath(wa.__file__)))
+
+    def test_restore_without_output_exits(self):
+        with patch("sys.argv", ["wa", "restore"]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_contacts_with_ios_backup_exits(self, tmp_path):
+        with patch(
+            "sys.argv",
+            [
+                "wa",
+                "archive",
+                "-o",
+                str(tmp_path),
+                "--ios-backup",
+                "/backup",
+                "--contacts",
+                "/contacts",
+            ],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_pull_media_without_staging_exits(self, tmp_path):
+        with patch(
+            "sys.argv", ["wa", "archive", "-o", str(tmp_path), "--from-adb", "--pull-media"]
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_wa_root_with_from_adb_allowed(self, tmp_path):
+        with patch(
+            "sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", "/wa", "--from-adb"]
+        ):
+            args = wa.parse_args()
+        assert args.from_adb is True
+        assert args.wa_roots == ["/wa"]
+
+    def test_pull_media_with_wa_root_exits(self, tmp_path):
+        with patch(
+            "sys.argv",
+            [
+                "wa",
+                "archive",
+                "-o",
+                str(tmp_path),
+                "--from-adb",
+                "--pull-media",
+                "--staging",
+                "/stage",
+                "--wa-root",
+                "/wa",
+            ],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_from_adb_with_ios_backup_exits(self, tmp_path):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--ios-backup", "/backup", "--from-adb"],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_pull_media_without_from_adb_exits(self, tmp_path):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--pull-media", "--staging", "/stage"],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_no_media_source_exits(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--from-adb"]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_restore_with_output_returns_args(self, tmp_path):
+        with patch("sys.argv", ["wa", "restore", "-o", str(tmp_path)]):
+            args = wa.parse_args()
+        assert args.command == "restore"
+        assert args.output == str(tmp_path)
+
+    def test_archive_without_output_exits(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "--wa-root", str(tmp_path)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_wa_root_and_ios_backup_mutual_exclusion(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('output = "/tmp"\nios_backup = "/backup"\n', encoding="utf-8")
+        with patch("sys.argv", ["wa", "--config", str(cfg), "--wa-root", str(tmp_path)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_pull_media_and_ios_backup_mutual_exclusion(self, tmp_path):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--pull-media", "--ios-backup", "/backup"],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_config_command_returns_args_when_mocked(self):
+        with (
+            patch("sys.argv", ["wa", "config", "generate"]),
+            patch("wab_archiver.main._generate_config", return_value=None),
+        ):
+            args = wa.parse_args()
+            assert args.command == "config"
+
+
+# ===========================================================================
+# wab_archiver.main: _warn_network_paths
+# ===========================================================================
+
+
+class TestWarnNetworkPaths:
+    def test_unc_output_warns(self):
+        args = argparse.Namespace(output="\\\\server\\share", wa_roots=[])
+        mock_logger = MagicMock()
+        wa._warn_network_paths(args, mock_logger)
+        assert mock_logger.warning.called
+
+    def test_unc_wa_root_warns(self):
+        args = argparse.Namespace(output="/tmp/out", wa_roots=["\\\\nas\\wa"])
+        mock_logger = MagicMock()
+        wa._warn_network_paths(args, mock_logger)
+        assert mock_logger.warning.called
+
+    def test_normal_paths_no_warning(self):
+        args = argparse.Namespace(output="/tmp/out", wa_roots=["/wa/media"])
+        mock_logger = MagicMock()
+        wa._warn_network_paths(args, mock_logger)
+        mock_logger.warning.assert_not_called()
+
+
+# ===========================================================================
+# wab_archiver.main: check_dependencies — tzdata (Windows-only)
+# ===========================================================================
+
+
+class TestCheckDependenciesTzdata:
+    def test_tzdata_missing_on_windows_raises(self, logger):
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone="Europe/Berlin",
+        )
+        with (
+            patch("wab_archiver.main.sys.platform", "win32"),
+            patch("importlib.util.find_spec", return_value=None),
+        ):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
+
+# ===========================================================================
+# wab_archiver.main: run_restore_mode
+# ===========================================================================
+
+
+def _restore_args(tmp_path, dry_run=False):
+    return argparse.Namespace(output=str(tmp_path), dry_run=dry_run)
+
+
+def _seed_archive(tmp_path, original_path, archive_rel, content=b"test data"):
+    """Insert DB row and write the archive copy file."""
+    conn = arc.open_archive_db(str(tmp_path))
+    md5 = hashlib.md5(content).digest()
+    cur = conn.cursor()
+    arc.record_file_archived(cur, original_path, md5, archive_rel, len(content))
+    conn.commit()
+    conn.close()
+    archive_file = tmp_path.joinpath(*archive_rel.split("/"))
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_bytes(content)
+    return archive_file
+
+
+class TestRunRestoreMode:
+    def test_empty_archive_exits(self, tmp_path, logger):
+        arc.open_archive_db(str(tmp_path)).close()
+        with pytest.raises(SystemExit):
+            wa.run_restore_mode(_restore_args(tmp_path), logger)
+
+    def test_ios_only_exits(self, tmp_path, logger):
+        _seed_archive(tmp_path, "Message/foo.jpg", "Contacts/Alice/2024/Received/foo.jpg")
+        with pytest.raises(SystemExit):
+            wa.run_restore_mode(_restore_args(tmp_path), logger)
+
+    def test_ios_and_android_warns(self, tmp_path):
+        _seed_archive(
+            tmp_path, "Media/WhatsApp Images/img.jpg", "Contacts/Alice/2024/Received/img.jpg"
+        )
+        _seed_archive(tmp_path, "Message/ios.jpg", "Contacts/Alice/2024/Received/ios.jpg")
+        mock_logger = MagicMock()
+        wa.run_restore_mode(_restore_args(tmp_path), mock_logger)
+        assert mock_logger.warning.called
+
+    def test_happy_path_restores_file(self, tmp_path, logger):
+        _seed_archive(
+            tmp_path, "Media/WhatsApp Images/img.jpg", "Contacts/Alice/2024/Received/img.jpg"
+        )
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        dest = tmp_path / "Media" / "WhatsApp Images" / "img.jpg"
+        assert dest.exists()
+
+    def test_dry_run_does_not_copy(self, tmp_path, logger):
+        _seed_archive(
+            tmp_path, "Media/WhatsApp Images/img.jpg", "Contacts/Alice/2024/Received/img.jpg"
+        )
+        wa.run_restore_mode(_restore_args(tmp_path, dry_run=True), logger)
+        dest = tmp_path / "Media" / "WhatsApp Images" / "img.jpg"
+        assert not dest.exists()
+
+    def test_unrestorable_no_archive_copy(self, tmp_path, logger):
+        # DB row exists but the archive file is absent from disk
+        conn = arc.open_archive_db(str(tmp_path))
+        md5 = hashlib.md5(b"x").digest()
+        arc.record_file_archived(
+            conn.cursor(), "Media/img.jpg", md5, "Contacts/Alice/2024/Received/img.jpg", 1
+        )
+        conn.commit()
+        conn.close()
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        report = tmp_path / "restore_report.csv"
+        assert report.exists()
+        assert "unrestorable" in report.read_text(encoding="utf-8")
+
+    def test_already_restored_skipped(self, tmp_path, logger):
+        content = b"same content"
+        _seed_archive(
+            tmp_path,
+            "Media/WhatsApp Images/img.jpg",
+            "Contacts/Alice/2024/Received/img.jpg",
+            content,
+        )
+        dest = tmp_path / "Media" / "WhatsApp Images" / "img.jpg"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        report = tmp_path / "restore_report.csv"
+        assert not report.exists()
+
+    def test_collision_skipped(self, tmp_path, logger):
+        _seed_archive(
+            tmp_path,
+            "Media/WhatsApp Images/img.jpg",
+            "Contacts/Alice/2024/Received/img.jpg",
+            b"archive content",
+        )
+        dest = tmp_path / "Media" / "WhatsApp Images" / "img.jpg"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"different content")
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        report = tmp_path / "restore_report.csv"
+        assert report.exists()
+        assert "collision_skipped" in report.read_text(encoding="utf-8")
+
+    def test_copy_error_writes_report(self, tmp_path, logger):
+        _seed_archive(
+            tmp_path, "Media/WhatsApp Images/img.jpg", "Contacts/Alice/2024/Received/img.jpg"
+        )
+        with patch("wab_archiver.main.shutil.copy2", side_effect=OSError("disk full")):
+            wa.run_restore_mode(_restore_args(tmp_path), logger)
+        report = tmp_path / "restore_report.csv"
+        assert report.exists()
+        assert "error:" in report.read_text(encoding="utf-8")
+
+
+# ===========================================================================
+# wab_archiver.main: main()
+# ===========================================================================
+
+
+class TestMain:
+    def _args(self, tmp_path, command="archive", dry_run=False):
+        return argparse.Namespace(
+            command=command,
+            dry_run=dry_run,
+            output=str(tmp_path),
+            log=None,
+            wa_roots=[],
+        )
+
+    def test_dispatches_to_forward_mode(self, tmp_path):
+        args = self._args(tmp_path, command="archive")
+        with (
+            patch("wab_archiver.main.parse_args", return_value=args),
+            patch("wab_archiver.main.setup_logging", return_value=MagicMock()),
+            patch("wab_archiver.main._warn_network_paths"),
+            patch("wab_archiver.main.run_forward_mode") as mock_fwd,
+            patch("wab_archiver.main.run_restore_mode") as mock_rst,
+        ):
+            wa.main()
+        mock_fwd.assert_called_once()
+        mock_rst.assert_not_called()
+
+    def test_dispatches_to_restore_mode(self, tmp_path):
+        args = self._args(tmp_path, command="restore")
+        with (
+            patch("wab_archiver.main.parse_args", return_value=args),
+            patch("wab_archiver.main.setup_logging", return_value=MagicMock()),
+            patch("wab_archiver.main._warn_network_paths"),
+            patch("wab_archiver.main.run_forward_mode") as mock_fwd,
+            patch("wab_archiver.main.run_restore_mode") as mock_rst,
+        ):
+            wa.main()
+        mock_rst.assert_called_once()
+        mock_fwd.assert_not_called()
+
+    def test_dry_run_logged(self, tmp_path):
+        args = self._args(tmp_path, command="archive", dry_run=True)
+        mock_logger = MagicMock()
+        with (
+            patch("wab_archiver.main.parse_args", return_value=args),
+            patch("wab_archiver.main.setup_logging", return_value=mock_logger),
+            patch("wab_archiver.main._warn_network_paths"),
+            patch("wab_archiver.main.run_forward_mode"),
+            patch("wab_archiver.main.run_restore_mode"),
+        ):
+            wa.main()
+        info_msgs = [str(c) for c in mock_logger.info.call_args_list]
+        assert any("DRY RUN" in m for m in info_msgs)
+
+    def test_restore_dry_run_logged(self, tmp_path):
+        args = self._args(tmp_path, command="restore", dry_run=True)
+        mock_logger = MagicMock()
+        with (
+            patch("wab_archiver.main.parse_args", return_value=args),
+            patch("wab_archiver.main.setup_logging", return_value=mock_logger),
+            patch("wab_archiver.main._warn_network_paths"),
+            patch("wab_archiver.main.run_forward_mode"),
+            patch("wab_archiver.main.run_restore_mode"),
+        ):
+            wa.main()
+        info_msgs = [str(c) for c in mock_logger.info.call_args_list]
+        assert any("DRY RUN MODE" in m for m in info_msgs)
+
+
+# ===========================================================================
+# iOS Auxiliary Database Extraction & HD Deduplication Tests
+# ===========================================================================
+
+
+class TestIosAuxiliaryDatabaseExtraction:
+    def test_extract_auxiliary_databases_unencrypted(self, tmp_path):
+        import logging
+
+        from wab_archiver import backup_reader as br
+
+        fake_ext = tmp_path / "fake_ext.sqlite"
+        fake_infra = tmp_path / "fake_infra.sqlite"
+        fake_lid = tmp_path / "fake_lid.sqlite"
+        fake_ext.write_bytes(b"EXT_DATA")
+        fake_infra.write_bytes(b"INFRA_DATA")
+        fake_lid.write_bytes(b"LID_DATA")
+
+        manifest_map = {
+            "ExtChatDB/ExtChatDatabase.sqlite": str(fake_ext),
+            "MessagingInfraDB_v2/MessagingInfraDatabase.sqlite": str(fake_infra),
+            "LID.sqlite": str(fake_lid),
+        }
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        logger = logging.getLogger("test_aux_extract")
+
+        br._extract_auxiliary_databases_unencrypted(manifest_map, str(output_dir), logger)
+
+        assert (output_dir / "ExtChatDatabase.sqlite").read_bytes() == b"EXT_DATA"
+        assert (output_dir / "MessagingInfraDatabase.sqlite").read_bytes() == b"INFRA_DATA"
+        assert (output_dir / "LID.sqlite").read_bytes() == b"LID_DATA"
+
+    def test_extract_auxiliary_databases_missing_is_graceful(self, tmp_path):
+        import logging
+
+        from wab_archiver import backup_reader as br
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        logger = logging.getLogger("test_aux_missing")
+
+        br._extract_auxiliary_databases_unencrypted({}, str(output_dir), logger)
+
+        assert not (output_dir / "ExtChatDatabase.sqlite").exists()
+        assert not (output_dir / "MessagingInfraDatabase.sqlite").exists()
+
+
+class TestIosHdDeduplication:
+    def test_find_ios_ext_db(self, tmp_path):
+        from wab_archiver import ios_handler as ios
+
+        d1 = tmp_path / "d1"
+        d1.mkdir()
+        assert ios.find_ios_ext_db([str(d1)]) is None
+
+        # Test nested ExtChatDB folder
+        nested = d1 / "ExtChatDB"
+        nested.mkdir()
+        nested_file = nested / "ExtChatDatabase.sqlite"
+        nested_file.touch()
+        assert ios.find_ios_ext_db([str(d1)]) == str(nested_file)
+
+        # Test flat folder
+        d2 = tmp_path / "d2"
+        d2.mkdir()
+        flat_file = d2 / "ExtChatDatabase.sqlite"
+        flat_file.touch()
+        assert ios.find_ios_ext_db([str(d2)]) == str(flat_file)
+
+    def test_check_ios_hd_association(self, tmp_path):
+        import logging
+
+        from wab_archiver import ios_handler as ios
+
+        logger = logging.getLogger("test_hd_assoc")
+        ext_path = tmp_path / "ExtChatDatabase.sqlite"
+        ext_conn = sqlite3.connect(str(ext_path))
+        ext_conn.execute(
+            "CREATE TABLE message_parent_association (stanza_id TEXT, parent_stanza_id TEXT, type INTEGER)"
+        )
+        ext_conn.execute("INSERT INTO message_parent_association VALUES ('child1', 'parent1', 10)")
+        ext_conn.commit()
+        ext_conn.close()
+
+        main_conn = sqlite3.connect(":memory:")
+        cursor = main_conn.cursor()
+
+        # Valid association found
+        assert ios.check_ios_hd_association(cursor, str(ext_path), logger) is True
+
+        # Non-existent file
+        assert (
+            ios.check_ios_hd_association(cursor, str(tmp_path / "nonexistent.sqlite"), logger)
+            is False
+        )
+
+    def test_build_ios_query_hd_dedup_clause(self):
+        from wab_archiver import ios_handler as ios
+
+        query_no_dedup = ios.build_ios_query(None, None, False)
+        assert "ext.message_parent_association" not in query_no_dedup
+
+        query_with_dedup = ios.build_ios_query(None, None, True)
+        assert "ext.message_parent_association" in query_with_dedup
+        assert "mpa.type IN (10, 5)" in query_with_dedup
+
+    def test_ios_hd_dedup_execution(self, tmp_path):
+        from wab_archiver import ios_handler as ios
+
+        main_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        main_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZPARTNERNAME TEXT, ZCONTACTJID TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
+                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
+                ZPUSHNAME TEXT, ZSTANZAID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 1, 'Group 1', NULL);
+            -- Parent message (LQ)
+            INSERT INTO ZWAMEDIAITEM VALUES (10, 'lq.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 1000.0, 0, 1, 10, NULL, 'User1', 'STANZA_LQ');
+
+            -- Child message (HD)
+            INSERT INTO ZWAMEDIAITEM VALUES (11, 'hd.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE VALUES (101, 1001.0, 0, 1, 11, NULL, 'User1', 'STANZA_HD');
+        """)
+
+        ext_conn = sqlite3.connect(str(tmp_path / "ExtChatDatabase.sqlite"))
+        ext_conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+            INSERT INTO message_parent_association VALUES ('STANZA_HD', 'STANZA_LQ', 10, 1, 'group1@g.us');
+        """)
+        ext_conn.close()
+
+        main_conn.execute("ATTACH DATABASE ? AS ext", (str(tmp_path / "ExtChatDatabase.sqlite"),))
+
+        # Without dedup: both rows returned
+        rows_no_dedup = main_conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        assert len(rows_no_dedup) == 2
+
+        # With dedup: only the HD row returned (LQ parent filtered out)
+        rows_dedup = main_conn.execute(ios.build_ios_query(None, None, True)).fetchall()
+        assert len(rows_dedup) == 1
+        assert rows_dedup[0][0] == 101  # HD message ID
+        assert rows_dedup[0][2] == "Message/hd.jpg"
+
+    def test_run_forward_mode_ios(self, tmp_path, logger):
+        from wab_archiver.main import parse_args, run_forward_mode
+
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
+                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
+                ZPUSHNAME TEXT, ZSTANZAID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
+        """)
+        conn.close()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        (wa_root / "Message").mkdir()
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with patch(
+            "sys.argv",
+            [
+                "wab-archiver",
+                "archive",
+                "--msgstore",
+                str(db_path),
+                "--wa-root",
+                str(wa_root),
+                "--output",
+                str(output_dir),
+                "--dry-run",
+            ],
+        ):
+            args = parse_args()
+        run_forward_mode(args, logger)
+
+    def test_run_forward_mode_ios_with_ext_db(self, tmp_path, logger):
+        from wab_archiver.main import parse_args, run_forward_mode
+
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
+                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
+                ZPUSHNAME TEXT, ZSTANZAID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
+        """)
+        conn.close()
+
+        ext_db = tmp_path / "ExtChatDatabase.sqlite"
+        conn = sqlite3.connect(str(ext_db))
+        conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT, parent_stanza_id TEXT, type INTEGER, sort INTEGER, chat_jid TEXT
+            );
+            INSERT INTO message_parent_association VALUES ('HD1', 'LQ1', 10, 1, 'chat@s.whatsapp.net');
+        """)
+        conn.close()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        (wa_root / "Message").mkdir()
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with patch(
+            "sys.argv",
+            [
+                "wab-archiver",
+                "archive",
+                "--msgstore",
+                str(db_path),
+                "--wa-root",
+                str(wa_root),
+                "--output",
+                str(output_dir),
+                "--dry-run",
+            ],
+        ):
+            args = parse_args()
+        run_forward_mode(args, logger)
+
+
+# ===========================================================================
+# wab_archiver entrypoint tests
+# ===========================================================================
+
+
+class TestMainEntrypoint:
+    def test_import_main_does_not_execute(self):
+        with patch("wab_archiver.main.main") as mock_main:
+            import importlib
+
+            import wab_archiver.__main__
+
+            importlib.reload(wab_archiver.__main__)
+            mock_main.assert_not_called()
+
+    def test_run_as_directory_help(self):
+        res = subprocess.run(
+            [sys.executable, "wab_archiver", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert "Archive WhatsApp media" in res.stdout
+
+    def test_run_as_module_help(self):
+        res = subprocess.run(
+            [sys.executable, "-m", "wab_archiver", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert "Archive WhatsApp media" in res.stdout
+
+
+# ===========================================================================
+# msgstore Decryption
+# ===========================================================================
+
+try:
+    import wa_crypt_tools  # noqa: F401
+
+    _HAS_WA_CRYPT_TOOLS = True
+except ImportError:
+    _HAS_WA_CRYPT_TOOLS = False
+
+_requires_wa_crypt_tools = pytest.mark.skipif(
+    not _HAS_WA_CRYPT_TOOLS,
+    reason="wa-crypt-tools is not installed",
+)
+
+
+def _create_synthetic_crypt15(plain_bytes: bytes, key_hex: str) -> bytes:
+    import zlib
+
+    from wa_crypt_tools.lib.db.db15 import Database15
+    from wa_crypt_tools.lib.key.keyfactory import KeyFactory
+    from wa_crypt_tools.lib.props import Props
+
+    key = KeyFactory.new(key_hex)
+    db15 = Database15(key=key)
+    compressed = zlib.compress(plain_bytes, 1)
+    return db15.encrypt(key, Props(), compressed)
+
+
+class TestDecryptMsgstore:
+    @pytest.fixture
+    def synthetic_db(self, tmp_path):
+        db_path = tmp_path / "plain.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, msg TEXT)")
+        conn.execute("INSERT INTO test VALUES (1, 'synthetic_test_value')")
+        conn.commit()
+        conn.close()
+        return db_path.read_bytes()
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_msgstore_success_with_hex_key(self, tmp_path, logger, synthetic_db):
+        key_hex = "11" * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        output_path = tmp_path / "out" / "msgstore.db"
+        res = wa.decrypt_msgstore(str(crypt_path), key_hex, str(output_path), logger)
+
+        assert res == str(output_path)
+        assert output_path.exists()
+        assert output_path.read_bytes() == synthetic_db
+
+        conn = sqlite3.connect(str(output_path))
+        row = conn.execute("SELECT msg FROM test WHERE id = 1").fetchone()
+        assert row[0] == "synthetic_test_value"
+        conn.close()
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_msgstore_success_with_binary_key_file(self, tmp_path, logger, synthetic_db):
+        from wa_crypt_tools.lib.key.key15 import Key15
+
+        key_hex = "11" * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        key_file = tmp_path / "encrypted_backup.key"
+        key_obj = Key15(keyarray=bytes.fromhex(key_hex))
+        key_obj.file_dump(key_file)
+
+        output_path = tmp_path / "msgstore.db"
+        res = wa.decrypt_msgstore(str(crypt_path), str(key_file), str(output_path), logger)
+
+        assert res == str(output_path)
+        assert output_path.read_bytes() == synthetic_db
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_msgstore_success_with_text_hex_key_file(self, tmp_path, logger, synthetic_db):
+        key_hex = "11" * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        key_txt = tmp_path / "hex_key.txt"
+        key_txt.write_text(f"  {key_hex}\n", encoding="utf-8")
+
+        output_path = tmp_path / "msgstore.db"
+        res = wa.decrypt_msgstore(str(crypt_path), str(key_txt), str(output_path), logger)
+
+        assert res == str(output_path)
+        assert output_path.read_bytes() == synthetic_db
+
+    def test_decrypt_msgstore_missing_dependency(self, tmp_path, logger):
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(b"dummy")
+        output_path = tmp_path / "msgstore.db"
+
+        with patch.dict(sys.modules, {"wa_crypt_tools.lib.db.dbfactory": None}):
+            with pytest.raises(SystemExit):
+                wa.decrypt_msgstore(str(crypt_path), "11" * 32, str(output_path), logger)
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_msgstore_invalid_key_raises(self, tmp_path, logger, synthetic_db):
+        key_hex = "11" * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+        output_path = tmp_path / "msgstore.db"
+
+        with pytest.raises(SystemExit):
+            wa.decrypt_msgstore(str(crypt_path), "invalid_key_string", str(output_path), logger)
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_msgstore_corrupt_file_raises(self, tmp_path, logger):
+        crypt_path = tmp_path / "corrupted.crypt15"
+        crypt_path.write_bytes(b"")
+        output_path = tmp_path / "msgstore.db"
+
+        with pytest.raises(SystemExit):
+            wa.decrypt_msgstore(str(crypt_path), "11" * 32, str(output_path), logger)
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_msgstore_wrong_key_fails(self, tmp_path, logger, synthetic_db):
+        key_hex = "11" * 32
+        wrong_key_hex = "22" * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+        output_path = tmp_path / "msgstore.db"
+
+        with pytest.raises(SystemExit):
+            wa.decrypt_msgstore(str(crypt_path), wrong_key_hex, str(output_path), logger)
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_msgstore_overwrites_existing_warning(self, tmp_path, logger, synthetic_db):
+        key_hex = "11" * 32
+        encrypted_bytes = _create_synthetic_crypt15(synthetic_db, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        output_path = tmp_path / "msgstore.db"
+        output_path.write_bytes(b"prior_existing_bytes")
+
+        with patch.object(logger, "warning") as mock_warn:
+            wa.decrypt_msgstore(str(crypt_path), key_hex, str(output_path), logger)
+            assert output_path.read_bytes() == synthetic_db
+            mock_warn.assert_called_once()
+            assert "Overwriting existing" in mock_warn.call_args[0][0]
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_key_candidate_oserror(self, tmp_path, logger):
+        key_file = tmp_path / "inaccessible.key"
+        key_file.write_text("something", encoding="utf-8")
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(b"dummy")
+        output_path = tmp_path / "msgstore.db"
+
+        real_open = open
+
+        def mock_open_fn(file, *args, **kwargs):
+            if str(file) == str(key_file):
+                raise OSError("Permission denied")
+            return real_open(file, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=mock_open_fn):
+            with pytest.raises(SystemExit):
+                wa.decrypt_msgstore(str(crypt_path), str(key_file), str(output_path), logger)
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_db_factory_returns_none(self, tmp_path, logger):
+        key_hex = "11" * 32
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(b"some_bytes")
+        output_path = tmp_path / "msgstore.db"
+
+        with patch("wa_crypt_tools.lib.db.dbfactory.DatabaseFactory.from_file", return_value=None):
+            with pytest.raises(SystemExit):
+                wa.decrypt_msgstore(str(crypt_path), key_hex, str(output_path), logger)
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_msgstore_read_oserror(self, tmp_path, logger):
+        key_hex = "11" * 32
+        crypt_path = tmp_path / "nonexistent.crypt15"
+        output_path = tmp_path / "msgstore.db"
+
+        with pytest.raises(SystemExit):
+            wa.decrypt_msgstore(str(crypt_path), key_hex, str(output_path), logger)
+
+    @_requires_wa_crypt_tools
+    def test_decrypt_payload_decrypt_exception(self, tmp_path, logger):
+        key_hex = "11" * 32
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(b"some_bytes")
+        output_path = tmp_path / "msgstore.db"
+
+        mock_db = MagicMock()
+        mock_db.decrypt.side_effect = RuntimeError("Crypto error")
+        with patch(
+            "wa_crypt_tools.lib.db.dbfactory.DatabaseFactory.from_file", return_value=mock_db
+        ):
+            with pytest.raises(SystemExit):
+                wa.decrypt_msgstore(str(crypt_path), key_hex, str(output_path), logger)
+
+
+class TestPrepareInputDecryption:
+    def test_prepare_input_missing_e2e_key_raises(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=None,
+            from_adb=False,
+            contacts=None,
+            msgstore="msgstore.db.crypt15",
+            e2e_key=None,
+            output=str(tmp_path),
+        )
+        with pytest.raises(SystemExit):
+            wa._prepare_input(args, None, logger)
+
+    @_requires_wa_crypt_tools
+    def test_prepare_input_calls_decrypt_msgstore(self, tmp_path, logger):
+        db_path = tmp_path / "plain.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)")
+        conn.execute("INSERT INTO test VALUES (1, 'val1')")
+        conn.commit()
+        conn.close()
+        plain_bytes = db_path.read_bytes()
+
+        key_hex = "11" * 32
+        encrypted_bytes = _create_synthetic_crypt15(plain_bytes, key_hex)
+        crypt_path = tmp_path / "msgstore.db.crypt15"
+        crypt_path.write_bytes(encrypted_bytes)
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            from_adb=False,
+            contacts=None,
+            msgstore=str(crypt_path),
+            e2e_key=key_hex,
+            output=str(tmp_path),
+        )
+
+        platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
+        expected_db = os.path.join(str(tmp_path), "Whatsapp Databases", "msgstore.db")
+        assert args.msgstore == expected_db
+        assert os.path.isfile(expected_db)
+        with open(expected_db, "rb") as f:
+            assert f.read() == plain_bytes
+
+
+# ===========================================================================
+# wab_archiver.main: _prepare_input — iOS backup mode
+# ===========================================================================
+
+
+class TestPrepareInputIos:
+    def test_prepare_input_ios_encrypted_missing_password_raises(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=str(tmp_path / "backup"),
+            ios_password=None,
+            ios_contacts=None,
+            business=False,
+            output=str(tmp_path),
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        with patch("wab_archiver.backup_reader.detect_encrypted", return_value=True):
+            with pytest.raises(SystemExit):
+                wa._prepare_input(args, None, logger)
+
+    def test_prepare_input_ios_encrypted_success(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=str(tmp_path / "backup"),
+            ios_password="secret_password",
+            ios_contacts=str(tmp_path / "ContactsV2.sqlite"),
+            business=False,
+            output=str(tmp_path),
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        fake_db = str(tmp_path / "ChatStorage.sqlite")
+        fake_contacts = str(tmp_path / "ContactsV2.sqlite")
+
+        def fake_resolver(fp):
+            return f"/extracted/{fp}"
+
+        with (
+            patch("wab_archiver.backup_reader.detect_encrypted", return_value=True),
+            patch(
+                "wab_archiver.backup_reader.extract_encrypted",
+                return_value=(fake_db, fake_contacts, fake_resolver),
+            ) as mock_ext,
+        ):
+            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
+
+        assert platform == "ios"
+        assert args.msgstore == fake_db
+        assert ios_contacts == fake_contacts
+        assert resolver("photo.jpg") == "/extracted/photo.jpg"
+        mock_ext.assert_called_once_with(
+            args.ios_backup,
+            "secret_password",
+            str(tmp_path),
+            fake_contacts,
+            False,
+            logger,
+        )
+
+    def test_prepare_input_ios_plaintext_success(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=str(tmp_path / "backup"),
+            ios_password=None,
+            ios_contacts=None,
+            business=False,
+            output=str(tmp_path),
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        fake_manifest = {"Message/photo.jpg": "/extracted/photo.jpg"}
+        fake_db = str(tmp_path / "ChatStorage.sqlite")
+
+        with (
+            patch("wab_archiver.backup_reader.detect_encrypted", return_value=False),
+            patch(
+                "wab_archiver.backup_reader.extract_plaintext",
+                return_value=(fake_manifest, fake_db, None),
+            ) as mock_ext,
+        ):
+            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
+
+        assert platform == "ios"
+        assert args.msgstore == fake_db
+        assert ios_contacts is None
+        assert resolver("Message/photo.jpg") == "/extracted/photo.jpg"
+        assert resolver("Message/missing.jpg") is None
+        mock_ext.assert_called_once_with(
+            args.ios_backup,
+            str(tmp_path),
+            None,
+            False,
+            logger,
+        )
+
+
+# ===========================================================================
+# wab_archiver.main: _prepare_input — multi-root resolution & conflicts
+# ===========================================================================
+
+
+class TestPrepareInputMultiRoot:
+    def test_multi_root_empty_candidates_returns_default(self, tmp_path, logger):
+        root1 = tmp_path / "root1"
+        root2 = tmp_path / "root2"
+        root1.mkdir()
+        root2.mkdir()
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[str(root1), str(root2)],
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
+        resolved = resolver("Media/photo.jpg")
+        expected = os.path.join(str(root1), "Media", "photo.jpg")
+        assert resolved == expected
+
+    def test_multi_root_single_candidate(self, tmp_path, logger):
+        root1 = tmp_path / "root1"
+        root2 = tmp_path / "root2"
+        root1.mkdir()
+        root2.mkdir()
+        img1 = root1 / "Media" / "photo.jpg"
+        img1.parent.mkdir(parents=True)
+        img1.write_bytes(b"content_img1")
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[str(root1), str(root2)],
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
+        resolved = resolver("Media/photo.jpg")
+        assert resolved == str(img1)
+        assert resolver.root_hits[str(root1)] == 1
+        assert resolver.root_hits[str(root2)] == 0
+
+    def test_multi_root_zero_byte_files_skipped(self, tmp_path, logger):
+        root1 = tmp_path / "root1"
+        root2 = tmp_path / "root2"
+        root1.mkdir()
+        root2.mkdir()
+        img1 = root1 / "Media" / "photo.jpg"
+        img1.parent.mkdir(parents=True)
+        img1.write_bytes(b"")
+
+        img2 = root2 / "Media" / "photo.jpg"
+        img2.parent.mkdir(parents=True)
+        img2.write_bytes(b"valid_data")
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[str(root1), str(root2)],
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
+        resolved = resolver("Media/photo.jpg")
+        assert resolved == str(img2)
+        assert resolver.zero_byte_count[0] == 1
+        assert resolver.root_hits[str(root2)] == 1
+
+    def test_multi_root_largest_wins(self, tmp_path, logger):
+        root1 = tmp_path / "root1"
+        root2 = tmp_path / "root2"
+        root1.mkdir()
+        root2.mkdir()
+        img1 = root1 / "Media" / "photo.jpg"
+        img1.parent.mkdir(parents=True)
+        img1.write_bytes(b"large_content_bytes_here")
+
+        img2 = root2 / "Media" / "photo.jpg"
+        img2.parent.mkdir(parents=True)
+        img2.write_bytes(b"small")
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[str(root1), str(root2)],
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
+        resolved = resolver("Media/photo.jpg")
+        assert resolved == str(img1)
+        assert len(resolver.conflict_rows) == 1
+        assert resolver.conflict_rows[0]["reason"] == "largest_wins"
+        assert resolver.root_hits[str(root1)] == 1
+
+    def test_multi_root_same_size_same_content(self, tmp_path, logger):
+        root1 = tmp_path / "root1"
+        root2 = tmp_path / "root2"
+        root1.mkdir()
+        root2.mkdir()
+        content = b"same_content_for_both_roots"
+        img1 = root1 / "Media" / "photo.jpg"
+        img1.parent.mkdir(parents=True)
+        img1.write_bytes(content)
+
+        img2 = root2 / "Media" / "photo.jpg"
+        img2.parent.mkdir(parents=True)
+        img2.write_bytes(content)
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[str(root1), str(root2)],
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
+        resolved = resolver("Media/photo.jpg")
+        assert resolved == str(img1)
+        assert len(resolver.conflict_rows) == 0
+        assert resolver.root_hits[str(root1)] == 1
+
+    def test_multi_root_same_size_different_content(self, tmp_path, logger):
+        root1 = tmp_path / "root1"
+        root2 = tmp_path / "root2"
+        root1.mkdir()
+        root2.mkdir()
+        img1 = root1 / "Media" / "photo.jpg"
+        img1.parent.mkdir(parents=True)
+        img1.write_bytes(b"content_version_a")
+
+        img2 = root2 / "Media" / "photo.jpg"
+        img2.parent.mkdir(parents=True)
+        img2.write_bytes(b"content_version_b")
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[str(root1), str(root2)],
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
+        resolved = resolver("Media/photo.jpg")
+        assert resolved == str(img1)
+        assert len(resolver.conflict_rows) == 1
+        assert resolver.conflict_rows[0]["reason"] == "same_size_first_root"
+
+    def test_owning_root_outside_all_roots(self, tmp_path, logger):
+        root1 = tmp_path / "root1"
+        root1.mkdir()
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[str(root1)],
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+        )
+        platform, resolver, _, _ = wa._prepare_input(args, None, logger)
+        other_path = tmp_path / "other" / "file.jpg"
+        other_path.parent.mkdir()
+        other_path.write_bytes(b"some_bytes")
+        with patch("os.path.exists", return_value=True), patch("os.path.getsize", return_value=10):
+            with patch("os.path.join", return_value=str(other_path)):
+                chosen = resolver("Media/photo.jpg")
+                assert chosen == str(other_path)
+                assert resolver.root_hits[str(root1)] == 1
+
+
+# ===========================================================================
+# wab_archiver.main: _prepare_input — ADB mode & contacts
+# ===========================================================================
+
+
+class TestPrepareInputAdb:
+    def test_prepare_input_adb_not_found(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[],
+            from_adb=True,
+            contacts=None,
+            msgstore="dummy",
+            output=str(tmp_path),
+        )
+        with patch("wab_archiver.adb_extractor.check_adb", return_value=False):
+            with pytest.raises(SystemExit):
+                wa._prepare_input(args, None, logger)
+
+    def test_prepare_input_adb_device_not_connected(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[],
+            from_adb=True,
+            contacts=None,
+            msgstore="dummy",
+            output=str(tmp_path),
+        )
+        with (
+            patch("wab_archiver.adb_extractor.check_adb", return_value=True),
+            patch("wab_archiver.adb_extractor.check_device_connected", return_value=False),
+        ):
+            with pytest.raises(SystemExit):
+                wa._prepare_input(args, None, logger)
+
+    def test_prepare_input_adb_pull_called_process_error(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[],
+            from_adb=True,
+            pull_media=False,
+            business=False,
+            contacts=None,
+            msgstore="dummy",
+            output=str(tmp_path),
+        )
+        with (
+            patch("wab_archiver.adb_extractor.check_adb", return_value=True),
+            patch("wab_archiver.adb_extractor.check_device_connected", return_value=True),
+            patch(
+                "wab_archiver.adb_extractor.pull_msgstore",
+                side_effect=subprocess.CalledProcessError(1, "adb"),
+            ),
+        ):
+            with pytest.raises(SystemExit):
+                wa._prepare_input(args, None, logger)
+
+    def test_prepare_input_adb_pull_media_success(self, tmp_path, logger):
+        stage_dir = str(tmp_path / "staging")
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[],
+            from_adb=True,
+            pull_media=True,
+            staging=stage_dir,
+            business=False,
+            contacts=None,
+            msgstore="dummy",
+            output=str(tmp_path),
+        )
+        conflicts = [{"original_path": "Media/p.jpg", "reason": "size_mismatch"}]
+        with (
+            patch("wab_archiver.adb_extractor.check_adb", return_value=True),
+            patch("wab_archiver.adb_extractor.check_device_connected", return_value=True),
+            patch("wab_archiver.adb_extractor.pull_msgstore", return_value="/pulled/msgstore.db"),
+            patch("wab_archiver.adb_extractor.pull_contacts", return_value="/pulled/contacts.txt"),
+            patch(
+                "wab_archiver.archive_db.open_archive_db", return_value=sqlite3.connect(":memory:")
+            ),
+            patch(
+                "wab_archiver.adb_extractor.pull_media", return_value=(5, 1, conflicts)
+            ) as mock_pull_media,
+            patch("wab_archiver.adb_extractor.write_adb_conflicts_report") as mock_conf_report,
+        ):
+            wa._prepare_input(args, None, logger)
+
+        assert args.msgstore == "/pulled/msgstore.db"
+        assert args.contacts == "/pulled/contacts.txt"
+        assert args.wa_roots == [stage_dir]
+        mock_conf_report.assert_called_once()
+        mock_pull_media.assert_called_once()
+        assert mock_pull_media.call_args[0][4] is None
+
+    def test_prepare_input_adb_pull_media_with_since_ms(self, tmp_path, logger):
+        stage_dir = str(tmp_path / "staging")
+        db_file = tmp_path / "pulled_msgstore.db"
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, 'Test Group', 10)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO message VALUES (1, 1705000000000, 10, 0)")
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Images/photo1.jpg', 'image/jpeg', 1, 1, 'url', NULL)"
+        )
+        conn.commit()
+        # Dump memory DB to disk file
+        disk_conn = sqlite3.connect(str(db_file))
+        conn.backup(disk_conn)
+        disk_conn.close()
+        conn.close()
+
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[],
+            from_adb=True,
+            pull_media=True,
+            staging=stage_dir,
+            business=False,
+            contacts=None,
+            msgstore="dummy",
+            output=str(tmp_path),
+            since="2024-01-01",
+        )
+        with (
+            patch("wab_archiver.adb_extractor.check_adb", return_value=True),
+            patch("wab_archiver.adb_extractor.check_device_connected", return_value=True),
+            patch("wab_archiver.adb_extractor.pull_msgstore", return_value=str(db_file)),
+            patch("wab_archiver.adb_extractor.pull_contacts", return_value="/pulled/contacts.txt"),
+            patch(
+                "wab_archiver.archive_db.open_archive_db", return_value=sqlite3.connect(":memory:")
+            ),
+            patch(
+                "wab_archiver.adb_extractor.pull_media", return_value=(1, 0, [])
+            ) as mock_pull_media,
+        ):
+            wa._prepare_input(args, 1704067200000, logger)
+
+        mock_pull_media.assert_called_once()
+        target_paths = mock_pull_media.call_args[0][4]
+        assert target_paths == {"Media/WhatsApp Images/photo1.jpg"}
+
+    def test_prepare_input_adb_pull_media_runtime_error(self, tmp_path, logger):
+        stage_dir = str(tmp_path / "staging")
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[],
+            from_adb=True,
+            pull_media=True,
+            staging=stage_dir,
+            business=False,
+            contacts=None,
+            msgstore="dummy",
+            output=str(tmp_path),
+        )
+        with (
+            patch("wab_archiver.adb_extractor.check_adb", return_value=True),
+            patch("wab_archiver.adb_extractor.check_device_connected", return_value=True),
+            patch("wab_archiver.adb_extractor.pull_msgstore", return_value="/pulled/msgstore.db"),
+            patch("wab_archiver.adb_extractor.pull_contacts", return_value="/pulled/contacts.txt"),
+            patch(
+                "wab_archiver.archive_db.open_archive_db", return_value=sqlite3.connect(":memory:")
+            ),
+            patch("wab_archiver.adb_extractor.pull_media", side_effect=RuntimeError("USB error")),
+        ):
+            with pytest.raises(SystemExit):
+                wa._prepare_input(args, None, logger)
+
+    def test_prepare_input_loads_android_contacts(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=None,
+            wa_roots=[str(tmp_path)],
+            from_adb=False,
+            contacts=str(tmp_path / "contacts.txt"),
+            msgstore="dummy",
+        )
+        with patch(
+            "wab_archiver.android_handler.load_contacts", return_value={"39012345": "Alice"}
+        ):
+            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
+        assert contacts == {"39012345": "Alice"}
+
+
+# ===========================================================================
+# wab_archiver.main: run_forward_mode — filters & edge cases
+# ===========================================================================
+
+
+class TestRunForwardModeFilters:
+    def test_run_forward_mode_msgstore_missing(self, tmp_path, logger):
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone=None,
+            since=None,
+            limit=None,
+            ios_backup=None,
+            dry_run=True,
+            msgstore=str(tmp_path / "nonexistent.db"),
+            wa_roots=[str(tmp_path)],
+            output=str(tmp_path),
+            contacts=None,
+        )
+        with pytest.raises(SystemExit):
+            wa.run_forward_mode(args, logger)
+
+    def test_run_forward_mode_valid_timezone(self, tmp_path, logger):
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        (wa_root / "Message").mkdir()
+
+        out_dir = tmp_path / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone="UTC",
+            since=None,
+            limit=None,
+            ios_backup=None,
+            dry_run=True,
+            msgstore=str(db_path),
+            wa_roots=[str(wa_root)],
+            output=str(out_dir),
+            contacts=None,
+            log=None,
+        )
+        with (
+            patch("wab_archiver.main.check_dependencies"),
+            patch("wab_archiver.ios_handler.validate_ios_schema"),
+            patch("wab_archiver.ios_handler.validate_ios_wa_root"),
+            patch("wab_archiver.ios_handler.build_ios_number_map", return_value={}),
+            patch("wab_archiver.ios_handler.build_ios_pushname_map", return_value={}),
+            patch("wab_archiver.ios_handler.find_ios_ext_db", return_value=None),
+            patch("wab_archiver.ios_handler.check_ios_hd_association", return_value=False),
+            patch("wab_archiver.ios_handler.build_ios_query", return_value="SELECT 1 WHERE 0"),
+            patch(
+                "wab_archiver.ios_handler.build_ios_group_subjects_query",
+                return_value="SELECT '1', 'g' WHERE 0",
+            ),
+            patch(
+                "wab_archiver.main.process_rows",
+                return_value=({"copied": 0, "skipped": 0, "missing": 0, "warnings": 0}, {}, {}, []),
+            ),
+        ):
+            wa.run_forward_mode(args, logger)
+
+    def test_run_forward_mode_adb_pull_media_with_since(self, tmp_path, logger):
+        out_dir = tmp_path / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stage_dir = tmp_path / "staging"
+
+        db_file = tmp_path / "msgstore.db"
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, 'Test Group', 10)")
+        conn.execute("INSERT INTO jid VALUES (10, 'group1')")
+        conn.execute("INSERT INTO message VALUES (1, 1705000000000, 10, 0)")
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Images/img.jpg', 'image/jpeg', 1, 1, 'url', NULL)"
+        )
+        conn.commit()
+        disk_conn = sqlite3.connect(str(db_file))
+        conn.backup(disk_conn)
+        disk_conn.close()
+        conn.close()
+
+        args = argparse.Namespace(
+            from_adb=True,
+            e2e_key=None,
+            ios_password=None,
+            timezone="UTC",
+            since="2024-01-01",
+            limit=None,
+            ios_backup=None,
+            dry_run=True,
+            msgstore="dummy",
+            pull_media=True,
+            staging=str(stage_dir),
+            wa_roots=[],
+            business=False,
+            output=str(out_dir),
+            contacts=None,
+            log=None,
+        )
+        with (
+            patch("wab_archiver.main.check_dependencies"),
+            patch("wab_archiver.adb_extractor.check_adb", return_value=True),
+            patch("wab_archiver.adb_extractor.check_device_connected", return_value=True),
+            patch("wab_archiver.adb_extractor.pull_msgstore", return_value=str(db_file)),
+            patch(
+                "wab_archiver.adb_extractor.pull_contacts",
+                return_value=str(tmp_path / "contacts.txt"),
+            ),
+            patch("wab_archiver.android_handler.load_contacts", return_value={}),
+            patch(
+                "wab_archiver.adb_extractor.pull_media", return_value=(1, 0, [])
+            ) as mock_pull_media,
+            patch("wab_archiver.android_handler.validate_schema"),
+            patch("wab_archiver.android_handler.validate_wa_root"),
+            patch("wab_archiver.android_handler.build_number_map", return_value={}),
+            patch(
+                "wab_archiver.main.process_rows",
+                return_value=({"copied": 0, "skipped": 0, "missing": 0, "warnings": 0}, {}, {}, []),
+            ),
+        ):
+            wa.run_forward_mode(args, logger)
+
+        mock_pull_media.assert_called_once()
+        target_paths = mock_pull_media.call_args[0][4]
+        assert target_paths == {"Media/WhatsApp Images/img.jpg"}
+
+    def test_run_forward_mode_invalid_timezone(self, tmp_path, logger):
+        db_path = tmp_path / "plain.db"
+        db_path.touch()
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone="Invalid/Timezone_Name_XYZ",
+            since=None,
+            limit=None,
+            ios_backup=None,
+            dry_run=True,
+            msgstore=str(db_path),
+            wa_roots=[str(tmp_path)],
+            output=str(tmp_path),
+            contacts=None,
+            log=None,
+        )
+        with patch("wab_archiver.main.check_dependencies"), pytest.raises(SystemExit):
+            wa.run_forward_mode(args, logger)
+
+    def test_run_forward_mode_valid_since(self, tmp_path, logger):
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        (wa_root / "Message").mkdir()
+
+        out_dir = tmp_path / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone="UTC",
+            since="2024-06-15",
+            limit=100,
+            ios_backup=None,
+            dry_run=True,
+            msgstore=str(db_path),
+            wa_roots=[str(wa_root)],
+            output=str(out_dir),
+            contacts=None,
+            log=None,
+        )
+        with (
+            patch("wab_archiver.main.check_dependencies"),
+            patch("wab_archiver.ios_handler.validate_ios_schema"),
+            patch("wab_archiver.ios_handler.validate_ios_wa_root"),
+            patch("wab_archiver.ios_handler.build_ios_number_map", return_value={}),
+            patch("wab_archiver.ios_handler.build_ios_pushname_map", return_value={}),
+            patch("wab_archiver.ios_handler.find_ios_ext_db", return_value=None),
+            patch("wab_archiver.ios_handler.check_ios_hd_association", return_value=False),
+            patch(
+                "wab_archiver.ios_handler.build_ios_query", return_value="SELECT 1 WHERE 0"
+            ) as mock_query,
+            patch(
+                "wab_archiver.ios_handler.build_ios_group_subjects_query",
+                return_value="SELECT '1', 'g' WHERE 0",
+            ),
+            patch(
+                "wab_archiver.main.process_rows",
+                return_value=({"copied": 0, "skipped": 0, "missing": 0, "warnings": 0}, {}, {}, []),
+            ),
+        ):
+            wa.run_forward_mode(args, logger)
+        mock_query.assert_called_once()
+        assert mock_query.call_args[0][0] == 100
+        assert mock_query.call_args[0][1] is not None
+
+    def test_run_forward_mode_invalid_since(self, tmp_path, logger):
+        db_path = tmp_path / "plain.db"
+        db_path.touch()
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone=None,
+            since="invalid-format-since",
+            limit=None,
+            ios_backup=None,
+            dry_run=True,
+            msgstore=str(db_path),
+            wa_roots=[str(tmp_path)],
+            output=str(tmp_path),
+            contacts=None,
+            log=None,
+        )
+        with pytest.raises(SystemExit):
+            wa.run_forward_mode(args, logger)
+
+    def test_run_forward_mode_ios_contacts_and_pushnames(self, tmp_path, logger):
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+
+        contacts_file = tmp_path / "ContactsV2.sqlite"
+        contacts_file.touch()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        (wa_root / "Message").mkdir()
+
+        out_dir = tmp_path / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone=None,
+            since=None,
+            limit=None,
+            ios_backup=None,
+            dry_run=True,
+            msgstore=str(db_path),
+            wa_roots=[str(wa_root)],
+            output=str(out_dir),
+            contacts=None,
+            ios_contacts=str(contacts_file),
+            log=None,
+        )
+        loaded_contacts = {"39111": "Loaded Contact"}
+        pushnames = {"39222": "Pushname User", "39111": "Ignored Pushname"}
+
+        with (
+            patch("wab_archiver.ios_handler.validate_ios_schema"),
+            patch("wab_archiver.ios_handler.validate_ios_wa_root"),
+            patch("wab_archiver.ios_handler.build_ios_number_map", return_value={}),
+            patch(
+                "wab_archiver.ios_handler.load_ios_contacts", return_value=loaded_contacts
+            ) as mock_load_contacts,
+            patch("wab_archiver.ios_handler.build_ios_pushname_map", return_value=pushnames),
+            patch("wab_archiver.ios_handler.find_ios_ext_db", return_value=None),
+            patch("wab_archiver.ios_handler.check_ios_hd_association", return_value=False),
+            patch("wab_archiver.ios_handler.build_ios_query", return_value="SELECT 1 WHERE 0"),
+            patch(
+                "wab_archiver.ios_handler.build_ios_group_subjects_query",
+                return_value="SELECT '1', 'g' WHERE 0",
+            ),
+            patch(
+                "wab_archiver.main.process_rows",
+                return_value=({"copied": 0, "skipped": 0, "missing": 0, "warnings": 0}, {}, {}, []),
+            ) as mock_proc,
+        ):
+            wa.run_forward_mode(args, logger)
+
+        mock_load_contacts.assert_called_once_with(str(contacts_file), logger)
+        passed_contacts = mock_proc.call_args[0][2]
+        assert passed_contacts["39111"] == "Loaded Contact"
+        assert passed_contacts["39222"] == "Pushname User"
+
+
+# ===========================================================================
+# wab_archiver.main: run_forward_mode — Android end-to-end execution
+# ===========================================================================
+
+
+class TestRunForwardModeAndroid:
+    def test_run_forward_mode_android_full_pipeline(self, tmp_path, logger):
+        db_path = tmp_path / "msgstore.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, subject TEXT, jid_row_id INTEGER);
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                timestamp INTEGER,
+                sender_jid_row_id INTEGER,
+                from_me INTEGER
+            );
+            CREATE TABLE message_media (
+                _id INTEGER PRIMARY KEY,
+                file_path TEXT,
+                mime_type TEXT,
+                chat_row_id INTEGER,
+                message_row_id INTEGER,
+                message_url TEXT,
+                media_name TEXT
+            );
+
+            INSERT INTO jid VALUES (1, '390111222');
+            INSERT INTO jid VALUES (2, '390333444');
+            INSERT INTO chat VALUES (1, NULL, 1);
+            INSERT INTO chat VALUES (2, 'Family Group', 2);
+
+            INSERT INTO message VALUES (1, 1718000000000, 1, 0);
+            INSERT INTO message_media VALUES (
+                1, 'Media/WhatsApp Images/IMG-001.jpg', 'image/jpeg', 1, 1, 'http://example.com/1', 'IMG-001.jpg'
+            );
+
+            INSERT INTO message VALUES (2, 1718001000000, 1, 0);
+            INSERT INTO message_media VALUES (
+                2, 'Media/WhatsApp Images/IMG-002.jpg', 'image/jpeg', 1, 2, 'http://example.com/2', 'IMG-002.jpg'
+            );
+
+            INSERT INTO message VALUES (3, 1718002000000, 2, 0);
+            INSERT INTO message_media VALUES (
+                3, 'Media/WhatsApp Images/IMG-003.jpg', 'image/jpeg', 2, 3, 'http://example.com/3', 'IMG-003.jpg'
+            );
+
+            INSERT INTO message VALUES (4, 1718003000000, 1, 0);
+            INSERT INTO message_media VALUES (
+                4, 'Media/WhatsApp Images/MISSING.jpg', 'image/jpeg', 1, 4, 'http://example.com/4', 'MISSING.jpg'
+            );
+        """)
+        conn.close()
+
+        root1 = tmp_path / "wa_root1"
+        media_dir1 = root1 / "Media" / "WhatsApp Images"
+        media_dir1.mkdir(parents=True)
+        # IMG-001 in root1 is 0 bytes (zero-byte skipped candidate)
+        (media_dir1 / "IMG-001.jpg").write_bytes(b"")
+        # IMG-003 in root1 is 100 bytes (larger candidate for conflict)
+        (media_dir1 / "IMG-003.jpg").write_bytes(b"large_content_" * 10)
+
+        root2 = tmp_path / "wa_root2"
+        media_dir2 = root2 / "Media" / "WhatsApp Images"
+        media_dir2.mkdir(parents=True)
+        dup_bytes = b"identical_duplicate_media_payload_bytes"
+        # IMG-001 in root2 is valid
+        (media_dir2 / "IMG-001.jpg").write_bytes(dup_bytes)
+        # IMG-002 in root2 has identical content to IMG-001 (causing duplicate hash in archive)
+        (media_dir2 / "IMG-002.jpg").write_bytes(dup_bytes)
+        # IMG-003 in root2 is 20 bytes (smaller candidate, triggering conflict)
+        (media_dir2 / "IMG-003.jpg").write_bytes(b"small_content_20byte")
+
+        output_dir = tmp_path / "archive_output"
+        output_dir.mkdir()
+
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone=None,
+            since=None,
+            limit=None,
+            ios_backup=None,
+            dry_run=False,
+            msgstore=str(db_path),
+            wa_roots=[str(root1), str(root2)],
+            output=str(output_dir),
+            contacts=None,
+            log=None,
+        )
+
+        wa.run_forward_mode(args, logger)
+
+        archive_db_path = output_dir / ".wa_media_archiver.db"
+        assert archive_db_path.exists()
+
+        missing_report = output_dir / "missing_media_report.csv"
+        assert missing_report.exists()
+
+        dup_report = output_dir / "duplicate_media_report.csv"
+        assert dup_report.exists()
+
+        conflict_report = output_dir / "source_conflicts_report.csv"
+        assert conflict_report.exists()
+
+
+# ===========================================================================
+# wab_archiver.main: top-level guards
+# ===========================================================================
+
+
+class TestModuleTopLevelExecution:
+    def test_python_version_guard(self):
+        import runpy
+
+        with patch("sys.version_info", (3, 10)), patch("sys.stderr.write"):
+            with pytest.raises(SystemExit) as exc_info:
+                runpy.run_module("wab_archiver.main", run_name="_not_main_")
+            assert exc_info.value.code == 1
+
+    def test_main_guard_invoked(self):
+        import runpy
+
+        with patch("sys.argv", ["wa", "--version"]):
+            with pytest.raises(SystemExit) as exc_info:
+                runpy.run_module("wab_archiver.main", run_name="__main__")
+            assert exc_info.value.code == 0

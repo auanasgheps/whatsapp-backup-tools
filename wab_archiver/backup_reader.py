@@ -7,13 +7,71 @@ import shutil
 import sqlite3
 import tempfile
 
+from shared.source_detection import WA_DATABASES_DIR_NAME
+
 # ==============================================================================
 # backup_reader.py — iPhone backup format parsing
 # Knows nothing about WhatsApp schema; handles only the backup file structure.
 # ==============================================================================
 
-_WA_DOMAIN          = 'AppDomainGroup-group.net.whatsapp.WhatsApp.shared'
-_WA_BUSINESS_DOMAIN = 'AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared'
+_WA_DOMAIN = "AppDomainGroup-group.net.whatsapp.WhatsApp.shared"
+_WA_BUSINESS_DOMAIN = "AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared"
+
+_IOS_AUXILIARY_DATABASES: list[tuple[list[str], str]] = [
+    (["ExtChatDB/ExtChatDatabase.sqlite", "ExtChatDatabase.sqlite"], "ExtChatDatabase.sqlite"),
+    (
+        [
+            "MessagingInfraDB_v2/MessagingInfraDatabase.sqlite",
+            "MessagingInfraDB/MessagingInfraDatabase.sqlite",
+            "MessagingInfraDatabase.sqlite",
+        ],
+        "MessagingInfraDatabase.sqlite",
+    ),
+    (["LID.sqlite"], "LID.sqlite"),
+    (["CallHistory.sqlite"], "CallHistory.sqlite"),
+    (["Labels.sqlite"], "Labels.sqlite"),
+]
+
+
+def _extract_auxiliary_databases_unencrypted(
+    manifest_map: dict[str, str], output_dir: str, logger: logging.Logger
+) -> None:
+    """Extract optional auxiliary iOS databases if present in the backup manifest."""
+    for candidates, target_name in _IOS_AUXILIARY_DATABASES:
+        found_path = None
+        for cand in candidates:
+            if cand in manifest_map:
+                found_path = cand
+                break
+        if found_path is not None:
+            logger.info(f"Extracting {target_name} from backup...")
+            tmp = extract_to_temp(manifest_map, found_path, logger)
+            _save_db_to_output(tmp, output_dir, target_name, logger)
+            os.unlink(tmp)
+
+
+def _extract_auxiliary_databases_encrypted(
+    backup, domain_like: str, output_dir: str, logger: logging.Logger
+) -> None:
+    """Decrypt optional auxiliary iOS databases if present in the encrypted backup."""
+    for candidates, target_name in _IOS_AUXILIARY_DATABASES:
+        extracted = False
+        for cand in candidates:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
+            tmp.close()
+            try:
+                backup.extract_file(
+                    relative_path=cand, domain_like=domain_like, output_filename=tmp.name
+                )
+                _save_db_to_output(tmp.name, output_dir, target_name, logger)
+                os.unlink(tmp.name)
+                logger.info(f"Decrypted {target_name}.")
+                extracted = True
+                break
+            except FileNotFoundError:
+                os.unlink(tmp.name)
+        if not extracted:
+            logger.debug(f"{target_name} not found in encrypted backup.")
 
 
 def _raise_macos_fda_error(path: str, logger: logging.Logger) -> None:
@@ -33,18 +91,16 @@ def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
     Reads the IsEncrypted flag from Manifest.plist in the backup directory.
     """
     if not os.path.isdir(backup_dir):
-        logger.error(
-            f"--ios_backup path does not exist or is not a directory: {backup_dir}"
-        )
+        logger.error(f"--ios-backup path does not exist or is not a directory: {backup_dir}")
         raise SystemExit(1)
 
-    info_path = os.path.join(backup_dir, 'Info.plist')
+    info_path = os.path.join(backup_dir, "Info.plist")
     if not os.path.isfile(info_path):
-        manifest_path = os.path.join(backup_dir, 'Manifest.plist')
+        manifest_path = os.path.join(backup_dir, "Manifest.plist")
         if not os.path.isfile(manifest_path):
             logger.error(
                 f"Neither Info.plist nor Manifest.plist found in: {backup_dir}\n"
-                f"  Make sure --ios_backup points to the backup directory "
+                f"  Make sure --ios-backup points to the backup directory "
                 f"(the folder that contains Manifest.db)."
             )
             raise SystemExit(1)
@@ -53,30 +109,36 @@ def detect_encrypted(backup_dir: str, logger: logging.Logger) -> bool:
         plist_path = info_path
 
     try:
-        with open(plist_path, 'rb') as f:
+        with open(plist_path, "rb") as f:
             data = plistlib.load(f)
     except PermissionError:
         _raise_macos_fda_error(plist_path, logger)
+    except plistlib.InvalidFileException as e:
+        logger.error(f"Could not read {plist_path}: {e}\n  The file may be corrupt.")
+        raise SystemExit(1)
 
     # Manifest.plist uses 'IsEncrypted'; Info.plist does not carry this flag.
     # If we only have Info.plist, fall back to checking Manifest.plist if present.
-    is_encrypted = data.get('IsEncrypted', False)
+    is_encrypted = data.get("IsEncrypted", False)
     if not is_encrypted and plist_path == info_path:
-        manifest_path = os.path.join(backup_dir, 'Manifest.plist')
+        manifest_path = os.path.join(backup_dir, "Manifest.plist")
         if os.path.isfile(manifest_path):
             try:
-                with open(manifest_path, 'rb') as f:
+                with open(manifest_path, "rb") as f:
                     manifest_data = plistlib.load(f)
             except PermissionError:
                 _raise_macos_fda_error(manifest_path, logger)
-            is_encrypted = manifest_data.get('IsEncrypted', False)
+            except plistlib.InvalidFileException as e:
+                logger.error(f"Could not read {manifest_path}: {e}\n  The file may be corrupt.")
+                raise SystemExit(1)
+            is_encrypted = manifest_data.get("IsEncrypted", False)
 
     return bool(is_encrypted)
 
 
-def build_manifest_map(backup_dir: str,
-                       logger: logging.Logger,
-                       domain: str = _WA_DOMAIN) -> dict[str, str]:
+def build_manifest_map(
+    backup_dir: str, logger: logging.Logger, domain: str = _WA_DOMAIN
+) -> dict[str, str]:
     """
     Build a {relativePath: absolute_hash_file_path} map for all WhatsApp files
     in the backup. Reads Manifest.db once at startup; all subsequent lookups
@@ -85,21 +147,19 @@ def build_manifest_map(backup_dir: str,
     Hash files are stored at <backup_dir>/<fileID[:2]>/<fileID>.
     """
     if not os.path.isdir(backup_dir):
-        logger.error(
-            f"--ios_backup path does not exist or is not a directory: {backup_dir}"
-        )
+        logger.error(f"--ios-backup path does not exist or is not a directory: {backup_dir}")
         raise SystemExit(1)
 
-    manifest_db = os.path.join(backup_dir, 'Manifest.db')
+    manifest_db = os.path.join(backup_dir, "Manifest.db")
     if not os.path.isfile(manifest_db):
         logger.error(
             f"Manifest.db not found in: {backup_dir}\n"
-            f"  Make sure --ios_backup points to the backup root directory."
+            f"  Make sure --ios-backup points to the backup root directory."
         )
         raise SystemExit(1)
 
     try:
-        with open(manifest_db, 'rb'):
+        with open(manifest_db, "rb"):
             pass
     except PermissionError:
         _raise_macos_fda_error(manifest_db, logger)
@@ -120,9 +180,9 @@ def build_manifest_map(backup_dir: str,
     return result
 
 
-def extract_to_temp(manifest_map: dict[str, str],
-                    relative_path: str,
-                    logger: logging.Logger) -> str:
+def extract_to_temp(
+    manifest_map: dict[str, str], relative_path: str, logger: logging.Logger
+) -> str:
     """
     Copy a single file from the backup hash tree to a NamedTemporaryFile.
     Returns the temp file path. Caller is responsible for deleting it on exit.
@@ -141,20 +201,18 @@ def extract_to_temp(manifest_map: dict[str, str],
 
     if not os.path.isfile(src):
         logger.error(
-            f"Backup hash file not found on disk: {src}\n"
-            f"  The backup may be incomplete or corrupt."
+            f"Backup hash file not found on disk: {src}\n  The backup may be incomplete or corrupt."
         )
         raise SystemExit(1)
 
-    suffix = os.path.splitext(relative_path)[1] or '.tmp'
+    suffix = os.path.splitext(relative_path)[1] or ".tmp"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.close()
     shutil.copy2(src, tmp.name)
     return tmp.name
 
 
-def _save_db_to_output(src: str, output_dir: str, filename: str,
-                       logger: logging.Logger) -> str:
+def _save_db_to_output(src: str, output_dir: str, filename: str, logger: logging.Logger) -> str:
     """Copy a SQLite file to the output folder; warn if overwriting. Returns dest path."""
     os.makedirs(output_dir, exist_ok=True)
     dest = os.path.join(output_dir, filename)
@@ -164,11 +222,13 @@ def _save_db_to_output(src: str, output_dir: str, filename: str,
     return dest
 
 
-def extract_plaintext(backup_dir: str,
-                      output_dir: str,
-                      ios_contacts_override: str | None,
-                      business: bool,
-                      logger: logging.Logger) -> tuple[dict, str, str | None]:
+def extract_plaintext(
+    backup_dir: str,
+    output_dir: str,
+    ios_contacts_override: str | None,
+    business: bool,
+    logger: logging.Logger,
+) -> tuple[dict, str, str | None]:
     """
     Extract WhatsApp files from a plaintext (unencrypted) iPhone backup.
     Returns (manifest_map, msgstore_path, ios_contacts_path).
@@ -183,37 +243,44 @@ def extract_plaintext(backup_dir: str,
         logger.warning(
             f"Manifest map is empty — no WhatsApp files found in the backup at: "
             f"{backup_dir}\n"
-            f"  Make sure --ios_backup points to the backup root directory "
+            f"  Make sure --ios-backup points to the backup root directory "
             f"(the folder that contains Manifest.db), and that the backup "
             f"includes WhatsApp data."
         )
     else:
         logger.info(f"Manifest map built: {len(manifest_map)} WhatsApp file(s).")
 
+    db_output_dir = os.path.join(output_dir, WA_DATABASES_DIR_NAME)
     logger.info("Extracting ChatStorage.sqlite from backup...")
-    tmp_db = extract_to_temp(manifest_map, 'ChatStorage.sqlite', logger)
-    msgstore_path = _save_db_to_output(tmp_db, output_dir, 'ChatStorage.sqlite', logger)
+    tmp_db = extract_to_temp(manifest_map, "ChatStorage.sqlite", logger)
+    msgstore_path = _save_db_to_output(tmp_db, db_output_dir, "ChatStorage.sqlite", logger)
     os.unlink(tmp_db)
 
     ios_contacts_path = ios_contacts_override
     if ios_contacts_path is None:
-        if manifest_map.get('ContactsV2.sqlite'):
+        if manifest_map.get("ContactsV2.sqlite"):
             logger.info("Extracting ContactsV2.sqlite from backup...")
-            tmp_contacts = extract_to_temp(manifest_map, 'ContactsV2.sqlite', logger)
-            atexit.register(os.unlink, tmp_contacts)
-            ios_contacts_path = tmp_contacts
+            tmp_contacts = extract_to_temp(manifest_map, "ContactsV2.sqlite", logger)
+            ios_contacts_path = _save_db_to_output(
+                tmp_contacts, db_output_dir, "ContactsV2.sqlite", logger
+            )
+            os.unlink(tmp_contacts)
         else:
             logger.warning("ContactsV2.sqlite not found in backup; proceeding without contacts.")
+
+    _extract_auxiliary_databases_unencrypted(manifest_map, db_output_dir, logger)
 
     return manifest_map, msgstore_path, ios_contacts_path
 
 
-def extract_encrypted(backup_dir: str,
-                      passphrase: str,
-                      output_dir: str,
-                      ios_contacts_override: str | None,
-                      business: bool,
-                      logger: logging.Logger) -> tuple[str, str | None, callable]:
+def extract_encrypted(
+    backup_dir: str,
+    passphrase: str,
+    output_dir: str,
+    ios_contacts_override: str | None,
+    business: bool,
+    logger: logging.Logger,
+) -> tuple[str, str | None, callable]:
     """
     Decrypt an encrypted iPhone backup and return a lazy media resolver.
     Returns (msgstore_path, ios_contacts_path, media_resolver).
@@ -239,7 +306,7 @@ def extract_encrypted(backup_dir: str,
         backup = EncryptedBackup(backup_directory=backup_dir, passphrase=passphrase)
         backup.test_decryption()
     except ValueError as e:
-        logger.error(f"Failed to unlock backup: {e}\n  Check that --ios_password is correct.")
+        logger.error(f"Failed to unlock backup: {e}\n  Check that --ios-password is correct.")
         raise SystemExit(1)
 
     # Use a tight domain pattern that targets exactly one app.
@@ -249,15 +316,16 @@ def extract_encrypted(backup_dir: str,
     domain_like = f"%{_domain.split('-', 1)[1]}%"
 
     os.makedirs(output_dir, exist_ok=True)
+    db_output_dir = os.path.join(output_dir, WA_DATABASES_DIR_NAME)
 
     # --- ChatStorage.sqlite ---
     logger.info("Decrypting ChatStorage.sqlite...")
-    tmp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite')
+    tmp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
     tmp_db.close()
     try:
-        backup.extract_file(relative_path='ChatStorage.sqlite',
-                            domain_like=domain_like,
-                            output_filename=tmp_db.name)
+        backup.extract_file(
+            relative_path="ChatStorage.sqlite", domain_like=domain_like, output_filename=tmp_db.name
+        )
     except FileNotFoundError:
         logger.error(
             "ChatStorage.sqlite not found in encrypted backup.\n"
@@ -265,41 +333,49 @@ def extract_encrypted(backup_dir: str,
         )
         os.unlink(tmp_db.name)
         raise SystemExit(1)
-    msgstore_path = _save_db_to_output(tmp_db.name, output_dir, 'ChatStorage.sqlite', logger)
+    msgstore_path = _save_db_to_output(tmp_db.name, db_output_dir, "ChatStorage.sqlite", logger)
     os.unlink(tmp_db.name)
 
     # --- ContactsV2.sqlite ---
     ios_contacts_path = ios_contacts_override
     if ios_contacts_path is None:
-        tmp_contacts = tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite')
+        tmp_contacts = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
         tmp_contacts.close()
         try:
-            backup.extract_file(relative_path='ContactsV2.sqlite',
-                                domain_like=domain_like,
-                                output_filename=tmp_contacts.name)
-            atexit.register(os.unlink, tmp_contacts.name)
-            ios_contacts_path = tmp_contacts.name
+            backup.extract_file(
+                relative_path="ContactsV2.sqlite",
+                domain_like=domain_like,
+                output_filename=tmp_contacts.name,
+            )
+            ios_contacts_path = _save_db_to_output(
+                tmp_contacts.name, db_output_dir, "ContactsV2.sqlite", logger
+            )
+            os.unlink(tmp_contacts.name)
             logger.info("Decrypted ContactsV2.sqlite.")
         except FileNotFoundError:
-            logger.warning("ContactsV2.sqlite not found in encrypted backup; proceeding without contacts.")
+            logger.warning(
+                "ContactsV2.sqlite not found in encrypted backup; proceeding without contacts."
+            )
             os.unlink(tmp_contacts.name)
+
+    _extract_auxiliary_databases_encrypted(backup, domain_like, db_output_dir, logger)
 
     # --- Lazy media resolver ---
     # Decrypt each media file on demand, caching in a temp dir.
     # Only files actually referenced by the (possibly filtered) query are touched.
-    tmp_media_dir = tempfile.mkdtemp(prefix='wa_ios_media_')
+    tmp_media_dir = tempfile.mkdtemp(prefix="wa_ios_media_")
     atexit.register(shutil.rmtree, tmp_media_dir, ignore_errors=True)
     cache: dict[str, str] = {}
 
     def _media_resolver(relative_path: str) -> str | None:
         if relative_path in cache:
             return cache[relative_path]
-        dest = os.path.join(tmp_media_dir, *relative_path.split('/'))
+        dest = os.path.join(tmp_media_dir, *relative_path.split("/"))
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         try:
-            backup.extract_file(relative_path=relative_path,
-                                domain_like=domain_like,
-                                output_filename=dest)
+            backup.extract_file(
+                relative_path=relative_path, domain_like=domain_like, output_filename=dest
+            )
         except FileNotFoundError:
             return None
         cache[relative_path] = dest

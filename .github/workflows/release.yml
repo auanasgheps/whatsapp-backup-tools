@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Create as draft release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Run Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pytest pytest-cov flask wa-crypt-tools iphone-backup-decrypt tzdata
+
+      - name: Run test suite
+        run: pytest tests/ -v
+
+  build:
+    name: Build Distribution Packages
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build tool
+        run: pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Store distribution packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download distribution packages
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Check for custom release notes
+        id: notes
+        shell: bash
+        run: |
+          if [ -f "RELEASE_NOTES.md" ]; then
+            echo "has_custom_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_custom_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Release (Custom Notes)
+        if: steps.notes.outputs.has_custom_notes == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: RELEASE_NOTES.md
+          draft: ${{ inputs.draft || false }}
+
+      - name: Create Release (Auto-Generated Notes)
+        if: steps.notes.outputs.has_custom_notes != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: ${{ inputs.draft || false }}

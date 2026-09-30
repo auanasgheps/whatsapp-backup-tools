@@ -1,0 +1,420 @@
+import logging
+import os
+import re
+import sqlite3
+
+# ==============================================================================
+# android_handler.py — WhatsApp Android schema handling
+# Knows nothing about ADB or backup format; handles only WhatsApp DB schema.
+# ==============================================================================
+
+_REQUIRED_TABLES = {"message", "message_media", "chat", "jid", "jid_map"}
+
+_REQUIRED_COLUMNS = {
+    "message": {"_id", "timestamp", "sender_jid_row_id", "from_me"},
+    "message_media": {
+        "file_path",
+        "mime_type",
+        "chat_row_id",
+        "message_row_id",
+        "message_url",
+        "media_name",
+    },
+    "chat": {"_id", "subject", "jid_row_id"},
+    "jid": {"_id", "user"},
+    "jid_map": {"lid_row_id", "jid_row_id"},
+}
+
+_MEDIA_SUBFOLDERS = {
+    "WhatsApp Images",
+    "WhatsApp Video",
+    "WhatsApp Audio",
+    "WhatsApp Voice Notes",
+    "WhatsApp Video Notes",
+    "WhatsApp Animated Gifs",
+    "WhatsApp Documents",
+}
+
+
+def _check_hd_association(cursor: sqlite3.Cursor, logger: logging.Logger) -> bool:
+    """Return True if message_association exists and supports HD dedup (types 12 and 7)."""
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "message_association" not in tables:
+        logger.debug("message_association table absent — HD dedup disabled.")
+        return False
+    logger.debug("message_association table found — HD dedup enabled.")
+    return True
+
+
+def validate_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
+    """Abort with a clear error if any required table or column is missing."""
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    missing_tables = _REQUIRED_TABLES - tables
+    if missing_tables:
+        logger.error(f"Schema validation failed — missing tables: {sorted(missing_tables)}")
+        raise SystemExit(1)
+
+    for table, required_cols in _REQUIRED_COLUMNS.items():
+        actual_cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+        missing_cols = required_cols - actual_cols
+        if missing_cols:
+            logger.error(
+                f"Schema validation failed — missing columns in '{table}': {sorted(missing_cols)}"
+            )
+            raise SystemExit(1)
+
+    logger.info("Schema validated.")
+
+
+def validate_wa_root(wa_roots: list, logger: logging.Logger):
+    """
+    Verify that each wa_root is the correct WhatsApp folder (the one containing Media/).
+    Aborts with a diagnostic hint for the most common mistakes.
+    Raises SystemExit(1) only if none of the roots are valid.
+    """
+    any_valid = False
+    for wa_root in wa_roots:
+        if not os.path.isdir(wa_root):
+            logger.error(f"--wa-root does not exist or is not a directory: {wa_root}")
+            continue
+
+        media_dir = os.path.join(wa_root, "Media")
+        if not os.path.isdir(media_dir):
+            folder_name = os.path.basename(os.path.normpath(wa_root))
+            if folder_name == "Media":
+                hint = "It looks like you passed the Media/ folder — pass its parent instead."
+            elif any(os.path.isdir(os.path.join(wa_root, s)) for s in _MEDIA_SUBFOLDERS):
+                hint = (
+                    "It looks like you passed a subfolder inside Media/ — "
+                    "pass the WhatsApp/ folder that contains Media/ instead."
+                )
+            else:
+                hint = "Expected structure: <wa_root>/Media/WhatsApp Images/ etc."
+            logger.error(f"--wa-root has no Media/ subfolder: {wa_root}\n  {hint}")
+            continue
+
+        found = [s for s in _MEDIA_SUBFOLDERS if os.path.isdir(os.path.join(media_dir, s))]
+        if not found:
+            logger.warning(
+                f"Media/ found but no WhatsApp media subfolders detected under {media_dir}. "
+                f"Expected at least one of: {sorted(_MEDIA_SUBFOLDERS)}"
+            )
+        any_valid = True
+
+    if not any_valid:
+        logger.error("No valid --wa-root found. Aborting.")
+        raise SystemExit(1)
+
+
+def build_number_map(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict:
+    """
+    Build a map of old_number -> new_number from WhatsApp's own
+    number change records. This ensures all media for a contact
+    that changed their number ends up in one folder.
+
+    Chains are resolved: if A->B and B->C, A maps to C.
+    """
+    try:
+        cursor.execute("""
+            SELECT jid_old.user, jid_new.user
+            FROM message_system_number_change mnc
+            LEFT JOIN jid AS jid_old ON jid_old._id = mnc.old_jid_row_id
+            LEFT JOIN jid AS jid_new ON jid_new._id = mnc.new_jid_row_id
+            WHERE jid_old.user IS NOT NULL
+            AND jid_new.user IS NOT NULL
+        """)
+        raw_pairs = cursor.fetchall()
+    except sqlite3.OperationalError as e:
+        logger.warning(f"Number-change table unavailable ({e}); skipping consolidation.")
+        return {}
+
+    direct = {old: new for old, new in raw_pairs}
+    cyclic: set[str] = set()
+
+    def resolve(number, visited=None):
+        if visited is None:
+            visited = set()
+        if number in visited:
+            cyclic.add(number)
+            return number
+        visited.add(number)
+        if number in direct:
+            return resolve(direct[number], visited)
+        return number
+
+    consolidated = {old: resolve(old) for old in direct}
+    if cyclic:
+        logger.debug(f"Number change chains: {len(cyclic)} cycle(s) ignored.")
+    logger.info(
+        f"Number consolidation map built: {len(consolidated)} "
+        f"old number(s) mapped to current numbers."
+    )
+    return consolidated
+
+
+def build_group_subjects_query() -> str:
+    """
+    Lightweight query returning the current subject for every group chat.
+    Used to detect renames before processing begins.
+    Intentionally unfiltered — rename detection must cover all known groups,
+    not just those active since --since.
+    """
+    return """
+        SELECT DISTINCT CAST(message_media.chat_row_id AS TEXT), chat.subject
+        FROM message_media
+        JOIN chat    ON message_media.chat_row_id    = chat._id
+        JOIN message ON message_media.message_row_id = message._id
+        WHERE chat.subject IS NOT NULL
+    """
+
+
+def build_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> str:
+    """
+    Build the main media extraction query.
+    If limit is provided, it is split evenly between the group chats and
+    1-to-1 chats blocks (LIMIT N//2 each), so both types are always
+    represented. Total rows returned is at most N.
+    If since_ms is provided, only media from messages at or after that timestamp
+    (milliseconds) are included.
+    If hd_dedup is True, LQ parent rows are excluded when an HD child with a
+    valid file_path exists (requires message_association table).
+    """
+    block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
+    since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
+    hd_dedup_clause = (
+        """
+        AND NOT EXISTS (
+            SELECT 1 FROM message_association ma
+            JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
+            WHERE ma.parent_message_row_id = message_media.message_row_id
+              AND ma.association_type IN (12, 7)
+              AND mm_hd.file_path IS NOT NULL
+        )"""
+        if hd_dedup
+        else ""
+    )
+
+    return f"""
+SELECT * FROM (
+    SELECT * FROM (
+        -- Group chats
+        SELECT
+            message._id                         AS message_id,
+            message.timestamp                   AS timestamp,
+            message_media.file_path             AS file_path,
+            message_media.mime_type             AS mime_type,
+            message_media.chat_row_id           AS chat_row_id,
+            chat.subject                        AS chat_subject,
+            ifnull(jid2.user, jid.user)         AS sender,
+            message.from_me                     AS key_from_me,
+            message_media.message_url           AS message_url,
+            CASE WHEN message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+                 THEN message_media.media_name END AS media_name
+        FROM message_media
+        LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
+        LEFT JOIN message ON message_media.message_row_id = message._id
+        LEFT JOIN jid     ON jid._id = message.sender_jid_row_id
+        LEFT JOIN (
+            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+            FROM jid_map
+            GROUP BY lid_row_id
+        ) jid_map ON jid_map.lid_row_id = message.sender_jid_row_id
+        LEFT JOIN jid AS jid2 ON jid2._id = jid_map.jid_row_id
+        WHERE (
+            message_media.file_path LIKE 'Media/WhatsApp Images/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+        )
+        AND chat.subject IS NOT NULL
+        {since_clause}
+        {hd_dedup_clause}
+        {block_limit_clause}
+    )
+
+    UNION ALL
+
+    SELECT * FROM (
+        -- 1-to-1 chats
+        SELECT
+            message._id                         AS message_id,
+            message.timestamp                   AS timestamp,
+            message_media.file_path             AS file_path,
+            message_media.mime_type             AS mime_type,
+            message_media.chat_row_id           AS chat_row_id,
+            NULL                                AS chat_subject,
+            jid.user                            AS sender,
+            message.from_me                     AS key_from_me,
+            message_media.message_url           AS message_url,
+            CASE WHEN message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+                 THEN message_media.media_name END AS media_name
+        FROM message_media
+        LEFT JOIN chat    ON message_media.chat_row_id    = chat._id
+        LEFT JOIN message ON message_media.message_row_id = message._id
+        LEFT JOIN jid     ON jid._id = chat.jid_row_id
+        WHERE (
+            message_media.file_path LIKE 'Media/WhatsApp Images/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+        )
+        AND chat.subject IS NULL
+        {since_clause}
+        {hd_dedup_clause}
+        {block_limit_clause}
+    )
+)
+"""
+
+
+def get_media_file_paths(cursor: sqlite3.Cursor, since_ms: int | None, hd_dedup: bool) -> set[str]:
+    """
+    Return distinct relative media file paths (e.g. 'Media/WhatsApp Images/...')
+    referenced by messages on or after since_ms.
+    """
+    query = build_query(None, since_ms, hd_dedup)
+    rows = cursor.execute(
+        f"SELECT DISTINCT file_path FROM ({query}) WHERE file_path IS NOT NULL"
+    ).fetchall()
+    return {row[0].replace("\\", "/") for row in rows if row[0]}
+
+
+def _clean_phone_number(raw: str) -> str:
+    """Strip formatting characters and return clean numeric string."""
+    cleaned = re.sub(r"[\s\-\(\)\.\+]", "", raw)
+    if cleaned.startswith("00"):
+        cleaned = cleaned[2:]
+    if cleaned.isdigit():
+        return cleaned
+    return ""
+
+
+def _parse_adb_row(line: str) -> dict[str, str]:
+    """Parse key=value columns from an ADB content query row."""
+    pattern = re.compile(r"([a-zA-Z0-9_]+)=")
+    matches = list(pattern.finditer(line))
+    if not matches:
+        return {}
+    fields = {}
+    for i, m in enumerate(matches):
+        key = m.group(1)
+        val_start = m.end()
+        val_end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
+        val = line[val_start:val_end].rstrip(", \r\n")
+        fields[key] = val
+    return fields
+
+
+def _parse_delimited_contact(line: str) -> tuple[str, str] | None:
+    """Parse a manual contact entry formatted as 'number,name' or 'name: number'."""
+    trimmed = line.strip()
+    if not trimmed or trimmed.startswith("#"):
+        return None
+    for delimiter in (",", ":", "\t"):
+        if delimiter in trimmed:
+            parts = trimmed.split(delimiter, 1)
+            p1, p2 = parts[0].strip(), parts[1].strip()
+            c1 = _clean_phone_number(p1)
+            c2 = _clean_phone_number(p2)
+            if c1 and not c2:
+                return c1, p2
+            if c2 and not c1:
+                return c2, p1
+            if c1 and c2:
+                return c1, p2
+    return None
+
+
+def load_contacts(file_path: str, logger: logging.Logger) -> dict[str, str]:
+    """
+    Load Android contacts from an ADB-exported contacts file or CSV.
+    Returns {phone_number: display_name} — same format as ios_handler.load_ios_contacts.
+    """
+    if not file_path:
+        return {}
+    try:
+        with open(file_path, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError as e:
+        logger.warning(f"Could not read contacts file ({e}); proceeding without names.")
+        return {}
+
+    wa_contacts = {}
+    phone_contacts = {}
+
+    for line in content.splitlines():
+        fields = _parse_adb_row(line)
+        if fields and "display_name" in fields and ("data1" in fields or "data4" in fields):
+            name = fields["display_name"].strip()
+            if not name:
+                continue
+            data1 = fields.get("data1", "").strip()
+            data4 = fields.get("data4", "").strip()
+            mimetype = fields.get("mimetype", "").strip()
+
+            if data1 in ("NULL", "null"):
+                data1 = ""
+            if data4 in ("NULL", "null"):
+                data4 = ""
+
+            is_wa_profile = (
+                "vnd.com.whatsapp" in mimetype or "@s.whatsapp.net" in data1 or "@w4b" in data1
+            )
+            is_phone = mimetype == "vnd.android.cursor.item/phone_v2"
+
+            if is_wa_profile:
+                raw_num = data1.split("@")[0] if "@" in data1 else data1
+                clean = _clean_phone_number(raw_num)
+                if clean:
+                    wa_contacts[clean] = name
+            elif is_phone:
+                if data4:
+                    clean4 = _clean_phone_number(data4)
+                    if clean4:
+                        phone_contacts[clean4] = name
+                if data1 and "@" not in data1:
+                    clean1 = _clean_phone_number(data1)
+                    if clean1:
+                        phone_contacts[clean1] = name
+            elif not mimetype:
+                # Legacy projection (display_name:data1)
+                if "@" in data1:
+                    if "@s.whatsapp.net" in data1 or "@w4b" in data1:
+                        raw_num = data1.split("@")[0]
+                        clean = _clean_phone_number(raw_num)
+                        if clean:
+                            wa_contacts[clean] = name
+                    # Other emails are skipped
+                else:
+                    clean1 = _clean_phone_number(data1)
+                    if clean1:
+                        phone_contacts[clean1] = name
+        else:
+            delimited = _parse_delimited_contact(line)
+            if delimited:
+                clean_num, name = delimited
+                if clean_num and name:
+                    phone_contacts[clean_num] = name
+
+    # WhatsApp profiles take precedence over phone contacts
+    contacts = {**phone_contacts, **wa_contacts}
+
+    if not contacts:
+        logger.warning(
+            "Contacts file was read but no WhatsApp contacts were found. "
+            "Folder names will show raw phone numbers.\n"
+            "  If using --from-adb, check that the device contacts permission is granted."
+        )
+    else:
+        unique_contacts = len({name for name in contacts.values() if name})
+        logger.info(
+            f"Loaded {len(contacts)} phone number(s) across {unique_contacts} Android contact(s)."
+        )
+    contacts.setdefault("0", "WhatsApp")
+    return contacts
