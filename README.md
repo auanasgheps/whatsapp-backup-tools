@@ -23,7 +23,27 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
   <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_clean.png" width="700" /> 
 </p>
 
-> 🚀 **Ready to begin?** Skip directly to [Installation & Quick Start](#installation--quick-start).
+---
+
+## Table of Contents
+
+> **Ready to begin?** Skip directly to [Installation & Quick Start](#installation--quick-start).
+
+- [Features](#features)
+  - [WhatsApp Backup Archiver](#whatsapp-backup-archiver)
+  - [WhatsApp Backup Viewer](#whatsapp-backup-viewer)
+- [Archive Structure](#archive-structure)
+- [Installation & Quick Start](#installation--quick-start)
+  - [Step 1: Install the Tool](#step-1-install-the-tool)
+  - [Step 2: Get the Files from Your Phone](#step-2-get-the-files-from-your-phone)
+  - [Step 3: Archive & View](#step-3-archive--view)
+- [Re-running the Archiver](#re-running-the-archiver)
+- [Prerequisites](#prerequisites)
+- [Known Limitations](#known-limitations)
+- [Star History](#star-history)
+- [Credits](#credits)
+- [Development Philosophy](#development-philosophy)
+- [Disclaimer](#disclaimer)
 
 ---
 
@@ -212,8 +232,6 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
-- **iOS HD media deduplication requires `ExtChatDatabase.sqlite`.** On modern iOS backups (v2.24+), the archiver extracts `ExtChatDatabase.sqlite` and automatically filters low-quality duplicates when an HD version is present. For legacy backups where this database is absent, both versions are archived
-
 ### Viewer
 
 - **Initial release scope**: Call history and poll interactions are not yet rendered in the chat timeline. Progressive media optimization for large photo galleries is planned for future updates.
