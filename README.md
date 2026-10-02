@@ -36,7 +36,7 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 - **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
 - **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
-- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, and Documents.
+- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents and Stickers.
 
 ### WhatsApp Backup Viewer
 Explore and search your archived chats through a local web UI replicating WhatsApp Web.
@@ -209,7 +209,6 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ### Archiver
 
-- Stickers are not currently archived
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
@@ -217,7 +216,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ### Viewer
 
-- **Initial release scope**: Call history, poll interactions, and stickers are not yet rendered in the chat timeline. Progressive media optimization for large photo galleries is planned for future updates.
+- **Initial release scope**: Call history and poll interactions are not yet rendered in the chat timeline. Progressive media optimization for large photo galleries is planned for future updates.
 - See [viewer known limitations](docs/viewer/index.md#known-limitations) for full details on profile push names, receipts, and platform variations.
 
 ---
