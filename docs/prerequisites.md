@@ -2,7 +2,7 @@
 
 # Prerequisites & Installation
 
-Everything you need to get started with **WhatsApp Backup Tools (`wab-tools`)**.
+Everything you need to get started with **WhatsApp Backup Tools (`whatsapp-backup-tools`)**.
 
 ---
 
@@ -16,10 +16,10 @@ Everything you need to get started with **WhatsApp Backup Tools (`wab-tools`)**.
 
 ## 2. Installation
 
-Install directly via `pip` from GitHub:
+Install directly via `pip` from PyPI:
 
 ```bash
-pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"
+pip install whatsapp-backup-tools
 ```
 
 Or clone the repository and install locally:
