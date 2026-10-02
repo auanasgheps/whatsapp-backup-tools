@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.51]
+
+### 🌐 WhatsApp Backup Viewer (`wab-viewer`) - *Fixes*
+
+- **Media Gallery Month Dividers**: Fixed unwanted empty month headers appearing at the bottom of the media gallery on initial open when secondary items (documents, links) are filtered out by default. Synchronized month divider visibility on initial open, infinite scroll pagination, and type filter switching.
+
+---
+
 ## [0.50] - Initial Public Suite Release
 
 This release marks the unification of the project into **WhatsApp Backup Tools (`wab-tools`)**, introducing the brand-new **`wab-viewer`** local WebUI and major architectural evolutions to **`wab-archiver`** (formerly *WhatsApp Media Archiver*).
