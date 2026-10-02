@@ -364,3 +364,150 @@ def test_media_gallery_navigation(browser: CDPSession, screenshot_dir: Path) -> 
         5.0,
     )
     assert closed is True
+
+
+def test_media_gallery_month_dividers_filtered(browser: CDPSession) -> None:
+    """Verify that gallery month dividers are displayed only when corresponding media is selected."""
+    # 1. Open contact chat Sarah Jenkins (who has 3 images and 1 link in April 2026)
+    opened = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const item = [...document.querySelectorAll('.chat-item')].find(
+                    el => el.querySelector('.chat-name')?.textContent.includes('Sarah Jenkins')
+                );
+                if (item) {
+                    item.click();
+                    for (let j = 0; j < 80; j++) {
+                        await new Promise(r => setTimeout(r, 50));
+                        const loading = document.getElementById('chat-loading');
+                        if (loading && loading.style.display === 'none') {
+                            await new Promise(r => setTimeout(r, 150));
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return false;
+        })()
+        """,
+        15.0,
+    )
+    assert opened is True
+
+    # 2. Open media gallery and wait for gallery items to be populated
+    gallery = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gal = document.getElementById('media-gallery');
+                const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                if (gal && gal.classList.contains('open') && items.length > 0) {
+                    await new Promise(r => setTimeout(r, 200));
+                    return { isOpen: true };
+                }
+            }
+            return { isOpen: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(gallery, dict)
+    assert gallery["isOpen"] is True
+
+    # 3. Check initial headers: by default, only images (media) are selected, links are hidden
+    # Total headers = 2 (media header + secondary link header), but only 1 should be visible (images)
+    state_initial = browser.evaluate(
+        """
+        (() => {
+            const allHeaders = [...document.querySelectorAll('#media-gallery-grid .gallery-month-header')];
+            const visibleHeaders = allHeaders.filter(h => !h.classList.contains('month-empty'));
+            const emptyHeaders = allHeaders.filter(h => h.classList.contains('month-empty'));
+            return {
+                total: allHeaders.length,
+                visible: visibleHeaders.length,
+                empty: emptyHeaders.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert state_initial["total"] == 2
+    assert state_initial["visible"] == 1
+    assert state_initial["empty"] == 1
+
+    # 4. Switch to links view: images should become month-empty, link month divider should become visible
+    state_links = browser.evaluate(
+        """
+        (async () => {
+            const linkPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="link"]');
+            if (linkPill) linkPill.click();
+            await new Promise(r => setTimeout(r, 350));
+            const allHeaders = [...document.querySelectorAll('#media-gallery-grid .gallery-month-header')];
+            const visibleHeaders = allHeaders.filter(h => !h.classList.contains('month-empty'));
+            const emptyHeaders = allHeaders.filter(h => h.classList.contains('month-empty'));
+            return {
+                total: allHeaders.length,
+                visible: visibleHeaders.length,
+                empty: emptyHeaders.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert state_links["visible"] == 1
+    assert state_links["empty"] == 1
+
+    # 5. Switch to total view: all dividers should be visible
+    state_total = browser.evaluate(
+        """
+        (async () => {
+            const totalPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="total"]');
+            if (totalPill) totalPill.click();
+            await new Promise(r => setTimeout(r, 350));
+            const allHeaders = [...document.querySelectorAll('#media-gallery-grid .gallery-month-header')];
+            const visibleHeaders = allHeaders.filter(h => !h.classList.contains('month-empty'));
+            return {
+                visible: visibleHeaders.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert state_total["visible"] == 2
+
+    # 6. Switch back to media view: secondary link month divider should be hidden again
+    state_media_again = browser.evaluate(
+        """
+        (async () => {
+            const totalPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="total"]');
+            if (totalPill) totalPill.click();
+            await new Promise(r => setTimeout(r, 350));
+            const allHeaders = [...document.querySelectorAll('#media-gallery-grid .gallery-month-header')];
+            const visibleHeaders = allHeaders.filter(h => !h.classList.contains('month-empty'));
+            return {
+                visible: visibleHeaders.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert state_media_again["visible"] == 1
+
+    # Cleanup: close gallery
+    browser.evaluate(
+        """
+        (() => {
+            const closeBtn = document.getElementById('media-gallery-close');
+            if (closeBtn) closeBtn.click();
+        })()
+        """,
+        5.0,
+    )
+
