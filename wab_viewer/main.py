@@ -4540,19 +4540,140 @@ def create_app(output_root: Path, rescan: bool = False):
         chat_id = request.args.get("chat_id", "")
         chat_type = request.args.get("chat_type", "")
 
+        conn = get_wa()
+        prefix = None
+
         archive_conn = sqlite3.connect(str(archive_db_path), timeout=5.0)
         archive_conn.row_factory = sqlite3.Row
         try:
             if chat_type == "contact":
                 folder_row = archive_conn.execute(
-                    "SELECT folder FROM contacts WHERE number = ?", (chat_id,)
+                    "SELECT folder FROM contacts WHERE number = ? OR number = ?",
+                    (chat_id, chat_id.lstrip("+")),
                 ).fetchone()
-                prefix = f"Contacts/{folder_row['folder']}/" if folder_row else None
+                if folder_row and folder_row["folder"]:
+                    prefix = f"Contacts/{folder_row['folder']}/"
+                elif conn is not None:
+                    if source_type == "ios":
+                        row = conn.execute(
+                            """
+                            SELECT COALESCE(con1.folder, con2.folder) AS folder
+                            FROM ZWACHATSESSION cs
+                            LEFT JOIN _ios_contacts ic ON ic.jid = cs.ZCONTACTJID
+                            LEFT JOIN arch.contacts con1 ON con1.number = NULLIF(
+                                SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                       INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '')
+                            LEFT JOIN arch.contacts con2 ON con2.number = ic.phone_number
+                            WHERE cs.Z_PK = CAST(? AS INTEGER)
+                            """,
+                            (chat_id,),
+                        ).fetchone()
+                        if row and row["folder"]:
+                            prefix = f"Contacts/{row['folder']}/"
+                        else:
+                            sample = conn.execute(
+                                """
+                                SELECT ac.archive_path
+                                FROM ZWAMESSAGE m
+                                JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                                JOIN arch.archive_copies ac ON ac.original_path = 'Message/' || mi.ZMEDIALOCALPATH
+                                WHERE m.ZCHATSESSION = CAST(? AS INTEGER) AND ac.archive_path IS NOT NULL
+                                LIMIT 1
+                                """,
+                                (chat_id,),
+                            ).fetchone()
+                            if sample and sample["archive_path"]:
+                                parts = sample["archive_path"].replace("\\", "/").split("/")
+                                if len(parts) >= 2:
+                                    prefix = f"{parts[0]}/{parts[1]}/"
+                    else:
+                        row = conn.execute(
+                            """
+                            SELECT con.folder
+                            FROM chat c
+                            LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                            LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
+                            LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
+                            LEFT JOIN arch.contacts con ON (
+                                con.number = j_chat_real.user
+                                OR con.number = j_chat.user
+                                OR con.number = ?
+                                OR con.number = ?
+                            )
+                            WHERE c.subject IS NULL
+                              AND (
+                                  c._id = CAST(? AS INTEGER)
+                                  OR COALESCE(j_chat_real.user, j_chat.user) = ?
+                                  OR j_chat.user = ?
+                                  OR j_chat_real.user = ?
+                              )
+                            LIMIT 1
+                            """,
+                            (chat_id, chat_id.lstrip("+"), chat_id, chat_id, chat_id, chat_id),
+                        ).fetchone()
+                        if row and row["folder"]:
+                            prefix = f"Contacts/{row['folder']}/"
+                        else:
+                            sample = conn.execute(
+                                """
+                                SELECT ac.archive_path
+                                FROM message m
+                                JOIN message_media mm ON mm.message_row_id = m._id
+                                LEFT JOIN chat c ON c._id = m.chat_row_id
+                                LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                                LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
+                                LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
+                                JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+                                WHERE c.subject IS NULL
+                                  AND (
+                                      c._id = CAST(? AS INTEGER)
+                                      OR COALESCE(j_chat_real.user, j_chat.user) = ?
+                                      OR j_chat.user = ?
+                                      OR j_chat_real.user = ?
+                                  )
+                                  AND ac.archive_path IS NOT NULL
+                                LIMIT 1
+                                """,
+                                (chat_id, chat_id, chat_id, chat_id),
+                            ).fetchone()
+                            if sample and sample["archive_path"]:
+                                parts = sample["archive_path"].replace("\\", "/").split("/")
+                                if len(parts) >= 2:
+                                    prefix = f"{parts[0]}/{parts[1]}/"
             else:
                 folder_row = archive_conn.execute(
                     "SELECT folder FROM groups WHERE chat_row_id = ?", (chat_id,)
                 ).fetchone()
-                prefix = f"Groups/{folder_row['folder']}/" if folder_row else None
+                prefix = f"Groups/{folder_row['folder']}/" if folder_row and folder_row["folder"] else None
+                if prefix is None and conn is not None:
+                    if source_type == "ios":
+                        sample = conn.execute(
+                            """
+                            SELECT ac.archive_path
+                            FROM ZWAMESSAGE m
+                            JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                            JOIN arch.archive_copies ac ON ac.original_path = 'Message/' || mi.ZMEDIALOCALPATH
+                            WHERE m.ZCHATSESSION = CAST(? AS INTEGER) AND ac.archive_path IS NOT NULL
+                            LIMIT 1
+                            """,
+                            (chat_id,),
+                        ).fetchone()
+                    else:
+                        sample = conn.execute(
+                            """
+                            SELECT ac.archive_path
+                            FROM message m
+                            JOIN message_media mm ON mm.message_row_id = m._id
+                            JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+                            WHERE m.chat_row_id = CAST(? AS INTEGER) AND ac.archive_path IS NOT NULL
+                            LIMIT 1
+                            """,
+                            (chat_id,),
+                        ).fetchone()
+                    if sample and sample["archive_path"]:
+                        parts = sample["archive_path"].replace("\\", "/").split("/")
+                        if len(parts) >= 2:
+                            prefix = f"{parts[0]}/{parts[1]}/"
 
             if prefix is None:
                 return jsonify({"bytes": 0})
