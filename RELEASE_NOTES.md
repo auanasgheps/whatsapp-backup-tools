@@ -2,8 +2,6 @@
 
 This minor update focuses on fixes, performance optimizations, and documentation refinements that were left outside of the initial stable release. Notably, official PyPI distribution is now available!
 
-**Privacy, Privacy, Privacy**: These tools run 100% locally on your machine. No data leaves your computer.
-
 ## What's New in v0.51
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
