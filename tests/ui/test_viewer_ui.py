@@ -513,4 +513,3 @@ def test_media_gallery_month_dividers_filtered(browser: CDPSession) -> None:
         """,
         5.0,
     )
-

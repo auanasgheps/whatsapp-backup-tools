@@ -4644,7 +4644,11 @@ def create_app(output_root: Path, rescan: bool = False):
                 folder_row = archive_conn.execute(
                     "SELECT folder FROM groups WHERE chat_row_id = ?", (chat_id,)
                 ).fetchone()
-                prefix = f"Groups/{folder_row['folder']}/" if folder_row and folder_row["folder"] else None
+                prefix = (
+                    f"Groups/{folder_row['folder']}/"
+                    if folder_row and folder_row["folder"]
+                    else None
+                )
                 if prefix is None and conn is not None:
                     if source_type == "ios":
                         sample = conn.execute(
