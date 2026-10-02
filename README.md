@@ -1,7 +1,7 @@
 # WhatsApp Backup Tools
 
 <p align="center">
-  <img src="icon.svg" alt="WhatsApp Backup Tools" width="120"/>
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="120"/>
 </p>
 
 ## Overview
@@ -19,8 +19,8 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 
 **Whatsapp Backup Viewer screenshots**
 <p float="left">
-  <img src="docs/images/viewer_dark.png" width="700" />
-  <img src="docs/images/viewer_clean.png" width="700" /> 
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_dark.png" width="700" />
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_clean.png" width="700" /> 
 </p>
 
 > 🚀 **Ready to begin?** Skip directly to [Installation & Quick Start](#installation--quick-start).
@@ -100,20 +100,20 @@ Everything is processed **100% locally on your computer** — no data leaves you
 
 ### Step 1: Install the Tool
 
-Ensure **Python 3.11+** is installed, then install directly from GitHub:
+Ensure **Python 3.11+** is installed, then install from PyPI:
 
 ```bash
-pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"
+pip install whatsapp-backup-tools
 ```
 
-> 💡 **Windows users:** If `pip` is not recognized, run `py -m pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"` instead.
+> 💡 **Windows users:** If `pip` is not recognized, run `py -m pip install whatsapp-backup-tools` instead.
 
 <details>
 <summary><b>Alternative installation methods (offline wheel, clone, or running without pip)</b></summary>
 
 - **Pre-built wheel (.whl):** Download from [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and run:
   ```bash
-  pip install wab_tools-x.xx-py3-none-any.whl
+  pip install whatsapp_backup_tools-x.xx-py3-none-any.whl
   ```
 - **Local clone:**
   ```bash

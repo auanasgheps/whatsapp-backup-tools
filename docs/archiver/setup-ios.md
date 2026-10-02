@@ -80,7 +80,7 @@ Contacts and auxiliary databases (`ChatStorage.sqlite`, `ContactsV2.sqlite`, `Ex
 Both encrypted and unencrypted iPhone backups are supported:
 
 - **Unencrypted backup** — no extra password argument needed.
-- **Encrypted backup** — pass `--ios-password <password>`. (The required `iphone-backup-decrypt` package is installed automatically with `wab-tools`).
+- **Encrypted backup** — pass `--ios-password <password>`. (The required `iphone-backup-decrypt` package is installed automatically with `whatsapp-backup-tools`).
 
 ---
 
