@@ -422,7 +422,7 @@ def test_media_gallery_month_dividers_filtered(browser: CDPSession) -> None:
     assert gallery["isOpen"] is True
 
     # 3. Check initial headers: by default, only images (media) are selected, links are hidden
-    # Total headers = 2 (media header + secondary link header), but only 1 should be visible (images)
+    # Total headers = 2 (May 2026 link header + April 2026 media header), but only 1 should be visible (images in April)
     state_initial = browser.evaluate(
         """
         (() => {
@@ -464,7 +464,7 @@ def test_media_gallery_month_dividers_filtered(browser: CDPSession) -> None:
     assert state_links["visible"] == 1
     assert state_links["empty"] == 1
 
-    # 5. Switch to total view: all dividers should be visible
+    # 5. Switch to total view: all dividers should be visible in strictly descending month order
     state_total = browser.evaluate(
         """
         (async () => {
@@ -473,14 +473,17 @@ def test_media_gallery_month_dividers_filtered(browser: CDPSession) -> None:
             await new Promise(r => setTimeout(r, 350));
             const allHeaders = [...document.querySelectorAll('#media-gallery-grid .gallery-month-header')];
             const visibleHeaders = allHeaders.filter(h => !h.classList.contains('month-empty'));
+            const monthKeys = allHeaders.map(h => parseInt(h.dataset.month, 10));
             return {
                 visible: visibleHeaders.length,
+                monthKeys: monthKeys,
             };
         })()
         """,
         5.0,
     )
     assert state_total["visible"] == 2
+    assert state_total["monthKeys"] == [202605, 202604]
 
     # 6. Switch back to media view: secondary link month divider should be hidden again
     state_media_again = browser.evaluate(

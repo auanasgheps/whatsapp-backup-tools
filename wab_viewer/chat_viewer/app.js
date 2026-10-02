@@ -1192,6 +1192,7 @@
     const src = '/media/' + msg.archive_path;
     const mt = msg.media_type;
     cell.dataset.type = mt;
+    cell.dataset.ts = String(msg.timestamp_ms || 0);
 
     if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
       const img = document.createElement('img');
@@ -1283,6 +1284,42 @@
     return cell;
   }
 
+  function _insertGalleryGridItem(grid, msg) {
+    const mk = monthKey(msg.timestamp_ms);
+    let monthHdr = grid.querySelector(`.gallery-month-header[data-month="${mk}"]`);
+    if (!monthHdr) {
+      monthHdr = document.createElement('div');
+      monthHdr.className = 'gallery-month-header';
+      monthHdr.dataset.month = String(mk);
+      monthHdr.textContent = fmtMonthHeader(msg.timestamp_ms);
+      const olderHdr = [...grid.querySelectorAll('.gallery-month-header')]
+        .find(el => parseInt(el.dataset.month, 10) < mk);
+      grid.insertBefore(monthHdr, olderHdr || gallerySentinel || null);
+    }
+
+    const cell = renderGalleryItem(msg);
+    if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
+      cell.classList.add('type-hidden');
+    }
+
+    const nextSection = [...grid.querySelectorAll('.gallery-month-header')]
+      .find(el => parseInt(el.dataset.month, 10) < mk) || gallerySentinel || null;
+
+    let insertBeforeEl = nextSection;
+    let curr = monthHdr.nextElementSibling;
+    while (curr && curr !== nextSection) {
+      if (curr.classList.contains('gallery-item')) {
+        const currTs = parseInt(curr.dataset.ts || '0', 10);
+        if (currTs < msg.timestamp_ms) {
+          insertBeforeEl = curr;
+          break;
+        }
+      }
+      curr = curr.nextElementSibling;
+    }
+    grid.insertBefore(cell, insertBeforeEl);
+  }
+
   async function openMediaGallery() {
     if (!currentChat) return;
     const grid = document.getElementById('media-gallery-grid');
@@ -1315,7 +1352,6 @@
     activeTypes = new Set();
     galleryAllLoaded = false;
     galleryLoadingMore = false;
-    galleryLastMonthKey = null;
 
     // fetch counts, documents, and links in parallel, then render media
     const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'link'];
@@ -1346,13 +1382,6 @@
 
     grid.innerHTML = '';
 
-    await _loadGalleryPage(null);
-
-    if (!currentGalleryItems.length && !docItems.length && !linkItems.length) {
-      grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
-      return;
-    }
-
     // attach IntersectionObserver sentinel at bottom of grid
     gallerySentinel = document.createElement('div');
     gallerySentinel.style.height = '1px';
@@ -1365,22 +1394,16 @@
     }, { root: grid, threshold: 0.1 });
     galleryObserver.observe(gallerySentinel);
 
-    // append document and link cards (documents first); hidden when secondary types are filtered out by default
-    let secondaryLastMonth = null;
+    await _loadGalleryPage(null);
+
+    if (!currentGalleryItems.length && !docItems.length && !linkItems.length) {
+      grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
+      return;
+    }
+
+    // append document and link cards; hidden when secondary types are filtered out by default
     for (const msg of [...docItems, ...linkItems]) {
-      const mk = monthKey(msg.timestamp_ms);
-      if (mk !== secondaryLastMonth) {
-        const hdr = document.createElement('div');
-        hdr.className = 'gallery-month-header';
-        hdr.textContent = fmtMonthHeader(msg.timestamp_ms);
-        grid.insertBefore(hdr, gallerySentinel);
-        secondaryLastMonth = mk;
-      }
-      const cell = renderGalleryItem(msg);
-      if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
-        cell.classList.add('type-hidden');
-      }
-      grid.insertBefore(cell, gallerySentinel);
+      _insertGalleryGridItem(grid, msg);
     }
     _syncMonthHeaders();
   }
@@ -1397,23 +1420,8 @@
       if (items.length < 100) galleryAllLoaded = true;
       currentGalleryItems.push(...items);
 
-      const archived = items;
-      for (const msg of archived) {
-        const mk = monthKey(msg.timestamp_ms);
-        if (mk !== galleryLastMonthKey) {
-          const hdr = document.createElement('div');
-          hdr.className = 'gallery-month-header';
-          hdr.textContent = fmtMonthHeader(msg.timestamp_ms);
-          if (gallerySentinel) grid.insertBefore(hdr, gallerySentinel);
-          else grid.appendChild(hdr);
-          galleryLastMonthKey = mk;
-        }
-        const cell = renderGalleryItem(msg);
-        if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
-          cell.classList.add('type-hidden');
-        }
-        if (gallerySentinel) grid.insertBefore(cell, gallerySentinel);
-        else grid.appendChild(cell);
+      for (const msg of items) {
+        _insertGalleryGridItem(grid, msg);
       }
 
       if (archiveViewActive) {
@@ -1465,7 +1473,6 @@
   let galleryLoadingMore = false;
   let gallerySentinel = null;
   let galleryObserver = null;
-  let galleryLastMonthKey = null;
 
   function _nextLightboxIndex(from, dir) {
     let i = from + dir;

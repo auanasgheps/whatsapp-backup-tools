@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`) - *Fixes*
 
-- **Media Gallery Month Dividers**: Fixed unwanted empty month headers appearing at the bottom of the media gallery on initial open when secondary items (documents, links) are filtered out by default. Synchronized month divider visibility on initial open, infinite scroll pagination, and type filter switching.
+- **Media Gallery Month Dividers & Ordering**: Fixed out-of-order month headers (e.g. June > January > May) caused by paginated media batches landing below older document/link headers. Unified chronological grid insertion for media and secondary items, ensuring month dividers remain strictly unique, properly sorted, and accurately synchronized with type filters.
 
 ---
 
