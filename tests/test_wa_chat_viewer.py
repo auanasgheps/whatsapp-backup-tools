@@ -2039,7 +2039,10 @@ class TestReactionsFrontendLayout:
         js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
         js = js_path.read_text(encoding="utf-8")
         assert "_syncMonthHeaders();\n  }\n\n  async function _loadGalleryPage" in js
-        assert "_appendToArchiveView(items, activeArchiveDir());\n      }\n      _syncMonthHeaders();" in js
+        assert (
+            "_appendToArchiveView(items, activeArchiveDir());\n      }\n      _syncMonthHeaders();"
+            in js
+        )
 
     def test_gallery_month_headers_chronological_insertion(self):
         """Gallery grid items and month headers must be inserted in strictly descending
@@ -2047,10 +2050,11 @@ class TestReactionsFrontendLayout:
         js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
         js = js_path.read_text(encoding="utf-8")
         assert "function _insertGalleryGridItem(grid, msg)" in js
-        assert "galleryLastMonthKey" not in js, "Stale galleryLastMonthKey state must not exist in app.js"
+        assert "galleryLastMonthKey" not in js, (
+            "Stale galleryLastMonthKey state must not exist in app.js"
+        )
         assert "monthHdr.dataset.month = String(mk);" in js
         assert "cell.dataset.ts = String(msg.timestamp_ms" in js
-
 
 
 # ---------------------------------------------------------------------------
@@ -6526,9 +6530,6 @@ class TestChatInfoMediaSizeAndStatus:
 
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
-            resp = client.get(
-                "/api/chat-info/media-size?chat_id=103624826949008&chat_type=contact"
-            )
+            resp = client.get("/api/chat-info/media-size?chat_id=103624826949008&chat_type=contact")
             assert resp.status_code == 200
             assert resp.get_json()["bytes"] == 10
-
