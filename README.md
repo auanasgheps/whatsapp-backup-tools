@@ -221,6 +221,18 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ---
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=auanasgheps%2Fwhatsapp-backup-tools&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=auanasgheps/whatsapp-backup-tools&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=auanasgheps/whatsapp-backup-tools&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=auanasgheps/whatsapp-backup-tools&type=date&legend=top-left" />
+ </picture>
+</a>
+
+---
+
 ## Credits
 
 - Inspired by [Wa_Immich_Tagger](https://github.com/mac12m99/Wa_Immich_Tagger) by mac12m99 — provided the initial Android DB query pattern

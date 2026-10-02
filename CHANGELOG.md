@@ -9,9 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.51]
 
-### 🌐 WhatsApp Backup Viewer (`wab-viewer`) - *Fixes*
+This minor update focuses on fixes, performance optimizations, and documentation refinements that were left outside of the initial stable release. Notably, official PyPI distribution (`pip install whatsapp-backup-tools`) is now available!
 
-- **Media Gallery Month Dividers & Ordering**: Fixed out-of-order month headers (e.g. June > January > May) caused by paginated media batches landing below older document/link headers. Unified chronological grid insertion for media and secondary items, ensuring month dividers remain strictly unique, properly sorted, and accurately synchronized with type filters.
+### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
+
+- **Faster & Smoother Media Gallery**: Browsing large media collections is now significantly faster and more responsive. Photos and videos load on demand as you scroll and unload when off-screen, dramatically reducing browser memory usage.
+- **Accurate Video Previews**: Video thumbnails now show real preview frames instead of blank or black boxes, and generate smoothly in the background without interrupting scrolling.
+- **Multi-Year Archive View**: Earlier years in chats with extensive media collections now automatically load in Archive View rather than stopping at the first page.
+- **Chronological Month Dividers**: Fixed an issue where month headers in the media gallery could appear out of chronological order when paginating through mixed media types.
+- **Accurate Chat Media Size**: Fixed disk size calculation for individual chats in the Chat Info panel to reflect total media storage accurately.
+
+### 📁 WhatsApp Backup Archiver (`wab-archiver`)
+
+- No changes in this release.
+
+### 📦 Packaging & Installation
+
+- **PyPI Distribution**: You can now install and update directly using `pip install whatsapp-backup-tools`.
+- **Automated Publishing**: Streamlined release delivery to PyPI and TestPyPI via automated workflows.
+
+### 📚 Documentation
+
+- **Simplified Quick Start**: Refreshed the setup instructions in the `README` with an easy 3-step guide and a detailed walkthrough for syncing Android media with Syncthing.
+- **Stickers Status**: Clarified that stickers are safely archived into dedicated folders by `wab-archiver` while timeline rendering in the viewer is in development.
+- **Development Philosophy**: Added an overview of the engineering practices and extensive automated testing behind the project.
 
 ---
 
