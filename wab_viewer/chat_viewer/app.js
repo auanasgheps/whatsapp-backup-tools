@@ -1382,6 +1382,7 @@
       }
       grid.insertBefore(cell, gallerySentinel);
     }
+    _syncMonthHeaders();
   }
 
   async function _loadGalleryPage(before) {
@@ -1418,6 +1419,7 @@
       if (archiveViewActive) {
         _appendToArchiveView(items, activeArchiveDir());
       }
+      _syncMonthHeaders();
     } finally {
       galleryLoadingMore = false;
     }
@@ -1522,10 +1524,12 @@
     const items = document.querySelectorAll(
       '#media-gallery-grid .gallery-item, #media-archive-view .gallery-item'
     );
+    let animating = false;
     items.forEach(cell => {
       const shouldHide = activeTypes.size > 0 && !activeTypes.has(cell.dataset.type);
       const isHidden   = cell.classList.contains('type-hidden');
       if (shouldHide && !isHidden) {
+        animating = true;
         cell.classList.remove('is-appearing');
         cell.classList.add('is-disappearing');
         cell.addEventListener('animationend', () => {
@@ -1534,6 +1538,7 @@
           _syncMonthHeaders();
         }, { once: true });
       } else if (!shouldHide && isHidden) {
+        animating = true;
         cell.classList.remove('type-hidden');
         cell.classList.remove('is-disappearing');
         requestAnimationFrame(() => {
@@ -1545,6 +1550,10 @@
         });
       }
     });
+    _syncMonthHeaders();
+    if (animating) {
+      setTimeout(() => _syncMonthHeaders(), 250);
+    }
   }
 
   function _syncMonthHeaders() {

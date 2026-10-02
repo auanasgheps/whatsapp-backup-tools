@@ -2034,6 +2034,13 @@ class TestReactionsFrontendLayout:
         js = js_path.read_text(encoding="utf-8")
         assert "has-reactions" in js
 
+    def test_gallery_month_headers_synced_on_open_and_load(self):
+        """openMediaGallery and _loadGalleryPage must synchronize month headers."""
+        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "_syncMonthHeaders();\n  }\n\n  async function _loadGalleryPage" in js
+        assert "_appendToArchiveView(items, activeArchiveDir());\n      }\n      _syncMonthHeaders();" in js
+
 
 # ---------------------------------------------------------------------------
 # Tests: /api/chat-info and /api/chat-info/media-size
