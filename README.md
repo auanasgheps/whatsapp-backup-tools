@@ -228,14 +228,15 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ---
 
-## AI-Assisted Development
+## Development Philosophy
 
-This tool was developed with the assistance of AI coding tools. Development was human-led and responsible throughout:
+Handling personal communication archives requires high standards for data integrity and privacy. This project is built on three core engineering pillars:
 
-- All architecture and design decisions were made by the developer
-- The AI received specific, detailed instructions at each step — it did not drive direction
-- All generated code was reviewed by the developer before being accepted
-- The tool was tested end-to-end by the developer
+- **Strict Verification**: Over **570 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
+- **Domain Rigor**: Deep reverse-engineering of proprietary WhatsApp artifacts across both mobile operating systems (cryptographic pipelines, protobuf varints, and auxiliary databases).
+- **Developed with AI**: Modern AI coding tools were leveraged as pair programmers to accelerate implementation and broaden test coverage, strictly guided by human architectural design and verified against automated CI suites.
+
+---
 
 ## Disclaimer
 
