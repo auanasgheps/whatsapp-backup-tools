@@ -1,7 +1,7 @@
 # WhatsApp Backup Tools
 
 <p align="center">
-  <img src="icon.svg" alt="WhatsApp Backup Tools" width="120"/>
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="120"/>
 </p>
 
 ## Overview
@@ -19,11 +19,31 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 
 **Whatsapp Backup Viewer screenshots**
 <p float="left">
-  <img src="docs/images/viewer_dark.png" width="700" />
-  <img src="docs/images/viewer_clean.png" width="700" /> 
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_dark.png" width="700" />
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_clean.png" width="700" /> 
 </p>
 
-> 🚀 **Ready to begin?** Skip directly to [Installation & Quick Start](#installation--quick-start).
+---
+
+## Table of Contents
+
+> **Ready to begin?** Skip directly to [Installation & Quick Start](#installation--quick-start).
+
+- [Features](#features)
+  - [WhatsApp Backup Archiver](#whatsapp-backup-archiver)
+  - [WhatsApp Backup Viewer](#whatsapp-backup-viewer)
+- [Archive Structure](#archive-structure)
+- [Installation & Quick Start](#installation--quick-start)
+  - [Step 1: Install the Tool](#step-1-install-the-tool)
+  - [Step 2: Get the Files from Your Phone](#step-2-get-the-files-from-your-phone)
+  - [Step 3: Archive & View](#step-3-archive--view)
+- [Re-running the Archiver](#re-running-the-archiver)
+- [Prerequisites](#prerequisites)
+- [Known Limitations](#known-limitations)
+- [Star History](#star-history)
+- [Credits](#credits)
+- [Development Philosophy](#development-philosophy)
+- [Disclaimer](#disclaimer)
 
 ---
 
@@ -36,7 +56,7 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 - **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
 - **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
-- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, and Documents.
+- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents and Stickers.
 
 ### WhatsApp Backup Viewer
 Explore and search your archived chats through a local web UI replicating WhatsApp Web.
@@ -100,20 +120,20 @@ Everything is processed **100% locally on your computer** — no data leaves you
 
 ### Step 1: Install the Tool
 
-Ensure **Python 3.11+** is installed, then install directly from GitHub:
+Ensure **Python 3.11+** is installed, then install from PyPI:
 
 ```bash
-pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"
+pip install whatsapp-backup-tools
 ```
 
-> 💡 **Windows users:** If `pip` is not recognized, run `py -m pip install "git+https://github.com/auanasgheps/whatsapp-backup-tools.git"` instead.
+> 💡 **Windows users:** If `pip` is not recognized, run `py -m pip install whatsapp-backup-tools` instead.
 
 <details>
 <summary><b>Alternative installation methods (offline wheel, clone, or running without pip)</b></summary>
 
 - **Pre-built wheel (.whl):** Download from [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and run:
   ```bash
-  pip install wab_tools-x.xx-py3-none-any.whl
+  pip install whatsapp_backup_tools-x.xx-py3-none-any.whl
   ```
 - **Local clone:**
   ```bash
@@ -209,16 +229,25 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ### Archiver
 
-- Stickers are not currently archived
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
-- **iOS HD media deduplication requires `ExtChatDatabase.sqlite`.** On modern iOS backups (v2.24+), the archiver extracts `ExtChatDatabase.sqlite` and automatically filters low-quality duplicates when an HD version is present. For legacy backups where this database is absent, both versions are archived
-
 ### Viewer
 
-- **Initial release scope**: Call history, poll interactions, and stickers are not yet rendered in the chat timeline. Progressive media optimization for large photo galleries is planned for future updates.
+- **Initial release scope**: Call history and poll interactions are not yet rendered in the chat timeline. Progressive media optimization for large photo galleries is planned for future updates.
 - See [viewer known limitations](docs/viewer/index.md#known-limitations) for full details on profile push names, receipts, and platform variations.
+
+---
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=auanasgheps%2Fwhatsapp-backup-tools&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=auanasgheps/whatsapp-backup-tools&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=auanasgheps/whatsapp-backup-tools&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=auanasgheps/whatsapp-backup-tools&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ---
 
@@ -229,14 +258,15 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ---
 
-## AI-Assisted Development
+## Development Philosophy
 
-This tool was developed with the assistance of AI coding tools. Development was human-led and responsible throughout:
+Handling personal communication archives requires high standards for data integrity and privacy. This project is built on three core engineering pillars:
 
-- All architecture and design decisions were made by the developer
-- The AI received specific, detailed instructions at each step — it did not drive direction
-- All generated code was reviewed by the developer before being accepted
-- The tool was tested end-to-end by the developer
+- **Strict Verification**: Over **570 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
+- **Domain Rigor**: Deep reverse-engineering of proprietary WhatsApp artifacts across both mobile operating systems (cryptographic pipelines, protobuf varints, and auxiliary databases).
+- **Developed with AI**: Modern AI coding tools were leveraged as pair programmers to accelerate implementation and broaden test coverage, strictly guided by human architectural design and verified against automated CI suites.
+
+---
 
 ## Disclaimer
 

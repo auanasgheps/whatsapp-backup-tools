@@ -2034,6 +2034,28 @@ class TestReactionsFrontendLayout:
         js = js_path.read_text(encoding="utf-8")
         assert "has-reactions" in js
 
+    def test_gallery_month_headers_synced_on_open_and_load(self):
+        """openMediaGallery and _loadGalleryPage must synchronize month headers."""
+        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "_syncMonthHeaders();\n  }\n\n  async function _loadGalleryPage" in js
+        assert (
+            "_appendToArchiveView(items, activeArchiveDir());\n      }\n      _syncMonthHeaders();"
+            in js
+        )
+
+    def test_gallery_month_headers_chronological_insertion(self):
+        """Gallery grid items and month headers must be inserted in strictly descending
+        chronological order without stale global month state."""
+        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "function _insertGalleryGridItem(grid, msg)" in js
+        assert "galleryLastMonthKey" not in js, (
+            "Stale galleryLastMonthKey state must not exist in app.js"
+        )
+        assert "monthHdr.dataset.month = String(mk);" in js
+        assert "cell.dataset.ts = String(msg.timestamp_ms" in js
+
 
 # ---------------------------------------------------------------------------
 # Tests: /api/chat-info and /api/chat-info/media-size
@@ -6423,3 +6445,91 @@ class TestChatInfoMediaSizeAndStatus:
             chat_idx_resp = client.get("/api/chat-index-status?chat_id=1001&chat_type=contact")
             assert chat_idx_resp.status_code == 200
             assert "status" in chat_idx_resp.get_json()
+
+    def test_chat_info_media_size_ios_contact(self, tmp_path):
+        from tests.test_wa_chat_viewer import make_archive_db
+
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('44123456', 'Alice', 'Alice')"
+        )
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Message/Media/1.jpg', 'Contacts/Alice/2026/Sent/1.jpg')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER, ZPARTNERNAME TEXT, ZHIDDEN INTEGER DEFAULT 0);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT, ZCONTACTNAME TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER, ZMESSAGEDATE REAL, ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZMEDIAITEM INTEGER, ZFROMJID TEXT, ZSTANZAID TEXT, ZPARENTMESSAGE INTEGER, ZPUSHNAME TEXT, ZGROUPMEMBER INTEGER);
+        """)
+        conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Partner')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE) VALUES (1, 'Media/1.jpg', '1.jpg')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES (1, 1, 1, 700000000.0, 1, '', 1)"
+        )
+        conn.commit()
+        conn.close()
+
+        f = tmp_path / "Contacts" / "Alice" / "2026" / "Sent" / "1.jpg"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"1234567890")
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info/media-size?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            assert resp.get_json()["bytes"] == 10
+
+    def test_chat_info_media_size_android_lid_contact(self, tmp_path):
+        from tests.test_wa_chat_viewer import make_archive_db
+
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('44123456', 'Bob', 'Bob')"
+        )
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Images/1.jpg', 'Contacts/Bob/2026/Sent/1.jpg')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        wa_conn = sqlite3.connect(str(tmp_path / "msgstore.db"))
+        wa_conn.executescript("""
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, from_me INTEGER, timestamp INTEGER, message_type INTEGER, text_data TEXT, sender_jid_row_id INTEGER);
+            CREATE TABLE message_media (message_row_id INTEGER PRIMARY KEY, chat_row_id INTEGER, file_path TEXT, media_name TEXT, mime_type TEXT);
+        """)
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '103624826949008', 'lid', '103624826949008@lid')"
+        )
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (1, 1, NULL, 0, 1678307200000, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type, text_data, sender_jid_row_id) VALUES (1, 1, 1, 1678307200000, 1, '', 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, chat_row_id, file_path) VALUES (1, 1, 'Media/Images/1.jpg')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        f = tmp_path / "Contacts" / "Bob" / "2026" / "Sent" / "1.jpg"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"1234567890")
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info/media-size?chat_id=103624826949008&chat_type=contact")
+            assert resp.status_code == 200
+            assert resp.get_json()["bytes"] == 10
