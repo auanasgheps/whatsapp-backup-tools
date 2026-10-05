@@ -1059,3 +1059,78 @@ def test_chat_bubble_media_aspect_ratio_and_lightbox_zoom(
         5.0,
     )
     assert closed_lb is True
+
+
+def test_chat_bubble_voice_message_audio_player(
+    browser: CDPSession,
+    screenshot_dir: Path,
+) -> None:
+    """Verify voice message audio player renders with non-zero width and controls in Chromium."""
+    # 1. Open contact chat Dr. Marcus Vance
+    opened = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const item = [...document.querySelectorAll('.chat-item')].find(
+                    el => el.querySelector('.chat-name')?.textContent.includes('Dr. Marcus Vance')
+                );
+                if (item) {
+                    item.click();
+                    for (let j = 0; j < 80; j++) {
+                        await new Promise(r => setTimeout(r, 50));
+                        const loading = document.getElementById('chat-loading');
+                        if (loading && loading.style.display === 'none') {
+                            await new Promise(r => setTimeout(r, 150));
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return false;
+        })()
+        """,
+        15.0,
+    )
+    assert opened is True
+
+    # 2. Inspect audio player element dimensions and wrapper in Chromium
+    audio_info = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const aud = document.querySelector('#message-scroll .msg-media audio');
+                if (aud) {
+                    const rect = aud.getBoundingClientRect();
+                    const wrap = aud.closest('.msg-media');
+                    const wrapRect = wrap ? wrap.getBoundingClientRect() : null;
+                    const bubble = aud.closest('.msg-bubble');
+                    const bubbleRect = bubble ? bubble.getBoundingClientRect() : null;
+                    return {
+                        found: true,
+                        hasControls: aud.controls,
+                        audWidth: rect.width,
+                        audHeight: rect.height,
+                        wrapWidth: wrapRect ? wrapRect.width : 0,
+                        wrapHasClass: wrap ? wrap.classList.contains('audio') : false,
+                        bubbleWidth: bubbleRect ? bubbleRect.width : 0,
+                    };
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { found: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(audio_info, dict)
+    assert audio_info.get("found") is True
+    assert audio_info.get("hasControls") is True
+    assert audio_info.get("wrapHasClass") is True
+    assert audio_info.get("audWidth", 0) >= 240
+    assert audio_info.get("audHeight", 0) >= 30
+    assert audio_info.get("wrapWidth", 0) >= 240
+
+    browser.capture_screenshot(screenshot_dir / "voice_message_audio_player.png", 5.0)
+

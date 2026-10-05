@@ -1026,6 +1026,7 @@
     const mt = msg.media_type;
 
     if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
+      if (mt === 'sticker') wrap.classList.add('sticker');
       const img = document.createElement('img');
       img.src = src;
       img.loading = 'lazy';
@@ -1060,6 +1061,7 @@
       }, { once: true });
       probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
     } else if (mt === 'audio') {
+      wrap.classList.add('audio');
       const aud = document.createElement('audio');
       aud.controls = true;
       aud.src = src;

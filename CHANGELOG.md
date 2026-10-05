@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
+- **Voice Message Audio Player in Chromium Browsers**: Fixed an issue where the inline audio player for voice messages failed to appear in Google Chrome, Microsoft Edge, Brave, and other Chromium-based browsers due to an intrinsic layout collapse when shrink-wrapping media containers. Audio players now render at full width with playback controls across all browsers.
 - **Chat Bubble Photo Aspect Ratio & Bubble Shrink-Wrapping**: Resolved an issue where vertical and tall photos or videos were stretched horizontally when accompanied by captions, sender names, or quoted messages, and fixed message bubbles expanding unnecessarily with empty space when displaying standalone photos. Media containers and bubbles now tightly shrink-wrap photos to eliminate wasted space while preserving the intrinsic aspect ratio.
 - **Lightbox Wheel Zoom & Pan**: Added interactive wheel zooming (up to 6×) in the full-screen photo viewer, complete with smooth click-and-drag panning, click-to-toggle zoom (1× / 2.5×), and a 1-click reset badge.
 
