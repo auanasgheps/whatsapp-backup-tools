@@ -420,9 +420,23 @@
       color: var(--text);
     }
 
-    .msg-media { border-radius: 4px; overflow: hidden; max-width: 100%; }
-    .msg-media img, .msg-media video { display: block; max-width: 320px; max-height: 300px; width: 100%; height: auto; cursor: pointer; }
+    .msg-media {
+      border-radius: 4px;
+      overflow: hidden;
+      max-width: 320px;
+      width: fit-content;
+    }
+    .msg-media img, .msg-media video {
+      display: block;
+      max-width: 100%;
+      max-height: 300px;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      cursor: pointer;
+    }
     .msg-media audio { display: block; max-width: 300px; width: 100%; margin: 4px 0; }
+    .msg-media.sticker { max-width: 180px; }
     .msg-media.sticker img { max-width: 180px; max-height: 180px; }
 
     /* ---- media grid (grouped media) ---- */
@@ -444,6 +458,7 @@
       width: 100%;
       height: 100%;
       border-radius: 0;
+      max-width: none;
     }
 
     .media-grid-cell .msg-media img,
@@ -521,15 +536,30 @@
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       z-index: 1000;
       animation: lb-fade-in 0.15s ease forwards;
+      overflow: hidden;
+      user-select: none;
     }
     .img-lightbox.is-closing { animation: lb-fade-out 0.15s ease forwards; }
-    .img-lightbox img { max-width: 90vw; max-height: 85vh; object-fit: contain; }
+    .img-lightbox img {
+      max-width: 90vw;
+      max-height: 85vh;
+      object-fit: contain;
+      transform-origin: center center;
+      cursor: zoom-in;
+    }
     .img-lightbox video { max-width: 90vw; max-height: 85vh; }
-    .lb-timestamp { color: rgba(255,255,255,0.7); font-size: 12px; margin-bottom: 10px; letter-spacing: 0.02em; }
+    .lb-timestamp {
+      color: rgba(255,255,255,0.7);
+      font-size: 12px;
+      margin-bottom: 10px;
+      letter-spacing: 0.02em;
+      z-index: 2;
+      pointer-events: none;
+    }
     .lb-close {
       position: absolute; top: 16px; right: 20px;
       background: none; border: none; color: #fff; font-size: 28px;
-      cursor: pointer; line-height: 1; opacity: 0.8; z-index: 1;
+      cursor: pointer; line-height: 1; opacity: 0.8; z-index: 3;
       padding: 0; margin: 0; transition: opacity 0.15s;
     }
     .lb-close:hover { opacity: 1; }
@@ -537,7 +567,7 @@
       position: absolute; top: 50%; transform: translateY(-50%);
       background: rgba(255,255,255,0.12); border: none; color: #fff;
       font-size: 32px; cursor: pointer; padding: 12px 16px;
-      border-radius: 6px; line-height: 1; opacity: 0.7; z-index: 1;
+      border-radius: 6px; line-height: 1; opacity: 0.7; z-index: 3;
       transition: opacity 0.15s, background 0.15s; margin: 0;
     }
     .lb-arrow:hover { opacity: 1; background: rgba(255,255,255,0.22); }
@@ -548,6 +578,7 @@
       display: flex; align-items: center; gap: 6px;
       color: rgba(255,255,255,0.55); font-size: 11px;
       margin-top: 8px; max-width: 90vw; word-break: break-all; text-align: center;
+      z-index: 2;
     }
     .lb-copy-btn {
       flex-shrink: 0; background: none; border: none; color: rgba(255,255,255,0.55);
@@ -556,6 +587,13 @@
     }
     .lb-copy-btn:hover { color: #fff; }
     .lb-copy-btn.copied { color: #4caf50; }
+    .lb-zoom-badge {
+      position: absolute; bottom: 38px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.65); border: 1px solid rgba(255,255,255,0.25);
+      color: #fff; font-size: 11px; padding: 3px 10px; border-radius: 12px;
+      z-index: 3; cursor: pointer; transition: opacity 0.15s, background 0.15s;
+    }
+    .lb-zoom-badge:hover { background: rgba(0,0,0,0.85); border-color: rgba(255,255,255,0.45); }
 
     /* ---- scroll-to-bottom ---- */
     #scroll-to-bottom {

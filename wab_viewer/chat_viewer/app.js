@@ -1092,6 +1092,139 @@
     setTimeout(() => lb.isConnected && lb.remove(), 300);
   }
 
+  function _setupLightboxZoom(lb, media) {
+    let scale = 1;
+    let panX = 0;
+    let panY = 0;
+    let isDragging = false;
+    let hasDragged = false;
+    let startX = 0;
+    let startY = 0;
+
+    const zoomBadge = document.createElement('div');
+    zoomBadge.className = 'lb-zoom-badge';
+    zoomBadge.style.display = 'none';
+    zoomBadge.title = 'Click to reset zoom';
+    lb.appendChild(zoomBadge);
+
+    function applyTransform(animated) {
+      media.style.transition = animated ? 'transform 0.12s ease-out' : 'none';
+      media.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+      if (scale > 1) {
+        media.style.cursor = isDragging ? 'grabbing' : 'grab';
+        zoomBadge.textContent = `${Math.round(scale * 100)}% \u00d7 Reset`;
+        zoomBadge.style.display = 'block';
+      } else {
+        media.style.cursor = 'zoom-in';
+        zoomBadge.style.display = 'none';
+      }
+    }
+
+    function clampPan() {
+      if (scale <= 1) {
+        panX = 0;
+        panY = 0;
+        return;
+      }
+      const scaledW = media.offsetWidth * scale;
+      const scaledH = media.offsetHeight * scale;
+      const maxPanX = Math.max(40, (scaledW - window.innerWidth) / 2 + 40);
+      const maxPanY = Math.max(40, (scaledH - window.innerHeight) / 2 + 40);
+      panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+      panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+    }
+
+    lb.addEventListener('wheel', e => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY < 0 ? 1.25 : (1 / 1.25);
+      const prevScale = scale;
+      let nextScale = scale * zoomFactor;
+      if (nextScale < 1.05) {
+        scale = 1;
+        panX = 0;
+        panY = 0;
+        applyTransform(true);
+        return;
+      }
+      if (nextScale > 6) {
+        nextScale = 6;
+      }
+      const cx = window.innerWidth / 2 + panX;
+      const cy = window.innerHeight / 2 + panY;
+      const dx = e.clientX - cx;
+      const dy = e.clientY - cy;
+      const ratio = nextScale / prevScale;
+      panX -= dx * (ratio - 1);
+      panY -= dy * (ratio - 1);
+      scale = nextScale;
+      clampPan();
+      applyTransform(true);
+    }, { passive: false });
+
+    media.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      if (scale > 1) {
+        isDragging = true;
+        hasDragged = false;
+        startX = e.clientX - panX;
+        startY = e.clientY - panY;
+        media.style.cursor = 'grabbing';
+        e.preventDefault();
+      }
+    });
+
+    const onMouseMove = e => {
+      if (!isDragging) return;
+      hasDragged = true;
+      panX = e.clientX - startX;
+      panY = e.clientY - startY;
+      clampPan();
+      applyTransform(false);
+    };
+
+    const onMouseUp = () => {
+      if (isDragging) {
+        isDragging = false;
+        applyTransform(false);
+      }
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+
+    lb.addEventListener('animationend', () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }, { once: true });
+
+    media.addEventListener('click', e => {
+      if (hasDragged) return;
+      e.stopPropagation();
+      if (scale === 1) {
+        scale = 2.5;
+        const cx = window.innerWidth / 2;
+        const cy = window.innerHeight / 2;
+        panX = -(e.clientX - cx) * 1.5;
+        panY = -(e.clientY - cy) * 1.5;
+        clampPan();
+        applyTransform(true);
+      } else {
+        scale = 1;
+        panX = 0;
+        panY = 0;
+        applyTransform(true);
+      }
+    });
+
+    zoomBadge.addEventListener('click', e => {
+      e.stopPropagation();
+      scale = 1;
+      panX = 0;
+      panY = 0;
+      applyTransform(true);
+    });
+  }
+
   function openLightboxAt(index) {
     document.getElementById('img-lightbox')?.remove();
 
@@ -1155,6 +1288,7 @@
     } else {
       media = document.createElement('img');
       media.src = src;
+      _setupLightboxZoom(lb, media);
     }
     lb.appendChild(media);
 

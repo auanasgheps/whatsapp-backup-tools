@@ -2000,6 +2000,35 @@ class TestHtmlTemplate:
             "_loadGalleryPage must not push to lightboxItems — renderGalleryItem handles that"
         )
 
+    def test_msg_media_aspect_ratio_preservation_css(self):
+        """msg-media img/video must preserve aspect ratio with width: auto and object-fit: contain,
+        preventing horizontal stretching for tall/vertical photos with captions."""
+        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        rule_match = re.search(r"\.msg-media\s+img[^{]*\{([^}]+)\}", css)
+        assert rule_match, ".msg-media img rule missing in app.css"
+        rule_body = rule_match.group(1)
+        assert "width: auto" in rule_body, "Media must use width: auto to avoid forced horizontal stretch"
+        assert "object-fit: contain" in rule_body, "Media must use object-fit: contain to preserve aspect ratio"
+        assert "max-height:" in rule_body, "Media must specify max-height constraint"
+
+        wrap_match = re.search(r"(?<!-)\.msg-media\s*\{([^}]+)\}", css)
+        assert wrap_match, ".msg-media rule missing in app.css"
+        wrap_body = wrap_match.group(1)
+        assert "max-width: 320px" in wrap_body, "Media container must clamp max-width to 320px"
+        assert "width: fit-content" in wrap_body, "Media container must use width: fit-content to prevent empty wasted space"
+
+    def test_lightbox_wheel_zoom_implemented(self):
+        """app.js must provide lightbox wheel-to-zoom and pan functionality."""
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        script = app_js_path.read_text(encoding="utf-8")
+
+        assert "_setupLightboxZoom" in script, "_setupLightboxZoom helper must be present in app.js"
+        assert "lb.addEventListener('wheel'" in script, "Lightbox wheel listener must be registered"
+        assert "scale" in script and "panX" in script, "Zoom scale and pan state must be tracked"
+        assert "lb-zoom-badge" in script, "Zoom reset indicator badge must be supported"
+
 
 class TestReactionsFrontendLayout:
     def test_reactions_css_corner_alignment(self):
