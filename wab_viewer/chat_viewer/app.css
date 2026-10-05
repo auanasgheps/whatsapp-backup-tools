@@ -435,6 +435,10 @@
       object-fit: contain;
       cursor: pointer;
     }
+    .msg-media:has(audio), .msg-media.audio {
+      width: 300px;
+      max-width: 100%;
+    }
     .msg-media audio { display: block; max-width: 300px; width: 100%; margin: 4px 0; }
     .msg-media.sticker { max-width: 180px; }
     .msg-media.sticker img { max-width: 180px; max-height: 180px; }
