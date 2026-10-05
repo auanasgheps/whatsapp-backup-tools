@@ -1,6 +1,6 @@
 [project]
 name = "whatsapp-backup-tools"
-version = "0.51"
+version = "0.52"
 description = "Archive and browse your WhatsApp data offline. Archive media from Android and iOS backups into a structured folder hierarchy. View chats in a WebUI that mirrors WhatsApp Web."
 readme = "README.md"
 requires-python = ">=3.11"

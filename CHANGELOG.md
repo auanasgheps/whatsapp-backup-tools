@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.52]
+
+### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
+
+- **Chat Bubble Photo Aspect Ratio & Bubble Shrink-Wrapping**: Resolved an issue where vertical and tall photos or videos were stretched horizontally when accompanied by captions, sender names, or quoted messages, and fixed message bubbles expanding unnecessarily with empty space when displaying standalone photos. Media containers and bubbles now tightly shrink-wrap photos to eliminate wasted space while preserving the intrinsic aspect ratio.
+- **Lightbox Wheel Zoom & Pan**: Added interactive wheel zooming (up to 6×) in the full-screen photo viewer, complete with smooth click-and-drag panning, click-to-toggle zoom (1× / 2.5×), and a 1-click reset badge.
+
+### 📁 WhatsApp Backup Archiver (`wab-archiver`)
+
+- No changes in this release.
+
+---
+
 ## [0.51]
 
 This minor update focuses on fixes, performance optimizations, and documentation refinements that were left outside of the initial stable release. Notably, official PyPI distribution (`pip install whatsapp-backup-tools`) is now available!

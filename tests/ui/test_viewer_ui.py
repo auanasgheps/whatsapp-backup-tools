@@ -888,3 +888,174 @@ def test_media_gallery_archive_view_loads_past_years_when_current_year_has_many_
             """,
             5.0,
         )
+
+
+def test_chat_bubble_media_aspect_ratio_and_lightbox_zoom(
+    browser: CDPSession,
+    screenshot_dir: Path,
+) -> None:
+    """Verify chat bubble images preserve intrinsic aspect ratio and lightbox supports wheel zoom."""
+    # 1. Open contact chat Sarah Jenkins
+    opened = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const item = [...document.querySelectorAll('.chat-item')].find(
+                    el => el.querySelector('.chat-name')?.textContent.includes('Sarah Jenkins')
+                );
+                if (item) {
+                    item.click();
+                    for (let j = 0; j < 80; j++) {
+                        await new Promise(r => setTimeout(r, 50));
+                        const loading = document.getElementById('chat-loading');
+                        if (loading && loading.style.display === 'none') {
+                            await new Promise(r => setTimeout(r, 150));
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return false;
+        })()
+        """,
+        15.0,
+    )
+    assert opened is True
+
+    # 2. Inspect media element aspect ratio and bubble wrapping
+    media_info = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const img = document.querySelector('#message-scroll .msg-media img');
+                if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                    const rect = img.getBoundingClientRect();
+                    const naturalAspect = img.naturalWidth / img.naturalHeight;
+                    const renderedAspect = rect.width / rect.height;
+                    const bubble = img.closest('.msg-bubble');
+                    const bubbleRect = bubble ? bubble.getBoundingClientRect() : rect;
+                    const hasCaption = bubble ? !!bubble.querySelector('.msg-caption') : false;
+                    return {
+                        ready: true,
+                        naturalWidth: img.naturalWidth,
+                        naturalHeight: img.naturalHeight,
+                        renderedWidth: rect.width,
+                        renderedHeight: rect.height,
+                        naturalAspect: naturalAspect,
+                        renderedAspect: renderedAspect,
+                        bubbleWidth: bubbleRect.width,
+                        hasCaption: hasCaption,
+                    };
+                }
+                await new Promise(r => setTimeout(r, 50));
+            }
+            return { ready: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(media_info, dict)
+    if media_info.get("ready"):
+        diff = abs(media_info["naturalAspect"] - media_info["renderedAspect"])
+        assert diff < 0.05, (
+            f"Aspect ratio distorted: natural={media_info['naturalAspect']:.3f}, "
+            f"rendered={media_info['renderedAspect']:.3f}"
+        )
+        if not media_info.get("hasCaption"):
+            wasted_space = media_info["bubbleWidth"] - media_info["renderedWidth"] - 20
+            assert wasted_space < 60, (
+                f"Too much wasted space in media bubble: bubbleWidth={media_info['bubbleWidth']}, "
+                f"mediaWidth={media_info['renderedWidth']}, wasted={wasted_space}"
+            )
+
+    # 2. Click the image to open Lightbox
+    lb_opened = browser.evaluate(
+        """
+        (async () => {
+            const img = document.querySelector('#message-scroll .msg-media img');
+            if (img) img.click();
+            for (let i = 0; i < 40; i++) {
+                const lb = document.getElementById('img-lightbox');
+                const lbImg = lb?.querySelector('img');
+                if (lb && lbImg) {
+                    return { opened: true };
+                }
+                await new Promise(r => setTimeout(r, 50));
+            }
+            return { opened: false };
+        })()
+        """,
+        5.0,
+    )
+    assert isinstance(lb_opened, dict)
+    assert lb_opened["opened"] is True
+
+    # 3. Simulate wheel zoom on the lightbox
+    zoom_result = browser.evaluate(
+        """
+        (() => {
+            const lb = document.getElementById('img-lightbox');
+            if (!lb) return { error: 'no lightbox' };
+            const evt = new WheelEvent('wheel', {
+                deltaY: -120,
+                clientX: window.innerWidth / 2,
+                clientY: window.innerHeight / 2,
+                bubbles: true,
+                cancelable: true
+            });
+            lb.dispatchEvent(evt);
+            const badge = lb.querySelector('.lb-zoom-badge');
+            const img = lb.querySelector('img');
+            return {
+                badgeVisible: badge ? badge.style.display !== 'none' : false,
+                badgeText: badge ? badge.textContent : '',
+                transform: img ? img.style.transform : '',
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert isinstance(zoom_result, dict)
+    assert zoom_result.get("badgeVisible") is True
+    assert "scale" in zoom_result.get("transform", "")
+
+    browser.capture_screenshot(screenshot_dir / "lightbox_wheel_zoomed.png", 5.0)
+
+    # 4. Click zoom badge to reset
+    reset_result = browser.evaluate(
+        """
+        (() => {
+            const lb = document.getElementById('img-lightbox');
+            const badge = lb?.querySelector('.lb-zoom-badge');
+            if (badge) badge.click();
+            const img = lb?.querySelector('img');
+            return {
+                badgeVisible: badge ? badge.style.display !== 'none' : false,
+                transform: img ? img.style.transform : '',
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert isinstance(reset_result, dict)
+    assert reset_result.get("badgeVisible") is False
+    assert "scale(1)" in reset_result.get("transform", "")
+
+    # 5. Close lightbox
+    closed_lb = browser.evaluate(
+        """
+        (async () => {
+            const closeBtn = document.querySelector('#img-lightbox .lb-close');
+            if (closeBtn) closeBtn.click();
+            for (let i = 0; i < 20; i++) {
+                if (!document.getElementById('img-lightbox')) return true;
+                await new Promise(r => setTimeout(r, 30));
+            }
+            return !document.getElementById('img-lightbox');
+        })()
+        """,
+        5.0,
+    )
+    assert closed_lb is True
