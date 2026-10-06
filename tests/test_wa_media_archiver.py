@@ -5237,6 +5237,202 @@ class TestRunForwardModeAndroid:
 
 
 # ===========================================================================
+# vCard extraction and processing
+# ===========================================================================
+
+
+class TestVcardExtraction:
+    def test_resolve_vcard_display_name_single_name(self):
+        from shared.db import resolve_vcard_display_name
+
+        name = resolve_vcard_display_name("John Doe", None)
+        assert name == "John Doe"
+
+    def test_resolve_vcard_display_name_ios_separator(self):
+        from shared.db import resolve_vcard_display_name
+
+        name = resolve_vcard_display_name(
+            "2 contacts_$!<Name-Separator>!$_Jane Doe", None
+        )
+        assert name == "Jane Doe"
+
+        pair = resolve_vcard_display_name(
+            "3 contacts_$!<Name-Separator>!$_Alice_$!<Name-Separator>!$_Bob", None
+        )
+        assert pair == "Alice & Bob"
+
+        multi = resolve_vcard_display_name(
+            "4 contacts_$!<Name-Separator>!$_Alice_$!<Name-Separator>!$_Bob_$!<Name-Separator>!$_Charlie", None
+        )
+        assert multi == "Alice and 2 others"
+
+    def test_resolve_vcard_display_name_fn_fallback(self):
+        from shared.db import resolve_vcard_display_name
+
+        vcard = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Carlos Danger\r\nEND:VCARD\r\n"
+        name = resolve_vcard_display_name(None, vcard)
+        assert name == "Carlos Danger"
+
+    def test_resolve_vcard_display_name_multiple_vcards(self):
+        from shared.db import resolve_vcard_display_name
+
+        vcard = (
+            "BEGIN:VCARD\r\nFN:Alpha\r\nEND:VCARD\r\n"
+            "BEGIN:VCARD\r\nFN:Beta\r\nEND:VCARD\r\n"
+            "BEGIN:VCARD\r\nFN:Gamma\r\nEND:VCARD\r\n"
+        )
+        name = resolve_vcard_display_name(None, vcard)
+        assert name == "Alpha and 2 others"
+
+    def test_resolve_vcard_display_name_empty_fallback(self):
+        from shared.db import resolve_vcard_display_name
+
+        name = resolve_vcard_display_name(None, None)
+        assert name == "Contact"
+
+        name_empty = resolve_vcard_display_name("", "")
+        assert name_empty == "Contact"
+
+    def test_has_vcard_support_android(self):
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        assert not android_handler.has_vcard_support(cur)
+        cur.execute("CREATE TABLE message_vcard (message_row_id INTEGER, vcard TEXT)")
+        assert android_handler.has_vcard_support(cur)
+        conn.close()
+
+    def test_build_vcard_query_android(self):
+        query = android_handler.build_vcard_query(10, 1600000000000)
+        assert "message_vcard" in query
+        assert "message_type IN (4, 14)" in query
+        assert "vcard_text" in query
+        assert "LIMIT 5" in query
+        assert "1600000000000" in query
+
+    def test_has_ios_vcard_support(self):
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        assert not ios.has_ios_vcard_support(cur)
+        cur.execute("CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT)")
+        assert not ios.has_ios_vcard_support(cur)
+        cur.execute("ALTER TABLE ZWAMEDIAITEM ADD COLUMN ZVCARDSTRING TEXT")
+        assert ios.has_ios_vcard_support(cur)
+        conn.close()
+
+    def test_build_ios_vcard_query(self):
+        query = ios.build_ios_vcard_query(20, 1600000000000)
+        assert "ZVCARDSTRING" in query
+        assert "ZVCARDNAME" in query
+        assert "ZMESSAGETYPE = 4" in query
+        assert "LIMIT 10" in query
+
+    def test_resolve_unique_vcard_dest(self, tmp_path, logger):
+        target_dir = tmp_path / "Contacts" / "Alice"
+        target_dir.mkdir(parents=True)
+        dest_file = target_dir / "Bob.vcf"
+
+        content1 = b"BEGIN:VCARD\r\nFN:Bob\r\nEND:VCARD\r\n"
+        md5_1 = hashlib.md5(content1).digest()
+        cand1 = wa.resolve_unique_vcard_dest(str(dest_file), md5_1, logger)
+        assert cand1 == str(dest_file)
+        dest_file.write_bytes(content1)
+
+        # Same content again should return None (skip)
+        cand_same = wa.resolve_unique_vcard_dest(str(dest_file), md5_1, logger)
+        assert cand_same is None
+
+        # Different content with same base name should get disambiguated name
+        content2 = b"BEGIN:VCARD\r\nFN:Bob\r\nTEL:12345\r\nEND:VCARD\r\n"
+        md5_2 = hashlib.md5(content2).digest()
+        cand2 = wa.resolve_unique_vcard_dest(str(dest_file), md5_2, logger)
+        assert cand2 == str(target_dir / "Bob_1.vcf")
+
+    def test_process_vcard_rows_creation_and_routing(self, tmp_path, logger):
+        archive_conn = arc.open_archive_db(str(tmp_path))
+
+        vcard_content = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Doctor Smith\r\nTEL:+15551234\r\nEND:VCARD\r\n"
+        rows = [
+            {
+                "message_id": 101,
+                "timestamp_ms": 1600000000000,
+                "chat_row_id": "4412345",
+                "chat_subject": None,
+                "sender": "4412345",
+                "key_from_me": 0,
+                "contact_name": "Doctor Smith",
+                "vcard_text": vcard_content,
+            },
+            {
+                "message_id": 102,
+                "timestamp_ms": 1600000010000,
+                "chat_row_id": "999",
+                "chat_subject": "Family Chat",
+                "sender": "4412345",
+                "key_from_me": 0,
+                "contact_name": "Nurse Kelly",
+                "vcard_text": "BEGIN:VCARD\r\nFN:Nurse Kelly\r\nEND:VCARD\r\n",
+            },
+        ]
+
+        contacts = {"4412345": "Alice"}
+        folder_index = {"4412345": "Alice (4412345)"}
+        group_index = {"999": {"folder": "Family Chat", "subject": "Family Chat"}}
+
+        stats, upd_idx, upd_grp = wa.process_vcard_rows(
+            rows,
+            contacts,
+            {},
+            folder_index,
+            group_index,
+            str(tmp_path),
+            logger,
+            False,
+            archive_conn,
+            None,
+        )
+        assert stats["copied"] == 2
+
+        # Verify contact routing (under year / Received)
+        contact_files = list((tmp_path / "Contacts").rglob("Doctor Smith.vcf"))
+        assert len(contact_files) == 1
+        contact_file = contact_files[0]
+        assert contact_file.exists()
+        assert contact_file.read_bytes() == vcard_content.encode("utf-8")
+        assert int(os.path.getmtime(contact_file) * 1000) == 1600000000000
+
+        # Verify group routing
+        group_files = list((tmp_path / "Groups").rglob("*Nurse Kelly*.vcf"))
+        assert len(group_files) == 1
+        group_file = group_files[0]
+        assert group_file.exists()
+
+        # Check archive_copies table
+        row1 = archive_conn.execute(
+            "SELECT archive_path FROM archive_copies WHERE original_path = 'vcard:101'"
+        ).fetchone()
+        assert row1 is not None
+        assert "Doctor Smith.vcf" in row1[0]
+
+        # Repeat processing should be idempotent and skip existing
+        stats_repeat, _, _ = wa.process_vcard_rows(
+            rows,
+            contacts,
+            {},
+            upd_idx,
+            upd_grp,
+            str(tmp_path),
+            logger,
+            False,
+            archive_conn,
+            None,
+        )
+        assert stats_repeat["copied"] == 0
+        assert stats_repeat["skipped"] == 2
+
+        archive_conn.close()
+
+
+# ===========================================================================
 # wab_archiver.main: top-level guards
 # ===========================================================================
 
