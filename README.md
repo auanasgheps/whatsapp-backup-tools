@@ -218,8 +218,12 @@ The archiver is **safe to re-run** on an existing archive:
 ## Prerequisites
 
 - **Python 3.11** or later is required
-- **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
-- **iOS/iPadOS**: End-to-end encrypted backup must be **disabled**
+- **Android**: 
+  - End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
+  - ADB is installed
+- **iOS/iPadOS**: 
+  - End-to-end encrypted backup must be **disabled**
+  - An iOS backup on your computer
 
 See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: E2E backup configuration, database extraction (Android and iOS), contacts pull, and locating your media folder.
 
