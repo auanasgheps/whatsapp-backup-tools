@@ -963,7 +963,7 @@
         txt.className = 'msg-text msg-unavailable';
         const icon = msg.media_type === 'image' ? '🖼️' : msg.media_type === 'video' ? '🎥' :
                      msg.media_type === 'audio' ? '🎵' : msg.media_type === 'sticker' ? '🩹' :
-                     msg.media_type === 'gif' ? '🎞️' : '📄';
+                     msg.media_type === 'gif' ? '🎞️' : msg.media_type === 'vcard' ? '📇' : '📄';
         txt.innerHTML = esc(icon) + ' ' + highlight(msg.text_body || 'Media not available', '');
         bubble.appendChild(txt);
       } else {
@@ -975,7 +975,7 @@
     } else {
       const mediaEl = renderMedia(msg);
       bubble.appendChild(mediaEl);
-      if (msg.text_body) {
+      if (msg.text_body && msg.media_type !== 'vcard') {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
         cap.innerHTML = highlight(msg.text_body, '');
@@ -1066,6 +1066,42 @@
       aud.controls = true;
       aud.src = src;
       wrap.appendChild(aud);
+    } else if (mt === 'vcard') {
+      wrap.classList.add('vcard');
+      const card = document.createElement('div');
+      card.className = 'vcard-card';
+
+      const avatar = document.createElement('div');
+      avatar.className = 'vcard-avatar';
+      avatar.innerHTML = '<span class="vcard-avatar-icon">👤</span>';
+
+      const details = document.createElement('div');
+      details.className = 'vcard-details';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'vcard-name';
+      nameEl.textContent = msg.text_body || msg.media_name || 'Contact';
+
+      const subEl = document.createElement('div');
+      subEl.className = 'vcard-sub';
+      subEl.textContent = 'Contact Card';
+
+      details.appendChild(nameEl);
+      details.appendChild(subEl);
+      card.appendChild(avatar);
+      card.appendChild(details);
+
+      const downloadLink = document.createElement('a');
+      downloadLink.className = 'vcard-download';
+      downloadLink.href = src;
+      const downloadName = (msg.media_name && msg.media_name.toLowerCase().endsWith('.vcf'))
+        ? msg.media_name
+        : ((msg.text_body ? msg.text_body : 'contact') + '.vcf');
+      downloadLink.download = downloadName;
+      downloadLink.innerHTML = '<span class="vcard-download-icon">📇</span><span>View Contact (.vcf)</span>';
+
+      wrap.appendChild(card);
+      wrap.appendChild(downloadLink);
     } else {
       const a = document.createElement('a');
       a.href = src;
@@ -1662,6 +1698,12 @@
       cell.appendChild(name);
       cell.appendChild(meta);
       cell.addEventListener('click', () => window.open(src, '_blank'));
+    } else if (mt === 'vcard') {
+      const d = document.createElement('div');
+      d.className = 'gallery-doc';
+      d.innerHTML = '<span style="font-size:28px">📇</span><span>' + esc(msg.media_name || msg.text_body || 'Contact') + '</span>';
+      d.addEventListener('click', () => window.open(src, '_blank'));
+      cell.appendChild(d);
     } else {
       const d = document.createElement('div');
       d.className = 'gallery-doc';
@@ -1761,7 +1803,7 @@
     galleryLoadingMore = false;
 
     // fetch counts, documents, and links in parallel, then render media
-    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'link'];
+    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
     const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
     const [counts, docItems, linkItems] = await Promise.all([
       fetch('/api/media/count?' + qs).then(r => r.json()),
@@ -1880,7 +1922,7 @@
   let currentGalleryItems = [];
   let activeTypes = new Set();   // empty = show all; populated = show only those types
   let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
-  const SECONDARY_TYPES = new Set(['link', 'document']);  // hidden by default, toggle exclusive
+  const SECONDARY_TYPES = new Set(['link', 'document', 'vcard']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
   let galleryLoadingMore = false;
   let gallerySentinel = null;
@@ -1898,7 +1940,7 @@
   }
 
   function _makeStatPill(label, count, type, missing) {
-    const plurals = { audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links' };
+    const plurals = { audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links', vcard: 'contacts' };
     const displayLabel = count === 1 ? label : (plurals[label] || label + 's');
     const span = document.createElement('span');
     span.className = 'gallery-stat';

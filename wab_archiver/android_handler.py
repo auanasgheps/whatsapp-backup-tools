@@ -285,6 +285,87 @@ def get_media_file_paths(cursor: sqlite3.Cursor, since_ms: int | None, hd_dedup:
     return {row[0].replace("\\", "/") for row in rows if row[0]}
 
 
+def has_vcard_support(cursor: sqlite3.Cursor) -> bool:
+    """Return True if message_vcard table exists."""
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return "message_vcard" in tables
+
+
+def build_vcard_query(limit: int | None, since_ms: int | None) -> str:
+    """
+    Build query to extract vCard contacts from Android msgstore.db.
+    Returns:
+        message_id   — message._id
+        timestamp_ms — message.timestamp
+        chat_row_id  — CAST(message.chat_row_id AS TEXT)
+        chat_subject — chat.subject for groups, NULL for 1-to-1
+        sender       — JID user
+        key_from_me  — message.from_me
+        contact_name — message.text_data
+        vcard_text   — concatenated vCard text(s)
+    """
+    block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
+    since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
+
+    return f"""
+SELECT * FROM (
+    SELECT * FROM (
+        -- Group chats
+        SELECT
+            message._id                         AS message_id,
+            message.timestamp                   AS timestamp_ms,
+            CAST(message.chat_row_id AS TEXT)   AS chat_row_id,
+            chat.subject                        AS chat_subject,
+            ifnull(jid2.user, jid.user)         AS sender,
+            message.from_me                     AS key_from_me,
+            message.text_data                   AS contact_name,
+            GROUP_CONCAT(message_vcard.vcard, char(10)) AS vcard_text
+        FROM message_vcard
+        JOIN message ON message_vcard.message_row_id = message._id
+        JOIN chat    ON message.chat_row_id          = chat._id
+        LEFT JOIN jid ON jid._id = message.sender_jid_row_id
+        LEFT JOIN (
+            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+            FROM jid_map
+            GROUP BY lid_row_id
+        ) jid_map ON jid_map.lid_row_id = message.sender_jid_row_id
+        LEFT JOIN jid AS jid2 ON jid2._id = jid_map.jid_row_id
+        WHERE message.message_type IN (4, 14)
+          AND chat.subject IS NOT NULL
+          {since_clause}
+        GROUP BY message._id
+        {block_limit_clause}
+    )
+
+    UNION ALL
+
+    SELECT * FROM (
+        -- 1-to-1 chats
+        SELECT
+            message._id                         AS message_id,
+            message.timestamp                   AS timestamp_ms,
+            CAST(message.chat_row_id AS TEXT)   AS chat_row_id,
+            NULL                                AS chat_subject,
+            jid.user                            AS sender,
+            message.from_me                     AS key_from_me,
+            message.text_data                   AS contact_name,
+            GROUP_CONCAT(message_vcard.vcard, char(10)) AS vcard_text
+        FROM message_vcard
+        JOIN message ON message_vcard.message_row_id = message._id
+        JOIN chat    ON message.chat_row_id          = chat._id
+        LEFT JOIN jid ON jid._id = chat.jid_row_id
+        WHERE message.message_type IN (4, 14)
+          AND chat.subject IS NULL
+          {since_clause}
+        GROUP BY message._id
+        {block_limit_clause}
+    )
+)
+ORDER BY timestamp_ms ASC
+"""
+
+
+
 def _clean_phone_number(raw: str) -> str:
     """Strip formatting characters and return clean numeric string."""
     cleaned = re.sub(r"[\s\-\(\)\.\+]", "", raw)

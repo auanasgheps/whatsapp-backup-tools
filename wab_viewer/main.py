@@ -257,6 +257,7 @@ GALLERY_PAGE_SIZE = 100
 _MEDIA_TYPE_EXPR = """
     CASE
         WHEN {col} IS NULL THEN 'text'
+        WHEN LOWER({col}) LIKE '%.vcf' THEN 'vcard'
         WHEN LOWER({col}) LIKE '%sticker%' THEN 'sticker'
         WHEN LOWER({col}) LIKE '%.jpg'  OR LOWER({col}) LIKE '%.jpeg'
           OR LOWER({col}) LIKE '%.png'  OR LOWER({col}) LIKE '%.webp'
@@ -1164,6 +1165,8 @@ def _media_type_from_path(path: str) -> str:
     if path is None:
         return "text"
     p = path.lower()
+    if p.endswith(".vcf"):
+        return "vcard"
     if "sticker" in p or "stickers" in p:
         return "sticker"
     ext = os.path.splitext(p)[1]
@@ -1176,6 +1179,7 @@ def _media_type_from_path(path: str) -> str:
     if ext == ".gif":
         return "gif"
     return "document"
+
 
 
 def _open_cache_db(output_root: Path) -> sqlite3.Connection:
@@ -1301,7 +1305,7 @@ def _stream_fts_rows(
         is_media = (
             row["message_type"] is not None
             and row["message_type"] != 0
-            and row["media_file"] is not None
+            and (row["media_file"] is not None or row["message_type"] in (4, 14))
         )
         if not text_body and not is_media:
             continue
@@ -1434,6 +1438,10 @@ def _fts_ios_chat(
     on_progress,
     hd_clause: str,
 ):
+    mi_cols = {
+        row[1] for row in wa_conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()
+    }
+    vcard_name_col = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
     sql = f"""
         SELECT
             m.Z_PK                                                      AS rowid,
@@ -1441,7 +1449,7 @@ def _fts_ios_chat(
             CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
                  ELSE 'contact' END                                     AS chat_type,
             CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
-            COALESCE(m.ZTEXT, '')                                       AS text_body,
+            COALESCE(m.ZTEXT, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_col} END, '') AS text_body,
             m.ZMESSAGETYPE                                              AS message_type,
             mi.ZMEDIALOCALPATH                                          AS media_file
         FROM ZWAMESSAGE m
@@ -1453,6 +1461,7 @@ def _fts_ios_chat(
     """
     cursor = wa_conn.execute(sql, (chat_id,))
     _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
+
 
 
 def _build_fts_chat(
@@ -1612,6 +1621,7 @@ _ANDROID_FILTER = """
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
+        OR (m.message_type IN (4, 14))
         OR (m.message_type = 7)
     )
 """
@@ -1660,6 +1670,7 @@ _IOS_SELECT = f"""
         ac.archive_path,
         CASE
             WHEN m.ZMESSAGETYPE = 6 THEN 'service'
+            WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -1708,13 +1719,14 @@ _IOS_SELECT = f"""
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
     LEFT JOIN arch.archive_copies ac
-          ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
+          ON ac.original_path = COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)
 """
 
 _BASE_IOS_FILTER = """
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
         OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 6)
     )
 """
@@ -2519,6 +2531,12 @@ def create_app(output_root: Path, rescan: bool = False):
         )
         has_jid_server = "server" in _jid_cols
         has_jid_raw_string = "raw_string" in _jid_cols
+        _mi_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
+            if "ZWAMEDIAITEM" in _wa_tables
+            else set()
+        )
+        has_ios_vcard_name = "ZVCARDNAME" in _mi_cols
         _zwa_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
             if "ZWAMESSAGE" in _wa_tables
@@ -2528,6 +2546,7 @@ def create_app(output_root: Path, rescan: bool = False):
         _tmp_wa.close()
 
     if source_type == "ios":
+        vcard_name_ios = "mi.ZVCARDNAME" if has_ios_vcard_name else "NULL"
         group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
         has_ios_sort = "ZSORT" in _zwa_cols
         sort_col_ios = "COALESCE(m.ZSORT, m.Z_PK)" if has_ios_sort else "m.Z_PK"
@@ -2540,6 +2559,7 @@ def create_app(output_root: Path, rescan: bool = False):
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
         OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE = 4)
         {ios_service_filter}
     )
 """
@@ -2583,6 +2603,7 @@ def create_app(output_root: Path, rescan: bool = False):
         ac.archive_path,
         CASE
             WHEN m.ZMESSAGETYPE = 6 THEN 'service'
+            WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -2590,8 +2611,8 @@ def create_app(output_root: Path, rescan: bool = False):
                      THEN 'link' ELSE 'text' END
             ELSE {_MEDIA_TYPE_EXPR.format(col="('Message/' || COALESCE(mi.ZMEDIALOCALPATH,''))")}
         END                                                           AS media_type,
-        COALESCE(mi.ZTITLE, '')                                      AS media_name,
-        COALESCE(m.ZTEXT, '')                                        AS text_body,
+        COALESCE(mi.ZTITLE, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '') AS media_name,
+        COALESCE(m.ZTEXT, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '')   AS text_body,
         COALESCE(qm.ZTEXT, '')                                       AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
@@ -2631,7 +2652,7 @@ def create_app(output_root: Path, rescan: bool = False):
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
     LEFT JOIN arch.archive_copies ac
-          ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
+          ON ac.original_path = COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)
 """
 
     ms_join = (
@@ -2648,6 +2669,7 @@ def create_app(output_root: Path, rescan: bool = False):
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
+        OR (m.message_type IN (4, 14))
         OR (m.message_type = 7 AND {ms_action_clause})
     )
     """
@@ -2706,6 +2728,7 @@ def create_app(output_root: Path, rescan: bool = False):
         ac.archive_path,
         CASE
             WHEN m.message_type = 7 THEN 'service'
+            WHEN m.message_type IN (4, 14) THEN 'vcard'
             WHEN m.message_type IS NULL OR m.message_type = 0 THEN
                 CASE WHEN m.text_data IS NOT NULL
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
@@ -2713,7 +2736,7 @@ def create_app(output_root: Path, rescan: bool = False):
                      THEN 'link' ELSE 'text' END
             ELSE {_MEDIA_TYPE_EXPR.format(col="mm.file_path")}
         END                                                          AS media_type,
-        COALESCE(mm.media_name, '')                                  AS media_name,
+        COALESCE(mm.media_name, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
         COALESCE(m.text_data, '')                                    AS text_body,
         COALESCE(mq.text_data, '')                                   AS quoted_text,
         CASE WHEN mq.from_me = 1 THEN 'You'
@@ -2740,7 +2763,7 @@ def create_app(output_root: Path, rescan: bool = False):
     {ms_join}
     LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
     LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)
-    LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+    LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE(mm.file_path, 'vcard:' || m._id)
 """
 
     def get_archive():
@@ -2898,6 +2921,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     WHERE (msg.ZTEXT IS NOT NULL AND msg.ZTEXT != '' AND (msg.ZMESSAGETYPE IS NULL OR msg.ZMESSAGETYPE = 0))
                        OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE != 0 AND msg.ZMESSAGETYPE != 6
                            AND mi2.ZMEDIALOCALPATH IS NOT NULL)
+                       OR (msg.ZMESSAGETYPE = 4)
                        {ios_service_filter_last_real}
                     GROUP BY msg.ZCHATSESSION
                 ) last_real ON last_real.ZCHATSESSION = cs.Z_PK
@@ -3084,6 +3108,10 @@ def create_app(output_root: Path, rescan: bool = False):
                 else:
                     d["last_msg_preview"] = ""
                     d["last_msg_type"] = "text"
+            elif (source_type == "android" and raw_type in (4, 14)) or (
+                source_type == "ios" and raw_type == 4
+            ):
+                d["last_msg_type"] = "vcard"
             elif raw_type != 0 and media_path:
                 path = media_path if source_type == "android" else f"Message/{media_path}"
                 d["last_msg_type"] = _media_type_from_path(path)

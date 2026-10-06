@@ -259,6 +259,96 @@ SELECT * FROM (
 """
 
 
+def has_ios_vcard_support(cursor: sqlite3.Cursor) -> bool:
+    """Return True if ZWAMEDIAITEM table exists and has ZVCARDSTRING column."""
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "ZWAMEDIAITEM" not in tables:
+        return False
+    cols = {row[1] for row in cursor.execute("PRAGMA table_info(ZWAMEDIAITEM)")}
+    return "ZVCARDSTRING" in cols
+
+
+def build_ios_vcard_query(limit: int | None, since_ms: int | None) -> str:
+    """
+    Build query to extract vCard contacts from iOS ChatStorage.sqlite.
+    Returns:
+        message_id   — ZWAMESSAGE.Z_PK
+        timestamp_ms — Unix epoch ms
+        chat_row_id  — CAST(cs.Z_PK AS TEXT)
+        chat_subject — cs.ZPARTNERNAME for groups, NULL for 1-to-1
+        sender       — phone number stripped from JID
+        key_from_me  — m.ZISFROMME
+        contact_name — mi.ZVCARDNAME
+        vcard_text   — mi.ZVCARDSTRING
+    """
+    block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
+    if since_ms is not None:
+        ios_since = (since_ms / 1000.0) - APPLE_EPOCH_OFFSET
+        since_clause = f"AND m.ZMESSAGEDATE >= {ios_since}"
+    else:
+        since_clause = ""
+
+    return f"""
+SELECT * FROM (
+    SELECT * FROM (
+        -- Group chats
+        SELECT
+            m.Z_PK                                                         AS message_id,
+            CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+            CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
+            cs.ZPARTNERNAME                                                AS chat_subject,
+            CASE
+                 WHEN gm.ZMEMBERJID IS NOT NULL AND INSTR(gm.ZMEMBERJID, '@') > 0
+                 THEN SUBSTR(gm.ZMEMBERJID, 1, INSTR(gm.ZMEMBERJID, '@') - 1)
+                 WHEN gm.ZMEMBERJID IS NOT NULL
+                 THEN gm.ZMEMBERJID
+                 ELSE m.ZPUSHNAME END                                      AS sender,
+            m.ZISFROMME                                                    AS key_from_me,
+            mi.ZVCARDNAME                                                  AS contact_name,
+            mi.ZVCARDSTRING                                                AS vcard_text
+        FROM ZWAMESSAGE m
+        JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+        JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
+        LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+        WHERE m.ZMESSAGETYPE = 4
+          AND cs.ZGROUPINFO IS NOT NULL
+          AND mi.ZVCARDSTRING IS NOT NULL AND mi.ZVCARDSTRING != ''
+          {since_clause}
+        {block_limit_clause}
+    )
+
+    UNION ALL
+
+    SELECT * FROM (
+        -- 1-to-1 chats
+        SELECT
+            m.Z_PK                                                         AS message_id,
+            CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+            CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
+            NULL                                                           AS chat_subject,
+            CASE
+                 WHEN cs.ZCONTACTJID IS NOT NULL AND INSTR(cs.ZCONTACTJID, '@') > 0
+                 THEN SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1)
+                 WHEN cs.ZCONTACTJID IS NOT NULL
+                 THEN cs.ZCONTACTJID
+                 ELSE m.ZPUSHNAME END                                      AS sender,
+            m.ZISFROMME                                                    AS key_from_me,
+            mi.ZVCARDNAME                                                  AS contact_name,
+            mi.ZVCARDSTRING                                                AS vcard_text
+        FROM ZWAMESSAGE m
+        JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+        JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
+        WHERE m.ZMESSAGETYPE = 4
+          AND cs.ZGROUPINFO IS NULL
+          AND mi.ZVCARDSTRING IS NOT NULL AND mi.ZVCARDSTRING != ''
+          {since_clause}
+        {block_limit_clause}
+    )
+)
+ORDER BY timestamp_ms ASC
+"""
+
+
 def build_ios_number_map(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, str]:
     """
     Build a map of old_number -> new_number for contacts that changed their

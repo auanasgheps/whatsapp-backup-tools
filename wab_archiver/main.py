@@ -580,6 +580,172 @@ def process_rows(
     return stats, updated_index, updated_group_index, missing_rows
 
 
+def resolve_unique_vcard_dest(
+    dest_path: str, vcard_hash: bytes, logger: logging.Logger
+) -> str | None:
+    """Determine whether to write, skip, or rename for an in-memory vCard payload."""
+    if not os.path.exists(dest_path):
+        return dest_path
+
+    dst_hash = file_md5(dest_path)
+    if vcard_hash == dst_hash:
+        logger.debug(f"SKIP (identical already exists): {dest_path}")
+        return None
+
+    logger.warning(f"COLLISION (same name, different content): {dest_path}")
+    base, ext = os.path.splitext(dest_path)
+    counter = 1
+    while True:
+        candidate = f"{base}_{counter}{ext}"
+        if not os.path.exists(candidate):
+            logger.warning(f"  -> Renamed to: {candidate}")
+            return candidate
+        counter += 1
+
+
+def process_vcard_rows(
+    rows: list,
+    contacts: dict,
+    number_map: dict,
+    folder_index: dict,
+    group_index: dict,
+    output_root: str,
+    logger: logging.Logger,
+    dry_run: bool,
+    conn: sqlite3.Connection | None,
+    tz,
+) -> tuple[dict, dict, dict]:
+    """
+    Extract vCard contacts to .vcf files in the archive output folder as regular media.
+    Routes to Groups/<Group>/<Year>/<Filename> or Contacts/<Contact>/<Year>/<Sent|Received>/<Filename>.
+    Tracks files in files and archive_copies tables in .wa_media_archiver.db.
+    """
+    stats = {"copied": 0, "skipped": 0, "warnings": 0}
+    updated_index = dict(folder_index)
+    updated_group_index = dict(group_index)
+    cursor = conn.cursor() if conn is not None else None
+
+    progress = ProgressReporter("Contacts", len(rows), logger, sys.stderr, 0.2)
+
+    for i, row in enumerate(rows, 1):
+        if isinstance(row, dict):
+            msg_id = row["message_id"]
+            timestamp_ms = int(row["timestamp_ms"])
+            chat_row_id = row["chat_row_id"]
+            chat_subject = row["chat_subject"]
+            sender = row["sender"]
+            key_from_me = row["key_from_me"]
+            contact_name = row["contact_name"]
+            vcard_text = row["vcard_text"]
+        else:
+            (
+                msg_id,
+                timestamp_ms,
+                chat_row_id,
+                chat_subject,
+                sender,
+                key_from_me,
+                contact_name,
+                vcard_text,
+            ) = row
+            timestamp_ms = int(timestamp_ms)
+
+        if not vcard_text or not vcard_text.strip():
+            stats["skipped"] += 1
+            progress.update(i, stats)
+            continue
+
+        is_group = chat_subject is not None
+        disp_name = db.resolve_vcard_display_name(contact_name, vcard_text)
+        filename = db.sanitize_filename(disp_name) + ".vcf"
+
+        year = get_year(timestamp_ms, tz)
+
+        if is_group:
+            dest_dir, dest_filename = _route_group(
+                chat_row_id,
+                chat_subject,
+                sender,
+                key_from_me,
+                contacts,
+                number_map,
+                filename,
+                year,
+                output_root,
+                updated_group_index,
+            )
+        else:
+            dest_dir, dest_filename = _route_contact(
+                sender,
+                key_from_me,
+                contacts,
+                number_map,
+                filename,
+                year,
+                output_root,
+                updated_index,
+            )
+
+        dest_path = os.path.join(dest_dir, dest_filename)
+        vcard_bytes = vcard_text.strip().encode("utf-8") + b"\r\n"
+        vcard_hash = hashing.bytes_md5(vcard_bytes)
+        vcard_size = len(vcard_bytes)
+        virtual_orig_path = f"vcard:{msg_id}"
+
+        if dry_run:
+            resolved = resolve_unique_vcard_dest(dest_path, vcard_hash, logger)
+            if resolved is None:
+                stats["skipped"] += 1
+            else:
+                logger.info(f"[DRY RUN] Would write vcard: {resolved}")
+                stats["copied"] += 1
+            progress.update(i, stats)
+            continue
+
+        if os.path.exists(dest_path):
+            resolved = resolve_unique_vcard_dest(dest_path, vcard_hash, logger)
+            if resolved is None:
+                if cursor is not None:
+                    rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
+                    archive_db.record_file_archived(
+                        cursor, virtual_orig_path, vcard_hash, rel, vcard_size
+                    )
+                stats["skipped"] += 1
+                progress.update(i, stats)
+                continue
+        else:
+            resolved = dest_path
+
+        os.makedirs(dest_dir, exist_ok=True)
+        try:
+            with open(resolved, "wb") as f:
+                f.write(vcard_bytes)
+        except OSError as e:
+            logger.error(f"ERROR writing vCard {resolved}: {e}")
+            stats["warnings"] += 1
+            progress.update(i, stats)
+            continue
+
+        if timestamp_ms is not None:
+            try:
+                set_file_times(resolved, timestamp_ms)
+            except OSError as e:
+                logger.debug(f"Could not set timestamps on {resolved}: {e}")
+
+        logger.debug(f"SAVED VCARD: {resolved}")
+        if cursor is not None:
+            rel = os.path.relpath(resolved, output_root).replace(os.sep, "/")
+            archive_db.record_file_archived(
+                cursor, virtual_orig_path, vcard_hash, rel, vcard_size
+            )
+        stats["copied"] += 1
+        progress.update(i, stats)
+
+    progress.finish(stats)
+    return stats, updated_index, updated_group_index
+
+
+
 # ---------------------------------------------------------------------------
 # Restore mode
 # ---------------------------------------------------------------------------
@@ -1623,6 +1789,11 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
 
             query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup)
+            vcard_query = (
+                ios_handler.build_ios_vcard_query(args.limit, since_ms)
+                if ios_handler.has_ios_vcard_support(cursor)
+                else None
+            )
             group_subjects = dict(
                 cursor.execute(ios_handler.build_ios_group_subjects_query()).fetchall()
             )
@@ -1634,6 +1805,11 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
             hd_dedup = android_handler._check_hd_association(cursor, logger)
             query = android_handler.build_query(args.limit, since_ms, hd_dedup)
+            vcard_query = (
+                android_handler.build_vcard_query(args.limit, since_ms)
+                if android_handler.has_vcard_support(cursor)
+                else None
+            )
             group_subjects = dict(
                 cursor.execute(android_handler.build_group_subjects_query()).fetchall()
             )
@@ -1687,6 +1863,27 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 conn=archive_conn if not args.dry_run else None,
                 tz=tz,
             )
+
+            if vcard_query:
+                vcard_rows = cursor.execute(vcard_query).fetchall()
+                if vcard_rows:
+                    logger.info(f"Processing {len(vcard_rows)} contact card(s)...")
+                    v_stats, updated_index, updated_group_index = process_vcard_rows(
+                        vcard_rows,
+                        contacts,
+                        number_map,
+                        updated_index,
+                        updated_group_index,
+                        args.output,
+                        logger,
+                        args.dry_run,
+                        conn=archive_conn if not args.dry_run else None,
+                        tz=tz,
+                    )
+                    stats["copied"] += v_stats["copied"]
+                    stats["skipped"] += v_stats["skipped"]
+                    stats["warnings"] += v_stats["warnings"]
+
 
             if not args.dry_run:
                 archive_conn.commit()

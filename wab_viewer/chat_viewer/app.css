@@ -489,6 +489,78 @@
     .doc-link { display: flex; align-items: center; gap: 8px; padding: 4px; font-size: 13px; text-decoration: none; }
     .doc-link .doc-icon { font-size: 20px; }
 
+    /* ---- vcard contact card ---- */
+    .msg-media.vcard {
+      width: 260px;
+      max-width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-sizing: border-box;
+    }
+    .vcard-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .vcard-avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: var(--bubble-in);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 22px;
+      user-select: none;
+    }
+    .vcard-details {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+      flex: 1;
+    }
+    .vcard-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .vcard-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .vcard-download {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 500;
+      text-decoration: none;
+      transition: background 0.15s ease;
+    }
+    .vcard-download:hover {
+      background: var(--bubble-in);
+    }
+
     /* ---- empty / loading states ---- */
     #empty-pane {
       flex: 1; display: flex;
