@@ -1398,6 +1398,15 @@
   const videoProbeQueue = [];
   let galleryMediaObserver = null;
   let archiveMediaObserver = null;
+  let archiveViewActive = false;
+  let currentGalleryItems = [];
+  let activeTypes = new Set();   // empty = show all; populated = show only those types
+  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
+  const SECONDARY_TYPES = new Set(['link', 'document', 'vcard']);  // hidden by default, toggle exclusive
+  let galleryAllLoaded = false;
+  let galleryLoadingMore = false;
+  let gallerySentinel = null;
+  let galleryObserver = null;
 
   function teardownMediaObservers() {
     if (galleryMediaObserver) {
@@ -1440,11 +1449,67 @@
   let galleryIsScrolling = false;
   let galleryScrollIdleTimer = null;
 
+  function _checkGalleryLoadMore() {
+    if (archiveViewActive || galleryAllLoaded || galleryLoadingMore) return;
+    const grid = document.getElementById('media-gallery-grid');
+    if (!grid) return;
+
+    const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
+    if (!mediaTypesActive) return;
+
+    const oldestMedia = currentGalleryItems[currentGalleryItems.length - 1];
+    if (!oldestMedia) return;
+
+    const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestMedia.timestamp_ms}"]`);
+    if (oldestCell) {
+      const cellRect = oldestCell.getBoundingClientRect();
+      const gridRect = grid.getBoundingClientRect();
+      if (cellRect.top <= gridRect.bottom + 800) {
+        _loadGalleryPage(oldestMedia.timestamp_ms);
+      }
+    } else {
+      _loadGalleryPage(oldestMedia.timestamp_ms);
+    }
+  }
+
+  async function _ensureMediaLoadedForViewport() {
+    if (archiveViewActive) return;
+    const grid = document.getElementById('media-gallery-grid');
+    if (!grid) return;
+    const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
+    if (!mediaTypesActive) return;
+
+    let attempts = 0;
+    while (!galleryAllLoaded && attempts < 20) {
+      attempts++;
+      if (galleryLoadingMore) {
+        await new Promise(r => setTimeout(r, 50));
+        continue;
+      }
+      const oldestMedia = currentGalleryItems[currentGalleryItems.length - 1];
+      if (!oldestMedia) break;
+      const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestMedia.timestamp_ms}"]`);
+      if (oldestCell) {
+        const cellRect = oldestCell.getBoundingClientRect();
+        const gridRect = grid.getBoundingClientRect();
+        if (cellRect.top <= gridRect.bottom + 600) {
+          await _loadGalleryPage(oldestMedia.timestamp_ms);
+          continue;
+        }
+      } else {
+        await _loadGalleryPage(oldestMedia.timestamp_ms);
+        continue;
+      }
+      break;
+    }
+  }
+
   function onGalleryScroll() {
     galleryIsScrolling = true;
     clearTimeout(galleryScrollIdleTimer);
     // Pause queued tasks while user is actively scrolling
     videoProbeQueue.length = 0;
+    _checkGalleryLoadMore();
     galleryScrollIdleTimer = setTimeout(() => {
       galleryIsScrolling = false;
       scheduleVisibleVideoExtraction();
@@ -1938,16 +2003,6 @@
     }
   });
 
-  let archiveViewActive = false;
-  let currentGalleryItems = [];
-  let activeTypes = new Set();   // empty = show all; populated = show only those types
-  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
-  const SECONDARY_TYPES = new Set(['link', 'document', 'vcard']);  // hidden by default, toggle exclusive
-  let galleryAllLoaded = false;
-  let galleryLoadingMore = false;
-  let gallerySentinel = null;
-  let galleryObserver = null;
-
   function _nextLightboxIndex(from, dir) {
     let i = from + dir;
     while (i >= 0 && i < lightboxItems.length) {
@@ -2000,6 +2055,7 @@
     _applyTypeFilter();
     _syncStatPills();
     scheduleVisibleVideoExtraction();
+    _ensureMediaLoadedForViewport();
   }
 
   function _applyTypeFilter() {

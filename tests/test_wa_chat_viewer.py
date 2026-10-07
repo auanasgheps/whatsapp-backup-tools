@@ -1174,6 +1174,52 @@ class TestApiMedia:
         # /api/media still returns the image
         assert any(r["media_type"] == "image" for r in media)
 
+    def test_media_types_parameter_filtering(self, tmp_path):
+        """/api/media supports types parameter for server-side filtering and combined streams."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+        seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (51, 10, 1, 1700000051000, 'see http://example.org/thing', NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (52, 10, 0, 1, 1700000052000, NULL, 6)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (52, NULL, 'contract.pdf')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            links = client.get("/api/media?chat_id=123456789&chat_type=contact&types=link").get_json()
+            assert len(links) == 1
+            assert links[0]["media_type"] == "link"
+
+            images = client.get("/api/media?chat_id=123456789&chat_type=contact&types=image").get_json()
+            assert len(images) == 1
+            assert images[0]["media_type"] == "image"
+
+            mixed = client.get("/api/media?chat_id=123456789&chat_type=contact&types=image,link").get_json()
+            assert len(mixed) == 2
+            assert [r["media_type"] for r in mixed] == ["link", "image"]
+
+            all_items = client.get("/api/media?chat_id=123456789&chat_type=contact&types=all").get_json()
+            assert len(all_items) == 3
+            assert {r["media_type"] for r in all_items} == {"image", "link", "document"}
+
+            paged = client.get(f"/api/media?chat_id=123456789&chat_type=contact&types=all&before={mixed[0]['timestamp_ms']}").get_json()
+            assert all(r["timestamp_ms"] < mixed[0]["timestamp_ms"] for r in paged)
+
+
     def test_media_documents_endpoint_returns_undownloaded_docs(self, tmp_path):
         """Documents with no file_path but a media_name are returned by /api/media/documents."""
         wa_path = tmp_path / "msgstore.db"
