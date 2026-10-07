@@ -59,6 +59,8 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
             reactions      TEXT,
+            is_edited      INTEGER NOT NULL DEFAULT 0,
+            edited_ts      INTEGER,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -2603,6 +2605,8 @@ class TestRecentMessagesSchema:
             "quoted_text",
             "quoted_sender",
             "quoted_ts",
+            "is_edited",
+            "edited_ts",
         }
         assert expected.issubset(cols), f"Missing columns: {expected - cols}"
 
@@ -2787,6 +2791,8 @@ class TestRecentMessagesRouting:
             "quoted_sender",
             "quoted_ts",
             "reactions",
+            "is_edited",
+            "edited_ts",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -6704,4 +6710,220 @@ class TestVcardViewer:
             chats = chats_resp.get_json()
             assert len(chats) == 1
             assert chats[0]["last_msg_type"] == "vcard"
+
+
+class TestEditedMessages:
+    def test_android_messages_with_message_edit_info(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("""
+            CREATE TABLE message_edit_info (
+                message_row_id INTEGER PRIMARY KEY,
+                original_key_id TEXT,
+                edited_timestamp INTEGER,
+                sender_timestamp INTEGER
+            );
+        """)
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '12345678')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id) VALUES (1, 1)")
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (101, 1, 0, 1700000000000, 'Original text', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (102, 1, 1, 1700000010000, 'Edited text', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp)
+            VALUES (102, 'orig-key-102', 1700000025000, 1700000025000)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=12345678&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert msgs[101]["is_edited"] == 0
+            assert msgs[101]["edited_ts"] is None
+            assert msgs[102]["is_edited"] == 1
+            assert msgs[102]["edited_ts"] == 1700000025000
+
+    def test_android_messages_fallback_message_add_on(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("""
+            CREATE TABLE message_add_on (
+                _id INTEGER PRIMARY KEY,
+                parent_message_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                timestamp INTEGER,
+                message_add_on_type INTEGER
+            );
+        """)
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '12345678')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id) VALUES (1, 1)")
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (201, 1, 0, 1700000000000, 'Regular message', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (202, 1, 1, 1700000010000, 'Add-on edited message', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_add_on (_id, parent_message_row_id, from_me, timestamp, message_add_on_type)
+            VALUES (1, 202, 1, 1700000030000, 74)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=12345678&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert msgs[201]["is_edited"] == 0
+            assert msgs[201]["edited_ts"] is None
+            assert msgs[202]["is_edited"] == 1
+            assert msgs[202]["edited_ts"] == 1700000030000
+
+    def test_recent_messages_cache_preserves_edit_info(self, tmp_path):
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.close()
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("""
+            INSERT INTO recent_messages
+            (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body, is_edited, edited_ts)
+            VALUES ('12345678', 'contact', 301, 1700000000000, 'Alice', 0, NULL, 'text', '', 'Cached edit', 1, 1700000045000)
+        """)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=12345678&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["msg_id"] == 301
+            assert msgs[0]["is_edited"] == 1
+            assert msgs[0]["edited_ts"] == 1700000045000
+
+    def test_ios_messages_edit_defaults(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = sqlite3.connect(str(wa_path))
+        archive_conn = make_archive_db(archive_path)
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZVCARDNAME TEXT,
+                ZVCARDSTRING TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZFROMJID TEXT,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+        """)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Partner')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT) VALUES (1, 1, 0, 700000000.0, 0, 'iOS message')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["is_edited"] == 0
+            assert msgs[0]["edited_ts"] is None
+
+    def test_messages_at_endpoint_includes_edited(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("""
+            CREATE TABLE message_edit_info (
+                message_row_id INTEGER PRIMARY KEY,
+                original_key_id TEXT,
+                edited_timestamp INTEGER,
+                sender_timestamp INTEGER
+            );
+        """)
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '99999999')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id) VALUES (1, 1)")
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (401, 1, 0, 1700000000000, 'Original message', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp)
+            VALUES (401, 'key-401', 1700000005000, 1700000005000)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages/at?chat_id=99999999&chat_type=contact&ts=1700000000000")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["is_edited"] == 1
+            assert msgs[0]["edited_ts"] == 1700000005000
+
+    def test_frontend_assets_include_msg_edited(self):
+        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        css_path = Path(viewer.__file__).parent / "chat_viewer" / "app.css"
+        js_content = js_path.read_text(encoding="utf-8")
+        css_content = css_path.read_text(encoding="utf-8")
+        assert "msg-edited" in js_content
+        assert "msg-edited" in css_content
 

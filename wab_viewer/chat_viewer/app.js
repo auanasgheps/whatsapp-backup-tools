@@ -880,6 +880,17 @@
         badge.textContent = 'You';
         meta.appendChild(badge);
       }
+      const isGroupEdited = unit.members.some(m => m.is_edited);
+      if (isGroupEdited) {
+        const editedSpan = document.createElement('span');
+        editedSpan.className = 'msg-edited';
+        editedSpan.textContent = 'Edited';
+        const editedTs = unit.members.find(m => m.edited_ts)?.edited_ts;
+        if (editedTs) {
+          editedSpan.title = 'Edited: ' + fmtTime(editedTs);
+        }
+        meta.appendChild(editedSpan);
+      }
       meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
       bubble.appendChild(meta);
 
@@ -955,6 +966,15 @@
         showMsgDetails(msg.from_me ? msg.msg_id : null, infoBtn, msg.archive_path || null);
       });
       meta.appendChild(infoBtn);
+    }
+    if (msg.is_edited) {
+      const editedSpan = document.createElement('span');
+      editedSpan.className = 'msg-edited';
+      editedSpan.textContent = 'Edited';
+      if (msg.edited_ts) {
+        editedSpan.title = 'Edited: ' + fmtTime(msg.edited_ts);
+      }
+      meta.appendChild(editedSpan);
     }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
     if (msg.media_type === 'text' || !msg.archive_path) {
