@@ -28,7 +28,7 @@ import webbrowser
 from pathlib import Path
 
 try:
-    from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory
+    from flask import Flask, Response, jsonify, make_response, render_template_string, request, send_from_directory
 except ImportError:
     sys.exit("Flask is not installed. Run: pip install flask")
 
@@ -5071,11 +5071,15 @@ def create_app(output_root: Path, rescan: bool = False):
 
     @app.route("/static/app.css")
     def serve_app_css():
-        return send_from_directory(_CHAT_VIEWER_DIR, "app.css")
+        resp = make_response(send_from_directory(_CHAT_VIEWER_DIR, "app.css"))
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
 
     @app.route("/static/app.js")
     def serve_app_js():
-        return send_from_directory(_CHAT_VIEWER_DIR, "app.js")
+        resp = make_response(send_from_directory(_CHAT_VIEWER_DIR, "app.js"))
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
 
     @app.route("/static/favicon.svg")
     @app.route("/favicon.ico")

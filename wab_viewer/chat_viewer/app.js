@@ -1449,6 +1449,60 @@
   let galleryIsScrolling = false;
   let galleryScrollIdleTimer = null;
 
+  function _findAnchorGalleryElement(grid) {
+    if (!grid) return null;
+    const gRect = grid.getBoundingClientRect();
+    const children = [...grid.children];
+    for (const el of children) {
+      if (el.classList.contains('gallery-month-header') ||
+          (el.classList.contains('gallery-item') && !el.classList.contains('type-hidden'))) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom >= gRect.top && r.top <= gRect.bottom) {
+          return el;
+        }
+      }
+    }
+    return null;
+  }
+
+  function _getMinVisibleGalleryTimestamp(grid) {
+    if (!grid) return Infinity;
+    const gRect = grid.getBoundingClientRect();
+    let minTs = Infinity;
+    const children = [...grid.children];
+    for (const el of children) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom >= gRect.top && r.top <= gRect.bottom + 600) {
+        if (el.dataset.ts) {
+          const ts = parseInt(el.dataset.ts, 10);
+          if (!isNaN(ts) && ts < minTs) minTs = ts;
+        } else if (el.dataset.month) {
+          const mk = parseInt(el.dataset.month, 10);
+          if (!isNaN(mk)) {
+            const y = Math.floor(mk / 100);
+            const m = mk % 100;
+            const monthStartTs = new Date(y, m - 1, 1).getTime();
+            if (monthStartTs < minTs) minTs = monthStartTs;
+          }
+        }
+      }
+    }
+    return minTs;
+  }
+
+  function _hydrateVisibleGalleryItems() {
+    const grid = document.getElementById('media-gallery-grid');
+    if (!grid) return;
+    const gRect = grid.getBoundingClientRect();
+    const cells = grid.querySelectorAll('.gallery-item[data-hydrated="false"]:not(.type-hidden)');
+    for (const cell of cells) {
+      const r = cell.getBoundingClientRect();
+      if (r.bottom >= gRect.top - 200 && r.top <= gRect.bottom + 600) {
+        hydrateGalleryItem(cell);
+      }
+    }
+  }
+
   function _checkGalleryLoadMore() {
     if (archiveViewActive || galleryAllLoaded || galleryLoadingMore) return;
     const grid = document.getElementById('media-gallery-grid');
@@ -1479,29 +1533,51 @@
     const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
     if (!mediaTypesActive) return;
 
+    const anchorEl = _findAnchorGalleryElement(grid);
+    const anchorTopBefore = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
+
     let attempts = 0;
-    while (!galleryAllLoaded && attempts < 20) {
+    while (!galleryAllLoaded && attempts < 30) {
       attempts++;
       if (galleryLoadingMore) {
-        await new Promise(r => setTimeout(r, 50));
+        await new Promise(r => setTimeout(r, 40));
         continue;
       }
       const oldestMedia = currentGalleryItems[currentGalleryItems.length - 1];
       if (!oldestMedia) break;
+
+      const minVisibleTs = _getMinVisibleGalleryTimestamp(grid);
       const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestMedia.timestamp_ms}"]`);
-      if (oldestCell) {
+
+      let needsMore = false;
+      if (minVisibleTs !== Infinity && oldestMedia.timestamp_ms > minVisibleTs) {
+        needsMore = true;
+      } else if (oldestCell) {
         const cellRect = oldestCell.getBoundingClientRect();
         const gridRect = grid.getBoundingClientRect();
         if (cellRect.top <= gridRect.bottom + 600) {
-          await _loadGalleryPage(oldestMedia.timestamp_ms);
-          continue;
+          needsMore = true;
         }
       } else {
+        needsMore = true;
+      }
+
+      if (needsMore) {
         await _loadGalleryPage(oldestMedia.timestamp_ms);
         continue;
       }
       break;
     }
+
+    if (anchorEl && anchorEl.isConnected) {
+      const anchorTopAfter = anchorEl.getBoundingClientRect().top;
+      const delta = anchorTopAfter - anchorTopBefore;
+      if (Math.abs(delta) > 1) {
+        grid.scrollTop += delta;
+      }
+    }
+
+    _hydrateVisibleGalleryItems();
   }
 
   function onGalleryScroll() {
@@ -2089,8 +2165,12 @@
       }
     });
     _syncMonthHeaders();
+    _hydrateVisibleGalleryItems();
     if (animating) {
-      setTimeout(() => _syncMonthHeaders(), 250);
+      setTimeout(() => {
+        _syncMonthHeaders();
+        _hydrateVisibleGalleryItems();
+      }, 250);
     }
   }
 
