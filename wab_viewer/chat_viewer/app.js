@@ -1405,6 +1405,7 @@
   const SECONDARY_TYPES = new Set(['link', 'document', 'vcard']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
   let galleryLoadingMore = false;
+  let galleryBackfillGen = 0;
   let gallerySentinel = null;
   let galleryObserver = null;
 
@@ -1454,7 +1455,7 @@
     const gRect = grid.getBoundingClientRect();
     const children = [...grid.children];
     for (const el of children) {
-      if (el.classList.contains('gallery-month-header') ||
+      if ((el.classList.contains('gallery-month-header') && !el.classList.contains('month-empty')) ||
           (el.classList.contains('gallery-item') && !el.classList.contains('type-hidden'))) {
         const r = el.getBoundingClientRect();
         if (r.bottom >= gRect.top && r.top <= gRect.bottom) {
@@ -1471,6 +1472,7 @@
     let minTs = Infinity;
     const children = [...grid.children];
     for (const el of children) {
+      if (el.classList.contains('type-hidden') || el.classList.contains('month-empty')) continue;
       const r = el.getBoundingClientRect();
       if (r.bottom >= gRect.top && r.top <= gRect.bottom + 600) {
         if (el.dataset.ts) {
@@ -1526,18 +1528,18 @@
     }
   }
 
-  async function _ensureMediaLoadedForViewport() {
-    if (archiveViewActive) return;
+  async function _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen) {
+    if (archiveViewActive || gen !== galleryBackfillGen) return;
     const grid = document.getElementById('media-gallery-grid');
     if (!grid) return;
     const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
     if (!mediaTypesActive) return;
 
-    const anchorEl = _findAnchorGalleryElement(grid);
-    const anchorTopBefore = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
+    const targetMonth = targetTs !== Infinity ? monthKey(targetTs) : null;
 
     let attempts = 0;
-    while (!galleryAllLoaded && attempts < 30) {
+    while (!galleryAllLoaded && attempts < 50) {
+      if (gen !== galleryBackfillGen) return;
       attempts++;
       if (galleryLoadingMore) {
         await new Promise(r => setTimeout(r, 40));
@@ -1546,13 +1548,12 @@
       const oldestMedia = currentGalleryItems[currentGalleryItems.length - 1];
       if (!oldestMedia) break;
 
-      const minVisibleTs = _getMinVisibleGalleryTimestamp(grid);
       const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestMedia.timestamp_ms}"]`);
 
       let needsMore = false;
-      if (minVisibleTs !== Infinity && oldestMedia.timestamp_ms > minVisibleTs) {
+      if (targetTs !== Infinity && oldestMedia.timestamp_ms > targetTs) {
         needsMore = true;
-      } else if (oldestCell) {
+      } else if (oldestCell && !oldestCell.classList.contains('type-hidden')) {
         const cellRect = oldestCell.getBoundingClientRect();
         const gridRect = grid.getBoundingClientRect();
         if (cellRect.top <= gridRect.bottom + 600) {
@@ -1564,16 +1565,30 @@
 
       if (needsMore) {
         await _loadGalleryPage(oldestMedia.timestamp_ms);
+        if (gen !== galleryBackfillGen) return;
+        if (anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
+          const delta = anchorEl.getBoundingClientRect().top - anchorTopBefore;
+          if (Math.abs(delta) > 1) {
+            grid.scrollTop += delta;
+          }
+        }
         continue;
       }
       break;
     }
 
-    if (anchorEl && anchorEl.isConnected) {
+    if (gen !== galleryBackfillGen) return;
+
+    if (anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
       const anchorTopAfter = anchorEl.getBoundingClientRect().top;
       const delta = anchorTopAfter - anchorTopBefore;
       if (Math.abs(delta) > 1) {
         grid.scrollTop += delta;
+      }
+    } else if (targetMonth) {
+      const monthHdr = grid.querySelector(`.gallery-month-header[data-month="${targetMonth}"]`);
+      if (monthHdr && !monthHdr.classList.contains('month-empty')) {
+        monthHdr.scrollIntoView({ behavior: 'instant', block: 'start' });
       }
     }
 
@@ -1785,6 +1800,7 @@
   function closeMediaGallery() {
     archiveViewActive = false;
     archiveLoadingAll = false;
+    galleryBackfillGen++;
     document.getElementById('media-gallery').classList.remove('open');
     if (galleryObserver) { galleryObserver.disconnect(); galleryObserver = null; }
     if (gallerySentinel) { gallerySentinel.remove(); gallerySentinel = null; }
@@ -1942,6 +1958,7 @@
     // reset to classic view each time
     archiveViewActive = false;
     archiveLoadingAll = false;
+    galleryBackfillGen++;
     switcher.style.display = 'flex';
     document.getElementById('media-archive-tabs').style.display =
       currentChat.type === 'contact' ? 'flex' : 'none';
@@ -2103,6 +2120,11 @@
   }
 
   function _toggleTypeFilter(type) {
+    const grid = document.getElementById('media-gallery-grid');
+    const targetTs = grid ? _getMinVisibleGalleryTimestamp(grid) : Infinity;
+    const anchorEl = grid ? _findAnchorGalleryElement(grid) : null;
+    const anchorTopBefore = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
+
     if (type === null) {
       // Total: toggle between show-all and the default media-only state
       if (activeTypes.size === 0) {
@@ -2129,9 +2151,16 @@
       activeTypes.add(type);
     }
     _applyTypeFilter();
+    if (grid && anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
+      const delta = anchorEl.getBoundingClientRect().top - anchorTopBefore;
+      if (Math.abs(delta) > 1) {
+        grid.scrollTop += delta;
+      }
+    }
     _syncStatPills();
     scheduleVisibleVideoExtraction();
-    _ensureMediaLoadedForViewport();
+    const gen = ++galleryBackfillGen;
+    _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen);
   }
 
   function _applyTypeFilter() {
