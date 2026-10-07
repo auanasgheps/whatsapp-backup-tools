@@ -1132,8 +1132,9 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
         INSERT OR REPLACE INTO recent_messages
             (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
              archive_path, media_type, media_name, text_body,
-             quoted_text, quoted_sender, quoted_ts, reactions)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             quoted_text, quoted_sender, quoted_ts, reactions,
+             is_edited, edited_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     keys = rows[0].keys()
     archive_conn.executemany(
@@ -1154,6 +1155,8 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
                 r["quoted_sender"] if "quoted_sender" in keys else None,
                 r["quoted_ts"] if "quoted_ts" in keys else None,
                 r["reactions"] if "reactions" in keys else None,
+                r["is_edited"] if "is_edited" in keys else 0,
+                r["edited_ts"] if "edited_ts" in keys else None,
             )
             for r in rows
         ],
@@ -1694,6 +1697,8 @@ _IOS_SELECT = f"""
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
         NULL                                                          AS reactions,
+        0                                                            AS is_edited,
+        NULL                                                          AS edited_ts,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         0                                                            AS group_event_type,
         gm.ZMEMBERJID                                                AS member_jid
@@ -2486,6 +2491,8 @@ def create_app(output_root: Path, rescan: bool = False):
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
             reactions      TEXT,
+            is_edited      INTEGER NOT NULL DEFAULT 0,
+            edited_ts      INTEGER,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -2501,6 +2508,10 @@ def create_app(output_root: Path, rescan: bool = False):
     cols = [r[1] for r in _archive_conn.execute("PRAGMA table_info(recent_messages)").fetchall()]
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
+    if "is_edited" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")
+    if "edited_ts" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN edited_ts INTEGER")
 
     _run_db_maintenance(cache_conn, _archive_conn)
 
@@ -2513,17 +2524,40 @@ def create_app(output_root: Path, rescan: bool = False):
     has_ios_group_event = False
     has_jid_server = False
     has_jid_raw_string = False
+    has_android_edit_info = False
+    has_android_add_on = False
+    has_mei_ts = False
+    has_mao_ts = False
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
         _wa_tables = {
             r[0]
             for r in _tmp_wa.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
-        has_reactions = "message_add_on" in _wa_tables
+        has_reactions = "message_add_on" in _wa_tables and "message_add_on_reaction" in _wa_tables
         has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
         has_lid_dn = "lid_display_name" in _wa_tables
         has_message_system = "message_system" in _wa_tables
         has_mcp = "message_system_chat_participant" in _wa_tables
+        _mei_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_edit_info)").fetchall()}
+            if "message_edit_info" in _wa_tables
+            else set()
+        )
+        has_android_edit_info = "message_edit_info" in _wa_tables and "message_row_id" in _mei_cols
+        has_mei_ts = "edited_timestamp" in _mei_cols
+
+        _mao_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_add_on)").fetchall()}
+            if "message_add_on" in _wa_tables
+            else set()
+        )
+        has_android_add_on = (
+            "message_add_on" in _wa_tables
+            and "message_add_on_type" in _mao_cols
+            and "parent_message_row_id" in _mao_cols
+        )
+        has_mao_ts = "timestamp" in _mao_cols
         _jid_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(jid)").fetchall()}
             if "jid" in _wa_tables
@@ -2627,6 +2661,8 @@ def create_app(output_root: Path, rescan: bool = False):
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
         NULL                                                          AS reactions,
+        0                                                            AS is_edited,
+        NULL                                                          AS edited_ts,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         {group_ev_col}                                               AS group_event_type,
         gm.ZMEMBERJID                                                AS member_jid
@@ -2710,6 +2746,22 @@ def create_app(output_root: Path, rescan: bool = False):
     j_is_lid = "j.server = 'lid'" if has_jid_server else "0"
     jq_is_lid = "jq.server = 'lid'" if has_jid_server else "0"
 
+    if has_android_edit_info:
+        edit_join = "LEFT JOIN message_edit_info mei ON mei.message_row_id = m._id"
+        edit_is_edited_col = "CASE WHEN mei.message_row_id IS NOT NULL THEN 1 ELSE 0 END"
+        edit_ts_col = "mei.edited_timestamp" if has_mei_ts else "NULL"
+    elif has_android_add_on:
+        edit_join = (
+            "LEFT JOIN message_add_on mao_edit "
+            "ON mao_edit.parent_message_row_id = m._id AND mao_edit.message_add_on_type = 74"
+        )
+        edit_is_edited_col = "CASE WHEN mao_edit._id IS NOT NULL THEN 1 ELSE 0 END"
+        edit_ts_col = "mao_edit.timestamp" if has_mao_ts else "NULL"
+    else:
+        edit_join = ""
+        edit_is_edited_col = "0"
+        edit_ts_col = "NULL"
+
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
@@ -2747,6 +2799,8 @@ def create_app(output_root: Path, rescan: bool = False):
                  CASE WHEN NOT ({jq_is_lid}) AND jq.user IS NOT NULL THEN '+' || jq.user END,
                  '') END                                             AS quoted_sender,
         COALESCE(mq.timestamp, 0)                                    AS quoted_ts,
+        {edit_is_edited_col}                                         AS is_edited,
+        {edit_ts_col}                                                AS edited_ts,
         {ms_col}                                                     AS action_type,
         ''                                                           AS participant_name
     FROM message m
@@ -2761,6 +2815,7 @@ def create_app(output_root: Path, rescan: bool = False):
     LEFT JOIN jid jq2 ON jq2._id = jmq.jid_row_id
     {ldn_select_joins}
     {ms_join}
+    {edit_join}
     LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
     LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)
     LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE(mm.file_path, 'vcard:' || m._id)

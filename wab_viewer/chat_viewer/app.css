@@ -384,6 +384,7 @@
     .msg-text ul, .msg-text ol, .msg-caption ul, .msg-caption ol { margin: 2px 0 2px 1.2em; padding: 0; }
     .msg-text li, .msg-caption li { margin: 0; }
     .msg-meta { font-size: 10px; color: var(--text-muted); text-align: right; margin-top: 2px; }
+    .msg-edited { display: inline; font-size: 10px; margin-right: 4px; color: inherit; user-select: none; }
 
     .msg-row.sent .msg-meta { color: var(--bubble-meta); }
     .msg-row.recv .msg-meta { color: var(--bubble-meta); }
