@@ -2643,7 +2643,7 @@ def create_app(output_root: Path, rescan: bool = False):
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
                            OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
-            ELSE {_MEDIA_TYPE_EXPR.format(col="('Message/' || COALESCE(mi.ZMEDIALOCALPATH,''))")}
+            ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE('Message/' || mi.ZMEDIALOCALPATH, mi.ZTITLE)")}
         END                                                           AS media_type,
         COALESCE(mi.ZTITLE, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '') AS media_name,
         COALESCE(m.ZTEXT, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '')   AS text_body,
@@ -2786,7 +2786,7 @@ def create_app(output_root: Path, rescan: bool = False):
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
                            OR INSTR(LOWER(m.text_data), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
-            ELSE {_MEDIA_TYPE_EXPR.format(col="mm.file_path")}
+            ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE(mm.file_path, mm.media_name)")}
         END                                                          AS media_type,
         COALESCE(mm.media_name, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
         COALESCE(m.text_data, '')                                    AS text_body,
@@ -3411,6 +3411,7 @@ def create_app(output_root: Path, rescan: bool = False):
         chat_id = request.args.get("chat_id", "")
         chat_type = request.args.get("chat_type", "")
         before = request.args.get("before")
+        types_raw = request.args.get("types")
         conn = get_wa()
         if conn is None:
             return jsonify([])
@@ -3419,15 +3420,66 @@ def create_app(output_root: Path, rescan: bool = False):
         if source_type == "android":
             chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
             is_media, ts_col = _ANDROID_IS_MEDIA, _ANDROID_TS
+            is_link = _ANDROID_IS_LINK
+            is_doc = _ANDROID_IS_DOCUMENT_UNDOWNLOADED
         else:
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             is_media, ts_col = _IOS_IS_MEDIA, _IOS_TS
+            is_link = _IOS_IS_LINK
+            is_doc = _IOS_IS_DOCUMENT_UNDOWNLOADED
+
+        if not types_raw:
+            if before:
+                sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL AND {ts_col} < ? ORDER BY {ts_col} DESC LIMIT ?"
+                rows = conn.execute(sql, chat_params + [int(before), GALLERY_PAGE_SIZE]).fetchall()
+            else:
+                sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL ORDER BY {ts_col} DESC LIMIT ?"
+                rows = conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
+            return jsonify([dict(r) for r in rows])
+
+        types_set = {t.strip().lower() for t in types_raw.split(",") if t.strip()}
+        has_all = "all" in types_set
+        has_link = has_all or "link" in types_set
+        has_doc = has_all or "document" in types_set
+        media_types = (types_set - {"link", "document", "all"}) if not has_all else set()
+        has_archived_media = has_all or bool(media_types) or has_doc
+
+        cand_clauses = []
+        if has_archived_media:
+            cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
+        if has_link:
+            cand_clauses.append(f"({is_link})")
+        if has_doc:
+            cand_clauses.append(f"({is_doc})")
+
+        if not cand_clauses:
+            return jsonify([])
+
+        cand_pred = " OR ".join(cand_clauses)
+        params = list(chat_params)
+        ts_clause = ""
         if before:
-            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL AND {ts_col} < ? ORDER BY {ts_col} DESC LIMIT ?"
-            rows = conn.execute(sql, chat_params + [int(before), GALLERY_PAGE_SIZE]).fetchall()
+            ts_clause = f"AND {ts_col} < ?"
+            params.append(int(before))
+
+        if has_all:
+            type_filter = "media_type NOT IN ('text', 'service')"
+            type_params = []
         else:
-            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL ORDER BY {ts_col} DESC LIMIT ?"
-            rows = conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
+            placeholders = ", ".join("?" for _ in types_set)
+            type_filter = f"media_type IN ({placeholders})"
+            type_params = list(types_set)
+
+        sql = f"""
+            SELECT * FROM (
+                {select} WHERE {chat_pred} AND ({cand_pred}) {ts_clause}
+                ORDER BY {ts_col} DESC
+            )
+            WHERE {type_filter}
+            ORDER BY timestamp_ms DESC
+            LIMIT ?
+        """
+        rows = conn.execute(sql, params + type_params + [GALLERY_PAGE_SIZE]).fetchall()
         return jsonify([dict(r) for r in rows])
 
     @app.route("/api/media/links")

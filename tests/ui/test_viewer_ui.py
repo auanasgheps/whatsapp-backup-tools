@@ -55,19 +55,24 @@ def open_group_chat_in_browser(browser: CDPSession, timeout: float) -> str:
 def test_chat_list_and_chat_opening(browser: CDPSession, screenshot_dir: Path) -> None:
     """Validate that chat items render and clicking an item loads the chat pane."""
     # 1. Wait for chat list to populate
-    chats_count = browser.evaluate(
-        """
-        (async () => {
-            for (let i = 0; i < 60; i++) {
-                const items = document.querySelectorAll('.chat-item');
-                if (items.length > 0) return items.length;
-                await new Promise(r => setTimeout(r, 100));
-            }
-            return 0;
-        })()
-        """,
-        10.0,
-    )
+    chats_count = None
+    for _ in range(3):
+        chats_count = browser.evaluate(
+            """
+            (async () => {
+                for (let i = 0; i < 60; i++) {
+                    const items = document.querySelectorAll('.chat-item');
+                    if (items.length > 0) return items.length;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                return 0;
+            })()
+            """,
+            10.0,
+        )
+        if isinstance(chats_count, int):
+            break
+        time.sleep(0.5)
     assert isinstance(chats_count, int)
     assert chats_count >= 5
 
@@ -874,6 +879,170 @@ def test_media_gallery_archive_view_loads_past_years_when_current_year_has_many_
 
         browser.capture_screenshot(screenshot_dir / "archive_view_past_years.png", 5.0)
 
+    finally:
+        browser.evaluate(
+            """
+            (() => {
+                if (window._testOriginalFetch) {
+                    window.fetch = window._testOriginalFetch;
+                    delete window._testOriginalFetch;
+                }
+                const closeBtn = document.getElementById('media-gallery-close');
+                if (closeBtn) closeBtn.click();
+            })()
+            """,
+            5.0,
+        )
+
+
+def test_media_gallery_scrolled_link_view_to_images_loads_viewport_images(
+    browser: CDPSession,
+) -> None:
+    """Validate that scrolling down in link view and enabling images loads images at the scrolled position."""
+    open_group_chat_in_browser(browser, 25.0)
+
+    setup_mock = browser.evaluate(
+        """
+        (() => {
+            const originalFetch = window.fetch;
+            window._testOriginalFetch = originalFetch;
+
+            const page1 = [];
+            for (let i = 0; i < 100; i++) {
+                page1.push({
+                    timestamp_ms: 1775000000000 - i * 10000,
+                    media_type: 'image',
+                    archive_path: 'Groups/Tech & Coffee Meetup/2026/img_2026_' + i + '.jpg',
+                    media_name: 'img_2026_' + i + '.jpg',
+                });
+            }
+
+            const page2 = [];
+            for (let i = 0; i < 20; i++) {
+                page2.push({
+                    timestamp_ms: 1740000000000 - i * 10000,
+                    media_type: 'image',
+                    archive_path: 'Groups/Tech & Coffee Meetup/2025/img_2025_' + i + '.jpg',
+                    media_name: 'img_2025_' + i + '.jpg',
+                });
+            }
+
+            const links = [
+                {
+                    timestamp_ms: 1775500000000,
+                    media_type: 'link',
+                    text_body: 'https://example.com/2026',
+                    sender: 'Alice',
+                },
+                {
+                    timestamp_ms: 1740500000000,
+                    media_type: 'link',
+                    text_body: 'https://example.com/2025',
+                    sender: 'Bob',
+                },
+            ];
+
+            window.fetch = async (url, options) => {
+                const urlStr = String(url);
+                if (urlStr.includes('/api/media/links')) {
+                    return new Response(JSON.stringify(links), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                    });
+                }
+                if (urlStr.includes('/api/media?')) {
+                    if (urlStr.includes('before=')) {
+                        return new Response(JSON.stringify(page2), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' },
+                        });
+                    } else {
+                        return new Response(JSON.stringify(page1), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' },
+                        });
+                    }
+                }
+                return originalFetch(url, options);
+            };
+            return true;
+        })()
+        """,
+        5.0,
+    )
+    assert setup_mock is True
+
+    try:
+        opened = browser.evaluate(
+            """
+            (async () => {
+                const mediaBtn = document.getElementById('media-btn');
+                if (mediaBtn) mediaBtn.click();
+                for (let i = 0; i < 60; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const gal = document.getElementById('media-gallery');
+                    const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                    if (gal && gal.classList.contains('open') && items.length > 0) {
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """,
+            10.0,
+        )
+        assert opened is True
+
+        browser.evaluate(
+            """
+            (() => {
+                const linkPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="link"]');
+                if (linkPill) linkPill.click();
+            })()
+            """,
+            5.0,
+        )
+
+        scrolled = browser.evaluate(
+            """
+            (() => {
+                const grid = document.getElementById('media-gallery-grid');
+                const linkCards = [...grid.querySelectorAll('.gallery-link-card')];
+                const card2025 = linkCards.find(el => el.textContent.includes('2025'));
+                if (card2025) {
+                    card2025.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    return true;
+                }
+                return false;
+            })()
+            """,
+            5.0,
+        )
+        assert scrolled is True
+
+        result = browser.evaluate(
+            """
+            (async () => {
+                const imgPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="image"]');
+                if (imgPill) imgPill.click();
+
+                for (let i = 0; i < 60; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const images2025 = document.querySelectorAll(
+                        '#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)'
+                    );
+                    const has2025Image = [...images2025].some(el => el.dataset.src && el.dataset.src.includes('2025'));
+                    if (has2025Image) {
+                        return { loaded2025Images: true, count: images2025.length };
+                    }
+                }
+                return { loaded2025Images: false };
+            })()
+            """,
+            10.0,
+        )
+        assert isinstance(result, dict)
+        assert result.get("loaded2025Images") is True, "2025 images failed to load after switching to images in scrolled view"
     finally:
         browser.evaluate(
             """
