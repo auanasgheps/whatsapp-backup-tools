@@ -120,6 +120,43 @@ def resolve_unique_dest(
         counter += 1
 
 
+def probe_hardlink_support(target_dir: str, logger: logging.Logger) -> bool:
+    """
+    Test whether the filesystem hosting target_dir supports creating hard links.
+    Creates an ephemeral probe file, attempts os.link, and removes both files.
+    Returns True if supported, or False if unsupported (e.g. FAT32, exFAT, unsupported SMB)
+    with a warning logged.
+    """
+    os.makedirs(target_dir, exist_ok=True)
+    probe_src = os.path.join(target_dir, f".wa_hardlink_probe_{os.getpid()}_{id(target_dir)}.tmp")
+    probe_dst = probe_src + ".link"
+    try:
+        with open(probe_src, "wb") as f:
+            f.write(b"probe")
+        try:
+            os.link(probe_src, probe_dst)
+            return True
+        except OSError as e:
+            logger.warning(
+                f"Target filesystem at '{target_dir}' does not support hard links ({e}). "
+                "Hardlinking will be disabled and standard copy mode will be used."
+            )
+            return False
+    except OSError as e:
+        logger.warning(
+            f"Failed to perform hardlink support probe at '{target_dir}' ({e}). "
+            "Hardlinking will be disabled and standard copy mode will be used."
+        )
+        return False
+    finally:
+        for p in (probe_dst, probe_src):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
@@ -225,7 +262,7 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection, logger: l
             GROUP BY f.md5
             HAVING total >= 2
         )
-        SELECT dh.md5, dh.total, ac.archive_path
+        SELECT dh.md5, dh.total, ac.archive_path, ac.is_hardlink
         FROM dup_hashes dh
         JOIN files f ON f.md5 = dh.md5
         JOIN archive_copies ac ON ac.original_path = f.original_path
@@ -236,14 +273,14 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection, logger: l
         logger.info("No duplicate media found.")
         return
 
-    fieldnames = ["group_id", "file_count", "archived_path", "md5_hex"]
+    fieldnames = ["group_id", "file_count", "archived_path", "md5_hex", "is_hardlink"]
     current_md5 = None
     group_id = 0
 
     with open(report_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for md5_bytes, file_count, archived_path in rows:
+        for md5_bytes, file_count, archived_path, is_hardlink in rows:
             if md5_bytes != current_md5:
                 current_md5 = md5_bytes
                 group_id += 1
@@ -253,6 +290,7 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection, logger: l
                     "file_count": file_count,
                     "archived_path": archived_path,
                     "md5_hex": md5_bytes.hex(),
+                    "is_hardlink": 1 if is_hardlink else 0,
                 }
             )
     logger.info(
@@ -353,16 +391,33 @@ def _route_contact(
 
 
 def _copy_or_skip(
-    src, dest_path, dest_dir, file_path, timestamp, output_root, dry_run, logger, cursor
+    src: str,
+    dest_path: str,
+    dest_dir: str,
+    file_path: str,
+    timestamp: int | None,
+    output_root: str,
+    dry_run: bool,
+    logger: logging.Logger,
+    cursor: sqlite3.Cursor | None,
+    link_duplicates: bool,
+    hash_to_canonical: dict[bytes, str],
 ) -> tuple[int, int, int]:
     """
-    Copy src to dest, handling dry-run, dedup, and collision.
+    Copy or hardlink src to dest, handling dry-run, dedup, and collision.
     Returns (copied, skipped, warnings) deltas.
     """
     if dry_run:
         resolved = resolve_unique_dest(dest_path, src, logger)
         if resolved is None:
             return 0, 1, 0
+        if link_duplicates:
+            src_hash = file_md5(src)
+            canonical = hash_to_canonical.get(src_hash)
+            if canonical and canonical != resolved:
+                logger.info(f"[DRY RUN] Would link: {canonical} -> {resolved}")
+                return 1, 0, 0
+            hash_to_canonical[src_hash] = resolved
         logger.info(f"[DRY RUN] Would copy: {src} -> {resolved}")
         return 1, 0, 0
 
@@ -373,29 +428,69 @@ def _copy_or_skip(
             if cursor is not None:
                 rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
                 archive_db.record_file_archived(
-                    cursor, file_path, src_hash, rel, os.path.getsize(dest_path)
+                    cursor, file_path, src_hash, rel, os.path.getsize(dest_path), 0
                 )
+            if src_hash not in hash_to_canonical:
+                hash_to_canonical[src_hash] = dest_path
             return 0, 1, 0
     else:
         src_hash = None
         resolved = dest_path
 
     os.makedirs(dest_dir, exist_ok=True)
-    try:
-        shutil.copy(src, resolved)
-    except Exception as e:
-        logger.error(f"ERROR copying {src} -> {resolved}: {e}")
-        return 0, 0, 1
-    try:
-        set_file_times(resolved, timestamp)
-    except OSError as e:
-        logger.debug(f"Could not set timestamps on {resolved}: {e}")
+    is_hardlink = 0
+
+    if link_duplicates:
+        if src_hash is None:
+            src_hash = file_md5(src)
+        canonical = hash_to_canonical.get(src_hash)
+        if canonical and canonical != resolved and os.path.isfile(canonical):
+            try:
+                os.link(canonical, resolved)
+                is_hardlink = 1
+                logger.debug(f"LINKED: {canonical} -> {resolved}")
+            except OSError as e:
+                logger.warning(
+                    f"Could not hard link {canonical} -> {resolved} ({e}). Falling back to copy."
+                )
+                try:
+                    shutil.copy(src, resolved)
+                    logger.debug(f"COPIED (fallback): {src} -> {resolved}")
+                except Exception as copy_err:
+                    logger.error(f"ERROR copying {src} -> {resolved}: {copy_err}")
+                    return 0, 0, 1
+        else:
+            try:
+                shutil.copy(src, resolved)
+                logger.debug(f"COPIED: {src} -> {resolved}")
+            except Exception as e:
+                logger.error(f"ERROR copying {src} -> {resolved}: {e}")
+                return 0, 0, 1
+            hash_to_canonical[src_hash] = resolved
+    else:
+        try:
+            shutil.copy(src, resolved)
+            logger.debug(f"COPIED: {src} -> {resolved}")
+        except Exception as e:
+            logger.error(f"ERROR copying {src} -> {resolved}: {e}")
+            return 0, 0, 1
+
+    if timestamp is not None:
+        try:
+            set_file_times(resolved, timestamp)
+        except OSError as e:
+            logger.debug(f"Could not set timestamps on {resolved}: {e}")
+
     if src_hash is None:
         src_hash = file_md5(resolved)
-    logger.debug(f"COPIED: {src} -> {resolved}")
+    if src_hash not in hash_to_canonical:
+        hash_to_canonical[src_hash] = resolved
+
     if cursor is not None:
         rel = os.path.relpath(resolved, output_root).replace(os.sep, "/")
-        archive_db.record_file_archived(cursor, file_path, src_hash, rel, os.path.getsize(resolved))
+        archive_db.record_file_archived(
+            cursor, file_path, src_hash, rel, os.path.getsize(resolved), is_hardlink
+        )
     return 1, 0, 0
 
 
@@ -410,8 +505,10 @@ def process_rows(
     output_root,
     logger,
     dry_run,
-    conn=None,
-    tz=None,
+    conn,
+    tz,
+    link_duplicates: bool,
+    hash_to_canonical: dict[bytes, str],
 ):
     stats = {"copied": 0, "skipped": 0, "missing": 0, "warnings": 0}
     updated_index = dict(folder_index)
@@ -566,6 +663,8 @@ def process_rows(
             dry_run,
             logger,
             cursor,
+            link_duplicates,
+            hash_to_canonical,
         )
         stats["copied"] += copied
         stats["skipped"] += skipped
@@ -708,7 +807,7 @@ def process_vcard_rows(
                 if cursor is not None:
                     rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
                     archive_db.record_file_archived(
-                        cursor, virtual_orig_path, vcard_hash, rel, vcard_size
+                        cursor, virtual_orig_path, vcard_hash, rel, vcard_size, 0
                     )
                 stats["skipped"] += 1
                 progress.update(i, stats)
@@ -736,14 +835,13 @@ def process_vcard_rows(
         if cursor is not None:
             rel = os.path.relpath(resolved, output_root).replace(os.sep, "/")
             archive_db.record_file_archived(
-                cursor, virtual_orig_path, vcard_hash, rel, vcard_size
+                cursor, virtual_orig_path, vcard_hash, rel, vcard_size, 0
             )
         stats["copied"] += 1
         progress.update(i, stats)
 
     progress.finish(stats)
     return stats, updated_index, updated_group_index
-
 
 
 # ---------------------------------------------------------------------------
@@ -761,7 +859,8 @@ def run_restore_mode(args, logger):
     try:
         archive_db.check_db_health(conn, logger)
         file_count = conn.execute(
-            "SELECT COUNT(DISTINCT original_path) FROM archive_copies"
+            "SELECT COUNT(DISTINCT original_path) FROM archive_copies "
+            "WHERE original_path NOT LIKE 'vcard:%' AND original_path NOT LIKE '%.vcf'"
         ).fetchone()[0]
         if file_count == 0:
             logger.error(
@@ -797,7 +896,9 @@ def run_restore_mode(args, logger):
 
         restore_map: dict[str, list[str]] = {}
         for original_path, archive_path in conn.execute(
-            "SELECT original_path, archive_path FROM archive_copies ORDER BY original_path, rowid"
+            "SELECT original_path, archive_path FROM archive_copies "
+            "WHERE original_path NOT LIKE 'vcard:%' AND original_path NOT LIKE '%.vcf' "
+            "ORDER BY original_path, rowid"
         ):
             restore_map.setdefault(original_path, []).append(archive_path)
 
@@ -964,6 +1065,7 @@ _VALID_CONFIG_KEYS = {
     "from_adb",
     "pull_media",
     "staging",
+    "link_duplicates",
 }
 
 _EXAMPLE_CONFIG = """\
@@ -989,6 +1091,7 @@ output     = "/path/to/archive"         # required
 # business = false
 # timezone = ""                         # e.g. Europe/Rome
 # since    = ""                         # e.g. 2024-01-01
+# link_duplicates = false              # hardlink duplicate media files across chats
 
 # Android — pull via ADB  (wab-archiver archive --from-adb; see setup-android.md)
 # from_adb   = false
@@ -1292,6 +1395,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="DATE",
         help="Only archive media from messages sent or received on or after this date (YYYY-MM-DD). Combines with --limit.",
+    )
+    archive_p.add_argument(
+        "--link-duplicates",
+        action="store_true",
+        dest="link_duplicates",
+        default=False,
+        help="Hardlink duplicate media files across chats instead of copying bytes.",
     )
     # Apply config defaults to the archive subparser.
     archive_p.set_defaults(**_config)
@@ -1847,6 +1957,16 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
             report_path = os.path.join(args.output, "missing_media_report.csv")
 
+            link_duplicates = bool(getattr(args, "link_duplicates", False))
+            if link_duplicates:
+                if not probe_hardlink_support(args.output, logger):
+                    link_duplicates = False
+
+            if archive_conn is not None:
+                hash_to_canonical = archive_db.load_canonical_copies(archive_conn, args.output)
+            else:
+                hash_to_canonical = {}
+
             logger.info("Executing query...")
             cursor.execute(query)
             stats, updated_index, updated_group_index, missing_rows = process_rows(
@@ -1862,6 +1982,8 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 args.dry_run,
                 conn=archive_conn if not args.dry_run else None,
                 tz=tz,
+                link_duplicates=link_duplicates,
+                hash_to_canonical=hash_to_canonical,
             )
 
             if vcard_query:
@@ -1883,7 +2005,6 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                     stats["copied"] += v_stats["copied"]
                     stats["skipped"] += v_stats["skipped"]
                     stats["warnings"] += v_stats["warnings"]
-
 
             if not args.dry_run:
                 archive_conn.commit()
