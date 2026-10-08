@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **vCard (.vcf) Contact Cards Archiving**: Added extraction and archiving of shared contact cards (`.vcf`) from both Android (`msgstore.db`) and iOS (`ChatStorage.sqlite`) databases into the media archive output hierarchy (`Contacts/<Contact>/<Year>/<Direction>/<DisplayName>.vcf` or `Groups/<Group>/<Year>/<DisplayName> (<Sender>).vcf`).
 - **Standard Serialization & Deduplication**: Serialized raw database vCard payloads into standard UTF-8 encoded files with CRLF line endings and preserved original message timestamps. Implemented deduplication and collision disambiguation via virtual original path tracking (`vcard:{msg_id}`).
 - **Multi-Contact Bundles & Name Resolution**: Handled multi-contact share bundles by consolidating entries into single message `.vcf` files while resolving user-friendly composite names (e.g., `"Alice & 2 others"`).
+- **Hardlink Duplicate Media Files (`--link-duplicates`)**: Added opt-in support for filesystem hardlinking duplicate media shared across chats instead of duplicating disk bytes. Includes upfront filesystem capability probing (detecting unsupported exFAT, FAT32, or network shares), per-file copy fallback on `OSError`, automatic database schema upgrade to v2 (`is_hardlink` column in `archive_copies`), duplicate reporting in `duplicate_media_report.csv`, and independent physical file restoration in restore mode.
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 

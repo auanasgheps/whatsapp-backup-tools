@@ -32,6 +32,7 @@ output     = "/path/to/archive"
 # business  = false
 # timezone  = ""          # e.g. Europe/Rome
 # since     = ""          # e.g. 2024-01-01
+# link_duplicates = false # hardlink duplicate media files across chats
 
 # Android — pull via ADB (wab-archiver archive --from-adb; see setup-android.md)
 # from_adb  = false
@@ -75,6 +76,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
                      [--business] [--pull-media] [--staging PATH]
                      -o PATH [-l PATH] [--timezone TZ] [--config PATH]
                      [--dry-run] [--limit N] [--since DATE]
+                     [--link-duplicates]
 ```
 
 | Argument | Required | Description |
@@ -97,6 +99,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--dry-run` | No | Simulate the run without copying any files |
 | `--limit N` | No | Cap rows returned per chat type. Total rows ≤ N. Useful for test runs |
 | `--since DATE` | No | Only archive media from messages sent or received on or after this date (`YYYY-MM-DD`) |
+| `--link-duplicates` | No | Hardlink duplicate media files across chats instead of copying bytes, saving disk space. Gracefully falls back to copying if the destination filesystem does not support hardlinks (e.g. exFAT, FAT32, unsupported network shares) |
 
 ### `restore`
 
@@ -232,6 +235,18 @@ wab-archiver archive \
   --dry-run
 ```
 
+#### Deduplicate with Hardlinks (`--link-duplicates`)
+
+When media (photos, videos, audio, documents) is shared across multiple chats or groups, `--link-duplicates` creates filesystem hardlinks for duplicate copies instead of duplicating file bytes. This saves disk space while maintaining independent folder paths for each chat:
+
+```bash
+wab-archiver archive \
+  --config config.toml \
+  --link-duplicates
+```
+
+> 💡 The first occurrence of a file is archived as the canonical copy. Any subsequent duplicate points to the existing file on disk via a hardlink. If the destination filesystem (e.g. FAT32, exFAT) or network share does not support hardlinks, the archiver detects this and gracefully falls back to standard file copying.
+
 #### iOS — pre-extracted mode
 
 Only use this mode if you know what you are doing.
@@ -252,7 +267,7 @@ wab-archiver archive \
 |---|---|
 | `wab-archiver.log` | Full run log including all copied, skipped, and missing files |
 | `missing_media_report.csv` | Structured report of all media referenced in the DB but not found on disk. Useful for manual recovery from old backups |
-| `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths. One row per path, sortable by `file_count`. Only written when duplicates exist |
+| `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths. One row per path, sortable by `file_count`. Includes column `is_hardlink` (`1` if hardlinked, `0` if independent copy). Only written when duplicates exist |
 | `source_conflicts_report.csv` | Written when multiple `--wa-root` roots contain different versions of the same file. Only written when conflicts exist |
 | `.wa_media_archiver.db` | SQLite database storing all persistent state: contact folder index, group folder index, and the file archive map. Health checks run automatically on every open. Do not delete unless you want to reset all tracking |
 | `adb_conflicts_report.csv` | Written when `--pull-media` finds a file with the same name but different content on the device vs the archive. Only written when conflicts exist; resolve manually |
@@ -274,7 +289,9 @@ The reconstructed tree is written to `<output>/Media/`, alongside the existing `
 
 **How it works:** During every real (non-dry-run) forward run, the archiver records each original `file_path` and the archive path it was copied to in `.wa_media_archiver.db`. Restore mode reads this data and copies each unique original file back to its original relative path. If the same file was archived from multiple chats, it is restored exactly once.
 
-**Limitations:**
+**Behavior & Limitations:**
+- Restored files are reconstructed as independent physical copies (never hardlinks) to faithfully recreate the original phone filesystem layout
+- Virtual contact cards (`.vcf`) are ignored during restore mode since they were generated from database records rather than files on the phone
 - Restored file timestamps reflect the WhatsApp message timestamp (same as in the archive), not the original on-device creation date
 - If a forward run was filtered with `--since` or `--limit`, the restore index only covers what was actually archived
 
