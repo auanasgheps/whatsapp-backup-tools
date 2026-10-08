@@ -2492,6 +2492,7 @@ class TestGenerateConfig:
         assert "config.toml" in content
         assert "output" in content
         assert "from_adb" in content
+        assert "link_duplicates" in content
 
     def test_overwrites_existing_file(self, tmp_path):
         dest = tmp_path / "example-config.toml"
@@ -2563,6 +2564,14 @@ class TestConfigInParseArgs:
             args = wa.parse_args()
         assert args.from_adb is True
         assert args.wa_roots == ["/wa"]
+
+    def test_config_link_duplicates(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\nlink_duplicates = true\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.link_duplicates is True
 
     def test_autodetect_single_config_yes(self, tmp_path):
         cfg = tmp_path / "config.toml"
