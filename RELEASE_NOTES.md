@@ -1,6 +1,6 @@
 # WhatsApp Backup Tools v0.60
 
-Version 0.60 brings support for shared contact cards across both tools, disk space savings with media hardlinking, and a smoother viewing experience in the offline web viewer.
+Version 0.60 brings support for shared contact cards across both tools, complete sticker archiving and gallery viewing, disk space savings with media hardlinking, and a smoother viewing experience in the offline web viewer.
 
 > 📇 **Shared Contact Cards (.vcf)**: WhatsApp stores shared contacts directly inside backup databases rather than as media files. WhatsApp Backup Tools now extracts and saves contacts as standard `.vcf` files and displays them as native contact cards in the web viewer, complete with search and 1-click download support!
 
@@ -9,6 +9,7 @@ Version 0.60 brings support for shared contact cards across both tools, disk spa
 ### 📁 WhatsApp Archiver
 
 #### ✨ New Features
+- **Sticker Archiving on Android**: Stickers sent and received on Android (`.webp` and `.was`) are now fully extracted, archived to disk, and recorded in the archive database alongside all other media types.
 - **Shared Contact Cards Archiving (`.vcf`)**: Automatically extracts contacts shared in 1:1 and group chats into organized `.vcf` files with original message timestamps and duplicate collision protection.
 - **Hardlink Duplicate Media Files (`--link-duplicates`)**: Drastically save disk storage by hardlinking identical media files shared across chats instead of duplicating files on disk. Unsupported filesystems (such as exFAT or network drives) are automatically detected upfront with safe fallback to copying.
 
@@ -24,6 +25,7 @@ Version 0.60 brings support for shared contact cards across both tools, disk spa
 ### 🌐 WhatsApp Viewer
 
 #### ✨ New Features
+- **Dedicated Stickers Section in Media Gallery**: Stickers now have a dedicated section and filter pill in the Media Gallery on both iOS and Android, with server-side filtering and count badges.
 - **Contact Cards in Chat & Gallery**: Received contacts now display in native WhatsApp-style contact cards with contact avatars, names, and a 1-click download button. Contact cards are also browsable in the Media Gallery and fully indexed in search.
 - **"Edited" Message Indicator**: Messages edited in WhatsApp now display an "Edited" badge next to the timestamp, with a hover tooltip showing the exact edit date and time.
 - **Lightbox Wheel Zoom & Pan**: Zoom smoothly into photos up to 6× using your mouse wheel, drag to pan around, and reset back to fit with a single click.
@@ -33,6 +35,7 @@ Version 0.60 brings support for shared contact cards across both tools, disk spa
 - **Photo Aspect Ratio & Shrink-Wrapping**: Vertical and tall photos now keep their natural aspect ratio without horizontal stretching, and chat bubbles fit snugly around images without empty space.
 
 #### 🐛 Bug Fixes
+- **iOS Sticker Classification**: Fixed an issue where iOS stickers were treated as standard photos in chat bubbles and the Media Gallery instead of appearing under the dedicated Stickers section.
 - **Voice Message Audio Player**: Fixed an issue where the inline audio player for voice messages was invisible in Google Chrome, Microsoft Edge, and other Chromium-based browsers.
 - **macOS / Older SQLite Compatibility**: Fixed a startup crash (`unrecognized option: "contentless_delete"`) when running on macOS or systems with SQLite versions older than 3.43.
 - Minor UI polish and rendering fixes.
