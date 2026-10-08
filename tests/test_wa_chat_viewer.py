@@ -3777,6 +3777,11 @@ class TestIosHdDeduplication:
         assert gallery[0]["msg_id"] == 101
         assert gallery[0]["archive_path"] == "photos/hd.jpg"
 
+        # Gallery with types filter also deduplicates and only returns the HD photo
+        gallery_types = client.get("/api/media?chat_id=10&chat_type=group&types=image").get_json()
+        assert len(gallery_types) == 1
+        assert gallery_types[0]["msg_id"] == 101
+
 
 class TestGroupMembersLidResolution:
     def test_ios_group_members_lid_resolved_via_contactsv2(self, tmp_path):

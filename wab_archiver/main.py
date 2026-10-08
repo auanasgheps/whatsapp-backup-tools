@@ -256,13 +256,13 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection, logger: l
     """Write a CSV report of media files with identical content at multiple paths."""
     rows = conn.execute("""
         WITH dup_hashes AS (
-            SELECT f.md5, COUNT(ac.archive_path) AS total
+            SELECT f.md5, COUNT(DISTINCT ac.archive_path) AS total
             FROM files f
             JOIN archive_copies ac ON ac.original_path = f.original_path
             GROUP BY f.md5
             HAVING total >= 2
         )
-        SELECT dh.md5, dh.total, ac.archive_path, ac.is_hardlink
+        SELECT DISTINCT dh.md5, dh.total, ac.archive_path, ac.is_hardlink
         FROM dup_hashes dh
         JOIN files f ON f.md5 = dh.md5
         JOIN archive_copies ac ON ac.original_path = f.original_path
@@ -860,7 +860,7 @@ def run_restore_mode(args, logger):
         archive_db.check_db_health(conn, logger)
         file_count = conn.execute(
             "SELECT COUNT(DISTINCT original_path) FROM archive_copies "
-            "WHERE original_path NOT LIKE 'vcard:%' AND original_path NOT LIKE '%.vcf'"
+            "WHERE original_path NOT LIKE 'vcard:%'"
         ).fetchone()[0]
         if file_count == 0:
             logger.error(
@@ -897,7 +897,7 @@ def run_restore_mode(args, logger):
         restore_map: dict[str, list[str]] = {}
         for original_path, archive_path in conn.execute(
             "SELECT original_path, archive_path FROM archive_copies "
-            "WHERE original_path NOT LIKE 'vcard:%' AND original_path NOT LIKE '%.vcf' "
+            "WHERE original_path NOT LIKE 'vcard:%' "
             "ORDER BY original_path, rowid"
         ):
             restore_map.setdefault(original_path, []).append(archive_path)
