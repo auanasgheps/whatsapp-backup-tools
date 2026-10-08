@@ -43,6 +43,7 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             original_path  TEXT NOT NULL REFERENCES files(original_path),
             archive_path   TEXT NOT NULL,
             is_hardlink    INTEGER NOT NULL DEFAULT 0,
+            timestamp_ms   INTEGER,
             PRIMARY KEY (original_path, archive_path)
         );
         CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
@@ -88,6 +89,8 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
     existing_copies = {r[1] for r in conn.execute("PRAGMA table_info(archive_copies)")}
     if "is_hardlink" not in existing_copies:
         conn.execute("ALTER TABLE archive_copies ADD COLUMN is_hardlink INTEGER NOT NULL DEFAULT 0")
+    if "timestamp_ms" not in existing_copies:
+        conn.execute("ALTER TABLE archive_copies ADD COLUMN timestamp_ms INTEGER")
     existing_recent = {r[1] for r in conn.execute("PRAGMA table_info(recent_messages)")}
     if "is_edited" not in existing_recent:
         conn.execute("ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")
@@ -168,6 +171,7 @@ def record_file_archived(
     archive_path: str,
     size: int,
     is_hardlink: int,
+    timestamp_ms: int | None,
 ):
     cursor.execute(
         "INSERT INTO files (original_path, md5, size) VALUES (?, ?, ?) "
@@ -175,9 +179,11 @@ def record_file_archived(
         (original_path, md5, size),
     )
     cursor.execute(
-        "INSERT INTO archive_copies (original_path, archive_path, is_hardlink) VALUES (?, ?, ?) "
-        "ON CONFLICT(original_path, archive_path) DO UPDATE SET is_hardlink = excluded.is_hardlink",
-        (original_path, archive_path, is_hardlink),
+        "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(original_path, archive_path) DO UPDATE SET "
+        "is_hardlink = excluded.is_hardlink, "
+        "timestamp_ms = COALESCE(excluded.timestamp_ms, archive_copies.timestamp_ms)",
+        (original_path, archive_path, is_hardlink, timestamp_ms),
     )
 
 

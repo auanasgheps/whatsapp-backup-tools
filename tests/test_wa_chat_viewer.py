@@ -1200,25 +1200,34 @@ class TestApiMedia:
         app = viewer.create_app(tmp_path, rescan=False)
         app.config["TESTING"] = True
         with app.test_client() as client:
-            links = client.get("/api/media?chat_id=123456789&chat_type=contact&types=link").get_json()
+            links = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=link"
+            ).get_json()
             assert len(links) == 1
             assert links[0]["media_type"] == "link"
 
-            images = client.get("/api/media?chat_id=123456789&chat_type=contact&types=image").get_json()
+            images = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=image"
+            ).get_json()
             assert len(images) == 1
             assert images[0]["media_type"] == "image"
 
-            mixed = client.get("/api/media?chat_id=123456789&chat_type=contact&types=image,link").get_json()
+            mixed = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=image,link"
+            ).get_json()
             assert len(mixed) == 2
             assert [r["media_type"] for r in mixed] == ["link", "image"]
 
-            all_items = client.get("/api/media?chat_id=123456789&chat_type=contact&types=all").get_json()
+            all_items = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=all"
+            ).get_json()
             assert len(all_items) == 3
             assert {r["media_type"] for r in all_items} == {"image", "link", "document"}
 
-            paged = client.get(f"/api/media?chat_id=123456789&chat_type=contact&types=all&before={mixed[0]['timestamp_ms']}").get_json()
+            paged = client.get(
+                f"/api/media?chat_id=123456789&chat_type=contact&types=all&before={mixed[0]['timestamp_ms']}"
+            ).get_json()
             assert all(r["timestamp_ms"] < mixed[0]["timestamp_ms"] for r in paged)
-
 
     def test_media_documents_endpoint_returns_undownloaded_docs(self, tmp_path):
         """Documents with no file_path but a media_name are returned by /api/media/documents."""
@@ -2057,15 +2066,21 @@ class TestHtmlTemplate:
         rule_match = re.search(r"\.msg-media\s+img[^{]*\{([^}]+)\}", css)
         assert rule_match, ".msg-media img rule missing in app.css"
         rule_body = rule_match.group(1)
-        assert "width: auto" in rule_body, "Media must use width: auto to avoid forced horizontal stretch"
-        assert "object-fit: contain" in rule_body, "Media must use object-fit: contain to preserve aspect ratio"
+        assert "width: auto" in rule_body, (
+            "Media must use width: auto to avoid forced horizontal stretch"
+        )
+        assert "object-fit: contain" in rule_body, (
+            "Media must use object-fit: contain to preserve aspect ratio"
+        )
         assert "max-height:" in rule_body, "Media must specify max-height constraint"
 
         wrap_match = re.search(r"(?<!-)\.msg-media\s*\{([^}]+)\}", css)
         assert wrap_match, ".msg-media rule missing in app.css"
         wrap_body = wrap_match.group(1)
         assert "max-width: 320px" in wrap_body, "Media container must clamp max-width to 320px"
-        assert "width: fit-content" in wrap_body, "Media container must use width: fit-content to prevent empty wasted space"
+        assert "width: fit-content" in wrap_body, (
+            "Media container must use width: fit-content to prevent empty wasted space"
+        )
 
     def test_lightbox_wheel_zoom_implemented(self):
         """app.js must provide lightbox wheel-to-zoom and pan functionality."""
@@ -6963,7 +6978,9 @@ class TestEditedMessages:
 
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
-            resp = client.get("/api/messages/at?chat_id=99999999&chat_type=contact&ts=1700000000000")
+            resp = client.get(
+                "/api/messages/at?chat_id=99999999&chat_type=contact&ts=1700000000000"
+            )
             assert resp.status_code == 200
             msgs = resp.get_json()
             assert len(msgs) == 1
@@ -6977,4 +6994,3 @@ class TestEditedMessages:
         css_content = css_path.read_text(encoding="utf-8")
         assert "msg-edited" in js_content
         assert "msg-edited" in css_content
-

@@ -252,9 +252,16 @@ def write_missing_report(report_path: str, rows: list, logger: logging.Logger):
 # ---------------------------------------------------------------------------
 
 
-def write_duplicate_report(report_path: str, conn: sqlite3.Connection, logger: logging.Logger):
+def write_duplicate_report(
+    report_path: str,
+    conn: sqlite3.Connection,
+    logger: logging.Logger,
+    tz,
+):
     """Write a CSV report of media files with identical content at multiple paths."""
-    rows = conn.execute("""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_copies)")}
+    ts_expr = "MIN(ac.timestamp_ms)" if "timestamp_ms" in cols else "NULL"
+    rows = conn.execute(f"""
         WITH dup_hashes AS (
             SELECT f.md5, COUNT(DISTINCT ac.archive_path) AS total
             FROM files f
@@ -262,10 +269,11 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection, logger: l
             GROUP BY f.md5
             HAVING total >= 2
         )
-        SELECT DISTINCT dh.md5, dh.total, ac.archive_path, ac.is_hardlink
+        SELECT dh.md5, dh.total, ac.archive_path, MAX(ac.is_hardlink) AS is_hardlink, {ts_expr} AS timestamp_ms
         FROM dup_hashes dh
         JOIN files f ON f.md5 = dh.md5
         JOIN archive_copies ac ON ac.original_path = f.original_path
+        GROUP BY dh.md5, dh.total, ac.archive_path
         ORDER BY dh.total DESC, dh.md5, ac.archive_path ASC
     """).fetchall()
 
@@ -273,14 +281,21 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection, logger: l
         logger.info("No duplicate media found.")
         return
 
-    fieldnames = ["group_id", "file_count", "archived_path", "md5_hex", "is_hardlink"]
+    fieldnames = [
+        "group_id",
+        "file_count",
+        "archived_path",
+        "md5_hex",
+        "is_hardlink",
+        "original_timestamp",
+    ]
     current_md5 = None
     group_id = 0
 
     with open(report_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for md5_bytes, file_count, archived_path, is_hardlink in rows:
+        for md5_bytes, file_count, archived_path, is_hardlink, timestamp_ms in rows:
             if md5_bytes != current_md5:
                 current_md5 = md5_bytes
                 group_id += 1
@@ -291,6 +306,7 @@ def write_duplicate_report(report_path: str, conn: sqlite3.Connection, logger: l
                     "archived_path": archived_path,
                     "md5_hex": md5_bytes.hex(),
                     "is_hardlink": 1 if is_hardlink else 0,
+                    "original_timestamp": human_datetime(timestamp_ms, tz) if timestamp_ms else "",
                 }
             )
     logger.info(
@@ -428,7 +444,7 @@ def _copy_or_skip(
             if cursor is not None:
                 rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
                 archive_db.record_file_archived(
-                    cursor, file_path, src_hash, rel, os.path.getsize(dest_path), 0
+                    cursor, file_path, src_hash, rel, os.path.getsize(dest_path), 0, timestamp
                 )
             if src_hash not in hash_to_canonical:
                 hash_to_canonical[src_hash] = dest_path
@@ -489,7 +505,7 @@ def _copy_or_skip(
     if cursor is not None:
         rel = os.path.relpath(resolved, output_root).replace(os.sep, "/")
         archive_db.record_file_archived(
-            cursor, file_path, src_hash, rel, os.path.getsize(resolved), is_hardlink
+            cursor, file_path, src_hash, rel, os.path.getsize(resolved), is_hardlink, timestamp
         )
     return 1, 0, 0
 
@@ -807,7 +823,7 @@ def process_vcard_rows(
                 if cursor is not None:
                     rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
                     archive_db.record_file_archived(
-                        cursor, virtual_orig_path, vcard_hash, rel, vcard_size, 0
+                        cursor, virtual_orig_path, vcard_hash, rel, vcard_size, 0, timestamp_ms
                     )
                 stats["skipped"] += 1
                 progress.update(i, stats)
@@ -835,7 +851,7 @@ def process_vcard_rows(
         if cursor is not None:
             rel = os.path.relpath(resolved, output_root).replace(os.sep, "/")
             archive_db.record_file_archived(
-                cursor, virtual_orig_path, vcard_hash, rel, vcard_size, 0
+                cursor, virtual_orig_path, vcard_hash, rel, vcard_size, 0, timestamp_ms
             )
         stats["copied"] += 1
         progress.update(i, stats)
@@ -2028,7 +2044,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             dup_report_path = os.path.join(args.output, "duplicate_media_report.csv")
             conflict_report_path = os.path.join(args.output, "source_conflicts_report.csv")
             if not args.dry_run:
-                write_duplicate_report(dup_report_path, archive_conn, logger)
+                write_duplicate_report(dup_report_path, archive_conn, logger, tz)
                 if hasattr(media_resolver, "conflict_rows"):
                     write_conflict_report(
                         conflict_report_path, media_resolver.conflict_rows, logger

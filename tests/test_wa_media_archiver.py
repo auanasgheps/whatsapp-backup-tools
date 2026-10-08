@@ -1108,7 +1108,13 @@ class TestRecordFileArchived:
         cursor = conn.cursor()
         md5 = b"\x01" * 16
         arc.record_file_archived(
-            cursor, "orig.jpg", md5, "Contacts/Alice (00111)/2024/Received/orig.jpg", 1024, 0
+            cursor,
+            "orig.jpg",
+            md5,
+            "Contacts/Alice (00111)/2024/Received/orig.jpg",
+            1024,
+            0,
+            1700000000000,
         )
         conn.commit()
         row = conn.execute(
@@ -1117,17 +1123,18 @@ class TestRecordFileArchived:
         assert row[0] == md5
         assert row[1] == 1024
         copy = conn.execute(
-            "SELECT archive_path FROM archive_copies WHERE original_path = 'orig.jpg'"
+            "SELECT archive_path, timestamp_ms FROM archive_copies WHERE original_path = 'orig.jpg'"
         ).fetchone()
         assert "Contacts/Alice (00111)/2024/Received/orig.jpg" == copy[0]
+        assert copy[1] == 1700000000000
         conn.close()
 
     def test_duplicate_archive_path_silently_ignored(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b"\x01" * 16
-        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512, 0)
-        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512, 0)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512, 0, None)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512, 0, None)
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -1139,8 +1146,8 @@ class TestRecordFileArchived:
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b"\x01" * 16
-        arc.record_file_archived(cursor, "orig.jpg", md5, "path1.jpg", 256, 0)
-        arc.record_file_archived(cursor, "orig.jpg", md5, "path2.jpg", 256, 0)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "path1.jpg", 256, 0, None)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "path2.jpg", 256, 0, None)
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -1227,10 +1234,22 @@ class TestBuildArchiveFilenameIndex:
         md5a = b"\x01" * 16
         md5b = b"\x02" * 16
         arc.record_file_archived(
-            cursor, "/staging/WhatsApp Images/photo.jpg", md5a, "Contacts/Alice/photo.jpg", 2048, 0
+            cursor,
+            "/staging/WhatsApp Images/photo.jpg",
+            md5a,
+            "Contacts/Alice/photo.jpg",
+            2048,
+            0,
+            None,
         )
         arc.record_file_archived(
-            cursor, "/staging/WhatsApp Video/clip.mp4", md5b, "Contacts/Bob/clip.mp4", 512000, 0
+            cursor,
+            "/staging/WhatsApp Video/clip.mp4",
+            md5b,
+            "Contacts/Bob/clip.mp4",
+            512000,
+            0,
+            None,
         )
         conn.commit()
         index = arc.build_archive_filename_index(conn)
@@ -1313,7 +1332,7 @@ class TestWriteDuplicateReport:
     def test_no_duplicates_does_not_create_file(self, tmp_path, logger):
         conn = arc.open_archive_db(str(tmp_path))
         path = str(tmp_path / "dups.csv")
-        wa.write_duplicate_report(path, conn, logger)
+        wa.write_duplicate_report(path, conn, logger, None)
         conn.close()
         assert not os.path.exists(path)
 
@@ -1325,16 +1344,16 @@ class TestWriteDuplicateReport:
         md5 = hashlib.md5(b"data").digest()
         cursor.execute("INSERT INTO files (original_path, md5) VALUES (?, ?)", ("orig.jpg", md5))
         cursor.execute(
-            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink) VALUES (?, ?, ?)",
-            ("orig.jpg", "Contacts/Alice (00111)/2024/Received/orig.jpg", 0),
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("orig.jpg", "Contacts/Alice (00111)/2024/Received/orig.jpg", 0, 1718000000000),
         )
         cursor.execute(
-            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink) VALUES (?, ?, ?)",
-            ("orig.jpg", "Groups/Family/2024/orig_Alice.jpg", 1),
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("orig.jpg", "Groups/Family/2024/orig_Alice.jpg", 1, 1718000000000),
         )
         conn.commit()
         path = str(tmp_path / "dups.csv")
-        wa.write_duplicate_report(path, conn, logger)
+        wa.write_duplicate_report(path, conn, logger, None)
         conn.close()
         assert os.path.isfile(path)
         with open(path, encoding="utf-8") as f:
@@ -1342,6 +1361,8 @@ class TestWriteDuplicateReport:
         assert "md5_hex" in content
         assert "file_count" in content
         assert "is_hardlink" in content
+        assert "original_timestamp" in content
+        assert "2024-" in content
 
 
 # ===========================================================================
@@ -3737,7 +3758,7 @@ def _seed_archive(tmp_path, original_path, archive_rel, content=b"test data"):
     conn = arc.open_archive_db(str(tmp_path))
     md5 = hashlib.md5(content).digest()
     cur = conn.cursor()
-    arc.record_file_archived(cur, original_path, md5, archive_rel, len(content), 0)
+    arc.record_file_archived(cur, original_path, md5, archive_rel, len(content), 0, None)
     conn.commit()
     conn.close()
     archive_file = tmp_path.joinpath(*archive_rel.split("/"))
@@ -3787,7 +3808,7 @@ class TestRunRestoreMode:
         conn = arc.open_archive_db(str(tmp_path))
         md5 = hashlib.md5(b"x").digest()
         arc.record_file_archived(
-            conn.cursor(), "Media/img.jpg", md5, "Contacts/Alice/2024/Received/img.jpg", 1, 0
+            conn.cursor(), "Media/img.jpg", md5, "Contacts/Alice/2024/Received/img.jpg", 1, 0, None
         )
         conn.commit()
         conn.close()
@@ -5364,7 +5385,9 @@ class TestVcardExtraction:
     def test_resolve_vcard_display_name_parameterized_fn(self):
         from shared.db import resolve_vcard_display_name
 
-        vcard_param = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN;CHARSET=UTF-8:Carlos Danger\r\nEND:VCARD\r\n"
+        vcard_param = (
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN;CHARSET=UTF-8:Carlos Danger\r\nEND:VCARD\r\n"
+        )
         name = resolve_vcard_display_name(None, vcard_param)
         assert name == "Carlos Danger"
 
@@ -5595,10 +5618,10 @@ class TestArchiveDbMigrationV2:
         file1.write_bytes(b"payload")
 
         cur = conn.cursor()
-        arc.record_file_archived(cur, "Media/img.jpg", md5, "Contacts/Alice/img.jpg", 7, 0)
+        arc.record_file_archived(cur, "Media/img.jpg", md5, "Contacts/Alice/img.jpg", 7, 0, None)
         # Add a missing file to verify it's not treated as canonical
         arc.record_file_archived(
-            cur, "Media/missing.jpg", b"fake", "Contacts/Bob/missing.jpg", 10, 0
+            cur, "Media/missing.jpg", b"fake", "Contacts/Bob/missing.jpg", 10, 0, None
         )
         conn.commit()
 
@@ -5721,7 +5744,7 @@ class TestHardlinkDuplicates:
 
         # Check duplicate report
         report_path = out / "duplicate_media_report.csv"
-        wa.write_duplicate_report(str(report_path), conn, logger)
+        wa.write_duplicate_report(str(report_path), conn, logger, None)
         assert report_path.exists()
         import csv
 
@@ -5731,6 +5754,9 @@ class TestHardlinkDuplicates:
         paths_to_link = {r["archived_path"]: r["is_hardlink"] for r in reader}
         assert paths_to_link["Groups/Family/2024/img_Alice.jpg"] == "0"
         assert paths_to_link["Contacts/Bob (00222)/2024/Received/img.jpg"] == "1"
+        paths_to_ts = {r["archived_path"]: r["original_timestamp"] for r in reader}
+        assert paths_to_ts["Groups/Family/2024/img_Alice.jpg"].startswith("2024-")
+        assert paths_to_ts["Contacts/Bob (00222)/2024/Received/img.jpg"].startswith("2024-")
         conn.close()
 
     def test_no_hardlink_when_flag_disabled(self, tmp_path, logger):
@@ -5948,10 +5974,22 @@ class TestRestoreModeFilesystemAndVcard:
         os.link(str(p1), str(p2))
 
         arc.record_file_archived(
-            cur, "Media/WhatsApp Images/img1.jpg", md5, "Contacts/Alice/img1.jpg", len(content), 0
+            cur,
+            "Media/WhatsApp Images/img1.jpg",
+            md5,
+            "Contacts/Alice/img1.jpg",
+            len(content),
+            0,
+            None,
         )
         arc.record_file_archived(
-            cur, "Media/WhatsApp Images/img2.jpg", md5, "Groups/Family/img2.jpg", len(content), 1
+            cur,
+            "Media/WhatsApp Images/img2.jpg",
+            md5,
+            "Groups/Family/img2.jpg",
+            len(content),
+            1,
+            None,
         )
         conn.commit()
         conn.close()
@@ -5985,7 +6023,7 @@ class TestRestoreModeFilesystemAndVcard:
 
         # Record virtual vcard
         arc.record_file_archived(
-            cur, "vcard:101", vcard_hash, "Contacts/Alice/Contact.vcf", len(vcard_bytes), 0
+            cur, "vcard:101", vcard_hash, "Contacts/Alice/Contact.vcf", len(vcard_bytes), 0, None
         )
         conn.commit()
         conn.close()
@@ -6016,6 +6054,7 @@ class TestRestoreModeFilesystemAndVcard:
             "Contacts/Bob/contacts.vcf",
             len(vcard_bytes),
             0,
+            None,
         )
         conn.commit()
         conn.close()
@@ -6037,21 +6076,27 @@ class TestRestoreModeFilesystemAndVcard:
         h = hashlib.md5(content).digest()
 
         # Two different original paths mapped to the SAME archive_path (e.g. repeated send skipped)
-        arc.record_file_archived(cur, "Media/IMG1.jpg", h, "Contacts/A/IMG1.jpg", len(content), 0)
-        arc.record_file_archived(cur, "Media/IMG2.jpg", h, "Contacts/A/IMG1.jpg", len(content), 0)
+        arc.record_file_archived(
+            cur, "Media/IMG1.jpg", h, "Contacts/A/IMG1.jpg", len(content), 0, None
+        )
+        arc.record_file_archived(
+            cur, "Media/IMG2.jpg", h, "Contacts/A/IMG1.jpg", len(content), 0, None
+        )
         conn.commit()
 
         report = out / "dup_report.csv"
-        wa.write_duplicate_report(str(report), conn, logger)
+        wa.write_duplicate_report(str(report), conn, logger, None)
 
         # Since there is only 1 distinct archive_path, it must NOT be reported as a duplicate of itself
         assert not report.exists()
 
         # Now add a second distinct archive_path
-        arc.record_file_archived(cur, "Media/IMG3.jpg", h, "Contacts/B/IMG1.jpg", len(content), 1)
+        arc.record_file_archived(
+            cur, "Media/IMG3.jpg", h, "Contacts/B/IMG1.jpg", len(content), 1, None
+        )
         conn.commit()
 
-        wa.write_duplicate_report(str(report), conn, logger)
+        wa.write_duplicate_report(str(report), conn, logger, None)
         assert report.exists()
         lines = [line.strip() for line in report.read_text().splitlines() if line.strip()]
         # Header + 2 distinct archive path rows (Contacts/A/IMG1.jpg and Contacts/B/IMG1.jpg)
