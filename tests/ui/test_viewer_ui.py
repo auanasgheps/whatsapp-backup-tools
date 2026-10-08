@@ -11,8 +11,8 @@ Validates the complete web interface lifecycle in a real headless browser using 
 
 from __future__ import annotations
 
-from pathlib import Path
 import time
+from pathlib import Path
 
 import pytest
 

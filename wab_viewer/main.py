@@ -28,7 +28,15 @@ import webbrowser
 from pathlib import Path
 
 try:
-    from flask import Flask, Response, jsonify, make_response, render_template_string, request, send_from_directory
+    from flask import (
+        Flask,
+        Response,
+        jsonify,
+        make_response,
+        render_template_string,
+        request,
+        send_from_directory,
+    )
 except ImportError:
     sys.exit("Flask is not installed. Run: pip install flask")
 
@@ -1184,7 +1192,6 @@ def _media_type_from_path(path: str) -> str:
     return "document"
 
 
-
 def _open_cache_db(output_root: Path) -> sqlite3.Connection:
     cache_path = get_cache_db_path(output_root)
     _ensure_writable(cache_path)
@@ -1441,9 +1448,7 @@ def _fts_ios_chat(
     on_progress,
     hd_clause: str,
 ):
-    mi_cols = {
-        row[1] for row in wa_conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()
-    }
+    mi_cols = {row[1] for row in wa_conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
     vcard_name_col = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
     sql = f"""
         SELECT
@@ -1464,7 +1469,6 @@ def _fts_ios_chat(
     """
     cursor = wa_conn.execute(sql, (chat_id,))
     _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
-
 
 
 def _build_fts_chat(
@@ -2474,7 +2478,8 @@ def create_app(output_root: Path, rescan: bool = False):
         CREATE TABLE IF NOT EXISTS archive_copies (
             original_path TEXT PRIMARY KEY,
             archive_path TEXT NOT NULL,
-            sha256 TEXT
+            sha256 TEXT,
+            is_hardlink INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS recent_messages (
             chat_id        TEXT NOT NULL,
@@ -2509,7 +2514,9 @@ def create_app(output_root: Path, rescan: bool = False):
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
     if "is_edited" not in cols:
-        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")
+        _archive_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0"
+        )
     if "edited_ts" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN edited_ts INTEGER")
 
