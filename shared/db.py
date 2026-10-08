@@ -80,4 +80,3 @@ def resolve_vcard_display_name(raw_name: str | None, vcard_text: str | None) -> 
         return cleaned
 
     return "Contact"
-

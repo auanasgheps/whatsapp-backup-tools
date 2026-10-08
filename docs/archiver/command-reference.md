@@ -247,7 +247,7 @@ wab-archiver archive \
 
 > 💡 The first occurrence of a file is archived as the canonical copy. Any subsequent duplicate points to the existing file on disk via a hardlink. If the destination filesystem (e.g. FAT32, exFAT) or network share does not support hardlinks, the archiver detects this and gracefully falls back to standard file copying.
 >
-> ⚠️ **File Modification Timestamps:** Because filesystem hardlinks share the same underlying inode / MFT record on disk, updating a hardlinked file's modification time updates it across all linked paths. When duplicate media is forwarded across different dates, the file modification timestamp (`mtime`) on disk will reflect the timestamp of the most recent message.
+> ⚠️ **File Modification Timestamps:** Because filesystem hardlinks share the same record on disk, updating a hardlinked file's modification time updates it across all linked paths. When duplicate media is forwarded across different dates, the file modification timestamp (`mtime`) on disk will reflect the timestamp of the most recent message. To preserve the exact date context for every copy, the archiver records the original message timestamp of each duplicate in `.wa_media_archiver.db` and exports it in the `original_timestamp` column of `duplicate_media_report.csv`.
 
 #### iOS — pre-extracted mode
 
@@ -269,7 +269,7 @@ wab-archiver archive \
 |---|---|
 | `wab-archiver.log` | Full run log including all copied, skipped, and missing files |
 | `missing_media_report.csv` | Structured report of all media referenced in the DB but not found on disk. Useful for manual recovery from old backups |
-| `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths. One row per path, sortable by `file_count`. Includes column `is_hardlink` (`1` if hardlinked, `0` if independent copy). Only written when duplicates exist |
+| `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths. One row per path, sortable by `file_count`. Includes columns `is_hardlink` (`1` if hardlinked, `0` if independent copy) and `original_timestamp` (message timestamp formatted in run timezone, preserving original file date context for hardlinks). Only written when duplicates exist |
 | `source_conflicts_report.csv` | Written when multiple `--wa-root` roots contain different versions of the same file. Only written when conflicts exist |
 | `.wa_media_archiver.db` | SQLite database storing all persistent state: contact folder index, group folder index, and the file archive map. Health checks run automatically on every open. Do not delete unless you want to reset all tracking |
 | `adb_conflicts_report.csv` | Written when `--pull-media` finds a file with the same name but different content on the device vs the archive. Only written when conflicts exist; resolve manually |

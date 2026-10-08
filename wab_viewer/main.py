@@ -2479,7 +2479,8 @@ def create_app(output_root: Path, rescan: bool = False):
             original_path TEXT PRIMARY KEY,
             archive_path TEXT NOT NULL,
             sha256 TEXT,
-            is_hardlink INTEGER NOT NULL DEFAULT 0
+            is_hardlink INTEGER NOT NULL DEFAULT 0,
+            timestamp_ms INTEGER
         );
         CREATE TABLE IF NOT EXISTS recent_messages (
             chat_id        TEXT NOT NULL,
@@ -2510,6 +2511,16 @@ def create_app(output_root: Path, rescan: bool = False):
             PRIMARY KEY (chat_id, msg_id)
         );
     """)
+    copy_cols = [
+        r[1] for r in _archive_conn.execute("PRAGMA table_info(archive_copies)").fetchall()
+    ]
+    if "is_hardlink" not in copy_cols:
+        _archive_conn.execute(
+            "ALTER TABLE archive_copies ADD COLUMN is_hardlink INTEGER NOT NULL DEFAULT 0"
+        )
+    if "timestamp_ms" not in copy_cols:
+        _archive_conn.execute("ALTER TABLE archive_copies ADD COLUMN timestamp_ms INTEGER")
+
     cols = [r[1] for r in _archive_conn.execute("PRAGMA table_info(recent_messages)").fetchall()]
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
@@ -3474,7 +3485,9 @@ def create_app(output_root: Path, rescan: bool = False):
                             ext_conds.append("m.ZMESSAGETYPE = 4")
                 if ext_conds:
                     prune_sql = " OR ".join(ext_conds)
-                    cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL AND ({prune_sql}))")
+                    cand_clauses.append(
+                        f"({is_media} AND ac.archive_path IS NOT NULL AND ({prune_sql}))"
+                    )
                 else:
                     cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
             else:

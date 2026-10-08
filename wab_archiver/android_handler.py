@@ -365,7 +365,6 @@ ORDER BY timestamp_ms ASC
 """
 
 
-
 def _clean_phone_number(raw: str) -> str:
     """Strip formatting characters and return clean numeric string."""
     cleaned = re.sub(r"[\s\-\(\)\.\+]", "", raw)

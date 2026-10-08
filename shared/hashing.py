@@ -13,4 +13,3 @@ def file_md5(path: str) -> bytes:
 def bytes_md5(data: bytes) -> bytes:
     """Compute MD5 hash of raw bytes."""
     return hashlib.md5(data).digest()
-

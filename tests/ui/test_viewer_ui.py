@@ -1046,7 +1046,9 @@ def test_media_gallery_scrolled_link_view_to_images_loads_viewport_images(
             10.0,
         )
         assert isinstance(result, dict)
-        assert result.get("loaded2025Images") is True, "2025 images failed to load after switching to images in scrolled view"
+        assert result.get("loaded2025Images") is True, (
+            "2025 images failed to load after switching to images in scrolled view"
+        )
     finally:
         browser.evaluate(
             """
@@ -1210,7 +1212,9 @@ def test_media_gallery_scrolled_link_view_deselect_link_restores_and_loads_image
             10.0,
         )
         assert isinstance(result, dict)
-        assert result.get("loaded2025Images") is True, "2025 images failed to load after deselecting links in scrolled view"
+        assert result.get("loaded2025Images") is True, (
+            "2025 images failed to load after deselecting links in scrolled view"
+        )
     finally:
         browser.evaluate(
             """
@@ -1470,4 +1474,3 @@ def test_chat_bubble_voice_message_audio_player(
     assert audio_info.get("wrapWidth", 0) >= 240
 
     browser.capture_screenshot(screenshot_dir / "voice_message_audio_player.png", 5.0)
-
