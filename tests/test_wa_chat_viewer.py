@@ -175,6 +175,11 @@ class TestMediaTypeFromPath:
 
     def test_sticker(self):
         assert viewer._media_type_from_path("foo/Sticker/abc.webp") == "sticker"
+        assert viewer._media_type_from_path("foo/stickers/abc.webp") == "sticker"
+        assert (
+            viewer._media_type_from_path("Groups/Chat/2026/STK-20260101-WA0001.webp") == "sticker"
+        )
+        assert viewer._media_type_from_path("Groups/Chat/2026/STK-20260101-WA0001.was") == "sticker"
 
     def test_document(self):
         assert viewer._media_type_from_path("foo/document.pdf") == "document"
@@ -7057,3 +7062,160 @@ class TestEditedMessages:
         css_content = css_path.read_text(encoding="utf-8")
         assert "msg-edited" in js_content
         assert "msg-edited" in css_content
+
+
+class TestStickerSupport:
+    def test_ios_sticker_classification_and_gallery(self, tmp_path):
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path_db)
+        archive_conn.execute("INSERT INTO contacts (number, folder) VALUES ('44123456', 'Alice')")
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Message/Media/123/abc.webp', 'Contacts/Alice/2026/abc.webp')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        wa_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZVCARDNAME TEXT,
+                ZVCARDSTRING TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZFROMJID TEXT,
+                ZSTANZAID TEXT,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+        """)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Alice')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE) VALUES (1, 'Media/123/abc.webp', NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES (1, 1, 0, 700000000.0, 15, NULL, 1)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            # 1. /api/messages classifies as sticker
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["media_type"] == "sticker"
+            assert msgs[0]["archive_path"] == "Contacts/Alice/2026/abc.webp"
+
+            # 2. /api/chats classifies last_msg_type as sticker
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = chats_resp.get_json()
+            assert len(chats) == 1
+            assert chats[0]["last_msg_type"] == "sticker"
+
+            # 3. /api/media with types=sticker returns the sticker
+            stickers_resp = client.get("/api/media?chat_id=1&chat_type=contact&types=sticker")
+            assert stickers_resp.status_code == 200
+            stickers = stickers_resp.get_json()
+            assert len(stickers) == 1
+            assert stickers[0]["media_type"] == "sticker"
+
+            # 4. /api/media with types=image does NOT return the sticker
+            images_resp = client.get("/api/media?chat_id=1&chat_type=contact&types=image")
+            assert images_resp.status_code == 200
+            images = images_resp.get_json()
+            assert len(images) == 0
+
+            # 5. /api/media/count counts it as sticker
+            count_resp = client.get("/api/media/count?chat_id=1&chat_type=contact")
+            assert count_resp.status_code == 200
+            counts = count_resp.get_json()
+            assert counts["by_type"]["sticker"]["count"] == 1
+            assert counts["by_type"]["sticker"]["missing"] == 0
+
+    def test_android_sticker_classification_and_gallery(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (55, 10, 0, 1, 1700000055000, NULL, 20)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (55, 'Media/WhatsApp Stickers/STK-2026.webp', 'STK-2026.webp')"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/WhatsApp Stickers/STK-2026.webp', 'Contacts/Alice/2026/STK-2026.webp')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            # 1. /api/messages classifies as sticker
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = [m for m in resp.get_json() if m["msg_id"] == 55]
+            assert len(msgs) == 1
+            assert msgs[0]["media_type"] == "sticker"
+            assert msgs[0]["archive_path"] == "Contacts/Alice/2026/STK-2026.webp"
+
+            # 2. /api/media with types=sticker returns the sticker
+            stickers_resp = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=sticker"
+            )
+            assert stickers_resp.status_code == 200
+            stickers = stickers_resp.get_json()
+            assert len(stickers) == 1
+            assert stickers[0]["media_type"] == "sticker"
+
+            # 3. /api/media with types=image does NOT return the sticker
+            images_resp = client.get("/api/media?chat_id=123456789&chat_type=contact&types=image")
+            assert images_resp.status_code == 200
+            images = [img for img in images_resp.get_json() if img["msg_id"] == 55]
+            assert len(images) == 0
+
+            # 4. /api/media/count counts it as sticker
+            count_resp = client.get("/api/media/count?chat_id=123456789&chat_type=contact")
+            assert count_resp.status_code == 200
+            counts = count_resp.get_json()
+            assert counts["by_type"]["sticker"]["count"] == 1
+            assert counts["by_type"]["sticker"]["missing"] == 0

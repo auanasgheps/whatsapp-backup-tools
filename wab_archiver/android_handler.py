@@ -33,6 +33,7 @@ _MEDIA_SUBFOLDERS = {
     "WhatsApp Video Notes",
     "WhatsApp Animated Gifs",
     "WhatsApp Documents",
+    "WhatsApp Stickers",
 }
 
 
@@ -228,6 +229,7 @@ SELECT * FROM (
             OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
             OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
             OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Stickers/%'
         )
         AND chat.subject IS NOT NULL
         {since_clause}
@@ -263,6 +265,7 @@ SELECT * FROM (
             OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
             OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
             OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
+            OR message_media.file_path LIKE 'Media/WhatsApp Stickers/%'
         )
         AND chat.subject IS NULL
         {since_clause}

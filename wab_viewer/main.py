@@ -1177,7 +1177,11 @@ def _media_type_from_path(path: str) -> str:
     p = path.lower()
     if p.endswith(".vcf"):
         return "vcard"
-    if "sticker" in p or "stickers" in p:
+    if (
+        "sticker" in p
+        or "stickers" in p
+        or (os.path.basename(p).startswith("stk-") and (p.endswith(".webp") or p.endswith(".was")))
+    ):
         return "sticker"
     ext = os.path.splitext(p)[1]
     if ext in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"):
@@ -1705,6 +1709,7 @@ _IOS_SELECT = f"""
         CASE
             WHEN m.ZMESSAGETYPE = 6 THEN 'service'
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+            WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -2683,6 +2688,7 @@ def create_app(output_root: Path, rescan: bool = False):
         CASE
             WHEN m.ZMESSAGETYPE = 6 THEN 'service'
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+            WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -2826,6 +2832,7 @@ def create_app(output_root: Path, rescan: bool = False):
         CASE
             WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IN (4, 14) THEN 'vcard'
+            WHEN m.message_type = 20 THEN 'sticker'
             WHEN m.message_type IS NULL OR m.message_type = 0 THEN
                 CASE WHEN m.text_data IS NOT NULL
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
@@ -3212,6 +3219,10 @@ def create_app(output_root: Path, rescan: bool = False):
                 source_type == "ios" and raw_type == 4
             ):
                 d["last_msg_type"] = "vcard"
+            elif (source_type == "android" and raw_type == 20) or (
+                source_type == "ios" and raw_type == 15
+            ):
+                d["last_msg_type"] = "sticker"
             elif raw_type != 0 and media_path:
                 path = media_path if source_type == "android" else f"Message/{media_path}"
                 d["last_msg_type"] = _media_type_from_path(path)
@@ -3510,6 +3521,13 @@ def create_app(output_root: Path, rescan: bool = False):
                             ext_conds.append("m.message_type IN (4, 14)")
                         else:
                             ext_conds.append("m.ZMESSAGETYPE = 4")
+                    if mt == "sticker":
+                        if source_type == "android":
+                            ext_conds.append(
+                                "(m.message_type = 20 OR mm.file_path LIKE '%sticker%')"
+                            )
+                        else:
+                            ext_conds.append("m.ZMESSAGETYPE = 15")
                 if ext_conds:
                     prune_sql = " OR ".join(ext_conds)
                     cand_clauses.append(
