@@ -157,8 +157,14 @@ class TestBuildQuery:
             "Media/WhatsApp Video Notes/%",
             "Media/WhatsApp Animated Gifs/%",
             "Media/WhatsApp Documents/%",
+            "Media/WhatsApp Stickers/%",
         ]:
             assert path in query, f"Missing from query: {path}"
+
+    def test_stickers_included(self):
+        query = android_handler.build_query(None, None, False)
+        assert query.count("Media/WhatsApp Stickers/%") == 2
+        assert "WhatsApp Stickers" in android_handler._MEDIA_SUBFOLDERS
 
     def test_limit_clause_included(self):
         query = android_handler.build_query(limit=100, since_ms=None, hd_dedup=False)
@@ -269,6 +275,20 @@ class TestGetMediaFilePaths:
 
         paths = android_handler.get_media_file_paths(conn.cursor(), None, True)
         assert paths == {"Media/WhatsApp Images/hd.jpg"}
+        conn.close()
+
+    def test_get_media_file_paths_includes_stickers(self):
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, NULL, 20)")
+        conn.execute("INSERT INTO jid VALUES (20, '123456')")
+        conn.execute("INSERT INTO message VALUES (1, 1000, 20, 0)")
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Stickers/STK-1.webp', 'image/webp', 1, 1, 'url', NULL)"
+        )
+        conn.commit()
+
+        paths = android_handler.get_media_file_paths(conn.cursor(), None, False)
+        assert "Media/WhatsApp Stickers/STK-1.webp" in paths
         conn.close()
 
 
@@ -1612,6 +1632,48 @@ class TestProcessRows:
         )
         assert os.path.isfile(
             os.path.join(out, "Contacts", "Alice (00111)", "2024", "Sent", "img.jpg")
+        )
+
+    def test_sticker_archiving_group_and_contact(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        stk_file = src_dir / "Media" / "WhatsApp Stickers" / "STK-20240115-WA0001.webp"
+        stk_file.parent.mkdir(parents=True, exist_ok=True)
+        stk_file.write_bytes(b"RIFF....WEBP")
+        out = str(tmp_path / "out")
+        os.makedirs(out)
+        rows = [
+            self._row(
+                file_path="Media/WhatsApp Stickers/STK-20240115-WA0001.webp",
+                chat_subject="Family",
+                sender="111",
+                key_from_me=0,
+            )
+        ]
+        stats, _, _, _ = wa.process_rows(
+            rows,
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            False,
+            None,
+            None,
+            False,
+            {},
+        )
+        assert stats["copied"] == 1
+        assert os.path.isfile(
+            os.path.join(
+                out,
+                "Groups",
+                "Family",
+                "2024",
+                "STK-20240115-WA0001_Alice.webp",
+            )
         )
 
     def test_unknown_sender_falls_back_to_phone_number(self, tmp_path, logger):
