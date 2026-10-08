@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 📁 WhatsApp Backup Archiver (`wab-archiver`)
 
+- **Stickers Archiving on Android**: Added complete extraction and archiving for WhatsApp stickers on Android (`STK-*.webp` and `*.was`) from `Media/WhatsApp Stickers/` into chat folders and database tracking, including targeted ADB pull support.
 - **vCard (.vcf) Contact Cards Archiving**: Added extraction and archiving of shared contact cards (`.vcf`) from both Android (`msgstore.db`) and iOS (`ChatStorage.sqlite`) databases into the media archive output hierarchy (`Contacts/<Contact>/<Year>/<Direction>/<DisplayName>.vcf` or `Groups/<Group>/<Year>/<DisplayName> (<Sender>).vcf`).
 - **Standard Serialization & Deduplication**: Serialized raw database vCard payloads into standard UTF-8 encoded files with CRLF line endings and preserved original message timestamps. Implemented deduplication and collision disambiguation via virtual original path tracking (`vcard:{msg_id}`).
 - **Multi-Contact Bundles & Name Resolution**: Handled multi-contact share bundles by consolidating entries into single message `.vcf` files while resolving user-friendly composite names (e.g., `"Alice & 2 others"`).
@@ -18,13 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
+- **Dedicated Stickers Section in Media Gallery & Chat Classification**: Added full sticker support across both platforms in the Media Gallery and chat views. On iOS, messages with `ZMESSAGETYPE = 15` are now properly categorized as stickers rather than falling through to generic images. Server-side type filtering (`types=sticker`) in `/api/media` and count badges in `/api/media/count` now accurately reflect sticker media.
 - **Contact Card Chat Bubbles**: Rendered native WhatsApp-style contact cards with contact avatar icons, display names, "Contact card" subtitle, and clean `.vcf` download buttons.
 - **Media Gallery & Archive View Integration**: Added square `.vcf` cards with contact icons to media galleries and archive tree views, complete with a dedicated `vcard` media filter tab and stat pill.
 - **Full-Text Search (FTS)**: Included shared contact names in full-text search indexing across Android and iOS databases.
 - **Chat List Previews**: Added contact card previews (`vcard`) in chat list snippets and timestamps.
 - **Voice Message Audio Player in Chromium Browsers**: Fixed an issue where the inline audio player for voice messages failed to appear in Google Chrome, Microsoft Edge, Brave, and other Chromium-based browsers due to an intrinsic layout collapse when shrink-wrapping media containers. Audio players now render at full width with playback controls across all browsers.
 - **Chat Bubble Photo Aspect Ratio & Bubble Shrink-Wrapping**: Resolved an issue where vertical and tall photos or videos were stretched horizontally when accompanied by captions, sender names, or quoted messages, and fixed message bubbles expanding unnecessarily with empty space when displaying standalone photos. Media containers and bubbles now tightly shrink-wrap photos to eliminate wasted space while preserving the intrinsic aspect ratio.
-- **"Edited" Message Indicator**: Messages edited in WhatsApp now display an "Edited" label immediately to the left of the timestamp in chat bubbles and media grid cells, matching WhatsApp's native interface. Hovering over the badge displays a tooltip with the exact edit date and time.
+- **"Edited" Message Indicator**: Messages edited in WhatsApp now display an "Edited" label immediately to the left of the timestamp in chat bubbles and media grid cells, matching WhatsApp's native interface.
 - **Media Gallery Viewport Sync & Filter Switching**: Enhanced Media Gallery lazy loading and filter transitions so that toggling media filters (such as switching from links back to photos) after scrolling down multiple months automatically backfills and hydrates images down to the visible viewport, maintaining scroll stability and preventing blank media grids.
 - **Lightbox Wheel Zoom & Pan**: Added interactive wheel zooming (up to 6×) in the full-screen photo viewer, complete with smooth click-and-drag panning, click-to-toggle zoom (1× / 2.5×), and a 1-click reset badge.
 
