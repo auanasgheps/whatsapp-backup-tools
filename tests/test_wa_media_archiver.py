@@ -5361,6 +5361,21 @@ class TestVcardExtraction:
         name_empty = resolve_vcard_display_name("", "")
         assert name_empty == "Contact"
 
+    def test_resolve_vcard_display_name_parameterized_fn(self):
+        from shared.db import resolve_vcard_display_name
+
+        vcard_param = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN;CHARSET=UTF-8:Carlos Danger\r\nEND:VCARD\r\n"
+        name = resolve_vcard_display_name(None, vcard_param)
+        assert name == "Carlos Danger"
+
+        vcard_lower = "BEGIN:VCARD\r\nfn:Mario Rossi\r\nEND:VCARD\r\n"
+        name2 = resolve_vcard_display_name(None, vcard_lower)
+        assert name2 == "Mario Rossi"
+
+        # Portuguese / international counter string should extract FN from vcard
+        name3 = resolve_vcard_display_name("2 contatos", vcard_param)
+        assert name3 == "Carlos Danger"
+
     def test_has_vcard_support_android(self):
         conn = sqlite3.connect(":memory:")
         cur = conn.cursor()
@@ -5979,3 +5994,66 @@ class TestRestoreModeFilesystemAndVcard:
         # Should exit with code 1 because no valid Media/ files exist to restore (vcards ignored)
         with pytest.raises(SystemExit):
             wa.run_restore_mode(args, logger)
+
+    def test_restore_mode_restores_legitimate_vcf_document(self, tmp_path, logger):
+        out = tmp_path / "archive"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        cur = conn.cursor()
+
+        vcard_bytes = b"BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Bob\r\nEND:VCARD\r\n"
+        vcard_hash = hashlib.md5(vcard_bytes).digest()
+
+        vcf_doc = out / "Contacts" / "Bob" / "contacts.vcf"
+        vcf_doc.parent.mkdir(parents=True, exist_ok=True)
+        vcf_doc.write_bytes(vcard_bytes)
+
+        # Record real Media/ document file with .vcf extension
+        arc.record_file_archived(
+            cur,
+            "Media/WhatsApp Documents/contacts.vcf",
+            vcard_hash,
+            "Contacts/Bob/contacts.vcf",
+            len(vcard_bytes),
+            0,
+        )
+        conn.commit()
+        conn.close()
+
+        args = argparse.Namespace(output=str(out), dry_run=False)
+        wa.run_restore_mode(args, logger)
+
+        restored = out / "Media" / "WhatsApp Documents" / "contacts.vcf"
+        assert restored.exists()
+        assert restored.read_bytes() == vcard_bytes
+
+    def test_duplicate_report_distinct_paths(self, tmp_path, logger):
+        out = tmp_path / "archive"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        cur = conn.cursor()
+
+        content = b"identical-content"
+        h = hashlib.md5(content).digest()
+
+        # Two different original paths mapped to the SAME archive_path (e.g. repeated send skipped)
+        arc.record_file_archived(cur, "Media/IMG1.jpg", h, "Contacts/A/IMG1.jpg", len(content), 0)
+        arc.record_file_archived(cur, "Media/IMG2.jpg", h, "Contacts/A/IMG1.jpg", len(content), 0)
+        conn.commit()
+
+        report = out / "dup_report.csv"
+        wa.write_duplicate_report(str(report), conn, logger)
+
+        # Since there is only 1 distinct archive_path, it must NOT be reported as a duplicate of itself
+        assert not report.exists()
+
+        # Now add a second distinct archive_path
+        arc.record_file_archived(cur, "Media/IMG3.jpg", h, "Contacts/B/IMG1.jpg", len(content), 1)
+        conn.commit()
+
+        wa.write_duplicate_report(str(report), conn, logger)
+        assert report.exists()
+        lines = [line.strip() for line in report.read_text().splitlines() if line.strip()]
+        # Header + 2 distinct archive path rows (Contacts/A/IMG1.jpg and Contacts/B/IMG1.jpg)
+        assert len(lines) == 3
+        conn.close()

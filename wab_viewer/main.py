@@ -3451,9 +3451,34 @@ def create_app(output_root: Path, rescan: bool = False):
         media_types = (types_set - {"link", "document", "all"}) if not has_all else set()
         has_archived_media = has_all or bool(media_types) or has_doc
 
+        _EXT_PATTERNS = {
+            "image": ["%.jpg", "%.jpeg", "%.png", "%.webp", "%.heic", "%.heif"],
+            "video": ["%.mp4", "%.mov", "%.avi", "%.mkv", "%.3gp"],
+            "audio": ["%.mp3", "%.ogg", "%.aac", "%.opus", "%.m4a"],
+            "gif": ["%.gif"],
+            "sticker": ["%sticker%"],
+            "vcard": ["%.vcf"],
+        }
+
         cand_clauses = []
         if has_archived_media:
-            cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
+            if not has_all and not has_doc and media_types:
+                ext_conds = []
+                for mt in media_types:
+                    for ext in _EXT_PATTERNS.get(mt, []):
+                        ext_conds.append(f"LOWER(ac.archive_path) LIKE '{ext}'")
+                    if mt == "vcard":
+                        if source_type == "android":
+                            ext_conds.append("m.message_type IN (4, 14)")
+                        else:
+                            ext_conds.append("m.ZMESSAGETYPE = 4")
+                if ext_conds:
+                    prune_sql = " OR ".join(ext_conds)
+                    cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL AND ({prune_sql}))")
+                else:
+                    cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
+            else:
+                cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
         if has_link:
             cand_clauses.append(f"({is_link})")
         if has_doc:
@@ -3477,9 +3502,11 @@ def create_app(output_root: Path, rescan: bool = False):
             type_filter = f"media_type IN ({placeholders})"
             type_params = list(types_set)
 
+        hd_dedup_clause = _IOS_HD_DEDUP_CLAUSE if (source_type == "ios" and has_ios_hd) else ""
+
         sql = f"""
             SELECT * FROM (
-                {select} WHERE {chat_pred} AND ({cand_pred}) {ts_clause}
+                {select} WHERE {chat_pred} {hd_dedup_clause} AND ({cand_pred}) {ts_clause}
                 ORDER BY {ts_col} DESC
             )
             WHERE {type_filter}

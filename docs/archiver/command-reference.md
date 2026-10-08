@@ -246,6 +246,8 @@ wab-archiver archive \
 ```
 
 > 💡 The first occurrence of a file is archived as the canonical copy. Any subsequent duplicate points to the existing file on disk via a hardlink. If the destination filesystem (e.g. FAT32, exFAT) or network share does not support hardlinks, the archiver detects this and gracefully falls back to standard file copying.
+>
+> ⚠️ **File Modification Timestamps:** Because filesystem hardlinks share the same underlying inode / MFT record on disk, updating a hardlinked file's modification time updates it across all linked paths. When duplicate media is forwarded across different dates, the file modification timestamp (`mtime`) on disk will reflect the timestamp of the most recent message.
 
 #### iOS — pre-extracted mode
 

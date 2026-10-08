@@ -1219,17 +1219,7 @@
       applyTransform(true);
     }, { passive: false });
 
-    media.addEventListener('mousedown', e => {
-      if (e.button !== 0) return;
-      if (scale > 1) {
-        isDragging = true;
-        hasDragged = false;
-        startX = e.clientX - panX;
-        startY = e.clientY - panY;
-        media.style.cursor = 'grabbing';
-        e.preventDefault();
-      }
-    });
+    media.draggable = false;
 
     const onMouseMove = e => {
       if (!isDragging) return;
@@ -1243,12 +1233,25 @@
     const onMouseUp = () => {
       if (isDragging) {
         isDragging = false;
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
         applyTransform(false);
       }
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
+    media.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      if (scale > 1) {
+        isDragging = true;
+        hasDragged = false;
+        startX = e.clientX - panX;
+        startY = e.clientY - panY;
+        media.style.cursor = 'grabbing';
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        e.preventDefault();
+      }
+    });
 
     lb.addEventListener('animationend', () => {
       window.removeEventListener('mousemove', onMouseMove);
@@ -1402,7 +1405,7 @@
   let currentGalleryItems = [];
   let activeTypes = new Set();   // empty = show all; populated = show only those types
   let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
-  const SECONDARY_TYPES = new Set(['link', 'document', 'vcard']);  // hidden by default, toggle exclusive
+  const SECONDARY_TYPES = new Set(['link', 'document']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
   let galleryLoadingMore = false;
   let galleryBackfillGen = 0;
@@ -2042,8 +2045,12 @@
     galleryLoadingMore = true;
     const grid = document.getElementById('media-gallery-grid');
     try {
+      const typesParam = (activeTypes.size > 0 && [...activeTypes].some(t => !SECONDARY_TYPES.has(t)))
+        ? '&types=' + encodeURIComponent([...activeTypes].filter(t => !SECONDARY_TYPES.has(t)).join(','))
+        : '';
       const url = '/api/media?chat_id=' + encodeURIComponent(currentChat.id) +
                   '&chat_type=' + encodeURIComponent(currentChat.type) +
+                  typesParam +
                   (before != null ? '&before=' + before : '');
       const items = await fetch(url).then(r => r.json());
       if (items.length < 100) galleryAllLoaded = true;
