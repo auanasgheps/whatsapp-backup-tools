@@ -293,8 +293,12 @@ class TestCacheSchema:
         cache_conn.execute(
             "INSERT INTO message_index (rowid, chat_id, chat_type, timestamp_ms) VALUES (1, 'c1', 'contact', 1000)"
         )
-        cache_conn.execute("INSERT INTO message_index_fts (rowid, text_body) VALUES (1, 'Hello world')")
-        cache_conn.execute("INSERT INTO indexed_chats (chat_id, chat_type) VALUES ('c1', 'contact')")
+        cache_conn.execute(
+            "INSERT INTO message_index_fts (rowid, text_body) VALUES (1, 'Hello world')"
+        )
+        cache_conn.execute(
+            "INSERT INTO indexed_chats (chat_id, chat_type) VALUES ('c1', 'contact')"
+        )
         cache_conn.commit()
 
         viewer._clear_fts_index(cache_conn)
@@ -304,7 +308,9 @@ class TestCacheSchema:
         fts_count = cache_conn.execute("SELECT COUNT(*) FROM message_index_fts").fetchone()[0]
         assert fts_count == 0
 
-        cache_conn.execute("INSERT INTO message_index_fts (rowid, text_body) VALUES (2, 'New text message')")
+        cache_conn.execute(
+            "INSERT INTO message_index_fts (rowid, text_body) VALUES (2, 'New text message')"
+        )
         cache_conn.commit()
         match_row = cache_conn.execute(
             "SELECT rowid FROM message_index_fts WHERE message_index_fts MATCH 'New'"
