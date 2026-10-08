@@ -1,86 +1,49 @@
-# WhatsApp Backup Tools v0.51
+# WhatsApp Backup Tools v0.60
 
-This minor update focuses on fixes, performance optimizations, and documentation refinements that were left outside of the initial stable release. Notably, official PyPI distribution is now available!
+Version 0.60 brings support for shared contact cards across both tools, disk space savings with media hardlinking, and a smoother viewing experience in the offline web viewer.
 
-## What's New in v0.51
-
-### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
-
-- **Faster & Smoother Media Gallery**: Browsing large media collections is now much faster and more responsive. Media items load on demand as you scroll and unload when off-screen, drastically reducing browser memory usage and keeping scrolling smooth.
-- **Accurate Video Previews**: Video thumbnails now show actual preview frames instead of blank or black rectangles, and generate quietly in the background without causing scroll stutter.
-- **Multi-Year Archive View**: Fixed an issue where older years in large chats were omitted. All years are now automatically fetched and browsable in the Archive View.
-- **Sorted Month Dividers**: Fixed out-of-order month headers when browsing through mixed media and documents.
-- **Accurate Chat Media Size**: Fixed the Chat Info panel to accurately calculate and display total media storage used by individual chats.
-
-### 📁 WhatsApp Backup Archiver (`wab-archiver`)
-
-- No changes in this release.
-
-### 📦 Installation & Packaging
-
-- **Now on PyPI**: You can now install and update the tools directly with pip:
-  ```bash
-  pip install whatsapp-backup-tools
-  ```
-- **Automated Release Pipeline**: Configured seamless publishing to PyPI for future updates.
-
-### 📚 Documentation
-
-- **Simplified Onboarding**: Streamlined the setup flow into an easy 3-step guide in the `README`.
-- **Syncthing Guide**: Added a step-by-step walkthrough for pairing and syncing Android media over local Wi-Fi.
-- **Stickers Archival Status**: Clarified that WhatsApp stickers are safely saved into dedicated archive folders by `wab-archiver`.
+> 📇 **Shared Contact Cards (.vcf)**: WhatsApp stores shared contacts directly inside backup databases rather than as media files. WhatsApp Backup Tools now extracts and saves contacts as standard `.vcf` files and displays them as native contact cards in the web viewer, complete with search and 1-click download support!
 
 ---
 
-### 🚀 Getting Started
+### 📁 WhatsApp Archiver
 
-Install via pip:
+#### ✨ New Features
+- **Shared Contact Cards Archiving (`.vcf`)**: Automatically extracts contacts shared in 1:1 and group chats into organized `.vcf` files with original message timestamps and duplicate collision protection.
+- **Hardlink Duplicate Media Files (`--link-duplicates`)**: Drastically save disk storage by hardlinking identical media files shared across chats instead of duplicating files on disk. Unsupported filesystems (such as exFAT or network drives) are automatically detected upfront with safe fallback to copying.
+
+#### ⚡ Improvements
+- **Original Timestamps in Duplicate Reports**: The `duplicate_media_report.csv` now records original WhatsApp message dates and times for duplicate media files, making audit logs clear and easy to follow.
+
+#### 🐛 Bug Fixes
+- Fixed duplicate reporting when identical files were shared across multiple messages, and ensured address book documents are properly preserved during restore mode.
+- Minor bug fixes and reliability improvements.
+
+---
+
+### 🌐 WhatsApp Viewer
+
+#### ✨ New Features
+- **Contact Cards in Chat & Gallery**: Received contacts now display in native WhatsApp-style contact cards with contact avatars, names, and a 1-click download button. Contact cards are also browsable in the Media Gallery and fully indexed in search.
+- **"Edited" Message Indicator**: Messages edited in WhatsApp now display an "Edited" badge next to the timestamp, with a hover tooltip showing the exact edit date and time.
+- **Lightbox Wheel Zoom & Pan**: Zoom smoothly into photos up to 6× using your mouse wheel, drag to pan around, and reset back to fit with a single click.
+
+#### ⚡ Improvements
+- **Media Gallery Filter Synchronization**: Switching media filters (such as switching from links back to photos) after scrolling down multiple months now seamlessly loads items at your current position without jumping or showing empty areas.
+- **Photo Aspect Ratio & Shrink-Wrapping**: Vertical and tall photos now keep their natural aspect ratio without horizontal stretching, and chat bubbles fit snugly around images without empty space.
+
+#### 🐛 Bug Fixes
+- **Voice Message Audio Player**: Fixed an issue where the inline audio player for voice messages was invisible in Google Chrome, Microsoft Edge, and other Chromium-based browsers.
+- Minor UI polish and rendering fixes.
+
+---
+
+### 🚀 How to Upgrade
+
+Update to the latest version using pip:
 
 ```bash
-pip install whatsapp-backup-tools
+pip install --upgrade whatsapp-backup-tools
 ```
 
-> 💡 **Windows users:** If `pip` is not recognized, run `py -m pip install whatsapp-backup-tools` instead.
-
-#### 1. Archive your backup
-
-The easiest and recommended way to run the archiver is using a configuration file, avoiding long terminal commands:
-
-1. **Generate the configuration file:**
-   ```bash
-   wab-archiver config generate
-   ```
-   This creates an `example-config.toml`. Open it in any text editor, fill in your paths and encryption key, and save it as `config.toml`.
-
-2. **Preview and run:**
-   ```bash
-   wab-archiver archive --dry-run
-   ```
-   Once the preview completes without errors, run `wab-archiver archive` to build your archive!
-
-<details>
-<summary><b>Alternatively, run directly with command-line arguments</b></summary>
-
-```bash
-# Android example (dry run first)
-wab-archiver archive \
-  --msgstore /path/to/msgstore.db.crypt15 \
-  --e2e-key YOUR_64_CHAR_KEY \
-  --wa-root /path/to/WhatsApp \
-  --output /path/to/my-archive \
-  --dry-run
-
-# iOS example
-wab-archiver archive \
-  --ios-backup /path/to/Backup/<UDID> \
-  --output /path/to/my-archive \
-  --dry-run
-```
-</details>
-
-#### 2. Open the viewer
-```bash
-wab-viewer /path/to/my-archive
-```
-
-Opens locally in your browser at `http://127.0.0.1:5000`.
+> 💡 **Windows users:** If `pip` is not recognized, run `py -m pip install --upgrade whatsapp-backup-tools` instead.
