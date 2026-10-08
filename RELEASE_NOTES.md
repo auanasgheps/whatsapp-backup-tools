@@ -27,7 +27,7 @@ Version 0.60 brings support for shared contact cards across both tools, complete
 #### ✨ New Features
 - **Dedicated Stickers Section in Media Gallery**: Stickers now have a dedicated section and filter pill in the Media Gallery on both iOS and Android, with server-side filtering and count badges.
 - **Contact Cards in Chat & Gallery**: Received contacts now display in native WhatsApp-style contact cards with contact avatars, names, and a 1-click download button. Contact cards are also browsable in the Media Gallery and fully indexed in search.
-- **"Edited" Message Indicator**: Messages edited in WhatsApp now display an "Edited" badge next to the timestamp, with a hover tooltip showing the exact edit date and time.
+- **"Edited" Message Indicator**: Messages edited in WhatsApp now display an "Edited" badge next to the timestamp.
 - **Lightbox Wheel Zoom & Pan**: Zoom smoothly into photos up to 6× using your mouse wheel, drag to pan around, and reset back to fit with a single click.
 
 #### ⚡ Improvements
