@@ -233,8 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_midx_chat_type_ts ON message_index(chat_id, chat_
 
 CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(
     text_body,
-    content='',
-    contentless_delete=1
+    content=''
 );
 
 CREATE TABLE IF NOT EXISTS sync_meta (
@@ -1202,6 +1201,7 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA cache_size = -8000")
         conn.executescript(CACHE_SCHEMA)
+        conn.execute("SELECT 1 FROM message_index_fts LIMIT 0")
         if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
             conn.execute("PRAGMA user_version = 1")
         conn.row_factory = sqlite3.Row
@@ -1219,6 +1219,21 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
                 f"Cannot open cache database at '{cache_path}' for writing ({e}). "
                 "Ensure the archive folder and its database files are not marked read-only."
             ) from e
+        if "contentless_delete" in str(e).lower():
+            try:
+                conn.close()
+            except Exception:
+                pass
+            for p in (
+                cache_path,
+                cache_path.with_name(cache_path.name + "-wal"),
+                cache_path.with_name(cache_path.name + "-shm"),
+            ):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return _open_cache_db(output_root)
         raise
     return conn
 
@@ -1342,7 +1357,13 @@ def _stream_fts_rows(
 
 def _clear_fts_index(cache_conn: sqlite3.Connection):
     cache_conn.execute("DELETE FROM message_index")
-    cache_conn.execute("DELETE FROM message_index_fts")
+    cache_conn.execute("DROP TABLE IF EXISTS message_index_fts")
+    cache_conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(\n"
+        "    text_body,\n"
+        "    content=''\n"
+        ")"
+    )
     cache_conn.execute("DELETE FROM indexed_chats")
     cache_conn.commit()
 
@@ -1572,7 +1593,13 @@ def _build_media_only(
     }
 
     cache_conn.execute("DELETE FROM message_index")
-    cache_conn.execute("DELETE FROM message_index_fts")
+    cache_conn.execute("DROP TABLE IF EXISTS message_index_fts")
+    cache_conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(\n"
+        "    text_body,\n"
+        "    content=''\n"
+        ")"
+    )
     cache_conn.commit()
 
     insert_sql = """

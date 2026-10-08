@@ -283,6 +283,63 @@ class TestCacheSchema:
             ).fetchall()
         ]
         assert "message_index_fts" in virtuals
+        conn.close()
+
+    def test_schema_no_contentless_delete(self):
+        assert "contentless_delete" not in viewer.CACHE_SCHEMA
+
+    def test_clear_fts_index_resets_fts_table(self, tmp_path):
+        cache_conn = viewer._open_cache_db(tmp_path)
+        cache_conn.execute(
+            "INSERT INTO message_index (rowid, chat_id, chat_type, timestamp_ms) VALUES (1, 'c1', 'contact', 1000)"
+        )
+        cache_conn.execute("INSERT INTO message_index_fts (rowid, text_body) VALUES (1, 'Hello world')")
+        cache_conn.execute("INSERT INTO indexed_chats (chat_id, chat_type) VALUES ('c1', 'contact')")
+        cache_conn.commit()
+
+        viewer._clear_fts_index(cache_conn)
+
+        assert cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0] == 0
+        assert cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0] == 0
+        fts_count = cache_conn.execute("SELECT COUNT(*) FROM message_index_fts").fetchone()[0]
+        assert fts_count == 0
+
+        cache_conn.execute("INSERT INTO message_index_fts (rowid, text_body) VALUES (2, 'New text message')")
+        cache_conn.commit()
+        match_row = cache_conn.execute(
+            "SELECT rowid FROM message_index_fts WHERE message_index_fts MATCH 'New'"
+        ).fetchone()
+        assert match_row is not None and match_row[0] == 2
+        cache_conn.close()
+
+    def test_open_cache_db_recovers_from_incompatible_fts(self, tmp_path, monkeypatch):
+        conn = viewer._open_cache_db(tmp_path)
+        conn.close()
+
+        first_call = True
+        real_connect = sqlite3.connect
+
+        def mock_connect(*args, **kwargs):
+            nonlocal first_call
+            real_conn = real_connect(*args, **kwargs)
+            if first_call:
+                first_call = False
+
+                class FailingConn:
+                    def __getattr__(self, name):
+                        return getattr(real_conn, name)
+
+                    def executescript(self, script):
+                        raise sqlite3.OperationalError('unrecognized option: "contentless_delete"')
+
+                return FailingConn()
+            return real_conn
+
+        monkeypatch.setattr(viewer.sqlite3, "connect", mock_connect)
+        recovered_conn = viewer._open_cache_db(tmp_path)
+        assert recovered_conn is not None
+        assert not first_call
+        recovered_conn.close()
 
 
 # ---------------------------------------------------------------------------

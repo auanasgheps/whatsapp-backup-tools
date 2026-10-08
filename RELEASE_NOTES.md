@@ -34,6 +34,7 @@ Version 0.60 brings support for shared contact cards across both tools, disk spa
 
 #### 🐛 Bug Fixes
 - **Voice Message Audio Player**: Fixed an issue where the inline audio player for voice messages was invisible in Google Chrome, Microsoft Edge, and other Chromium-based browsers.
+- **macOS / Older SQLite Compatibility**: Fixed a startup crash (`unrecognized option: "contentless_delete"`) when running on macOS or systems with SQLite versions older than 3.43.
 - Minor UI polish and rendering fixes.
 
 ---
