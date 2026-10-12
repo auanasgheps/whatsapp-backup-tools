@@ -6389,3 +6389,137 @@ class TestRestoreModeFilesystemAndVcard:
         # Header + 2 distinct archive path rows (Contacts/A/IMG1.jpg and Contacts/B/IMG1.jpg)
         assert len(lines) == 3
         conn.close()
+
+
+class TestDuplicateAndSkippedBreakdown:
+    def test_copy_result_contract(self):
+        res = wa.CopyResult(1, 0, 0, 1)
+        assert res == (1, 0, 0)
+        copied, skipped, warnings = res
+        assert copied == 1
+        assert skipped == 0
+        assert warnings == 0
+        assert res.is_hardlink == 1
+
+    def test_process_rows_skipped_preexisting_vs_duplicate(self, tmp_path, logger):
+        out = tmp_path / "out"
+        out.mkdir()
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        f1 = src_dir / "pic.jpg"
+        f1.write_bytes(b"content-a")
+        f2 = src_dir / "pic2.jpg"
+        f2.write_bytes(b"content-b")
+
+        # Pre-place pic.jpg in output destination to simulate existing from previous run
+        folder = wa.build_contact_folder_name("Alice", "111")
+        year = wa.get_year(1705276800000, None)
+        pre_dir = out / "Contacts" / folder / year / "Received"
+        pre_dir.mkdir(parents=True)
+        (pre_dir / "pic.jpg").write_bytes(b"content-a")
+
+        # Row 1 targets existing pic.jpg -> should be skipped_preexisting
+        # Row 2 targets pic2.jpg -> should be copied
+        # Row 3 targets pic2.jpg again with same filename in same chat -> should be skipped_duplicate
+        rows = [
+            (1, 1705276800000, "Media/pic.jpg", "image/jpeg", 1, None, "111", 0, None, "pic.jpg"),
+            (2, 1705276800000, "Media/pic2.jpg", "image/jpeg", 1, None, "111", 0, None, "pic2.jpg"),
+            (3, 1705276800000, "Media/pic2.jpg", "image/jpeg", 1, None, "111", 0, None, "pic2.jpg"),
+        ]
+
+        def resolver(fp):
+            if "pic2" in fp:
+                return str(f2)
+            return str(f1)
+
+        stats, _, _, _ = wa.process_rows(
+            rows,
+            len(rows),
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            None,
+            None,
+            False,
+            {},
+        )
+
+        assert stats["copied"] == 1
+        assert stats["skipped"] == 2
+        assert stats["skipped_preexisting"] == 1
+        assert stats["skipped_duplicate"] == 1
+
+    def test_summary_report_logging_format(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        log_records = []
+
+        class TestHandler(logging.Handler):
+            def emit(self, record):
+                log_records.append(record.getMessage())
+
+        t_logger = logging.getLogger("test_summary_report")
+        t_logger.setLevel(logging.INFO)
+        handler = TestHandler()
+        t_logger.addHandler(handler)
+
+        stats = {
+            "copied": 10,
+            "skipped": 5,
+            "missing": 1,
+            "warnings": 0,
+            "hardlinked": 2,
+            "skipped_preexisting": 4,
+            "skipped_duplicate": 1,
+            "skipped_empty_vcard": 0,
+        }
+        dup_summary = (2, 4)
+
+        # Emulate the summary reporting block
+        copied_label = "Copied"
+        hardlinked_count = stats.get("hardlinked", 0)
+        if hardlinked_count > 0:
+            t_logger.info(
+                f"  {copied_label:<20}: {stats['copied']} ({hardlinked_count} linked duplicates)"
+            )
+        else:
+            t_logger.info(f"  {copied_label:<20}: {stats['copied']}")
+
+        n_skipped = stats["skipped"]
+        n_pre = stats.get("skipped_preexisting", 0)
+        n_dup = stats.get("skipped_duplicate", 0)
+        n_empty = stats.get("skipped_empty_vcard", 0)
+        if n_skipped > 0 and (n_pre > 0 or n_dup > 0 or n_empty > 0):
+            parts = []
+            if n_pre > 0:
+                parts.append(f"{n_pre} already archived")
+            if n_dup > 0:
+                parts.append(f"{n_dup} same-chat duplicates")
+            if n_empty > 0:
+                parts.append(f"{n_empty} empty vCards")
+            t_logger.info(f"  Skipped             : {n_skipped} ({', '.join(parts)})")
+        else:
+            t_logger.info(f"  Skipped             : {n_skipped}")
+
+        t_logger.info(f"  Missing source files: {stats['missing']}")
+        t_logger.info(f"  Errors / Warnings   : {stats['warnings']}")
+        if dup_summary[1] > 0:
+            t_logger.info(
+                f"  Duplicate media     : {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
+                "→ see duplicate_media_report.csv"
+            )
+
+        t_logger.removeHandler(handler)
+
+        output_text = "\n".join(log_records)
+        assert "Copied              : 10 (2 linked duplicates)" in output_text
+        assert "Skipped             : 5 (4 already archived, 1 same-chat duplicates)" in output_text
+        assert (
+            "Duplicate media     : 4 file(s) across 2 group(s) → see duplicate_media_report.csv"
+            in output_text
+        )

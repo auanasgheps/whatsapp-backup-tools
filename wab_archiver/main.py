@@ -279,7 +279,7 @@ def write_duplicate_report(
 
     if not rows:
         logger.info("No duplicate media found.")
-        return
+        return 0, 0
 
     fieldnames = [
         "group_id",
@@ -323,6 +323,7 @@ def write_duplicate_report(
         f"Duplicate media report written to: {report_path} "
         f"({group_id} group(s), {len(rows)} file(s))"
     )
+    return group_id, len(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +417,15 @@ def _route_contact(
     return dest_dir, filename
 
 
+class CopyResult(tuple):
+    """3-tuple preserving (copied, skipped, warnings) contract with extra is_hardlink attribute."""
+
+    def __new__(cls, copied: int, skipped: int, warnings: int, is_hardlink: int):
+        instance = super().__new__(cls, (copied, skipped, warnings))
+        instance.is_hardlink = is_hardlink
+        return instance
+
+
 def _copy_or_skip(
     src: str,
     dest_path: str,
@@ -436,16 +446,16 @@ def _copy_or_skip(
     if dry_run:
         resolved = resolve_unique_dest(dest_path, src, logger)
         if resolved is None:
-            return 0, 1, 0
+            return CopyResult(0, 1, 0, 0)
         if link_duplicates:
             src_hash = file_md5(src)
             canonical = hash_to_canonical.get(src_hash)
             if canonical and canonical != resolved:
                 logger.info(f"[DRY RUN] Would link: {canonical} -> {resolved}")
-                return 1, 0, 0
+                return CopyResult(1, 0, 0, 1)
             hash_to_canonical[src_hash] = resolved
         logger.info(f"[DRY RUN] Would copy: {src} -> {resolved}")
-        return 1, 0, 0
+        return CopyResult(1, 0, 0, 0)
 
     if os.path.exists(dest_path):
         src_hash = file_md5(src)
@@ -465,7 +475,7 @@ def _copy_or_skip(
                 )
             if src_hash not in hash_to_canonical:
                 hash_to_canonical[src_hash] = dest_path
-            return 0, 1, 0
+            return CopyResult(0, 1, 0, 0)
     else:
         src_hash = None
         resolved = dest_path
@@ -491,14 +501,14 @@ def _copy_or_skip(
                     logger.debug(f"COPIED (fallback): {src} -> {resolved}")
                 except Exception as copy_err:
                     logger.error(f"ERROR copying {src} -> {resolved}: {copy_err}")
-                    return 0, 0, 1
+                    return CopyResult(0, 0, 1, 0)
         else:
             try:
                 shutil.copy(src, resolved)
                 logger.debug(f"COPIED: {src} -> {resolved}")
             except Exception as e:
                 logger.error(f"ERROR copying {src} -> {resolved}: {e}")
-                return 0, 0, 1
+                return CopyResult(0, 0, 1, 0)
             hash_to_canonical[src_hash] = resolved
     else:
         try:
@@ -506,7 +516,7 @@ def _copy_or_skip(
             logger.debug(f"COPIED: {src} -> {resolved}")
         except Exception as e:
             logger.error(f"ERROR copying {src} -> {resolved}: {e}")
-            return 0, 0, 1
+            return CopyResult(0, 0, 1, 0)
 
     if timestamp is not None:
         try:
@@ -524,7 +534,7 @@ def _copy_or_skip(
         archive_db.record_file_archived(
             cursor, file_path, src_hash, rel, os.path.getsize(resolved), is_hardlink, timestamp
         )
-    return 1, 0, 0
+    return CopyResult(1, 0, 0, is_hardlink)
 
 
 def process_rows(
@@ -543,7 +553,16 @@ def process_rows(
     link_duplicates: bool,
     hash_to_canonical: dict[bytes, str],
 ):
-    stats = {"copied": 0, "skipped": 0, "missing": 0, "warnings": 0}
+    stats = {
+        "copied": 0,
+        "skipped": 0,
+        "missing": 0,
+        "warnings": 0,
+        "hardlinked": 0,
+        "skipped_preexisting": 0,
+        "skipped_duplicate": 0,
+    }
+    written_dest_paths: set[str] = set()
     updated_index = dict(folder_index)
     updated_group_index = dict(group_index)
     missing_rows = []
@@ -686,7 +705,8 @@ def process_rows(
             )
 
         dest_path = os.path.join(dest_dir, dest_filename)
-        copied, skipped, warnings = _copy_or_skip(
+        dest_existed_before = dest_path not in written_dest_paths and os.path.exists(dest_path)
+        res = _copy_or_skip(
             src,
             dest_path,
             dest_dir,
@@ -699,9 +719,20 @@ def process_rows(
             link_duplicates,
             hash_to_canonical,
         )
+        copied, skipped, warnings = res
         stats["copied"] += copied
         stats["skipped"] += skipped
         stats["warnings"] += warnings
+        if copied:
+            written_dest_paths.add(dest_path)
+            if getattr(res, "is_hardlink", 0):
+                stats["hardlinked"] += 1
+        elif skipped:
+            if dest_existed_before:
+                stats["skipped_preexisting"] += 1
+                written_dest_paths.add(dest_path)
+            else:
+                stats["skipped_duplicate"] += 1
         progress.update(
             i, {"Copied": stats["copied"], "Skipped": stats["skipped"], "Missing": stats["missing"]}
         )
@@ -752,7 +783,16 @@ def process_vcard_rows(
     Routes to Groups/<Group>/<Year>/<Filename> or Contacts/<Contact>/<Year>/<Sent|Received>/<Filename>.
     Tracks files in files and archive_copies tables in .wa_media_archiver.db.
     """
-    stats = {"copied": 0, "skipped": 0, "warnings": 0}
+    stats = {
+        "copied": 0,
+        "skipped": 0,
+        "warnings": 0,
+        "hardlinked": 0,
+        "skipped_preexisting": 0,
+        "skipped_duplicate": 0,
+        "skipped_empty_vcard": 0,
+    }
+    written_dest_paths: set[str] = set()
     updated_index = dict(folder_index)
     updated_group_index = dict(group_index)
     cursor = conn.cursor() if conn is not None else None
@@ -784,6 +824,7 @@ def process_vcard_rows(
 
         if not vcard_text or not vcard_text.strip():
             stats["skipped"] += 1
+            stats["skipped_empty_vcard"] += 1
             progress.update(i, stats)
             continue
 
@@ -828,9 +869,15 @@ def process_vcard_rows(
             resolved = resolve_unique_vcard_dest(dest_path, vcard_hash, logger)
             if resolved is None:
                 stats["skipped"] += 1
+                if dest_path in written_dest_paths:
+                    stats["skipped_duplicate"] += 1
+                else:
+                    stats["skipped_preexisting"] += 1
+                    written_dest_paths.add(dest_path)
             else:
                 logger.info(f"[DRY RUN] Would write vcard: {resolved}")
                 stats["copied"] += 1
+                written_dest_paths.add(resolved)
             progress.update(i, stats)
             continue
 
@@ -843,6 +890,11 @@ def process_vcard_rows(
                         cursor, virtual_orig_path, vcard_hash, rel, vcard_size, 0, timestamp_ms
                     )
                 stats["skipped"] += 1
+                if dest_path in written_dest_paths:
+                    stats["skipped_duplicate"] += 1
+                else:
+                    stats["skipped_preexisting"] += 1
+                    written_dest_paths.add(dest_path)
                 progress.update(i, stats)
                 continue
         else:
@@ -857,6 +909,7 @@ def process_vcard_rows(
             stats["warnings"] += 1
             progress.update(i, stats)
             continue
+        written_dest_paths.add(resolved)
 
         if timestamp_ms is not None:
             try:
@@ -2038,6 +2091,10 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                     stats["copied"] += v_stats["copied"]
                     stats["skipped"] += v_stats["skipped"]
                     stats["warnings"] += v_stats["warnings"]
+                    stats["hardlinked"] += v_stats.get("hardlinked", 0)
+                    stats["skipped_preexisting"] += v_stats.get("skipped_preexisting", 0)
+                    stats["skipped_duplicate"] += v_stats.get("skipped_duplicate", 0)
+                    stats["skipped_empty_vcard"] += v_stats.get("skipped_empty_vcard", 0)
 
             if not args.dry_run:
                 archive_conn.commit()
@@ -2060,8 +2117,9 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
             dup_report_path = os.path.join(args.output, "duplicate_media_report.csv")
             conflict_report_path = os.path.join(args.output, "source_conflicts_report.csv")
+            dup_summary = (0, 0)
             if not args.dry_run:
-                write_duplicate_report(dup_report_path, archive_conn, logger, tz)
+                dup_summary = write_duplicate_report(dup_report_path, archive_conn, logger, tz)
                 if hasattr(media_resolver, "conflict_rows"):
                     write_conflict_report(
                         conflict_report_path, media_resolver.conflict_rows, logger
@@ -2075,10 +2133,38 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     logger.info("=== Run complete ===")
     if args.dry_run:
         logger.info("  (DRY RUN — no files were written)")
-    logger.info(f"  {'Would copy' if args.dry_run else 'Copied':<20}: {stats['copied']}")
-    logger.info(f"  Skipped             : {stats['skipped']}")
+    copied_label = "Would copy" if args.dry_run else "Copied"
+    hardlinked_count = stats.get("hardlinked", 0)
+    if hardlinked_count > 0:
+        logger.info(
+            f"  {copied_label:<20}: {stats['copied']} ({hardlinked_count} linked duplicates)"
+        )
+    else:
+        logger.info(f"  {copied_label:<20}: {stats['copied']}")
+
+    n_skipped = stats["skipped"]
+    n_pre = stats.get("skipped_preexisting", 0)
+    n_dup = stats.get("skipped_duplicate", 0)
+    n_empty = stats.get("skipped_empty_vcard", 0)
+    if n_skipped > 0 and (n_pre > 0 or n_dup > 0 or n_empty > 0):
+        parts = []
+        if n_pre > 0:
+            parts.append(f"{n_pre} already archived")
+        if n_dup > 0:
+            parts.append(f"{n_dup} same-chat duplicates")
+        if n_empty > 0:
+            parts.append(f"{n_empty} empty vCards")
+        logger.info(f"  Skipped             : {n_skipped} ({', '.join(parts)})")
+    else:
+        logger.info(f"  Skipped             : {n_skipped}")
+
     logger.info(f"  Missing source files: {stats['missing']}")
     logger.info(f"  Errors / Warnings   : {stats['warnings']}")
+    if dup_summary[1] > 0:
+        logger.info(
+            f"  Duplicate media     : {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
+            "→ see duplicate_media_report.csv"
+        )
     if hasattr(media_resolver, "root_hits"):
         for root, count in media_resolver.root_hits.items():
             logger.info(f"  Source {root:<14}: {count} file(s) used")
