@@ -63,6 +63,7 @@ When using manual execution, you must manually install required packages.
 
 - **Android Users**:
   - Enable **End-to-End Encrypted Backup** in WhatsApp (`Settings → Chats → Chat Backup → End-to-end Encrypted Backup`) and save your 64-digit key.
+  - ADB (Android Debug Bridge) installed on your computer.
   - No root is required.
   - Review the [Android Setup Guide](archiver/setup-android.md).
 
