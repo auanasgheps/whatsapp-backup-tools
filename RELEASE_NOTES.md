@@ -14,7 +14,7 @@ Version 0.60 brings support for shared contact cards across both tools, complete
 - **Hardlink Duplicate Media Files (`--link-duplicates`)**: Drastically save disk storage by hardlinking identical media files shared across chats instead of duplicating files on disk. Unsupported filesystems (such as exFAT or network drives) are automatically detected upfront with safe fallback to copying.
 
 #### ⚡ Improvements
-- **Original Timestamps in Duplicate Reports**: The `duplicate_media_report.csv` now records original WhatsApp message dates and times for duplicate media files, making audit logs clear and easy to follow.
+- **Clearer Duplicate Media Reports**: The `duplicate_media_report.csv` now features a clear `link_status` column (distinguishing zero-byte filesystem hardlinks from physical duplicate copies) and records original WhatsApp message dates and times for easy auditing.
 
 #### 🐛 Bug Fixes
 - Fixed duplicate reporting when identical files were shared across multiple messages, and ensured address book documents are properly preserved during restore mode.
