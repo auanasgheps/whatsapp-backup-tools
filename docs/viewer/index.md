@@ -62,8 +62,9 @@ The source WA database must be present for the viewer to resolve media file path
 - **Chat timeline** — messages displayed chronologically (oldest at top, newest at bottom), lazy-loaded as you scroll
 - **Full-text search** — search across all messages; scoped to the current chat or across all chats
 - **Media playback** — images, videos, and audio stream directly in the browser with HTTP Range support (seeking works in video/audio players)
-- **Image lightbox** — click any image to open it full-screen
-- **DOM windowing** — only ~100 message elements kept in the DOM at once, so long chats stay fast
+- **Image lightbox** — click any image to open it full-screen with smooth zoom and pan
+- **Media gallery & stickers** — browse chat media by thumbnail grid or folder tree, with dedicated stickers section and contact cards (.vcf)
+- **Fast, lightweight scrolling** — chats and massive media collections load smoothly on demand without slowing down your browser
 
 ## Cache Invalidation
 
@@ -94,8 +95,7 @@ The server binds to `127.0.0.1` by default — it is not accessible from other m
 
 ## Known Limitations
 
-- **Initial release scope**: Call history, poll interactions/votes, and stickers are not yet rendered in the timeline.
-- **Media gallery optimization**: Large media galleries load original files directly; optimized thumbnail caching and lazy loading optimizations are planned for future releases.
+- **Timeline scope**: Call history and poll interactions/votes are not yet rendered in the chat timeline.
 - **Profile pictures are not displayed.** On Android this requires extracting `wa.db` (not yet implemented). On iOS no local image data is available in the backup.
 - **Friendly profile push names for unsaved contacts are not available on Android without root.** On Android, user-chosen friendly push names (`wa_name`) reside exclusively in `/data/data/com.whatsapp/databases/wa.db` within WhatsApp's private application sandbox. WhatsApp excludes contact records from local backups (`WhatsApp/Backups/wa.db.crypt14/15`), so extracting `wa.db` requires root access on the device, which is not implemented in the Viewer or Archiver. Unsaved contacts on Android will therefore display their phone number. On iOS, WhatsApp stores push names directly in `ChatStorage.sqlite` (`ZWAPROFILEPUSHNAME`), so they are preserved in standard backups.
 - **iOS read and played receipts require `MessagingInfraDatabase.sqlite`.** On modern iOS backups (v2.24+), delivery, read, and voice message played timestamps are read directly from `MessagingInfraDatabase.sqlite`. For older backups or messages not recorded in it (such as those sent via web or companion devices), the viewer falls back to `ChatStorage.sqlite`'s `ZRECEIPTINFO`, which shows "Read (time not stored)" when a read state is confirmed without a timestamp.

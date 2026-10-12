@@ -33,7 +33,7 @@ pip install .
 You can also download pre-built `.whl` packages from [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and install them:
 
 ```bash
-pip install wab_tools-x.xx-py3-none-any.whl
+pip install whatsapp_backup_tools-x.xx-py3-none-any.whl
 ```
 
 > 💡 **Windows users:** If `pip install` is not recognized, run `py -m pip install .` instead.
