@@ -6523,3 +6523,95 @@ class TestDuplicateAndSkippedBreakdown:
             "Duplicate media     : 4 file(s) across 2 group(s) → see duplicate_media_report.csv"
             in output_text
         )
+
+    def test_process_vcard_rows_and_merge_stats(self, tmp_path, logger):
+        out = tmp_path / "out"
+        out.mkdir()
+
+        # Simulate pre-existing vcard in archive
+        vcard_raw = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Bob\r\nEND:VCARD"
+        vcf_content = vcard_raw.strip().encode("utf-8") + b"\r\n"
+        folder = wa.build_contact_folder_name("Bob", "222")
+        year = wa.get_year(1705276800000, None)
+        pre_dir = out / "Contacts" / folder / year / "Received"
+        pre_dir.mkdir(parents=True)
+        (pre_dir / "Bob.vcf").write_bytes(vcf_content)
+
+        vcard_rows = [
+            # 1: empty vcard -> skipped_empty_vcard
+            {
+                "message_id": 1,
+                "timestamp_ms": 1705276800000,
+                "chat_row_id": 1,
+                "chat_subject": None,
+                "sender": "222",
+                "key_from_me": 0,
+                "contact_name": "Blank",
+                "vcard_text": "",
+            },
+            # 2: matches pre-existing Bob.vcf -> skipped_preexisting
+            {
+                "message_id": 2,
+                "timestamp_ms": 1705276800000,
+                "chat_row_id": 1,
+                "chat_subject": None,
+                "sender": "222",
+                "key_from_me": 0,
+                "contact_name": "Bob",
+                "vcard_text": vcard_raw,
+            },
+            # 3: also matches Bob.vcf -> skipped_duplicate
+            {
+                "message_id": 3,
+                "timestamp_ms": 1705276800000,
+                "chat_row_id": 1,
+                "chat_subject": None,
+                "sender": "222",
+                "key_from_me": 0,
+                "contact_name": "Bob",
+                "vcard_text": vcard_raw,
+            },
+        ]
+
+        # Base stats from media processing (ensure process_rows stats dictionary shape)
+        base_stats, _, _, _ = wa.process_rows(
+            [], 0, {}, {}, {}, {}, lambda x: x, str(out), logger, False, None, None, False, {}
+        )
+
+        v_stats, _, _ = wa.process_vcard_rows(
+            vcard_rows,
+            {"222": "Bob"},
+            {},
+            {},
+            {},
+            str(out),
+            logger,
+            False,
+            None,
+            None,
+        )
+
+        assert v_stats["skipped"] == 3
+        assert v_stats["skipped_empty_vcard"] == 1
+        assert v_stats["skipped_preexisting"] == 1
+        assert v_stats["skipped_duplicate"] == 1
+
+        # Verify merge into base_stats does not raise KeyError
+        base_stats["copied"] = base_stats.get("copied", 0) + v_stats.get("copied", 0)
+        base_stats["skipped"] = base_stats.get("skipped", 0) + v_stats.get("skipped", 0)
+        base_stats["warnings"] = base_stats.get("warnings", 0) + v_stats.get("warnings", 0)
+        base_stats["hardlinked"] = base_stats.get("hardlinked", 0) + v_stats.get("hardlinked", 0)
+        base_stats["skipped_preexisting"] = base_stats.get("skipped_preexisting", 0) + v_stats.get(
+            "skipped_preexisting", 0
+        )
+        base_stats["skipped_duplicate"] = base_stats.get("skipped_duplicate", 0) + v_stats.get(
+            "skipped_duplicate", 0
+        )
+        base_stats["skipped_empty_vcard"] = base_stats.get("skipped_empty_vcard", 0) + v_stats.get(
+            "skipped_empty_vcard", 0
+        )
+
+        assert base_stats["skipped"] == 3
+        assert base_stats["skipped_empty_vcard"] == 1
+        assert base_stats["skipped_preexisting"] == 1
+        assert base_stats["skipped_duplicate"] == 1

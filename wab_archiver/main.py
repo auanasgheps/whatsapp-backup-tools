@@ -561,6 +561,7 @@ def process_rows(
         "hardlinked": 0,
         "skipped_preexisting": 0,
         "skipped_duplicate": 0,
+        "skipped_empty_vcard": 0,
     }
     written_dest_paths: set[str] = set()
     updated_index = dict(folder_index)
@@ -825,7 +826,7 @@ def process_vcard_rows(
         if not vcard_text or not vcard_text.strip():
             stats["skipped"] += 1
             stats["skipped_empty_vcard"] += 1
-            progress.update(i, stats)
+            progress.update(i, {"Copied": stats["copied"], "Skipped": stats["skipped"]})
             continue
 
         is_group = chat_subject is not None
@@ -878,7 +879,7 @@ def process_vcard_rows(
                 logger.info(f"[DRY RUN] Would write vcard: {resolved}")
                 stats["copied"] += 1
                 written_dest_paths.add(resolved)
-            progress.update(i, stats)
+            progress.update(i, {"Copied": stats["copied"], "Skipped": stats["skipped"]})
             continue
 
         if os.path.exists(dest_path):
@@ -895,7 +896,7 @@ def process_vcard_rows(
                 else:
                     stats["skipped_preexisting"] += 1
                     written_dest_paths.add(dest_path)
-                progress.update(i, stats)
+                progress.update(i, {"Copied": stats["copied"], "Skipped": stats["skipped"]})
                 continue
         else:
             resolved = dest_path
@@ -907,7 +908,7 @@ def process_vcard_rows(
         except OSError as e:
             logger.error(f"ERROR writing vCard {resolved}: {e}")
             stats["warnings"] += 1
-            progress.update(i, stats)
+            progress.update(i, {"Copied": stats["copied"], "Skipped": stats["skipped"]})
             continue
         written_dest_paths.add(resolved)
 
@@ -924,9 +925,9 @@ def process_vcard_rows(
                 cursor, virtual_orig_path, vcard_hash, rel, vcard_size, 0, timestamp_ms
             )
         stats["copied"] += 1
-        progress.update(i, stats)
+        progress.update(i, {"Copied": stats["copied"], "Skipped": stats["skipped"]})
 
-    progress.finish(stats)
+    progress.finish({"Copied": stats["copied"], "Skipped": stats["skipped"]})
     return stats, updated_index, updated_group_index
 
 
@@ -2088,13 +2089,19 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                         conn=archive_conn if not args.dry_run else None,
                         tz=tz,
                     )
-                    stats["copied"] += v_stats["copied"]
-                    stats["skipped"] += v_stats["skipped"]
-                    stats["warnings"] += v_stats["warnings"]
-                    stats["hardlinked"] += v_stats.get("hardlinked", 0)
-                    stats["skipped_preexisting"] += v_stats.get("skipped_preexisting", 0)
-                    stats["skipped_duplicate"] += v_stats.get("skipped_duplicate", 0)
-                    stats["skipped_empty_vcard"] += v_stats.get("skipped_empty_vcard", 0)
+                    stats["copied"] = stats.get("copied", 0) + v_stats.get("copied", 0)
+                    stats["skipped"] = stats.get("skipped", 0) + v_stats.get("skipped", 0)
+                    stats["warnings"] = stats.get("warnings", 0) + v_stats.get("warnings", 0)
+                    stats["hardlinked"] = stats.get("hardlinked", 0) + v_stats.get("hardlinked", 0)
+                    stats["skipped_preexisting"] = stats.get(
+                        "skipped_preexisting", 0
+                    ) + v_stats.get("skipped_preexisting", 0)
+                    stats["skipped_duplicate"] = stats.get("skipped_duplicate", 0) + v_stats.get(
+                        "skipped_duplicate", 0
+                    )
+                    stats["skipped_empty_vcard"] = stats.get(
+                        "skipped_empty_vcard", 0
+                    ) + v_stats.get("skipped_empty_vcard", 0)
 
             if not args.dry_run:
                 archive_conn.commit()
