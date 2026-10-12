@@ -54,8 +54,8 @@ Unencrypted backup:
 
 ```bash
 wab-archiver archive \
-  --ios-backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
-  --output /path/to/output \
+  --ios-backup "~/Library/Application Support/MobileSync/Backup/<UDID>" \
+  --output "/path/to/output" \
   --dry-run
 ```
 
@@ -63,13 +63,14 @@ Encrypted iPhone backup (use the password you set in Finder/Apple Devices):
 
 ```bash
 wab-archiver archive \
-  --ios-backup ~/Library/Application\ Support/MobileSync/Backup/<UDID> \
+  --ios-backup "~/Library/Application Support/MobileSync/Backup/<UDID>" \
   --ios-password your_backup_password \
-  --output /path/to/output \
+  --output "/path/to/output" \
   --dry-run
 ```
 
-> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
+> 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).  
+> 💡 **Paths with spaces:** iOS backup paths (such as `C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>`) often contain spaces — always wrap paths in quotes.
 
 Contacts and auxiliary databases (`ChatStorage.sqlite`, `ContactsV2.sqlite`, `ExtChatDatabase.sqlite`, `MessagingInfraDatabase.sqlite`, `LID.sqlite`, `Labels.sqlite`, `CallHistory.sqlite`) are automatically extracted from the backup and saved to the `Whatsapp Databases` subfolder in the output folder for re-runs and viewer use.
 

@@ -31,7 +31,7 @@ Choose your mobile platform to extract the necessary databases and media files:
 
 - 📱 **[Android Setup Guide](setup-android.md)**:
   - Enable in-app E2E encryption and save your 64-digit key.
-  - Sync your WhatsApp media folder using **Syncthing** (recommended) or pull over USB via **ADB**.
+  - Pull your WhatsApp media folder over USB via **ADB** or sync using **Syncthing**.
   - No root required.
 - 🍏 **[iOS Setup Guide](setup-ios.md)**:
   - Disable in-app WhatsApp E2E encryption before backing up.
@@ -62,22 +62,22 @@ Before writing any files to disk, run with `--dry-run` to verify that your paths
 **Android example:**
 ```bash
 wab-archiver archive \
-  --msgstore /path/to/msgstore.db.crypt15 \
+  --msgstore "/path/to/WhatsApp/Databases/msgstore.db.crypt15" \
   --e2e-key YOUR_64_HEX_KEY \
-  --wa-root /path/to/WhatsApp \
-  --output /path/to/archive \
+  --wa-root "/path/to/WhatsApp" \
+  --output "/path/to/archive" \
   --dry-run
 ```
 
 **iOS example:**
 ```bash
 wab-archiver archive \
-  --ios-backup /path/to/backup/folder \
-  --output /path/to/archive \
+  --ios-backup "/path/to/backup/folder" \
+  --output "/path/to/archive" \
   --dry-run
 ```
 
-The dry run simulates the entire process, tests database decryption, verifies schema compatibility, and displays expected file counts without modifying your filesystem.
+The dry run simulates the entire process, tests database decryption, verifies schema compatibility, and displays expected file counts without copying media files or writing reports (note: if your database is encrypted, the decrypted SQLite database is extracted to allow querying).
 
 ---
 
