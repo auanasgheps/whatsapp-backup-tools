@@ -56,7 +56,7 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 - **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
 - **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
-- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents and Stickers.
+- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents, Stickers, and Contact cards (.vcf).
 
 ### WhatsApp Backup Viewer
 Explore and search your archived chats through a local web UI replicating WhatsApp Web.
@@ -240,7 +240,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
 ### Viewer
 
-- **Initial release scope**: Call history and poll interactions are not yet rendered in the chat timeline. Progressive media optimization for large photo galleries is planned for future updates.
+- **Timeline scope**: Call history and poll interactions are not yet rendered in the chat timeline.
 - See [viewer known limitations](docs/viewer/index.md#known-limitations) for full details on profile push names, receipts, and platform variations.
 
 ---
