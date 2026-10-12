@@ -181,7 +181,7 @@ def record_file_archived(
     cursor.execute(
         "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(original_path, archive_path) DO UPDATE SET "
-        "is_hardlink = excluded.is_hardlink, "
+        "is_hardlink = MAX(archive_copies.is_hardlink, excluded.is_hardlink), "
         "timestamp_ms = COALESCE(excluded.timestamp_ms, archive_copies.timestamp_ms)",
         (original_path, archive_path, is_hardlink, timestamp_ms),
     )

@@ -286,11 +286,12 @@ def write_duplicate_report(
         "file_count",
         "archived_path",
         "md5_hex",
-        "is_hardlink",
+        "link_status",
         "original_timestamp",
     ]
     current_md5 = None
     group_id = 0
+    output_root = os.path.dirname(os.path.abspath(report_path))
 
     with open(report_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -299,13 +300,22 @@ def write_duplicate_report(
             if md5_bytes != current_md5:
                 current_md5 = md5_bytes
                 group_id += 1
+            abs_file = os.path.join(output_root, *archived_path.split("/"))
+            is_hl = 1 if is_hardlink else 0
+            if os.path.isfile(abs_file):
+                try:
+                    if os.stat(abs_file).st_nlink > 1:
+                        is_hl = 1
+                except OSError:
+                    pass
+            link_status = "hardlink" if is_hl else "duplicate_copy"
             writer.writerow(
                 {
                     "group_id": group_id,
                     "file_count": file_count,
                     "archived_path": archived_path,
                     "md5_hex": md5_bytes.hex(),
-                    "is_hardlink": 1 if is_hardlink else 0,
+                    "link_status": link_status,
                     "original_timestamp": human_datetime(timestamp_ms, tz) if timestamp_ms else "",
                 }
             )
@@ -443,8 +453,15 @@ def _copy_or_skip(
         if resolved is None:
             if cursor is not None:
                 rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
+                is_hardlink_val = 1 if os.stat(dest_path).st_nlink > 1 else 0
                 archive_db.record_file_archived(
-                    cursor, file_path, src_hash, rel, os.path.getsize(dest_path), 0, timestamp
+                    cursor,
+                    file_path,
+                    src_hash,
+                    rel,
+                    os.path.getsize(dest_path),
+                    is_hardlink_val,
+                    timestamp,
                 )
             if src_hash not in hash_to_canonical:
                 hash_to_canonical[src_hash] = dest_path

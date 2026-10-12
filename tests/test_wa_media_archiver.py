@@ -1380,7 +1380,7 @@ class TestWriteDuplicateReport:
             content = f.read()
         assert "md5_hex" in content
         assert "file_count" in content
-        assert "is_hardlink" in content
+        assert "link_status" in content
         assert "original_timestamp" in content
         assert "2024-" in content
 
@@ -5722,6 +5722,10 @@ class TestProbeHardlinkSupport:
         with patch("builtins.open", side_effect=PermissionError("Permission denied")):
             assert wa.probe_hardlink_support(str(tmp_path), logger) is False
 
+    def test_probe_cleanup_os_error_suppressed(self, tmp_path, logger):
+        with patch("os.remove", side_effect=OSError("Remove failed")):
+            assert wa.probe_hardlink_support(str(tmp_path), logger) is True
+
 
 class TestHardlinkDuplicates:
     def _create_rows(self):
@@ -5813,9 +5817,9 @@ class TestHardlinkDuplicates:
         with open(str(report_path), newline="", encoding="utf-8") as f:
             reader = list(csv.DictReader(f))
         assert len(reader) == 2
-        paths_to_link = {r["archived_path"]: r["is_hardlink"] for r in reader}
-        assert paths_to_link["Groups/Family/2024/img_Alice.jpg"] == "0"
-        assert paths_to_link["Contacts/Bob (00222)/2024/Received/img.jpg"] == "1"
+        paths_to_link = {r["archived_path"]: r["link_status"] for r in reader}
+        assert paths_to_link["Groups/Family/2024/img_Alice.jpg"] == "duplicate_copy"
+        assert paths_to_link["Contacts/Bob (00222)/2024/Received/img.jpg"] == "hardlink"
         paths_to_ts = {r["archived_path"]: r["original_timestamp"] for r in reader}
         assert paths_to_ts["Groups/Family/2024/img_Alice.jpg"].startswith("2024-")
         assert paths_to_ts["Contacts/Bob (00222)/2024/Received/img.jpg"].startswith("2024-")
@@ -5866,6 +5870,87 @@ class TestHardlinkDuplicates:
 
         records = conn.execute("SELECT is_hardlink FROM archive_copies").fetchall()
         assert all(r[0] == 0 for r in records)
+
+        # Duplicate report reflects separate copies as duplicate_copy
+        report_path = out / "duplicate_media_report.csv"
+        wa.write_duplicate_report(str(report_path), conn, logger, None)
+        import csv
+
+        with open(str(report_path), newline="", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+        assert len(reader) == 2
+        for r in reader:
+            assert r["link_status"] == "duplicate_copy"
+        conn.close()
+
+    def test_duplicate_report_reflects_active_hardlinks_on_disk(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        content = b"active hardlink content"
+        (src_dir / "img.jpg").write_bytes(content)
+
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        wa.process_rows(
+            rows,
+            2,
+            {"111": "Alice", "222": "Bob"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            hash_to_canonical,
+        )
+        conn.commit()
+
+        # Both files exist and are hardlinks on disk
+        report_path = out / "duplicate_media_report.csv"
+        wa.write_duplicate_report(str(report_path), conn, logger, None)
+        import csv
+
+        with open(str(report_path), newline="", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+        assert len(reader) == 2
+        for r in reader:
+            assert r["link_status"] == "hardlink"
+
+        # Re-run over existing archive: skip branch preserves hardlink status
+        wa.process_rows(
+            rows,
+            2,
+            {"111": "Alice", "222": "Bob"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            hash_to_canonical,
+        )
+        conn.commit()
+
+        records = conn.execute(
+            "SELECT archive_path, is_hardlink FROM archive_copies ORDER BY rowid ASC"
+        ).fetchall()
+        assert len(records) == 2
+        # Hardlinked second file is not downgraded to 0 on skip
+        assert records[1][1] == 1
         conn.close()
 
     def test_hardlink_dry_run_logs_would_link(self, tmp_path, logger):
@@ -6012,6 +6097,146 @@ class TestHardlinkDuplicates:
 
         records = conn.execute("SELECT is_hardlink FROM archive_copies").fetchall()
         assert records == [(0,), (0,)]
+        conn.close()
+
+    def test_hardlink_fallback_copy_error_logged(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "img.jpg").write_bytes(b"content")
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        import shutil
+
+        orig_copy = shutil.copy
+
+        def _fail_on_fallback(src, dst):
+            if "Bob" in dst:
+                raise OSError("Disk full")
+            return orig_copy(src, dst)
+
+        with (
+            patch("os.link", side_effect=OSError(17, "Cross-device")),
+            patch("shutil.copy", side_effect=_fail_on_fallback),
+        ):
+            stats, _, _, _ = wa.process_rows(
+                rows,
+                2,
+                {"111": "Alice", "222": "Bob"},
+                {},
+                {},
+                {},
+                resolver,
+                str(out),
+                logger,
+                False,
+                conn,
+                None,
+                True,
+                hash_to_canonical,
+            )
+            assert stats["warnings"] == 1
+        conn.close()
+
+    def test_hardlink_canonical_copy_error_logged(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "img.jpg").write_bytes(b"content")
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        with patch("shutil.copy", side_effect=OSError("Copy error on canonical")):
+            stats, _, _, _ = wa.process_rows(
+                rows[:1],
+                1,
+                {"111": "Alice"},
+                {},
+                {},
+                {},
+                resolver,
+                str(out),
+                logger,
+                False,
+                conn,
+                None,
+                True,
+                hash_to_canonical,
+            )
+            assert stats["warnings"] == 1
+        conn.close()
+
+    def test_hardlink_skip_branch_populates_hash_to_canonical(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        content = b"preexisting content"
+        (src_dir / "img.jpg").write_bytes(content)
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        p1 = out / "Groups" / "Family" / "2024" / "img_Alice.jpg"
+        p1.parent.mkdir(parents=True, exist_ok=True)
+        p1.write_bytes(content)
+
+        hash_to_canonical = {}
+        stats, _, _, _ = wa.process_rows(
+            rows[:1],
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            hash_to_canonical,
+        )
+        assert stats["skipped"] == 1
+        md5 = wa.file_md5(str(p1))
+        assert md5 in hash_to_canonical
+        assert hash_to_canonical[md5] == str(p1)
+        conn.close()
+
+    def test_write_duplicate_report_os_stat_os_error_handled(self, tmp_path, logger):
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        cur = conn.cursor()
+        md5 = b"1234567890123456"
+        p = out / "Contacts" / "Alice" / "a.jpg"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"data")
+        arc.record_file_archived(cur, "orig1", md5, "Contacts/Alice/a.jpg", 4, 0, None)
+        arc.record_file_archived(cur, "orig2", md5, "Contacts/Bob/b.jpg", 4, 1, None)
+        conn.commit()
+
+        report_path = out / "duplicate_media_report.csv"
+        with patch("os.stat", side_effect=OSError("Permission denied on stat")):
+            wa.write_duplicate_report(str(report_path), conn, logger, None)
+        assert report_path.exists()
+        conn.close()
+
+    def test_load_canonical_copies_skips_missing_files_on_disk(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        cur = conn.cursor()
+        md5 = b"missingfile12345"
+        arc.record_file_archived(cur, "orig1", md5, "Contacts/Nonexistent/a.jpg", 10, 0, None)
+        conn.commit()
+        canonical_map = arc.load_canonical_copies(conn, str(tmp_path))
+        assert md5 not in canonical_map
         conn.close()
 
 
