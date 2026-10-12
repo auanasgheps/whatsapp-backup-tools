@@ -15,6 +15,7 @@ Version 0.60 brings support for shared contact cards across both tools, complete
 
 #### ⚡ Improvements
 - **Clearer Duplicate Media Reports**: The `duplicate_media_report.csv` now features a clear `link_status` column (distinguishing zero-byte filesystem hardlinks from physical duplicate copies) and records original WhatsApp message dates and times for easy auditing.
+- **Detailed Run Summary & Duplicate Breakdown**: The archiver's final report now explains why files were skipped (differentiating files already archived in previous runs from duplicate messages within the same chat), reports hardlink counts under copied files, and highlights overall duplicate totals found across the archive.
 
 #### 🐛 Bug Fixes
 - Fixed duplicate reporting when identical files were shared across multiple messages, and ensured address book documents are properly preserved during restore mode.
