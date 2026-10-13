@@ -288,6 +288,111 @@ def test_theme_toggle_tokens(browser: CDPSession, screenshot_dir: Path) -> None:
     browser.capture_screenshot(screenshot_dir / "theme_dark.png", 5.0)
 
 
+def test_settings_scrollable_on_small_viewport(browser: CDPSession, screenshot_dir: Path) -> None:
+    """Validate that Settings modal adapts and scrolls when viewport is smaller than settings."""
+    # 1. Set viewport to small height (450px) where settings content (~560px) overflows
+    browser.ws.send_json(
+        {
+            "id": 8801,
+            "method": "Emulation.setDeviceMetricsOverride",
+            "params": {
+                "width": 1000,
+                "height": 450,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+            },
+        }
+    )
+    time.sleep(0.3)
+
+    try:
+        # 2. Open settings modal
+        opened = browser.evaluate(
+            """
+            (async () => {
+                const btn = document.getElementById('settings-btn');
+                if (btn) btn.click();
+                for (let i = 0; i < 40; i++) {
+                    const modal = document.getElementById('settings-modal');
+                    if (modal && modal.classList.contains('open')) return true;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                return false;
+            })()
+            """,
+            5.0,
+        )
+        assert opened is True
+
+        # 3. Check that #settings-panel adapts to viewport and #settings-body is scrollable
+        metrics = browser.evaluate(
+            """
+            (() => {
+                const modal = document.getElementById('settings-modal');
+                const panel = document.getElementById('settings-panel');
+                const body = document.getElementById('settings-body');
+                const header = document.getElementById('settings-header');
+                const winHeight = window.innerHeight;
+
+                return {
+                    winHeight,
+                    panelHeight: panel.offsetHeight,
+                    headerHeight: header.offsetHeight,
+                    bodyScrollHeight: body.scrollHeight,
+                    bodyClientHeight: body.clientHeight,
+                    bodyOverflowY: getComputedStyle(body).overflowY,
+                    isBodyScrollable: body.scrollHeight > body.clientHeight,
+                    fitsInViewport: panel.offsetHeight <= winHeight
+                };
+            })()
+            """,
+            5.0,
+        )
+
+        assert metrics["fitsInViewport"] is True
+        assert metrics["isBodyScrollable"] is True
+        assert metrics["bodyOverflowY"] == "auto"
+
+        # 4. Scroll settings-body and verify scroll position updates
+        scroll_res = browser.evaluate(
+            """
+            (() => {
+                const body = document.getElementById('settings-body');
+                body.scrollTop = 150;
+                return {
+                    scrollTop: body.scrollTop,
+                    didScroll: body.scrollTop > 0
+                };
+            })()
+            """,
+            5.0,
+        )
+        assert scroll_res["didScroll"] is True
+
+        # 5. Capture visual evidence
+        browser.capture_screenshot(screenshot_dir / "settings_small_viewport_scrolled.png", 5.0)
+
+        # 6. Close modal
+        browser.evaluate(
+            """
+            (() => {
+                const closeBtn = document.getElementById('settings-close');
+                if (closeBtn) closeBtn.click();
+            })()
+            """,
+            5.0,
+        )
+    finally:
+        browser.ws.send_json(
+            {
+                "id": 8802,
+                "method": "Emulation.clearDeviceMetricsOverride",
+                "params": {},
+            }
+        )
+        time.sleep(0.3)
+
+
 def test_chat_info_panel_toggle(browser: CDPSession, screenshot_dir: Path) -> None:
     """Validate opening and closing the chat info drawer with participant details."""
     open_group_chat_in_browser(browser, 15.0)
