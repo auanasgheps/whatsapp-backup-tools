@@ -112,53 +112,55 @@ HTML_TEMPLATE = (
       <span>Settings</span>
       <button id="settings-close">&#10005;</button>
     </div>
-    <div id="settings-app-info">
-      <img id="settings-app-logo" src="/static/favicon.svg" alt="" width="52" height="52">
-      <div id="settings-app-details">
-        <h2 id="settings-app-name">WhatsApp Backup Viewer</h2>
-        <p id="settings-app-subtitle">from WhatsApp Backup Tools</p>
-        <div id="settings-app-links">
-          <a id="settings-repo-link" href="https://github.com/auanasgheps/whatsapp-backup-tools" target="_blank" rel="noopener noreferrer">Repository</a>
-          <span id="settings-version">v{{ version }}</span>
-        </div>
-      </div>
-    </div>
-    <div class="settings-section">
-      <div class="settings-label">Theme</div>
-      <div class="settings-row">
-        <button class="pref-btn" data-pref="theme" data-value="dark">Dark</button>
-        <button class="pref-btn" data-pref="theme" data-value="light">Light</button>
-      </div>
-    </div>
-    <div class="settings-section">
-      <div class="settings-label">Date format</div>
-      <div class="settings-row">
-        <button class="pref-btn" data-pref="date_format" data-value="DD/MM/YYYY">DD/MM/YYYY &nbsp;<em>25/07/2026</em></button>
-        <button class="pref-btn" data-pref="date_format" data-value="MM/DD/YYYY">MM/DD/YYYY &nbsp;<em>07/25/2026</em></button>
-        <button class="pref-btn" data-pref="date_format" data-value="YYYY/MM/DD">YYYY/MM/DD &nbsp;<em>2026/07/25</em></button>
-      </div>
-    </div>
-    <div class="settings-section">
-      <div class="settings-label">Font size</div>
-      <div class="settings-row">
-        <button class="pref-btn" data-pref="font_size" data-value="small">Small</button>
-        <button class="pref-btn" data-pref="font_size" data-value="medium">Medium</button>
-        <button class="pref-btn" data-pref="font_size" data-value="large">Large</button>
-      </div>
-    </div>
-    <div class="settings-section">
-      <div class="settings-label">Database</div>
-      <div class="settings-row" style="flex-direction:column;gap:8px;align-items:flex-start">
-        <button id="optimize-db-btn" class="pref-btn">Compact & optimize database</button>
-        <div id="optimize-db-status" class="index-progress-label" style="display:none"></div>
-        <button id="index-all-btn" class="pref-btn">Index all chats for search</button>
-        <div id="index-all-progress" style="display:none;width:100%">
-          <div class="index-progress-bar-wrap">
-            <div id="index-progress-bar" class="index-progress-bar"></div>
+    <div id="settings-body">
+      <div id="settings-app-info">
+        <img id="settings-app-logo" src="/static/favicon.svg" alt="" width="52" height="52">
+        <div id="settings-app-details">
+          <h2 id="settings-app-name">WhatsApp Backup Viewer</h2>
+          <p id="settings-app-subtitle">from WhatsApp Backup Tools</p>
+          <div id="settings-app-links">
+            <a id="settings-repo-link" href="https://github.com/auanasgheps/whatsapp-backup-tools" target="_blank" rel="noopener noreferrer">Repository</a>
+            <span id="settings-version">v{{ version }}</span>
           </div>
-          <div id="index-progress-label" class="index-progress-label"></div>
         </div>
-        <button id="clear-index-btn" class="pref-btn">Clear search index</button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Theme</div>
+        <div class="settings-row">
+          <button class="pref-btn" data-pref="theme" data-value="dark">Dark</button>
+          <button class="pref-btn" data-pref="theme" data-value="light">Light</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Date format</div>
+        <div class="settings-row">
+          <button class="pref-btn" data-pref="date_format" data-value="DD/MM/YYYY">DD/MM/YYYY &nbsp;<em>25/07/2026</em></button>
+          <button class="pref-btn" data-pref="date_format" data-value="MM/DD/YYYY">MM/DD/YYYY &nbsp;<em>07/25/2026</em></button>
+          <button class="pref-btn" data-pref="date_format" data-value="YYYY/MM/DD">YYYY/MM/DD &nbsp;<em>2026/07/25</em></button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Font size</div>
+        <div class="settings-row">
+          <button class="pref-btn" data-pref="font_size" data-value="small">Small</button>
+          <button class="pref-btn" data-pref="font_size" data-value="medium">Medium</button>
+          <button class="pref-btn" data-pref="font_size" data-value="large">Large</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Database</div>
+        <div class="settings-row" style="flex-direction:column;gap:8px;align-items:flex-start">
+          <button id="optimize-db-btn" class="pref-btn">Compact & optimize database</button>
+          <div id="optimize-db-status" class="index-progress-label" style="display:none"></div>
+          <button id="index-all-btn" class="pref-btn">Index all chats for search</button>
+          <div id="index-all-progress" style="display:none;width:100%">
+            <div class="index-progress-bar-wrap">
+              <div id="index-progress-bar" class="index-progress-bar"></div>
+            </div>
+            <div id="index-progress-label" class="index-progress-label"></div>
+          </div>
+          <button id="clear-index-btn" class="pref-btn">Clear search index</button>
+        </div>
       </div>
     </div>
   </div>

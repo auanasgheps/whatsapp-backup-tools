@@ -3052,6 +3052,8 @@
   }
 
   document.getElementById('settings-btn').addEventListener('click', async () => {
+    const sBody = document.getElementById('settings-body');
+    if (sBody) sBody.scrollTop = 0;
     document.getElementById('settings-modal').classList.add('open');
     try {
       const r = await fetch('/api/index/progress');

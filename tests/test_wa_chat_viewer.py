@@ -5310,6 +5310,7 @@ class TestFaviconAndStaticAssets:
             assert resp_index.status_code == 200
             assert b'href="/static/favicon.svg"' in resp_index.data
             assert b'id="settings-app-logo"' in resp_index.data
+            assert b'id="settings-body"' in resp_index.data
 
 
 # ===========================================================================
