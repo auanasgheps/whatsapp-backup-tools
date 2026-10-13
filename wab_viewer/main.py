@@ -28,7 +28,15 @@ import webbrowser
 from pathlib import Path
 
 try:
-    from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory
+    from flask import (
+        Flask,
+        Response,
+        jsonify,
+        make_response,
+        render_template_string,
+        request,
+        send_from_directory,
+    )
 except ImportError:
     sys.exit("Flask is not installed. Run: pip install flask")
 
@@ -225,8 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_midx_chat_type_ts ON message_index(chat_id, chat_
 
 CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(
     text_body,
-    content='',
-    contentless_delete=1
+    content=''
 );
 
 CREATE TABLE IF NOT EXISTS sync_meta (
@@ -257,6 +264,7 @@ GALLERY_PAGE_SIZE = 100
 _MEDIA_TYPE_EXPR = """
     CASE
         WHEN {col} IS NULL THEN 'text'
+        WHEN LOWER({col}) LIKE '%.vcf' THEN 'vcard'
         WHEN LOWER({col}) LIKE '%sticker%' THEN 'sticker'
         WHEN LOWER({col}) LIKE '%.jpg'  OR LOWER({col}) LIKE '%.jpeg'
           OR LOWER({col}) LIKE '%.png'  OR LOWER({col}) LIKE '%.webp'
@@ -1131,8 +1139,9 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
         INSERT OR REPLACE INTO recent_messages
             (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
              archive_path, media_type, media_name, text_body,
-             quoted_text, quoted_sender, quoted_ts, reactions)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             quoted_text, quoted_sender, quoted_ts, reactions,
+             is_edited, edited_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     keys = rows[0].keys()
     archive_conn.executemany(
@@ -1153,6 +1162,8 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
                 r["quoted_sender"] if "quoted_sender" in keys else None,
                 r["quoted_ts"] if "quoted_ts" in keys else None,
                 r["reactions"] if "reactions" in keys else None,
+                r["is_edited"] if "is_edited" in keys else 0,
+                r["edited_ts"] if "edited_ts" in keys else None,
             )
             for r in rows
         ],
@@ -1164,7 +1175,13 @@ def _media_type_from_path(path: str) -> str:
     if path is None:
         return "text"
     p = path.lower()
-    if "sticker" in p or "stickers" in p:
+    if p.endswith(".vcf"):
+        return "vcard"
+    if (
+        "sticker" in p
+        or "stickers" in p
+        or (os.path.basename(p).startswith("stk-") and (p.endswith(".webp") or p.endswith(".was")))
+    ):
         return "sticker"
     ext = os.path.splitext(p)[1]
     if ext in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"):
@@ -1188,6 +1205,7 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA cache_size = -8000")
         conn.executescript(CACHE_SCHEMA)
+        conn.execute("SELECT 1 FROM message_index_fts LIMIT 0")
         if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
             conn.execute("PRAGMA user_version = 1")
         conn.row_factory = sqlite3.Row
@@ -1205,6 +1223,21 @@ def _open_cache_db(output_root: Path) -> sqlite3.Connection:
                 f"Cannot open cache database at '{cache_path}' for writing ({e}). "
                 "Ensure the archive folder and its database files are not marked read-only."
             ) from e
+        if "contentless_delete" in str(e).lower():
+            try:
+                conn.close()
+            except Exception:
+                pass
+            for p in (
+                cache_path,
+                cache_path.with_name(cache_path.name + "-wal"),
+                cache_path.with_name(cache_path.name + "-shm"),
+            ):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return _open_cache_db(output_root)
         raise
     return conn
 
@@ -1301,7 +1334,7 @@ def _stream_fts_rows(
         is_media = (
             row["message_type"] is not None
             and row["message_type"] != 0
-            and row["media_file"] is not None
+            and (row["media_file"] is not None or row["message_type"] in (4, 14))
         )
         if not text_body and not is_media:
             continue
@@ -1328,7 +1361,13 @@ def _stream_fts_rows(
 
 def _clear_fts_index(cache_conn: sqlite3.Connection):
     cache_conn.execute("DELETE FROM message_index")
-    cache_conn.execute("DELETE FROM message_index_fts")
+    cache_conn.execute("DROP TABLE IF EXISTS message_index_fts")
+    cache_conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(\n"
+        "    text_body,\n"
+        "    content=''\n"
+        ")"
+    )
     cache_conn.execute("DELETE FROM indexed_chats")
     cache_conn.commit()
 
@@ -1434,6 +1473,8 @@ def _fts_ios_chat(
     on_progress,
     hd_clause: str,
 ):
+    mi_cols = {row[1] for row in wa_conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
+    vcard_name_col = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
     sql = f"""
         SELECT
             m.Z_PK                                                      AS rowid,
@@ -1441,7 +1482,7 @@ def _fts_ios_chat(
             CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
                  ELSE 'contact' END                                     AS chat_type,
             CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
-            COALESCE(m.ZTEXT, '')                                       AS text_body,
+            COALESCE(m.ZTEXT, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_col} END, '') AS text_body,
             m.ZMESSAGETYPE                                              AS message_type,
             mi.ZMEDIALOCALPATH                                          AS media_file
         FROM ZWAMESSAGE m
@@ -1556,7 +1597,13 @@ def _build_media_only(
     }
 
     cache_conn.execute("DELETE FROM message_index")
-    cache_conn.execute("DELETE FROM message_index_fts")
+    cache_conn.execute("DROP TABLE IF EXISTS message_index_fts")
+    cache_conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(\n"
+        "    text_body,\n"
+        "    content=''\n"
+        ")"
+    )
     cache_conn.commit()
 
     insert_sql = """
@@ -1612,6 +1659,7 @@ _ANDROID_FILTER = """
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
+        OR (m.message_type IN (4, 14))
         OR (m.message_type = 7)
     )
 """
@@ -1660,6 +1708,8 @@ _IOS_SELECT = f"""
         ac.archive_path,
         CASE
             WHEN m.ZMESSAGETYPE = 6 THEN 'service'
+            WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+            WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -1683,6 +1733,8 @@ _IOS_SELECT = f"""
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
         NULL                                                          AS reactions,
+        0                                                            AS is_edited,
+        NULL                                                          AS edited_ts,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         0                                                            AS group_event_type,
         gm.ZMEMBERJID                                                AS member_jid
@@ -1708,13 +1760,14 @@ _IOS_SELECT = f"""
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
     LEFT JOIN arch.archive_copies ac
-          ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
+          ON ac.original_path = COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)
 """
 
 _BASE_IOS_FILTER = """
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
         OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 6)
     )
 """
@@ -2457,7 +2510,9 @@ def create_app(output_root: Path, rescan: bool = False):
         CREATE TABLE IF NOT EXISTS archive_copies (
             original_path TEXT PRIMARY KEY,
             archive_path TEXT NOT NULL,
-            sha256 TEXT
+            sha256 TEXT,
+            is_hardlink INTEGER NOT NULL DEFAULT 0,
+            timestamp_ms INTEGER
         );
         CREATE TABLE IF NOT EXISTS recent_messages (
             chat_id        TEXT NOT NULL,
@@ -2474,6 +2529,8 @@ def create_app(output_root: Path, rescan: bool = False):
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
             reactions      TEXT,
+            is_edited      INTEGER NOT NULL DEFAULT 0,
+            edited_ts      INTEGER,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -2486,9 +2543,25 @@ def create_app(output_root: Path, rescan: bool = False):
             PRIMARY KEY (chat_id, msg_id)
         );
     """)
+    copy_cols = [
+        r[1] for r in _archive_conn.execute("PRAGMA table_info(archive_copies)").fetchall()
+    ]
+    if "is_hardlink" not in copy_cols:
+        _archive_conn.execute(
+            "ALTER TABLE archive_copies ADD COLUMN is_hardlink INTEGER NOT NULL DEFAULT 0"
+        )
+    if "timestamp_ms" not in copy_cols:
+        _archive_conn.execute("ALTER TABLE archive_copies ADD COLUMN timestamp_ms INTEGER")
+
     cols = [r[1] for r in _archive_conn.execute("PRAGMA table_info(recent_messages)").fetchall()]
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
+    if "is_edited" not in cols:
+        _archive_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0"
+        )
+    if "edited_ts" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN edited_ts INTEGER")
 
     _run_db_maintenance(cache_conn, _archive_conn)
 
@@ -2501,17 +2574,40 @@ def create_app(output_root: Path, rescan: bool = False):
     has_ios_group_event = False
     has_jid_server = False
     has_jid_raw_string = False
+    has_android_edit_info = False
+    has_android_add_on = False
+    has_mei_ts = False
+    has_mao_ts = False
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
         _wa_tables = {
             r[0]
             for r in _tmp_wa.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
-        has_reactions = "message_add_on" in _wa_tables
+        has_reactions = "message_add_on" in _wa_tables and "message_add_on_reaction" in _wa_tables
         has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
         has_lid_dn = "lid_display_name" in _wa_tables
         has_message_system = "message_system" in _wa_tables
         has_mcp = "message_system_chat_participant" in _wa_tables
+        _mei_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_edit_info)").fetchall()}
+            if "message_edit_info" in _wa_tables
+            else set()
+        )
+        has_android_edit_info = "message_edit_info" in _wa_tables and "message_row_id" in _mei_cols
+        has_mei_ts = "edited_timestamp" in _mei_cols
+
+        _mao_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_add_on)").fetchall()}
+            if "message_add_on" in _wa_tables
+            else set()
+        )
+        has_android_add_on = (
+            "message_add_on" in _wa_tables
+            and "message_add_on_type" in _mao_cols
+            and "parent_message_row_id" in _mao_cols
+        )
+        has_mao_ts = "timestamp" in _mao_cols
         _jid_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(jid)").fetchall()}
             if "jid" in _wa_tables
@@ -2519,6 +2615,12 @@ def create_app(output_root: Path, rescan: bool = False):
         )
         has_jid_server = "server" in _jid_cols
         has_jid_raw_string = "raw_string" in _jid_cols
+        _mi_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
+            if "ZWAMEDIAITEM" in _wa_tables
+            else set()
+        )
+        has_ios_vcard_name = "ZVCARDNAME" in _mi_cols
         _zwa_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
             if "ZWAMESSAGE" in _wa_tables
@@ -2528,6 +2630,7 @@ def create_app(output_root: Path, rescan: bool = False):
         _tmp_wa.close()
 
     if source_type == "ios":
+        vcard_name_ios = "mi.ZVCARDNAME" if has_ios_vcard_name else "NULL"
         group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
         has_ios_sort = "ZSORT" in _zwa_cols
         sort_col_ios = "COALESCE(m.ZSORT, m.Z_PK)" if has_ios_sort else "m.Z_PK"
@@ -2540,6 +2643,7 @@ def create_app(output_root: Path, rescan: bool = False):
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
         OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE = 4)
         {ios_service_filter}
     )
 """
@@ -2583,15 +2687,17 @@ def create_app(output_root: Path, rescan: bool = False):
         ac.archive_path,
         CASE
             WHEN m.ZMESSAGETYPE = 6 THEN 'service'
+            WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+            WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
                            OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
-            ELSE {_MEDIA_TYPE_EXPR.format(col="('Message/' || COALESCE(mi.ZMEDIALOCALPATH,''))")}
+            ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE('Message/' || mi.ZMEDIALOCALPATH, mi.ZTITLE)")}
         END                                                           AS media_type,
-        COALESCE(mi.ZTITLE, '')                                      AS media_name,
-        COALESCE(m.ZTEXT, '')                                        AS text_body,
+        COALESCE(mi.ZTITLE, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '') AS media_name,
+        COALESCE(m.ZTEXT, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '')   AS text_body,
         COALESCE(qm.ZTEXT, '')                                       AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
@@ -2606,6 +2712,8 @@ def create_app(output_root: Path, rescan: bool = False):
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
         NULL                                                          AS reactions,
+        0                                                            AS is_edited,
+        NULL                                                          AS edited_ts,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         {group_ev_col}                                               AS group_event_type,
         gm.ZMEMBERJID                                                AS member_jid
@@ -2631,7 +2739,7 @@ def create_app(output_root: Path, rescan: bool = False):
           ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1,
                                     INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)
     LEFT JOIN arch.archive_copies ac
-          ON ac.original_path = 'Message/' || COALESCE(mi.ZMEDIALOCALPATH, '')
+          ON ac.original_path = COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)
 """
 
     ms_join = (
@@ -2648,6 +2756,7 @@ def create_app(output_root: Path, rescan: bool = False):
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
+        OR (m.message_type IN (4, 14))
         OR (m.message_type = 7 AND {ms_action_clause})
     )
     """
@@ -2688,6 +2797,22 @@ def create_app(output_root: Path, rescan: bool = False):
     j_is_lid = "j.server = 'lid'" if has_jid_server else "0"
     jq_is_lid = "jq.server = 'lid'" if has_jid_server else "0"
 
+    if has_android_edit_info:
+        edit_join = "LEFT JOIN message_edit_info mei ON mei.message_row_id = m._id"
+        edit_is_edited_col = "CASE WHEN mei.message_row_id IS NOT NULL THEN 1 ELSE 0 END"
+        edit_ts_col = "mei.edited_timestamp" if has_mei_ts else "NULL"
+    elif has_android_add_on:
+        edit_join = (
+            "LEFT JOIN message_add_on mao_edit "
+            "ON mao_edit.parent_message_row_id = m._id AND mao_edit.message_add_on_type = 74"
+        )
+        edit_is_edited_col = "CASE WHEN mao_edit._id IS NOT NULL THEN 1 ELSE 0 END"
+        edit_ts_col = "mao_edit.timestamp" if has_mao_ts else "NULL"
+    else:
+        edit_join = ""
+        edit_is_edited_col = "0"
+        edit_ts_col = "NULL"
+
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
@@ -2706,14 +2831,16 @@ def create_app(output_root: Path, rescan: bool = False):
         ac.archive_path,
         CASE
             WHEN m.message_type = 7 THEN 'service'
+            WHEN m.message_type IN (4, 14) THEN 'vcard'
+            WHEN m.message_type = 20 THEN 'sticker'
             WHEN m.message_type IS NULL OR m.message_type = 0 THEN
                 CASE WHEN m.text_data IS NOT NULL
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
                            OR INSTR(LOWER(m.text_data), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
-            ELSE {_MEDIA_TYPE_EXPR.format(col="mm.file_path")}
+            ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE(mm.file_path, mm.media_name)")}
         END                                                          AS media_type,
-        COALESCE(mm.media_name, '')                                  AS media_name,
+        COALESCE(mm.media_name, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
         COALESCE(m.text_data, '')                                    AS text_body,
         COALESCE(mq.text_data, '')                                   AS quoted_text,
         CASE WHEN mq.from_me = 1 THEN 'You'
@@ -2724,6 +2851,8 @@ def create_app(output_root: Path, rescan: bool = False):
                  CASE WHEN NOT ({jq_is_lid}) AND jq.user IS NOT NULL THEN '+' || jq.user END,
                  '') END                                             AS quoted_sender,
         COALESCE(mq.timestamp, 0)                                    AS quoted_ts,
+        {edit_is_edited_col}                                         AS is_edited,
+        {edit_ts_col}                                                AS edited_ts,
         {ms_col}                                                     AS action_type,
         ''                                                           AS participant_name
     FROM message m
@@ -2738,9 +2867,10 @@ def create_app(output_root: Path, rescan: bool = False):
     LEFT JOIN jid jq2 ON jq2._id = jmq.jid_row_id
     {ldn_select_joins}
     {ms_join}
+    {edit_join}
     LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
     LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)
-    LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+    LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE(mm.file_path, 'vcard:' || m._id)
 """
 
     def get_archive():
@@ -2898,6 +3028,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     WHERE (msg.ZTEXT IS NOT NULL AND msg.ZTEXT != '' AND (msg.ZMESSAGETYPE IS NULL OR msg.ZMESSAGETYPE = 0))
                        OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE != 0 AND msg.ZMESSAGETYPE != 6
                            AND mi2.ZMEDIALOCALPATH IS NOT NULL)
+                       OR (msg.ZMESSAGETYPE = 4)
                        {ios_service_filter_last_real}
                     GROUP BY msg.ZCHATSESSION
                 ) last_real ON last_real.ZCHATSESSION = cs.Z_PK
@@ -3084,6 +3215,14 @@ def create_app(output_root: Path, rescan: bool = False):
                 else:
                     d["last_msg_preview"] = ""
                     d["last_msg_type"] = "text"
+            elif (source_type == "android" and raw_type in (4, 14)) or (
+                source_type == "ios" and raw_type == 4
+            ):
+                d["last_msg_type"] = "vcard"
+            elif (source_type == "android" and raw_type == 20) or (
+                source_type == "ios" and raw_type == 15
+            ):
+                d["last_msg_type"] = "sticker"
             elif raw_type != 0 and media_path:
                 path = media_path if source_type == "android" else f"Message/{media_path}"
                 d["last_msg_type"] = _media_type_from_path(path)
@@ -3328,6 +3467,7 @@ def create_app(output_root: Path, rescan: bool = False):
         chat_id = request.args.get("chat_id", "")
         chat_type = request.args.get("chat_type", "")
         before = request.args.get("before")
+        types_raw = request.args.get("types")
         conn = get_wa()
         if conn is None:
             return jsonify([])
@@ -3336,15 +3476,102 @@ def create_app(output_root: Path, rescan: bool = False):
         if source_type == "android":
             chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
             is_media, ts_col = _ANDROID_IS_MEDIA, _ANDROID_TS
+            is_link = _ANDROID_IS_LINK
+            is_doc = _ANDROID_IS_DOCUMENT_UNDOWNLOADED
         else:
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             is_media, ts_col = _IOS_IS_MEDIA, _IOS_TS
+            is_link = _IOS_IS_LINK
+            is_doc = _IOS_IS_DOCUMENT_UNDOWNLOADED
+
+        if not types_raw:
+            if before:
+                sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL AND {ts_col} < ? ORDER BY {ts_col} DESC LIMIT ?"
+                rows = conn.execute(sql, chat_params + [int(before), GALLERY_PAGE_SIZE]).fetchall()
+            else:
+                sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL ORDER BY {ts_col} DESC LIMIT ?"
+                rows = conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
+            return jsonify([dict(r) for r in rows])
+
+        types_set = {t.strip().lower() for t in types_raw.split(",") if t.strip()}
+        has_all = "all" in types_set
+        has_link = has_all or "link" in types_set
+        has_doc = has_all or "document" in types_set
+        media_types = (types_set - {"link", "document", "all"}) if not has_all else set()
+        has_archived_media = has_all or bool(media_types) or has_doc
+
+        _EXT_PATTERNS = {
+            "image": ["%.jpg", "%.jpeg", "%.png", "%.webp", "%.heic", "%.heif"],
+            "video": ["%.mp4", "%.mov", "%.avi", "%.mkv", "%.3gp"],
+            "audio": ["%.mp3", "%.ogg", "%.aac", "%.opus", "%.m4a"],
+            "gif": ["%.gif"],
+            "sticker": ["%sticker%"],
+            "vcard": ["%.vcf"],
+        }
+
+        cand_clauses = []
+        if has_archived_media:
+            if not has_all and not has_doc and media_types:
+                ext_conds = []
+                for mt in media_types:
+                    for ext in _EXT_PATTERNS.get(mt, []):
+                        ext_conds.append(f"LOWER(ac.archive_path) LIKE '{ext}'")
+                    if mt == "vcard":
+                        if source_type == "android":
+                            ext_conds.append("m.message_type IN (4, 14)")
+                        else:
+                            ext_conds.append("m.ZMESSAGETYPE = 4")
+                    if mt == "sticker":
+                        if source_type == "android":
+                            ext_conds.append(
+                                "(m.message_type = 20 OR mm.file_path LIKE '%sticker%')"
+                            )
+                        else:
+                            ext_conds.append("m.ZMESSAGETYPE = 15")
+                if ext_conds:
+                    prune_sql = " OR ".join(ext_conds)
+                    cand_clauses.append(
+                        f"({is_media} AND ac.archive_path IS NOT NULL AND ({prune_sql}))"
+                    )
+                else:
+                    cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
+            else:
+                cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
+        if has_link:
+            cand_clauses.append(f"({is_link})")
+        if has_doc:
+            cand_clauses.append(f"({is_doc})")
+
+        if not cand_clauses:
+            return jsonify([])
+
+        cand_pred = " OR ".join(cand_clauses)
+        params = list(chat_params)
+        ts_clause = ""
         if before:
-            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL AND {ts_col} < ? ORDER BY {ts_col} DESC LIMIT ?"
-            rows = conn.execute(sql, chat_params + [int(before), GALLERY_PAGE_SIZE]).fetchall()
+            ts_clause = f"AND {ts_col} < ?"
+            params.append(int(before))
+
+        if has_all:
+            type_filter = "media_type NOT IN ('text', 'service')"
+            type_params = []
         else:
-            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL ORDER BY {ts_col} DESC LIMIT ?"
-            rows = conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
+            placeholders = ", ".join("?" for _ in types_set)
+            type_filter = f"media_type IN ({placeholders})"
+            type_params = list(types_set)
+
+        hd_dedup_clause = _IOS_HD_DEDUP_CLAUSE if (source_type == "ios" and has_ios_hd) else ""
+
+        sql = f"""
+            SELECT * FROM (
+                {select} WHERE {chat_pred} {hd_dedup_clause} AND ({cand_pred}) {ts_clause}
+                ORDER BY {ts_col} DESC
+            )
+            WHERE {type_filter}
+            ORDER BY timestamp_ms DESC
+            LIMIT ?
+        """
+        rows = conn.execute(sql, params + type_params + [GALLERY_PAGE_SIZE]).fetchall()
         return jsonify([dict(r) for r in rows])
 
     @app.route("/api/media/links")
@@ -4936,11 +5163,15 @@ def create_app(output_root: Path, rescan: bool = False):
 
     @app.route("/static/app.css")
     def serve_app_css():
-        return send_from_directory(_CHAT_VIEWER_DIR, "app.css")
+        resp = make_response(send_from_directory(_CHAT_VIEWER_DIR, "app.css"))
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
 
     @app.route("/static/app.js")
     def serve_app_js():
-        return send_from_directory(_CHAT_VIEWER_DIR, "app.js")
+        resp = make_response(send_from_directory(_CHAT_VIEWER_DIR, "app.js"))
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
 
     @app.route("/static/favicon.svg")
     @app.route("/favicon.ico")

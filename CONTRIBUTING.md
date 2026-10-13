@@ -1,6 +1,6 @@
 # Contributing to WhatsApp Backup Tools
 
-Thank you for your interest in contributing to WhatsApp Backup Tools (`wab-tools`)!
+Thank you for your interest in contributing to WhatsApp Backup Tools (`whatsapp-backup-tools`)!
 
 ## Core Principles & Privacy
 

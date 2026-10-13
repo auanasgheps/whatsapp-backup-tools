@@ -19,7 +19,7 @@ HTML_TEMPLATE = (
   <style>"""
     + _PICO_CSS
     + r"""</style>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v={{ version }}">
 </head>
 <body>
 <div id="app">
@@ -180,7 +180,7 @@ HTML_TEMPLATE = (
 <div id="msg-details-popup"></div>
 
 <script>window.OUTPUT_ROOT = {{ output_root | tojson }};</script>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v={{ version }}"></script>
 
 </body>
 </html>

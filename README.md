@@ -56,7 +56,7 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 - **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
 - **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
-- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents and Stickers.
+- **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents, Stickers, and Contact cards (.vcf).
 
 ### WhatsApp Backup Viewer
 Explore and search your archived chats through a local web UI replicating WhatsApp Web.
@@ -156,7 +156,7 @@ Follow the step-by-step guide for your device to extract your database and sync 
 
 - 🤖 **[Android Setup Guide](docs/archiver/setup-android.md)**:
   - Turn on End-to-End Encrypted Backup in WhatsApp and note your 64-digit key.
-  - Sync your media folder with Syncthing (or pull over USB with ADB).
+  - Sync your media folder automatically over USB via ADB (`--from-adb`) or use Syncthing.
 - 🍏 **[iOS / iPhone Setup Guide](docs/archiver/setup-ios.md)**:
   - Turn off in-app WhatsApp encrypted backup.
   - Create a local device backup on your computer with Finder (macOS) or Apple Devices / iTunes (Windows).
@@ -173,31 +173,33 @@ Run a preview (`--dry-run`) first to verify your paths and encryption key:
 **Android example:**
 ```bash
 wab-archiver archive \
-  --msgstore /path/to/msgstore.db.crypt15 \
+  --msgstore "/path/to/WhatsApp/Databases/msgstore.db.crypt15" \
   --e2e-key YOUR_64_CHAR_KEY \
-  --wa-root /path/to/WhatsApp \
-  --output /path/to/my-archive \
+  --wa-root "/path/to/WhatsApp" \
+  --output "/path/to/my-archive" \
   --dry-run
 ```
+*(Alternatively, if your phone is connected via USB, use `--from-adb` to pull and decrypt the database automatically.)*
 
 **iOS example:**
 ```bash
 wab-archiver archive \
-  --ios-backup /path/to/Backup/<UDID> \
-  --output /path/to/my-archive \
+  --ios-backup "/path/to/Backup/<UDID>" \
+  --output "/path/to/my-archive" \
   --dry-run
 ```
 
 Once the dry run completes without errors, remove `--dry-run` to create your archive!
 
 > 💡 On Windows, replace the line continuation `\` with `` ` `` (PowerShell) or `^` (cmd.exe).  
+> 💡 **Paths with spaces:** If your folder paths contain spaces, remember to enclose them in quotes (e.g. `"/path/to/my folder"`).  
 > 💡 **Tip:** Avoid repeating long terminal commands by generating a settings file with `wab-archiver config generate`. See [Configuration Files](docs/archiver/command-reference.md).
 
 #### 2. Open the Local Chat Viewer
 Point `wab-viewer` to your archive folder:
 
 ```bash
-wab-viewer /path/to/my-archive
+wab-viewer "/path/to/my-archive"
 ```
 
 Open your browser at `http://127.0.0.1:5000` to browse, search, and relive your chats. See the [Viewer Guide](docs/viewer/index.md) for all features.
@@ -218,8 +220,12 @@ The archiver is **safe to re-run** on an existing archive:
 ## Prerequisites
 
 - **Python 3.11** or later is required
-- **Android**: End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
-- **iOS/iPadOS**: End-to-end encrypted backup must be **disabled**
+- **Android**: 
+  - End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
+  - ADB is installed
+- **iOS/iPadOS**: 
+  - End-to-end encrypted backup must be **disabled**
+  - An iOS backup on your computer
 
 See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: E2E backup configuration, database extraction (Android and iOS), contacts pull, and locating your media folder.
 
@@ -234,7 +240,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
 ### Viewer
 
-- **Initial release scope**: Call history and poll interactions are not yet rendered in the chat timeline. Progressive media optimization for large photo galleries is planned for future updates.
+- **Timeline scope**: Call history and poll interactions are not yet rendered in the chat timeline.
 - See [viewer known limitations](docs/viewer/index.md#known-limitations) for full details on profile push names, receipts, and platform variations.
 
 ---

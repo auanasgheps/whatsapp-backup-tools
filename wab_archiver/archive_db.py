@@ -42,6 +42,8 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS archive_copies (
             original_path  TEXT NOT NULL REFERENCES files(original_path),
             archive_path   TEXT NOT NULL,
+            is_hardlink    INTEGER NOT NULL DEFAULT 0,
+            timestamp_ms   INTEGER,
             PRIMARY KEY (original_path, archive_path)
         );
         CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
@@ -60,6 +62,8 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
             reactions      TEXT,
+            is_edited      INTEGER NOT NULL DEFAULT 0,
+            edited_ts      INTEGER,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -82,8 +86,18 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
     existing = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
     if "size" not in existing:
         conn.execute("ALTER TABLE files ADD COLUMN size INTEGER")
-    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
-        conn.execute("PRAGMA user_version = 1")
+    existing_copies = {r[1] for r in conn.execute("PRAGMA table_info(archive_copies)")}
+    if "is_hardlink" not in existing_copies:
+        conn.execute("ALTER TABLE archive_copies ADD COLUMN is_hardlink INTEGER NOT NULL DEFAULT 0")
+    if "timestamp_ms" not in existing_copies:
+        conn.execute("ALTER TABLE archive_copies ADD COLUMN timestamp_ms INTEGER")
+    existing_recent = {r[1] for r in conn.execute("PRAGMA table_info(recent_messages)")}
+    if "is_edited" not in existing_recent:
+        conn.execute("ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")
+    if "edited_ts" not in existing_recent:
+        conn.execute("ALTER TABLE recent_messages ADD COLUMN edited_ts INTEGER")
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
+        conn.execute("PRAGMA user_version = 2")
     conn.commit()
     return conn
 
@@ -151,7 +165,13 @@ def save_groups_to_db(conn: sqlite3.Connection, index: dict):
 
 
 def record_file_archived(
-    cursor: sqlite3.Cursor, original_path: str, md5: bytes, archive_path: str, size: int
+    cursor: sqlite3.Cursor,
+    original_path: str,
+    md5: bytes,
+    archive_path: str,
+    size: int,
+    is_hardlink: int,
+    timestamp_ms: int | None,
 ):
     cursor.execute(
         "INSERT INTO files (original_path, md5, size) VALUES (?, ?, ?) "
@@ -159,9 +179,31 @@ def record_file_archived(
         (original_path, md5, size),
     )
     cursor.execute(
-        "INSERT OR IGNORE INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
-        (original_path, archive_path),
+        "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(original_path, archive_path) DO UPDATE SET "
+        "is_hardlink = MAX(archive_copies.is_hardlink, excluded.is_hardlink), "
+        "timestamp_ms = COALESCE(excluded.timestamp_ms, archive_copies.timestamp_ms)",
+        (original_path, archive_path, is_hardlink, timestamp_ms),
     )
+
+
+def load_canonical_copies(conn: sqlite3.Connection, output_root: str) -> dict[bytes, str]:
+    """
+    Load a mapping of {md5_bytes: canonical_abs_path} from the archive database
+    for files that exist on disk.
+    """
+    canonical_map = {}
+    rows = conn.execute(
+        "SELECT f.md5, ac.archive_path FROM files f "
+        "JOIN archive_copies ac ON ac.original_path = f.original_path "
+        "ORDER BY ac.rowid ASC"
+    ).fetchall()
+    for md5_bytes, rel_path in rows:
+        if md5_bytes not in canonical_map:
+            abs_path = os.path.join(output_root, *rel_path.split("/"))
+            if os.path.isfile(abs_path):
+                canonical_map[md5_bytes] = abs_path
+    return canonical_map
 
 
 # ---------------------------------------------------------------------------

@@ -157,8 +157,14 @@ class TestBuildQuery:
             "Media/WhatsApp Video Notes/%",
             "Media/WhatsApp Animated Gifs/%",
             "Media/WhatsApp Documents/%",
+            "Media/WhatsApp Stickers/%",
         ]:
             assert path in query, f"Missing from query: {path}"
+
+    def test_stickers_included(self):
+        query = android_handler.build_query(None, None, False)
+        assert query.count("Media/WhatsApp Stickers/%") == 2
+        assert "WhatsApp Stickers" in android_handler._MEDIA_SUBFOLDERS
 
     def test_limit_clause_included(self):
         query = android_handler.build_query(limit=100, since_ms=None, hd_dedup=False)
@@ -269,6 +275,20 @@ class TestGetMediaFilePaths:
 
         paths = android_handler.get_media_file_paths(conn.cursor(), None, True)
         assert paths == {"Media/WhatsApp Images/hd.jpg"}
+        conn.close()
+
+    def test_get_media_file_paths_includes_stickers(self):
+        conn = _make_msgstore()
+        conn.execute("INSERT INTO chat VALUES (1, NULL, 20)")
+        conn.execute("INSERT INTO jid VALUES (20, '123456')")
+        conn.execute("INSERT INTO message VALUES (1, 1000, 20, 0)")
+        conn.execute(
+            "INSERT INTO message_media VALUES ('Media/WhatsApp Stickers/STK-1.webp', 'image/webp', 1, 1, 'url', NULL)"
+        )
+        conn.commit()
+
+        paths = android_handler.get_media_file_paths(conn.cursor(), None, False)
+        assert "Media/WhatsApp Stickers/STK-1.webp" in paths
         conn.close()
 
 
@@ -1108,7 +1128,13 @@ class TestRecordFileArchived:
         cursor = conn.cursor()
         md5 = b"\x01" * 16
         arc.record_file_archived(
-            cursor, "orig.jpg", md5, "Contacts/Alice (00111)/2024/Received/orig.jpg", 1024
+            cursor,
+            "orig.jpg",
+            md5,
+            "Contacts/Alice (00111)/2024/Received/orig.jpg",
+            1024,
+            0,
+            1700000000000,
         )
         conn.commit()
         row = conn.execute(
@@ -1117,17 +1143,18 @@ class TestRecordFileArchived:
         assert row[0] == md5
         assert row[1] == 1024
         copy = conn.execute(
-            "SELECT archive_path FROM archive_copies WHERE original_path = 'orig.jpg'"
+            "SELECT archive_path, timestamp_ms FROM archive_copies WHERE original_path = 'orig.jpg'"
         ).fetchone()
         assert "Contacts/Alice (00111)/2024/Received/orig.jpg" == copy[0]
+        assert copy[1] == 1700000000000
         conn.close()
 
     def test_duplicate_archive_path_silently_ignored(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b"\x01" * 16
-        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512)
-        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512, 0, None)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "Contacts/path.jpg", 512, 0, None)
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -1139,8 +1166,8 @@ class TestRecordFileArchived:
         conn = arc.open_archive_db(str(tmp_path))
         cursor = conn.cursor()
         md5 = b"\x01" * 16
-        arc.record_file_archived(cursor, "orig.jpg", md5, "path1.jpg", 256)
-        arc.record_file_archived(cursor, "orig.jpg", md5, "path2.jpg", 256)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "path1.jpg", 256, 0, None)
+        arc.record_file_archived(cursor, "orig.jpg", md5, "path2.jpg", 256, 0, None)
         conn.commit()
         count = conn.execute(
             "SELECT COUNT(*) FROM archive_copies WHERE original_path = 'orig.jpg'"
@@ -1158,7 +1185,7 @@ class TestCheckDbHealth:
     def test_archive_db_user_version_and_reactions_cache(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert user_version == 1
+        assert user_version == 2
         auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
         assert auto_vacuum == 2  # INCREMENTAL
         tables = {
@@ -1227,10 +1254,22 @@ class TestBuildArchiveFilenameIndex:
         md5a = b"\x01" * 16
         md5b = b"\x02" * 16
         arc.record_file_archived(
-            cursor, "/staging/WhatsApp Images/photo.jpg", md5a, "Contacts/Alice/photo.jpg", 2048
+            cursor,
+            "/staging/WhatsApp Images/photo.jpg",
+            md5a,
+            "Contacts/Alice/photo.jpg",
+            2048,
+            0,
+            None,
         )
         arc.record_file_archived(
-            cursor, "/staging/WhatsApp Video/clip.mp4", md5b, "Contacts/Bob/clip.mp4", 512000
+            cursor,
+            "/staging/WhatsApp Video/clip.mp4",
+            md5b,
+            "Contacts/Bob/clip.mp4",
+            512000,
+            0,
+            None,
         )
         conn.commit()
         index = arc.build_archive_filename_index(conn)
@@ -1313,7 +1352,7 @@ class TestWriteDuplicateReport:
     def test_no_duplicates_does_not_create_file(self, tmp_path, logger):
         conn = arc.open_archive_db(str(tmp_path))
         path = str(tmp_path / "dups.csv")
-        wa.write_duplicate_report(path, conn, logger)
+        wa.write_duplicate_report(path, conn, logger, None)
         conn.close()
         assert not os.path.exists(path)
 
@@ -1325,22 +1364,25 @@ class TestWriteDuplicateReport:
         md5 = hashlib.md5(b"data").digest()
         cursor.execute("INSERT INTO files (original_path, md5) VALUES (?, ?)", ("orig.jpg", md5))
         cursor.execute(
-            "INSERT INTO archive_copies VALUES (?, ?)",
-            ("orig.jpg", "Contacts/Alice (00111)/2024/Received/orig.jpg"),
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("orig.jpg", "Contacts/Alice (00111)/2024/Received/orig.jpg", 0, 1718000000000),
         )
         cursor.execute(
-            "INSERT INTO archive_copies VALUES (?, ?)",
-            ("orig.jpg", "Groups/Family/2024/orig_Alice.jpg"),
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("orig.jpg", "Groups/Family/2024/orig_Alice.jpg", 1, 1718000000000),
         )
         conn.commit()
         path = str(tmp_path / "dups.csv")
-        wa.write_duplicate_report(path, conn, logger)
+        wa.write_duplicate_report(path, conn, logger, None)
         conn.close()
         assert os.path.isfile(path)
         with open(path, encoding="utf-8") as f:
             content = f.read()
         assert "md5_hex" in content
         assert "file_count" in content
+        assert "link_status" in content
+        assert "original_timestamp" in content
+        assert "2024-" in content
 
 
 # ===========================================================================
@@ -1505,7 +1547,11 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert stats["copied"] == 1
         assert stats["missing"] == 0
@@ -1527,7 +1573,11 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert stats["copied"] == 1
         assert os.path.isfile(os.path.join(out, "Groups", "Family", "2024", "img_Me.jpg"))
@@ -1548,7 +1598,11 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert stats["copied"] == 1
         assert os.path.isfile(
@@ -1570,10 +1624,56 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert os.path.isfile(
             os.path.join(out, "Contacts", "Alice (00111)", "2024", "Sent", "img.jpg")
+        )
+
+    def test_sticker_archiving_group_and_contact(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        stk_file = src_dir / "Media" / "WhatsApp Stickers" / "STK-20240115-WA0001.webp"
+        stk_file.parent.mkdir(parents=True, exist_ok=True)
+        stk_file.write_bytes(b"RIFF....WEBP")
+        out = str(tmp_path / "out")
+        os.makedirs(out)
+        rows = [
+            self._row(
+                file_path="Media/WhatsApp Stickers/STK-20240115-WA0001.webp",
+                chat_subject="Family",
+                sender="111",
+                key_from_me=0,
+            )
+        ]
+        stats, _, _, _ = wa.process_rows(
+            rows,
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            self._resolver(src_dir),
+            out,
+            logger,
+            False,
+            None,
+            None,
+            False,
+            {},
+        )
+        assert stats["copied"] == 1
+        assert os.path.isfile(
+            os.path.join(
+                out,
+                "Groups",
+                "Family",
+                "2024",
+                "STK-20240115-WA0001_Alice.webp",
+            )
         )
 
     def test_unknown_sender_falls_back_to_phone_number(self, tmp_path, logger):
@@ -1591,7 +1691,11 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert os.path.isfile(
             os.path.join(out, "Contacts", "Unknown (00999)", "2024", "Received", "img.jpg")
@@ -1613,7 +1717,11 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert os.path.isfile(
             os.path.join(out, "Contacts", "Alice (00222)", "2024", "Received", "img.jpg")
@@ -1635,7 +1743,11 @@ class TestProcessRows:
             lambda fp: str(tmp_path / "nowhere" / fp),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert stats["missing"] == 1
         assert stats["copied"] == 0
@@ -1655,7 +1767,11 @@ class TestProcessRows:
             lambda fp: fp,
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert stats["missing"] == 1
         assert len(missing) == 1
@@ -1675,7 +1791,11 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert stats["missing"] == 1
         assert stats["copied"] == 0
@@ -1698,7 +1818,11 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=True,
+            True,
+            None,
+            None,
+            False,
+            {},
         )
         assert stats["copied"] == 1
         assert not os.path.isfile(os.path.join(out, "Groups", "Family", "2024", "img_Alice.jpg"))
@@ -1724,7 +1848,11 @@ class TestProcessRows:
             self._resolver(src_dir),
             out,
             logger,
-            dry_run=False,
+            False,
+            None,
+            None,
+            False,
+            {},
         )
         assert stats["skipped"] == 1
         assert stats["copied"] == 0
@@ -1748,8 +1876,11 @@ class TestProcessRows:
                 self._resolver(src_dir),
                 out,
                 logger,
-                dry_run=False,
-                conn=archive_conn,
+                False,
+                archive_conn,
+                None,
+                False,
+                {},
             )
             archive_conn.commit()
             count = archive_conn.execute(
@@ -2444,6 +2575,7 @@ class TestGenerateConfig:
         assert "config.toml" in content
         assert "output" in content
         assert "from_adb" in content
+        assert "link_duplicates" in content
 
     def test_overwrites_existing_file(self, tmp_path):
         dest = tmp_path / "example-config.toml"
@@ -2515,6 +2647,14 @@ class TestConfigInParseArgs:
             args = wa.parse_args()
         assert args.from_adb is True
         assert args.wa_roots == ["/wa"]
+
+    def test_config_link_duplicates(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\nlink_duplicates = true\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.link_duplicates is True
 
     def test_autodetect_single_config_yes(self, tmp_path):
         cfg = tmp_path / "config.toml"
@@ -3140,9 +3280,11 @@ class TestCopyOrSkip:
             "original/path.jpg",
             1705276800000,
             str(tmp_path),
-            dry_run=True,
-            logger=logger,
-            cursor=None,
+            True,
+            logger,
+            None,
+            False,
+            {},
         )
         assert result == (0, 1, 0)
 
@@ -3162,9 +3304,11 @@ class TestCopyOrSkip:
             "original/path.jpg",
             1705276800000,
             str(tmp_path),
-            dry_run=False,
-            logger=logger,
-            cursor=cursor,
+            False,
+            logger,
+            cursor,
+            False,
+            {},
         )
         conn.commit()
         assert result == (0, 1, 0)
@@ -3184,9 +3328,11 @@ class TestCopyOrSkip:
                 "original/path.jpg",
                 1705276800000,
                 str(tmp_path),
-                dry_run=False,
-                logger=logger,
-                cursor=None,
+                False,
+                logger,
+                None,
+                False,
+                {},
             )
         assert result == (0, 0, 1)
 
@@ -3202,9 +3348,11 @@ class TestCopyOrSkip:
                 "original/path.jpg",
                 1705276800000,
                 str(tmp_path),
-                dry_run=False,
-                logger=logger,
-                cursor=None,
+                False,
+                logger,
+                None,
+                False,
+                {},
             )
         assert result == (1, 0, 0)
         assert dest_path.exists()
@@ -3234,6 +3382,10 @@ class TestProcessRowsProgress:
             output_root=str(tmp_path),
             logger=mock_logger,
             dry_run=True,
+            conn=None,
+            tz=None,
+            link_duplicates=False,
+            hash_to_canonical={},
         )
         assert any("Progress: 1000/" in m for m in info_calls)
 
@@ -3668,7 +3820,7 @@ def _seed_archive(tmp_path, original_path, archive_rel, content=b"test data"):
     conn = arc.open_archive_db(str(tmp_path))
     md5 = hashlib.md5(content).digest()
     cur = conn.cursor()
-    arc.record_file_archived(cur, original_path, md5, archive_rel, len(content))
+    arc.record_file_archived(cur, original_path, md5, archive_rel, len(content), 0, None)
     conn.commit()
     conn.close()
     archive_file = tmp_path.joinpath(*archive_rel.split("/"))
@@ -3718,7 +3870,7 @@ class TestRunRestoreMode:
         conn = arc.open_archive_db(str(tmp_path))
         md5 = hashlib.md5(b"x").digest()
         arc.record_file_archived(
-            conn.cursor(), "Media/img.jpg", md5, "Contacts/Alice/2024/Received/img.jpg", 1
+            conn.cursor(), "Media/img.jpg", md5, "Contacts/Alice/2024/Received/img.jpg", 1, 0, None
         )
         conn.commit()
         conn.close()
@@ -5237,6 +5389,220 @@ class TestRunForwardModeAndroid:
 
 
 # ===========================================================================
+# vCard extraction and processing
+# ===========================================================================
+
+
+class TestVcardExtraction:
+    def test_resolve_vcard_display_name_single_name(self):
+        from shared.db import resolve_vcard_display_name
+
+        name = resolve_vcard_display_name("John Doe", None)
+        assert name == "John Doe"
+
+    def test_resolve_vcard_display_name_ios_separator(self):
+        from shared.db import resolve_vcard_display_name
+
+        name = resolve_vcard_display_name("2 contacts_$!<Name-Separator>!$_Jane Doe", None)
+        assert name == "Jane Doe"
+
+        pair = resolve_vcard_display_name(
+            "3 contacts_$!<Name-Separator>!$_Alice_$!<Name-Separator>!$_Bob", None
+        )
+        assert pair == "Alice & Bob"
+
+        multi = resolve_vcard_display_name(
+            "4 contacts_$!<Name-Separator>!$_Alice_$!<Name-Separator>!$_Bob_$!<Name-Separator>!$_Charlie",
+            None,
+        )
+        assert multi == "Alice and 2 others"
+
+    def test_resolve_vcard_display_name_fn_fallback(self):
+        from shared.db import resolve_vcard_display_name
+
+        vcard = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Carlos Danger\r\nEND:VCARD\r\n"
+        name = resolve_vcard_display_name(None, vcard)
+        assert name == "Carlos Danger"
+
+    def test_resolve_vcard_display_name_multiple_vcards(self):
+        from shared.db import resolve_vcard_display_name
+
+        vcard = (
+            "BEGIN:VCARD\r\nFN:Alpha\r\nEND:VCARD\r\n"
+            "BEGIN:VCARD\r\nFN:Beta\r\nEND:VCARD\r\n"
+            "BEGIN:VCARD\r\nFN:Gamma\r\nEND:VCARD\r\n"
+        )
+        name = resolve_vcard_display_name(None, vcard)
+        assert name == "Alpha and 2 others"
+
+    def test_resolve_vcard_display_name_empty_fallback(self):
+        from shared.db import resolve_vcard_display_name
+
+        name = resolve_vcard_display_name(None, None)
+        assert name == "Contact"
+
+        name_empty = resolve_vcard_display_name("", "")
+        assert name_empty == "Contact"
+
+    def test_resolve_vcard_display_name_parameterized_fn(self):
+        from shared.db import resolve_vcard_display_name
+
+        vcard_param = (
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN;CHARSET=UTF-8:Carlos Danger\r\nEND:VCARD\r\n"
+        )
+        name = resolve_vcard_display_name(None, vcard_param)
+        assert name == "Carlos Danger"
+
+        vcard_lower = "BEGIN:VCARD\r\nfn:Mario Rossi\r\nEND:VCARD\r\n"
+        name2 = resolve_vcard_display_name(None, vcard_lower)
+        assert name2 == "Mario Rossi"
+
+        # Portuguese / international counter string should extract FN from vcard
+        name3 = resolve_vcard_display_name("2 contatos", vcard_param)
+        assert name3 == "Carlos Danger"
+
+    def test_has_vcard_support_android(self):
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        assert not android_handler.has_vcard_support(cur)
+        cur.execute("CREATE TABLE message_vcard (message_row_id INTEGER, vcard TEXT)")
+        assert android_handler.has_vcard_support(cur)
+        conn.close()
+
+    def test_build_vcard_query_android(self):
+        query = android_handler.build_vcard_query(10, 1600000000000)
+        assert "message_vcard" in query
+        assert "message_type IN (4, 14)" in query
+        assert "vcard_text" in query
+        assert "LIMIT 5" in query
+        assert "1600000000000" in query
+
+    def test_has_ios_vcard_support(self):
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        assert not ios.has_ios_vcard_support(cur)
+        cur.execute("CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT)")
+        assert not ios.has_ios_vcard_support(cur)
+        cur.execute("ALTER TABLE ZWAMEDIAITEM ADD COLUMN ZVCARDSTRING TEXT")
+        assert ios.has_ios_vcard_support(cur)
+        conn.close()
+
+    def test_build_ios_vcard_query(self):
+        query = ios.build_ios_vcard_query(20, 1600000000000)
+        assert "ZVCARDSTRING" in query
+        assert "ZVCARDNAME" in query
+        assert "ZMESSAGETYPE = 4" in query
+        assert "LIMIT 10" in query
+
+    def test_resolve_unique_vcard_dest(self, tmp_path, logger):
+        target_dir = tmp_path / "Contacts" / "Alice"
+        target_dir.mkdir(parents=True)
+        dest_file = target_dir / "Bob.vcf"
+
+        content1 = b"BEGIN:VCARD\r\nFN:Bob\r\nEND:VCARD\r\n"
+        md5_1 = hashlib.md5(content1).digest()
+        cand1 = wa.resolve_unique_vcard_dest(str(dest_file), md5_1, logger)
+        assert cand1 == str(dest_file)
+        dest_file.write_bytes(content1)
+
+        # Same content again should return None (skip)
+        cand_same = wa.resolve_unique_vcard_dest(str(dest_file), md5_1, logger)
+        assert cand_same is None
+
+        # Different content with same base name should get disambiguated name
+        content2 = b"BEGIN:VCARD\r\nFN:Bob\r\nTEL:12345\r\nEND:VCARD\r\n"
+        md5_2 = hashlib.md5(content2).digest()
+        cand2 = wa.resolve_unique_vcard_dest(str(dest_file), md5_2, logger)
+        assert cand2 == str(target_dir / "Bob_1.vcf")
+
+    def test_process_vcard_rows_creation_and_routing(self, tmp_path, logger):
+        archive_conn = arc.open_archive_db(str(tmp_path))
+
+        vcard_content = (
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Doctor Smith\r\nTEL:+15551234\r\nEND:VCARD\r\n"
+        )
+        rows = [
+            {
+                "message_id": 101,
+                "timestamp_ms": 1600000000000,
+                "chat_row_id": "4412345",
+                "chat_subject": None,
+                "sender": "4412345",
+                "key_from_me": 0,
+                "contact_name": "Doctor Smith",
+                "vcard_text": vcard_content,
+            },
+            {
+                "message_id": 102,
+                "timestamp_ms": 1600000010000,
+                "chat_row_id": "999",
+                "chat_subject": "Family Chat",
+                "sender": "4412345",
+                "key_from_me": 0,
+                "contact_name": "Nurse Kelly",
+                "vcard_text": "BEGIN:VCARD\r\nFN:Nurse Kelly\r\nEND:VCARD\r\n",
+            },
+        ]
+
+        contacts = {"4412345": "Alice"}
+        folder_index = {"4412345": "Alice (4412345)"}
+        group_index = {"999": {"folder": "Family Chat", "subject": "Family Chat"}}
+
+        stats, upd_idx, upd_grp = wa.process_vcard_rows(
+            rows,
+            contacts,
+            {},
+            folder_index,
+            group_index,
+            str(tmp_path),
+            logger,
+            False,
+            archive_conn,
+            None,
+        )
+        assert stats["copied"] == 2
+
+        # Verify contact routing (under year / Received)
+        contact_files = list((tmp_path / "Contacts").rglob("Doctor Smith.vcf"))
+        assert len(contact_files) == 1
+        contact_file = contact_files[0]
+        assert contact_file.exists()
+        assert contact_file.read_bytes() == vcard_content.encode("utf-8")
+        assert int(os.path.getmtime(contact_file) * 1000) == 1600000000000
+
+        # Verify group routing
+        group_files = list((tmp_path / "Groups").rglob("*Nurse Kelly*.vcf"))
+        assert len(group_files) == 1
+        group_file = group_files[0]
+        assert group_file.exists()
+
+        # Check archive_copies table
+        row1 = archive_conn.execute(
+            "SELECT archive_path FROM archive_copies WHERE original_path = 'vcard:101'"
+        ).fetchone()
+        assert row1 is not None
+        assert "Doctor Smith.vcf" in row1[0]
+
+        # Repeat processing should be idempotent and skip existing
+        stats_repeat, _, _ = wa.process_vcard_rows(
+            rows,
+            contacts,
+            {},
+            upd_idx,
+            upd_grp,
+            str(tmp_path),
+            logger,
+            False,
+            archive_conn,
+            None,
+        )
+        assert stats_repeat["copied"] == 0
+        assert stats_repeat["skipped"] == 2
+
+        archive_conn.close()
+
+
+# ===========================================================================
 # wab_archiver.main: top-level guards
 # ===========================================================================
 
@@ -5257,3 +5623,995 @@ class TestModuleTopLevelExecution:
             with pytest.raises(SystemExit) as exc_info:
                 runpy.run_module("wab_archiver.main", run_name="__main__")
             assert exc_info.value.code == 0
+
+
+# ===========================================================================
+# Hardlink Duplicates, Filesystem Probe & DB Schema v2 Tests
+# ===========================================================================
+
+
+class TestArchiveDbMigrationV2:
+    def test_v1_to_v2_migration_adds_is_hardlink_and_updates_version(self, tmp_path):
+        db_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE files (
+                original_path TEXT PRIMARY KEY,
+                md5 BLOB NOT NULL,
+                size INTEGER
+            );
+            CREATE TABLE archive_copies (
+                original_path TEXT NOT NULL REFERENCES files(original_path),
+                archive_path TEXT NOT NULL,
+                PRIMARY KEY (original_path, archive_path)
+            );
+            PRAGMA user_version = 1;
+        """)
+        conn.execute(
+            "INSERT INTO files VALUES ('Media/1.jpg', X'0102030405060708090a0b0c0d0e0f10', 100)"
+        )
+        conn.execute("INSERT INTO archive_copies VALUES ('Media/1.jpg', 'Contacts/Alice/1.jpg')")
+        conn.commit()
+        conn.close()
+
+        migrated_conn = arc.open_archive_db(str(tmp_path))
+        assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        cols = {r[1] for r in migrated_conn.execute("PRAGMA table_info(archive_copies)").fetchall()}
+        assert "is_hardlink" in cols
+
+        row = migrated_conn.execute(
+            "SELECT original_path, archive_path, is_hardlink FROM archive_copies"
+        ).fetchone()
+        assert row == ("Media/1.jpg", "Contacts/Alice/1.jpg", 0)
+        migrated_conn.close()
+
+    def test_fresh_db_is_v2_with_is_hardlink(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_copies)").fetchall()}
+        assert "is_hardlink" in cols
+        conn.close()
+
+    def test_load_canonical_copies_retrieves_existing_files(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        md5 = hashlib.md5(b"payload").digest()
+        file1 = tmp_path / "Contacts" / "Alice" / "img.jpg"
+        file1.parent.mkdir(parents=True, exist_ok=True)
+        file1.write_bytes(b"payload")
+
+        cur = conn.cursor()
+        arc.record_file_archived(cur, "Media/img.jpg", md5, "Contacts/Alice/img.jpg", 7, 0, None)
+        # Add a missing file to verify it's not treated as canonical
+        arc.record_file_archived(
+            cur, "Media/missing.jpg", b"fake", "Contacts/Bob/missing.jpg", 10, 0, None
+        )
+        conn.commit()
+
+        canonical_map = arc.load_canonical_copies(conn, str(tmp_path))
+        assert md5 in canonical_map
+        assert canonical_map[md5] == str(file1)
+        assert b"fake" not in canonical_map
+        conn.close()
+
+
+class TestProbeHardlinkSupport:
+    def test_probe_success_on_supported_fs(self, tmp_path, logger):
+        assert wa.probe_hardlink_support(str(tmp_path), logger) is True
+
+    def test_probe_windows_exfat_error_returns_false(self, tmp_path, logger):
+        with patch("os.link", side_effect=OSError(1, "Incorrect function")):
+            assert wa.probe_hardlink_support(str(tmp_path), logger) is False
+
+    def test_probe_windows_smb_not_supported_returns_false(self, tmp_path, logger):
+        with patch("os.link", side_effect=OSError(50, "The network request is not supported")):
+            assert wa.probe_hardlink_support(str(tmp_path), logger) is False
+
+    def test_probe_posix_exdev_returns_false(self, tmp_path, logger):
+        import errno
+
+        with patch("os.link", side_effect=OSError(errno.EXDEV, "Invalid cross-device link")):
+            assert wa.probe_hardlink_support(str(tmp_path), logger) is False
+
+    def test_probe_posix_eopnotsupp_returns_false(self, tmp_path, logger):
+        import errno
+
+        with patch("os.link", side_effect=OSError(errno.EOPNOTSUPP, "Operation not supported")):
+            assert wa.probe_hardlink_support(str(tmp_path), logger) is False
+
+    def test_probe_permission_error_returns_false(self, tmp_path, logger):
+        with patch("builtins.open", side_effect=PermissionError("Permission denied")):
+            assert wa.probe_hardlink_support(str(tmp_path), logger) is False
+
+    def test_probe_cleanup_os_error_suppressed(self, tmp_path, logger):
+        with patch("os.remove", side_effect=OSError("Remove failed")):
+            assert wa.probe_hardlink_support(str(tmp_path), logger) is True
+
+
+class TestHardlinkDuplicates:
+    def _create_rows(self):
+        # Two messages in different chats sharing the same content
+        return [
+            (1, 1705276800000, "img.jpg", "image/jpeg", "1", "Family", "111", 0, None, None),
+            (2, 1705276900000, "img.jpg", "image/jpeg", None, None, "222", 0, None, None),
+        ]
+
+    def _resolver(self, src_dir):
+        def _resolve(fp):
+            return str(src_dir / fp)
+
+        return _resolve
+
+    def test_hardlink_duplicates_across_chats(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        content = b"duplicate binary media content"
+        (src_dir / "img.jpg").write_bytes(content)
+
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        stats, _, _, missing = wa.process_rows(
+            rows,
+            2,
+            {"111": "Alice", "222": "Bob"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            hash_to_canonical,
+        )
+        conn.commit()
+
+        assert stats["copied"] == 2
+        assert stats["warnings"] == 0
+        assert len(missing) == 0
+
+        p1 = out / "Groups" / "Family" / "2024" / "img_Alice.jpg"
+        p2 = out / "Contacts" / "Bob (00222)" / "2024" / "Received" / "img.jpg"
+        assert p1.exists()
+        assert p2.exists()
+
+        # Check hardlink attributes on disk
+        s1 = os.stat(str(p1))
+        s2 = os.stat(str(p2))
+        assert s1.st_nlink >= 2
+        assert s2.st_nlink >= 2
+        assert s1.st_ino == s2.st_ino
+        assert s1.st_dev == s2.st_dev
+
+        # Content modification on one reflects on the other
+        with open(str(p1), "wb") as f:
+            f.write(b"modified data")
+        assert p2.read_bytes() == b"modified data"
+
+        # Deleting one link preserves the other
+        p1.unlink()
+        assert p2.exists()
+        assert p2.read_bytes() == b"modified data"
+
+        # Check DB records
+        records = conn.execute(
+            "SELECT archive_path, is_hardlink FROM archive_copies ORDER BY rowid ASC"
+        ).fetchall()
+        assert len(records) == 2
+        assert records[0][1] == 0  # original copy
+        assert records[1][1] == 1  # hardlinked copy
+
+        # Check duplicate report
+        report_path = out / "duplicate_media_report.csv"
+        wa.write_duplicate_report(str(report_path), conn, logger, None)
+        assert report_path.exists()
+        import csv
+
+        with open(str(report_path), newline="", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+        assert len(reader) == 2
+        paths_to_link = {r["archived_path"]: r["link_status"] for r in reader}
+        assert paths_to_link["Groups/Family/2024/img_Alice.jpg"] == "duplicate_copy"
+        assert paths_to_link["Contacts/Bob (00222)/2024/Received/img.jpg"] == "hardlink"
+        paths_to_ts = {r["archived_path"]: r["original_timestamp"] for r in reader}
+        assert paths_to_ts["Groups/Family/2024/img_Alice.jpg"].startswith("2024-")
+        assert paths_to_ts["Contacts/Bob (00222)/2024/Received/img.jpg"].startswith("2024-")
+        conn.close()
+
+    def test_no_hardlink_when_flag_disabled(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        content = b"unique separate content"
+        (src_dir / "img.jpg").write_bytes(content)
+
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        stats, _, _, _ = wa.process_rows(
+            rows,
+            2,
+            {"111": "Alice", "222": "Bob"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            False,  # link_duplicates disabled
+            hash_to_canonical,
+        )
+        conn.commit()
+
+        p1 = out / "Groups" / "Family" / "2024" / "img_Alice.jpg"
+        p2 = out / "Contacts" / "Bob (00222)" / "2024" / "Received" / "img.jpg"
+        assert p1.exists()
+        assert p2.exists()
+
+        s1 = os.stat(str(p1))
+        s2 = os.stat(str(p2))
+        assert s1.st_nlink == 1
+        assert s2.st_nlink == 1
+        assert s1.st_ino != s2.st_ino
+
+        records = conn.execute("SELECT is_hardlink FROM archive_copies").fetchall()
+        assert all(r[0] == 0 for r in records)
+
+        # Duplicate report reflects separate copies as duplicate_copy
+        report_path = out / "duplicate_media_report.csv"
+        wa.write_duplicate_report(str(report_path), conn, logger, None)
+        import csv
+
+        with open(str(report_path), newline="", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+        assert len(reader) == 2
+        for r in reader:
+            assert r["link_status"] == "duplicate_copy"
+        conn.close()
+
+    def test_duplicate_report_reflects_active_hardlinks_on_disk(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        content = b"active hardlink content"
+        (src_dir / "img.jpg").write_bytes(content)
+
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        wa.process_rows(
+            rows,
+            2,
+            {"111": "Alice", "222": "Bob"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            hash_to_canonical,
+        )
+        conn.commit()
+
+        # Both files exist and are hardlinks on disk
+        report_path = out / "duplicate_media_report.csv"
+        wa.write_duplicate_report(str(report_path), conn, logger, None)
+        import csv
+
+        with open(str(report_path), newline="", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+        assert len(reader) == 2
+        for r in reader:
+            assert r["link_status"] == "hardlink"
+
+        # Re-run over existing archive: skip branch preserves hardlink status
+        wa.process_rows(
+            rows,
+            2,
+            {"111": "Alice", "222": "Bob"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            hash_to_canonical,
+        )
+        conn.commit()
+
+        records = conn.execute(
+            "SELECT archive_path, is_hardlink FROM archive_copies ORDER BY rowid ASC"
+        ).fetchall()
+        assert len(records) == 2
+        # Hardlinked second file is not downgraded to 0 on skip
+        assert records[1][1] == 1
+        conn.close()
+
+    def test_hardlink_dry_run_logs_would_link(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "img.jpg").write_bytes(b"sample data")
+
+        out = tmp_path / "out"
+        out.mkdir()
+
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        mock_logger = MagicMock()
+
+        stats, _, _, _ = wa.process_rows(
+            rows,
+            2,
+            {"111": "Alice", "222": "Bob"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            mock_logger,
+            True,  # dry_run
+            None,
+            None,
+            True,  # link_duplicates
+            {},
+        )
+        assert stats["copied"] == 2
+        calls = [str(c) for c in mock_logger.info.mock_calls]
+        assert any("Would copy" in c for c in calls)
+        assert any("Would link" in c for c in calls)
+
+    def test_hardlink_incremental_run_links_to_previous_canonical(self, tmp_path, logger):
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        content = b"content across incremental runs"
+        (src_dir / "img.jpg").write_bytes(content)
+
+        resolver = self._resolver(src_dir)
+
+        # Run 1: archives first chat
+        row1 = [(1, 1705276800000, "img.jpg", "image/jpeg", "1", "Family", "111", 0, None, None)]
+        wa.process_rows(
+            row1,
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            {},
+        )
+        conn.commit()
+
+        # Run 2: starts fresh with canonical map loaded from existing DB
+        hash_to_canonical = arc.load_canonical_copies(conn, str(out))
+        assert len(hash_to_canonical) == 1
+
+        row2 = [(2, 1705276900000, "img.jpg", "image/jpeg", None, None, "222", 0, None, None)]
+        wa.process_rows(
+            row2,
+            1,
+            {"222": "Bob"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            hash_to_canonical,
+        )
+        conn.commit()
+
+        p1 = out / "Groups" / "Family" / "2024" / "img_Alice.jpg"
+        p2 = out / "Contacts" / "Bob (00222)" / "2024" / "Received" / "img.jpg"
+        assert p1.exists()
+        assert p2.exists()
+        assert os.stat(str(p1)).st_ino == os.stat(str(p2)).st_ino
+
+        records = conn.execute(
+            "SELECT is_hardlink FROM archive_copies ORDER BY rowid ASC"
+        ).fetchall()
+        assert records == [(0,), (1,)]
+        conn.close()
+
+    def test_fallback_to_copy_when_os_link_raises(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        content = b"fallback media content"
+        (src_dir / "img.jpg").write_bytes(content)
+
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        # Simulate os.link failure on the duplicate
+        with patch("os.link", side_effect=OSError(17, "Cross-device link")):
+            stats, _, _, _ = wa.process_rows(
+                rows,
+                2,
+                {"111": "Alice", "222": "Bob"},
+                {},
+                {},
+                {},
+                resolver,
+                str(out),
+                logger,
+                False,
+                conn,
+                None,
+                True,
+                hash_to_canonical,
+            )
+            conn.commit()
+
+        assert stats["copied"] == 2
+        p1 = out / "Groups" / "Family" / "2024" / "img_Alice.jpg"
+        p2 = out / "Contacts" / "Bob (00222)" / "2024" / "Received" / "img.jpg"
+        assert p1.exists()
+        assert p2.exists()
+        # Fallback copied, so separate inodes
+        assert os.stat(str(p1)).st_ino != os.stat(str(p2)).st_ino
+
+        records = conn.execute("SELECT is_hardlink FROM archive_copies").fetchall()
+        assert records == [(0,), (0,)]
+        conn.close()
+
+    def test_hardlink_fallback_copy_error_logged(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "img.jpg").write_bytes(b"content")
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        import shutil
+
+        orig_copy = shutil.copy
+
+        def _fail_on_fallback(src, dst):
+            if "Bob" in dst:
+                raise OSError("Disk full")
+            return orig_copy(src, dst)
+
+        with (
+            patch("os.link", side_effect=OSError(17, "Cross-device")),
+            patch("shutil.copy", side_effect=_fail_on_fallback),
+        ):
+            stats, _, _, _ = wa.process_rows(
+                rows,
+                2,
+                {"111": "Alice", "222": "Bob"},
+                {},
+                {},
+                {},
+                resolver,
+                str(out),
+                logger,
+                False,
+                conn,
+                None,
+                True,
+                hash_to_canonical,
+            )
+            assert stats["warnings"] == 1
+        conn.close()
+
+    def test_hardlink_canonical_copy_error_logged(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "img.jpg").write_bytes(b"content")
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        hash_to_canonical = {}
+
+        with patch("shutil.copy", side_effect=OSError("Copy error on canonical")):
+            stats, _, _, _ = wa.process_rows(
+                rows[:1],
+                1,
+                {"111": "Alice"},
+                {},
+                {},
+                {},
+                resolver,
+                str(out),
+                logger,
+                False,
+                conn,
+                None,
+                True,
+                hash_to_canonical,
+            )
+            assert stats["warnings"] == 1
+        conn.close()
+
+    def test_hardlink_skip_branch_populates_hash_to_canonical(self, tmp_path, logger):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        content = b"preexisting content"
+        (src_dir / "img.jpg").write_bytes(content)
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        rows = self._create_rows()
+        resolver = self._resolver(src_dir)
+        p1 = out / "Groups" / "Family" / "2024" / "img_Alice.jpg"
+        p1.parent.mkdir(parents=True, exist_ok=True)
+        p1.write_bytes(content)
+
+        hash_to_canonical = {}
+        stats, _, _, _ = wa.process_rows(
+            rows[:1],
+            1,
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            conn,
+            None,
+            True,
+            hash_to_canonical,
+        )
+        assert stats["skipped"] == 1
+        md5 = wa.file_md5(str(p1))
+        assert md5 in hash_to_canonical
+        assert hash_to_canonical[md5] == str(p1)
+        conn.close()
+
+    def test_write_duplicate_report_os_stat_os_error_handled(self, tmp_path, logger):
+        out = tmp_path / "out"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        cur = conn.cursor()
+        md5 = b"1234567890123456"
+        p = out / "Contacts" / "Alice" / "a.jpg"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"data")
+        arc.record_file_archived(cur, "orig1", md5, "Contacts/Alice/a.jpg", 4, 0, None)
+        arc.record_file_archived(cur, "orig2", md5, "Contacts/Bob/b.jpg", 4, 1, None)
+        conn.commit()
+
+        report_path = out / "duplicate_media_report.csv"
+        with patch("os.stat", side_effect=OSError("Permission denied on stat")):
+            wa.write_duplicate_report(str(report_path), conn, logger, None)
+        assert report_path.exists()
+        conn.close()
+
+    def test_load_canonical_copies_skips_missing_files_on_disk(self, tmp_path):
+        conn = arc.open_archive_db(str(tmp_path))
+        cur = conn.cursor()
+        md5 = b"missingfile12345"
+        arc.record_file_archived(cur, "orig1", md5, "Contacts/Nonexistent/a.jpg", 10, 0, None)
+        conn.commit()
+        canonical_map = arc.load_canonical_copies(conn, str(tmp_path))
+        assert md5 not in canonical_map
+        conn.close()
+
+
+class TestRestoreModeFilesystemAndVcard:
+    def test_restore_mode_restores_duplicates_as_independent_copies(self, tmp_path, logger):
+        out = tmp_path / "archive"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        cur = conn.cursor()
+
+        content = b"restored file data"
+        md5 = hashlib.md5(content).digest()
+
+        # Seed two original paths with duplicate content
+        p1 = out / "Contacts" / "Alice" / "img1.jpg"
+        p1.parent.mkdir(parents=True, exist_ok=True)
+        p1.write_bytes(content)
+
+        p2 = out / "Groups" / "Family" / "img2.jpg"
+        p2.parent.mkdir(parents=True, exist_ok=True)
+        # On disk p2 is hardlinked to p1
+        os.link(str(p1), str(p2))
+
+        arc.record_file_archived(
+            cur,
+            "Media/WhatsApp Images/img1.jpg",
+            md5,
+            "Contacts/Alice/img1.jpg",
+            len(content),
+            0,
+            None,
+        )
+        arc.record_file_archived(
+            cur,
+            "Media/WhatsApp Images/img2.jpg",
+            md5,
+            "Groups/Family/img2.jpg",
+            len(content),
+            1,
+            None,
+        )
+        conn.commit()
+        conn.close()
+
+        args = argparse.Namespace(output=str(out), dry_run=False)
+        wa.run_restore_mode(args, logger)
+
+        restored1 = out / "Media" / "WhatsApp Images" / "img1.jpg"
+        restored2 = out / "Media" / "WhatsApp Images" / "img2.jpg"
+        assert restored1.exists()
+        assert restored2.exists()
+        assert restored1.read_bytes() == content
+        assert restored2.read_bytes() == content
+        # Restored files are separate independent copies
+        s1 = os.stat(str(restored1))
+        s2 = os.stat(str(restored2))
+        assert s1.st_ino != s2.st_ino
+
+    def test_restore_mode_ignores_vcard_entries(self, tmp_path, logger):
+        out = tmp_path / "archive"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        cur = conn.cursor()
+
+        vcard_bytes = b"BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Alice\r\nEND:VCARD\r\n"
+        vcard_hash = hashlib.md5(vcard_bytes).digest()
+
+        vcard_file = out / "Contacts" / "Alice" / "Contact.vcf"
+        vcard_file.parent.mkdir(parents=True, exist_ok=True)
+        vcard_file.write_bytes(vcard_bytes)
+
+        # Record virtual vcard
+        arc.record_file_archived(
+            cur, "vcard:101", vcard_hash, "Contacts/Alice/Contact.vcf", len(vcard_bytes), 0, None
+        )
+        conn.commit()
+        conn.close()
+
+        args = argparse.Namespace(output=str(out), dry_run=False)
+        # Should exit with code 1 because no valid Media/ files exist to restore (vcards ignored)
+        with pytest.raises(SystemExit):
+            wa.run_restore_mode(args, logger)
+
+    def test_restore_mode_restores_legitimate_vcf_document(self, tmp_path, logger):
+        out = tmp_path / "archive"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        cur = conn.cursor()
+
+        vcard_bytes = b"BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Bob\r\nEND:VCARD\r\n"
+        vcard_hash = hashlib.md5(vcard_bytes).digest()
+
+        vcf_doc = out / "Contacts" / "Bob" / "contacts.vcf"
+        vcf_doc.parent.mkdir(parents=True, exist_ok=True)
+        vcf_doc.write_bytes(vcard_bytes)
+
+        # Record real Media/ document file with .vcf extension
+        arc.record_file_archived(
+            cur,
+            "Media/WhatsApp Documents/contacts.vcf",
+            vcard_hash,
+            "Contacts/Bob/contacts.vcf",
+            len(vcard_bytes),
+            0,
+            None,
+        )
+        conn.commit()
+        conn.close()
+
+        args = argparse.Namespace(output=str(out), dry_run=False)
+        wa.run_restore_mode(args, logger)
+
+        restored = out / "Media" / "WhatsApp Documents" / "contacts.vcf"
+        assert restored.exists()
+        assert restored.read_bytes() == vcard_bytes
+
+    def test_duplicate_report_distinct_paths(self, tmp_path, logger):
+        out = tmp_path / "archive"
+        out.mkdir()
+        conn = arc.open_archive_db(str(out))
+        cur = conn.cursor()
+
+        content = b"identical-content"
+        h = hashlib.md5(content).digest()
+
+        # Two different original paths mapped to the SAME archive_path (e.g. repeated send skipped)
+        arc.record_file_archived(
+            cur, "Media/IMG1.jpg", h, "Contacts/A/IMG1.jpg", len(content), 0, None
+        )
+        arc.record_file_archived(
+            cur, "Media/IMG2.jpg", h, "Contacts/A/IMG1.jpg", len(content), 0, None
+        )
+        conn.commit()
+
+        report = out / "dup_report.csv"
+        wa.write_duplicate_report(str(report), conn, logger, None)
+
+        # Since there is only 1 distinct archive_path, it must NOT be reported as a duplicate of itself
+        assert not report.exists()
+
+        # Now add a second distinct archive_path
+        arc.record_file_archived(
+            cur, "Media/IMG3.jpg", h, "Contacts/B/IMG1.jpg", len(content), 1, None
+        )
+        conn.commit()
+
+        wa.write_duplicate_report(str(report), conn, logger, None)
+        assert report.exists()
+        lines = [line.strip() for line in report.read_text().splitlines() if line.strip()]
+        # Header + 2 distinct archive path rows (Contacts/A/IMG1.jpg and Contacts/B/IMG1.jpg)
+        assert len(lines) == 3
+        conn.close()
+
+
+class TestDuplicateAndSkippedBreakdown:
+    def test_copy_result_contract(self):
+        res = wa.CopyResult(1, 0, 0, 1)
+        assert res == (1, 0, 0)
+        copied, skipped, warnings = res
+        assert copied == 1
+        assert skipped == 0
+        assert warnings == 0
+        assert res.is_hardlink == 1
+
+    def test_process_rows_skipped_preexisting_vs_duplicate(self, tmp_path, logger):
+        out = tmp_path / "out"
+        out.mkdir()
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        f1 = src_dir / "pic.jpg"
+        f1.write_bytes(b"content-a")
+        f2 = src_dir / "pic2.jpg"
+        f2.write_bytes(b"content-b")
+
+        # Pre-place pic.jpg in output destination to simulate existing from previous run
+        folder = wa.build_contact_folder_name("Alice", "111")
+        year = wa.get_year(1705276800000, None)
+        pre_dir = out / "Contacts" / folder / year / "Received"
+        pre_dir.mkdir(parents=True)
+        (pre_dir / "pic.jpg").write_bytes(b"content-a")
+
+        # Row 1 targets existing pic.jpg -> should be skipped_preexisting
+        # Row 2 targets pic2.jpg -> should be copied
+        # Row 3 targets pic2.jpg again with same filename in same chat -> should be skipped_duplicate
+        rows = [
+            (1, 1705276800000, "Media/pic.jpg", "image/jpeg", 1, None, "111", 0, None, "pic.jpg"),
+            (2, 1705276800000, "Media/pic2.jpg", "image/jpeg", 1, None, "111", 0, None, "pic2.jpg"),
+            (3, 1705276800000, "Media/pic2.jpg", "image/jpeg", 1, None, "111", 0, None, "pic2.jpg"),
+        ]
+
+        def resolver(fp):
+            if "pic2" in fp:
+                return str(f2)
+            return str(f1)
+
+        stats, _, _, _ = wa.process_rows(
+            rows,
+            len(rows),
+            {"111": "Alice"},
+            {},
+            {},
+            {},
+            resolver,
+            str(out),
+            logger,
+            False,
+            None,
+            None,
+            False,
+            {},
+        )
+
+        assert stats["copied"] == 1
+        assert stats["skipped"] == 2
+        assert stats["skipped_preexisting"] == 1
+        assert stats["skipped_duplicate"] == 1
+
+    def test_summary_report_logging_format(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        log_records = []
+
+        class TestHandler(logging.Handler):
+            def emit(self, record):
+                log_records.append(record.getMessage())
+
+        t_logger = logging.getLogger("test_summary_report")
+        t_logger.setLevel(logging.INFO)
+        handler = TestHandler()
+        t_logger.addHandler(handler)
+
+        stats = {
+            "copied": 10,
+            "skipped": 5,
+            "missing": 1,
+            "warnings": 0,
+            "hardlinked": 2,
+            "skipped_preexisting": 4,
+            "skipped_duplicate": 1,
+            "skipped_empty_vcard": 0,
+        }
+        dup_summary = (2, 4)
+
+        # Emulate the summary reporting block
+        copied_label = "Copied"
+        hardlinked_count = stats.get("hardlinked", 0)
+        if hardlinked_count > 0:
+            t_logger.info(
+                f"  {copied_label:<20}: {stats['copied']} ({hardlinked_count} linked duplicates)"
+            )
+        else:
+            t_logger.info(f"  {copied_label:<20}: {stats['copied']}")
+
+        n_skipped = stats["skipped"]
+        n_pre = stats.get("skipped_preexisting", 0)
+        n_dup = stats.get("skipped_duplicate", 0)
+        n_empty = stats.get("skipped_empty_vcard", 0)
+        if n_skipped > 0 and (n_pre > 0 or n_dup > 0 or n_empty > 0):
+            parts = []
+            if n_pre > 0:
+                parts.append(f"{n_pre} already archived")
+            if n_dup > 0:
+                parts.append(f"{n_dup} same-chat duplicates")
+            if n_empty > 0:
+                parts.append(f"{n_empty} empty vCards")
+            t_logger.info(f"  Skipped             : {n_skipped} ({', '.join(parts)})")
+        else:
+            t_logger.info(f"  Skipped             : {n_skipped}")
+
+        t_logger.info(f"  Missing source files: {stats['missing']}")
+        t_logger.info(f"  Errors / Warnings   : {stats['warnings']}")
+        if dup_summary[1] > 0:
+            t_logger.info(
+                f"  Duplicate media     : {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
+                "→ see duplicate_media_report.csv"
+            )
+
+        t_logger.removeHandler(handler)
+
+        output_text = "\n".join(log_records)
+        assert "Copied              : 10 (2 linked duplicates)" in output_text
+        assert "Skipped             : 5 (4 already archived, 1 same-chat duplicates)" in output_text
+        assert (
+            "Duplicate media     : 4 file(s) across 2 group(s) → see duplicate_media_report.csv"
+            in output_text
+        )
+
+    def test_process_vcard_rows_and_merge_stats(self, tmp_path, logger):
+        out = tmp_path / "out"
+        out.mkdir()
+
+        # Simulate pre-existing vcard in archive
+        vcard_raw = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Bob\r\nEND:VCARD"
+        vcf_content = vcard_raw.strip().encode("utf-8") + b"\r\n"
+        folder = wa.build_contact_folder_name("Bob", "222")
+        year = wa.get_year(1705276800000, None)
+        pre_dir = out / "Contacts" / folder / year / "Received"
+        pre_dir.mkdir(parents=True)
+        (pre_dir / "Bob.vcf").write_bytes(vcf_content)
+
+        vcard_rows = [
+            # 1: empty vcard -> skipped_empty_vcard
+            {
+                "message_id": 1,
+                "timestamp_ms": 1705276800000,
+                "chat_row_id": 1,
+                "chat_subject": None,
+                "sender": "222",
+                "key_from_me": 0,
+                "contact_name": "Blank",
+                "vcard_text": "",
+            },
+            # 2: matches pre-existing Bob.vcf -> skipped_preexisting
+            {
+                "message_id": 2,
+                "timestamp_ms": 1705276800000,
+                "chat_row_id": 1,
+                "chat_subject": None,
+                "sender": "222",
+                "key_from_me": 0,
+                "contact_name": "Bob",
+                "vcard_text": vcard_raw,
+            },
+            # 3: also matches Bob.vcf -> skipped_duplicate
+            {
+                "message_id": 3,
+                "timestamp_ms": 1705276800000,
+                "chat_row_id": 1,
+                "chat_subject": None,
+                "sender": "222",
+                "key_from_me": 0,
+                "contact_name": "Bob",
+                "vcard_text": vcard_raw,
+            },
+        ]
+
+        # Base stats from media processing (ensure process_rows stats dictionary shape)
+        base_stats, _, _, _ = wa.process_rows(
+            [], 0, {}, {}, {}, {}, lambda x: x, str(out), logger, False, None, None, False, {}
+        )
+
+        v_stats, _, _ = wa.process_vcard_rows(
+            vcard_rows,
+            {"222": "Bob"},
+            {},
+            {},
+            {},
+            str(out),
+            logger,
+            False,
+            None,
+            None,
+        )
+
+        assert v_stats["skipped"] == 3
+        assert v_stats["skipped_empty_vcard"] == 1
+        assert v_stats["skipped_preexisting"] == 1
+        assert v_stats["skipped_duplicate"] == 1
+
+        # Verify merge into base_stats does not raise KeyError
+        base_stats["copied"] = base_stats.get("copied", 0) + v_stats.get("copied", 0)
+        base_stats["skipped"] = base_stats.get("skipped", 0) + v_stats.get("skipped", 0)
+        base_stats["warnings"] = base_stats.get("warnings", 0) + v_stats.get("warnings", 0)
+        base_stats["hardlinked"] = base_stats.get("hardlinked", 0) + v_stats.get("hardlinked", 0)
+        base_stats["skipped_preexisting"] = base_stats.get("skipped_preexisting", 0) + v_stats.get(
+            "skipped_preexisting", 0
+        )
+        base_stats["skipped_duplicate"] = base_stats.get("skipped_duplicate", 0) + v_stats.get(
+            "skipped_duplicate", 0
+        )
+        base_stats["skipped_empty_vcard"] = base_stats.get("skipped_empty_vcard", 0) + v_stats.get(
+            "skipped_empty_vcard", 0
+        )
+
+        assert base_stats["skipped"] == 3
+        assert base_stats["skipped_empty_vcard"] == 1
+        assert base_stats["skipped_preexisting"] == 1
+        assert base_stats["skipped_duplicate"] == 1

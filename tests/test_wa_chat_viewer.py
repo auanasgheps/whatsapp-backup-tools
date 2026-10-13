@@ -59,6 +59,8 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
             reactions      TEXT,
+            is_edited      INTEGER NOT NULL DEFAULT 0,
+            edited_ts      INTEGER,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -173,6 +175,11 @@ class TestMediaTypeFromPath:
 
     def test_sticker(self):
         assert viewer._media_type_from_path("foo/Sticker/abc.webp") == "sticker"
+        assert viewer._media_type_from_path("foo/stickers/abc.webp") == "sticker"
+        assert (
+            viewer._media_type_from_path("Groups/Chat/2026/STK-20260101-WA0001.webp") == "sticker"
+        )
+        assert viewer._media_type_from_path("Groups/Chat/2026/STK-20260101-WA0001.was") == "sticker"
 
     def test_document(self):
         assert viewer._media_type_from_path("foo/document.pdf") == "document"
@@ -281,6 +288,69 @@ class TestCacheSchema:
             ).fetchall()
         ]
         assert "message_index_fts" in virtuals
+        conn.close()
+
+    def test_schema_no_contentless_delete(self):
+        assert "contentless_delete" not in viewer.CACHE_SCHEMA
+
+    def test_clear_fts_index_resets_fts_table(self, tmp_path):
+        cache_conn = viewer._open_cache_db(tmp_path)
+        cache_conn.execute(
+            "INSERT INTO message_index (rowid, chat_id, chat_type, timestamp_ms) VALUES (1, 'c1', 'contact', 1000)"
+        )
+        cache_conn.execute(
+            "INSERT INTO message_index_fts (rowid, text_body) VALUES (1, 'Hello world')"
+        )
+        cache_conn.execute(
+            "INSERT INTO indexed_chats (chat_id, chat_type) VALUES ('c1', 'contact')"
+        )
+        cache_conn.commit()
+
+        viewer._clear_fts_index(cache_conn)
+
+        assert cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0] == 0
+        assert cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0] == 0
+        fts_count = cache_conn.execute("SELECT COUNT(*) FROM message_index_fts").fetchone()[0]
+        assert fts_count == 0
+
+        cache_conn.execute(
+            "INSERT INTO message_index_fts (rowid, text_body) VALUES (2, 'New text message')"
+        )
+        cache_conn.commit()
+        match_row = cache_conn.execute(
+            "SELECT rowid FROM message_index_fts WHERE message_index_fts MATCH 'New'"
+        ).fetchone()
+        assert match_row is not None and match_row[0] == 2
+        cache_conn.close()
+
+    def test_open_cache_db_recovers_from_incompatible_fts(self, tmp_path, monkeypatch):
+        conn = viewer._open_cache_db(tmp_path)
+        conn.close()
+
+        first_call = True
+        real_connect = sqlite3.connect
+
+        def mock_connect(*args, **kwargs):
+            nonlocal first_call
+            real_conn = real_connect(*args, **kwargs)
+            if first_call:
+                first_call = False
+
+                class FailingConn:
+                    def __getattr__(self, name):
+                        return getattr(real_conn, name)
+
+                    def executescript(self, script):
+                        raise sqlite3.OperationalError('unrecognized option: "contentless_delete"')
+
+                return FailingConn()
+            return real_conn
+
+        monkeypatch.setattr(viewer.sqlite3, "connect", mock_connect)
+        recovered_conn = viewer._open_cache_db(tmp_path)
+        assert recovered_conn is not None
+        assert not first_call
+        recovered_conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1172,6 +1242,61 @@ class TestApiMedia:
         # /api/media still returns the image
         assert any(r["media_type"] == "image" for r in media)
 
+    def test_media_types_parameter_filtering(self, tmp_path):
+        """/api/media supports types parameter for server-side filtering and combined streams."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+        seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (51, 10, 1, 1700000051000, 'see http://example.org/thing', NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (52, 10, 0, 1, 1700000052000, NULL, 6)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (52, NULL, 'contract.pdf')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            links = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=link"
+            ).get_json()
+            assert len(links) == 1
+            assert links[0]["media_type"] == "link"
+
+            images = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=image"
+            ).get_json()
+            assert len(images) == 1
+            assert images[0]["media_type"] == "image"
+
+            mixed = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=image,link"
+            ).get_json()
+            assert len(mixed) == 2
+            assert [r["media_type"] for r in mixed] == ["link", "image"]
+
+            all_items = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=all"
+            ).get_json()
+            assert len(all_items) == 3
+            assert {r["media_type"] for r in all_items} == {"image", "link", "document"}
+
+            paged = client.get(
+                f"/api/media?chat_id=123456789&chat_type=contact&types=all&before={mixed[0]['timestamp_ms']}"
+            ).get_json()
+            assert all(r["timestamp_ms"] < mixed[0]["timestamp_ms"] for r in paged)
+
     def test_media_documents_endpoint_returns_undownloaded_docs(self, tmp_path):
         """Documents with no file_path but a media_name are returned by /api/media/documents."""
         wa_path = tmp_path / "msgstore.db"
@@ -2000,6 +2125,41 @@ class TestHtmlTemplate:
             "_loadGalleryPage must not push to lightboxItems — renderGalleryItem handles that"
         )
 
+    def test_msg_media_aspect_ratio_preservation_css(self):
+        """msg-media img/video must preserve aspect ratio with width: auto and object-fit: contain,
+        preventing horizontal stretching for tall/vertical photos with captions."""
+        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        rule_match = re.search(r"\.msg-media\s+img[^{]*\{([^}]+)\}", css)
+        assert rule_match, ".msg-media img rule missing in app.css"
+        rule_body = rule_match.group(1)
+        assert "width: auto" in rule_body, (
+            "Media must use width: auto to avoid forced horizontal stretch"
+        )
+        assert "object-fit: contain" in rule_body, (
+            "Media must use object-fit: contain to preserve aspect ratio"
+        )
+        assert "max-height:" in rule_body, "Media must specify max-height constraint"
+
+        wrap_match = re.search(r"(?<!-)\.msg-media\s*\{([^}]+)\}", css)
+        assert wrap_match, ".msg-media rule missing in app.css"
+        wrap_body = wrap_match.group(1)
+        assert "max-width: 320px" in wrap_body, "Media container must clamp max-width to 320px"
+        assert "width: fit-content" in wrap_body, (
+            "Media container must use width: fit-content to prevent empty wasted space"
+        )
+
+    def test_lightbox_wheel_zoom_implemented(self):
+        """app.js must provide lightbox wheel-to-zoom and pan functionality."""
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        script = app_js_path.read_text(encoding="utf-8")
+
+        assert "_setupLightboxZoom" in script, "_setupLightboxZoom helper must be present in app.js"
+        assert "lb.addEventListener('wheel'" in script, "Lightbox wheel listener must be registered"
+        assert "scale" in script and "panX" in script, "Zoom scale and pan state must be tracked"
+        assert "lb-zoom-badge" in script, "Zoom reset indicator badge must be supported"
+
 
 class TestReactionsFrontendLayout:
     def test_reactions_css_corner_alignment(self):
@@ -2574,6 +2734,8 @@ class TestRecentMessagesSchema:
             "quoted_text",
             "quoted_sender",
             "quoted_ts",
+            "is_edited",
+            "edited_ts",
         }
         assert expected.issubset(cols), f"Missing columns: {expected - cols}"
 
@@ -2758,6 +2920,8 @@ class TestRecentMessagesRouting:
             "quoted_sender",
             "quoted_ts",
             "reactions",
+            "is_edited",
+            "edited_ts",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -3695,6 +3859,11 @@ class TestIosHdDeduplication:
         assert len(gallery) == 1
         assert gallery[0]["msg_id"] == 101
         assert gallery[0]["archive_path"] == "photos/hd.jpg"
+
+        # Gallery with types filter also deduplicates and only returns the HD photo
+        gallery_types = client.get("/api/media?chat_id=10&chat_type=group&types=image").get_json()
+        assert len(gallery_types) == 1
+        assert gallery_types[0]["msg_id"] == 101
 
 
 class TestGroupMembersLidResolution:
@@ -6533,3 +6702,520 @@ class TestChatInfoMediaSizeAndStatus:
             resp = client.get("/api/chat-info/media-size?chat_id=103624826949008&chat_type=contact")
             assert resp.status_code == 200
             assert resp.get_json()["bytes"] == 10
+
+
+class TestVcardViewer:
+    def test_media_type_from_path_vcf(self):
+        assert viewer._media_type_from_path("Contacts/Alice/Bob.vcf") == "vcard"
+        assert viewer._media_type_from_path("Contacts/Alice/Bob.VCF") == "vcard"
+
+    def test_android_vcard_messages_endpoint(self, tmp_path):
+        from tests.test_wa_chat_viewer import make_archive_db
+
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('44123456', 'Alice', 'Alice')"
+        )
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('vcard:1', 'Contacts/Alice/Bob.vcf')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        wa_conn = sqlite3.connect(str(tmp_path / "msgstore.db"))
+        wa_conn.executescript("""
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, from_me INTEGER, timestamp INTEGER, message_type INTEGER, text_data TEXT, sender_jid_row_id INTEGER);
+            CREATE TABLE message_media (message_row_id INTEGER PRIMARY KEY, chat_row_id INTEGER, file_path TEXT, media_name TEXT, mime_type TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER, sender_jid_row_id INTEGER);
+            CREATE TABLE message_vcard (message_row_id INTEGER PRIMARY KEY, vcard TEXT);
+        """)
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '44123456', 's.whatsapp.net', '44123456@s.whatsapp.net')"
+        )
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (1, 1, NULL, 0, 1678307200000, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type, text_data, sender_jid_row_id) VALUES (1, 1, 0, 1678307200000, 4, 'Bob', 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_vcard (message_row_id, vcard) VALUES (1, 'BEGIN:VCARD\r\nFN:Bob\r\nEND:VCARD\r\n')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=44123456&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["media_type"] == "vcard"
+            assert msgs[0]["archive_path"] == "Contacts/Alice/Bob.vcf"
+            assert msgs[0]["media_name"] == "Bob"
+
+            # Check chat list last_msg_type
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = chats_resp.get_json()
+            assert len(chats) == 1
+            assert chats[0]["last_msg_type"] == "vcard"
+
+    def test_ios_vcard_messages_endpoint(self, tmp_path):
+        from tests.test_wa_chat_viewer import make_archive_db
+
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('44123456', 'Alice', 'Alice')"
+        )
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('vcard:1', 'Contacts/Alice/Doctor Bob.vcf')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        wa_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZVCARDNAME TEXT,
+                ZVCARDSTRING TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZFROMJID TEXT,
+                ZSTANZAID TEXT,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+        """)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Partner')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZVCARDNAME, ZVCARDSTRING) VALUES (1, NULL, NULL, 'Doctor Bob', 'BEGIN:VCARD\r\nFN:Doctor Bob\r\nEND:VCARD\r\n')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES (1, 1, 0, 700000000.0, 4, NULL, 1)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["media_type"] == "vcard"
+            assert msgs[0]["archive_path"] == "Contacts/Alice/Doctor Bob.vcf"
+            assert msgs[0]["media_name"] == "Doctor Bob"
+
+            # Check chat list last_msg_type
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = chats_resp.get_json()
+            assert len(chats) == 1
+            assert chats[0]["last_msg_type"] == "vcard"
+
+
+class TestEditedMessages:
+    def test_android_messages_with_message_edit_info(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("""
+            CREATE TABLE message_edit_info (
+                message_row_id INTEGER PRIMARY KEY,
+                original_key_id TEXT,
+                edited_timestamp INTEGER,
+                sender_timestamp INTEGER
+            );
+        """)
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '12345678')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id) VALUES (1, 1)")
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (101, 1, 0, 1700000000000, 'Original text', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (102, 1, 1, 1700000010000, 'Edited text', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp)
+            VALUES (102, 'orig-key-102', 1700000025000, 1700000025000)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=12345678&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert msgs[101]["is_edited"] == 0
+            assert msgs[101]["edited_ts"] is None
+            assert msgs[102]["is_edited"] == 1
+            assert msgs[102]["edited_ts"] == 1700000025000
+
+    def test_android_messages_fallback_message_add_on(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("""
+            CREATE TABLE message_add_on (
+                _id INTEGER PRIMARY KEY,
+                parent_message_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                timestamp INTEGER,
+                message_add_on_type INTEGER
+            );
+        """)
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '12345678')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id) VALUES (1, 1)")
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (201, 1, 0, 1700000000000, 'Regular message', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (202, 1, 1, 1700000010000, 'Add-on edited message', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_add_on (_id, parent_message_row_id, from_me, timestamp, message_add_on_type)
+            VALUES (1, 202, 1, 1700000030000, 74)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=12345678&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert msgs[201]["is_edited"] == 0
+            assert msgs[201]["edited_ts"] is None
+            assert msgs[202]["is_edited"] == 1
+            assert msgs[202]["edited_ts"] == 1700000030000
+
+    def test_recent_messages_cache_preserves_edit_info(self, tmp_path):
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.close()
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute("""
+            INSERT INTO recent_messages
+            (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body, is_edited, edited_ts)
+            VALUES ('12345678', 'contact', 301, 1700000000000, 'Alice', 0, NULL, 'text', '', 'Cached edit', 1, 1700000045000)
+        """)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=12345678&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["msg_id"] == 301
+            assert msgs[0]["is_edited"] == 1
+            assert msgs[0]["edited_ts"] == 1700000045000
+
+    def test_ios_messages_edit_defaults(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = sqlite3.connect(str(wa_path))
+        archive_conn = make_archive_db(archive_path)
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZVCARDNAME TEXT,
+                ZVCARDSTRING TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZFROMJID TEXT,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+        """)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Partner')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT) VALUES (1, 1, 0, 700000000.0, 0, 'iOS message')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["is_edited"] == 0
+            assert msgs[0]["edited_ts"] is None
+
+    def test_messages_at_endpoint_includes_edited(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("""
+            CREATE TABLE message_edit_info (
+                message_row_id INTEGER PRIMARY KEY,
+                original_key_id TEXT,
+                edited_timestamp INTEGER,
+                sender_timestamp INTEGER
+            );
+        """)
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '99999999')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id) VALUES (1, 1)")
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type)
+            VALUES (401, 1, 0, 1700000000000, 'Original message', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp)
+            VALUES (401, 'key-401', 1700000005000, 1700000005000)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get(
+                "/api/messages/at?chat_id=99999999&chat_type=contact&ts=1700000000000"
+            )
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["is_edited"] == 1
+            assert msgs[0]["edited_ts"] == 1700000005000
+
+    def test_frontend_assets_include_msg_edited(self):
+        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        css_path = Path(viewer.__file__).parent / "chat_viewer" / "app.css"
+        js_content = js_path.read_text(encoding="utf-8")
+        css_content = css_path.read_text(encoding="utf-8")
+        assert "msg-edited" in js_content
+        assert "msg-edited" in css_content
+
+
+class TestStickerSupport:
+    def test_ios_sticker_classification_and_gallery(self, tmp_path):
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path_db)
+        archive_conn.execute("INSERT INTO contacts (number, folder) VALUES ('44123456', 'Alice')")
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Message/Media/123/abc.webp', 'Contacts/Alice/2026/abc.webp')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        wa_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZVCARDNAME TEXT,
+                ZVCARDSTRING TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZFROMJID TEXT,
+                ZSTANZAID TEXT,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+        """)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Alice')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE) VALUES (1, 'Media/123/abc.webp', NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES (1, 1, 0, 700000000.0, 15, NULL, 1)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            # 1. /api/messages classifies as sticker
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["media_type"] == "sticker"
+            assert msgs[0]["archive_path"] == "Contacts/Alice/2026/abc.webp"
+
+            # 2. /api/chats classifies last_msg_type as sticker
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = chats_resp.get_json()
+            assert len(chats) == 1
+            assert chats[0]["last_msg_type"] == "sticker"
+
+            # 3. /api/media with types=sticker returns the sticker
+            stickers_resp = client.get("/api/media?chat_id=1&chat_type=contact&types=sticker")
+            assert stickers_resp.status_code == 200
+            stickers = stickers_resp.get_json()
+            assert len(stickers) == 1
+            assert stickers[0]["media_type"] == "sticker"
+
+            # 4. /api/media with types=image does NOT return the sticker
+            images_resp = client.get("/api/media?chat_id=1&chat_type=contact&types=image")
+            assert images_resp.status_code == 200
+            images = images_resp.get_json()
+            assert len(images) == 0
+
+            # 5. /api/media/count counts it as sticker
+            count_resp = client.get("/api/media/count?chat_id=1&chat_type=contact")
+            assert count_resp.status_code == 200
+            counts = count_resp.get_json()
+            assert counts["by_type"]["sticker"]["count"] == 1
+            assert counts["by_type"]["sticker"]["missing"] == 0
+
+    def test_android_sticker_classification_and_gallery(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (55, 10, 0, 1, 1700000055000, NULL, 20)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (55, 'Media/WhatsApp Stickers/STK-2026.webp', 'STK-2026.webp')"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/WhatsApp Stickers/STK-2026.webp', 'Contacts/Alice/2026/STK-2026.webp')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            # 1. /api/messages classifies as sticker
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = [m for m in resp.get_json() if m["msg_id"] == 55]
+            assert len(msgs) == 1
+            assert msgs[0]["media_type"] == "sticker"
+            assert msgs[0]["archive_path"] == "Contacts/Alice/2026/STK-2026.webp"
+
+            # 2. /api/media with types=sticker returns the sticker
+            stickers_resp = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=sticker"
+            )
+            assert stickers_resp.status_code == 200
+            stickers = stickers_resp.get_json()
+            assert len(stickers) == 1
+            assert stickers[0]["media_type"] == "sticker"
+
+            # 3. /api/media with types=image does NOT return the sticker
+            images_resp = client.get("/api/media?chat_id=123456789&chat_type=contact&types=image")
+            assert images_resp.status_code == 200
+            images = [img for img in images_resp.get_json() if img["msg_id"] == 55]
+            assert len(images) == 0
+
+            # 4. /api/media/count counts it as sticker
+            count_resp = client.get("/api/media/count?chat_id=123456789&chat_type=contact")
+            assert count_resp.status_code == 200
+            counts = count_resp.get_json()
+            assert counts["by_type"]["sticker"]["count"] == 1
+            assert counts["by_type"]["sticker"]["missing"] == 0

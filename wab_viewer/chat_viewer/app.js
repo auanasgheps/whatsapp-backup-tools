@@ -880,6 +880,17 @@
         badge.textContent = 'You';
         meta.appendChild(badge);
       }
+      const isGroupEdited = unit.members.some(m => m.is_edited);
+      if (isGroupEdited) {
+        const editedSpan = document.createElement('span');
+        editedSpan.className = 'msg-edited';
+        editedSpan.textContent = 'Edited';
+        const editedTs = unit.members.find(m => m.edited_ts)?.edited_ts;
+        if (editedTs) {
+          editedSpan.title = 'Edited: ' + fmtTime(editedTs);
+        }
+        meta.appendChild(editedSpan);
+      }
       meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
       bubble.appendChild(meta);
 
@@ -956,6 +967,15 @@
       });
       meta.appendChild(infoBtn);
     }
+    if (msg.is_edited) {
+      const editedSpan = document.createElement('span');
+      editedSpan.className = 'msg-edited';
+      editedSpan.textContent = 'Edited';
+      if (msg.edited_ts) {
+        editedSpan.title = 'Edited: ' + fmtTime(msg.edited_ts);
+      }
+      meta.appendChild(editedSpan);
+    }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
     if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
@@ -963,7 +983,7 @@
         txt.className = 'msg-text msg-unavailable';
         const icon = msg.media_type === 'image' ? '🖼️' : msg.media_type === 'video' ? '🎥' :
                      msg.media_type === 'audio' ? '🎵' : msg.media_type === 'sticker' ? '🩹' :
-                     msg.media_type === 'gif' ? '🎞️' : '📄';
+                     msg.media_type === 'gif' ? '🎞️' : msg.media_type === 'vcard' ? '📇' : '📄';
         txt.innerHTML = esc(icon) + ' ' + highlight(msg.text_body || 'Media not available', '');
         bubble.appendChild(txt);
       } else {
@@ -975,7 +995,7 @@
     } else {
       const mediaEl = renderMedia(msg);
       bubble.appendChild(mediaEl);
-      if (msg.text_body) {
+      if (msg.text_body && msg.media_type !== 'vcard') {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
         cap.innerHTML = highlight(msg.text_body, '');
@@ -1026,6 +1046,7 @@
     const mt = msg.media_type;
 
     if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
+      if (mt === 'sticker') wrap.classList.add('sticker');
       const img = document.createElement('img');
       img.src = src;
       img.loading = 'lazy';
@@ -1060,10 +1081,47 @@
       }, { once: true });
       probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
     } else if (mt === 'audio') {
+      wrap.classList.add('audio');
       const aud = document.createElement('audio');
       aud.controls = true;
       aud.src = src;
       wrap.appendChild(aud);
+    } else if (mt === 'vcard') {
+      wrap.classList.add('vcard');
+      const card = document.createElement('div');
+      card.className = 'vcard-card';
+
+      const avatar = document.createElement('div');
+      avatar.className = 'vcard-avatar';
+      avatar.innerHTML = '<span class="vcard-avatar-icon">👤</span>';
+
+      const details = document.createElement('div');
+      details.className = 'vcard-details';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'vcard-name';
+      nameEl.textContent = msg.text_body || msg.media_name || 'Contact';
+
+      const subEl = document.createElement('div');
+      subEl.className = 'vcard-sub';
+      subEl.textContent = 'Contact Card';
+
+      details.appendChild(nameEl);
+      details.appendChild(subEl);
+      card.appendChild(avatar);
+      card.appendChild(details);
+
+      const downloadLink = document.createElement('a');
+      downloadLink.className = 'vcard-download';
+      downloadLink.href = src;
+      const downloadName = (msg.media_name && msg.media_name.toLowerCase().endsWith('.vcf'))
+        ? msg.media_name
+        : ((msg.text_body ? msg.text_body : 'contact') + '.vcf');
+      downloadLink.download = downloadName;
+      downloadLink.innerHTML = '<span class="vcard-download-icon">📇</span><span>View Contact (.vcf)</span>';
+
+      wrap.appendChild(card);
+      wrap.appendChild(downloadLink);
     } else {
       const a = document.createElement('a');
       a.href = src;
@@ -1090,6 +1148,142 @@
     lb.classList.add('is-closing');
     lb.addEventListener('animationend', () => lb.remove(), { once: true });
     setTimeout(() => lb.isConnected && lb.remove(), 300);
+  }
+
+  function _setupLightboxZoom(lb, media) {
+    let scale = 1;
+    let panX = 0;
+    let panY = 0;
+    let isDragging = false;
+    let hasDragged = false;
+    let startX = 0;
+    let startY = 0;
+
+    const zoomBadge = document.createElement('div');
+    zoomBadge.className = 'lb-zoom-badge';
+    zoomBadge.style.display = 'none';
+    zoomBadge.title = 'Click to reset zoom';
+    lb.appendChild(zoomBadge);
+
+    function applyTransform(animated) {
+      media.style.transition = animated ? 'transform 0.12s ease-out' : 'none';
+      media.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+      if (scale > 1) {
+        media.style.cursor = isDragging ? 'grabbing' : 'grab';
+        zoomBadge.textContent = `${Math.round(scale * 100)}% \u00d7 Reset`;
+        zoomBadge.style.display = 'block';
+      } else {
+        media.style.cursor = 'zoom-in';
+        zoomBadge.style.display = 'none';
+      }
+    }
+
+    function clampPan() {
+      if (scale <= 1) {
+        panX = 0;
+        panY = 0;
+        return;
+      }
+      const scaledW = media.offsetWidth * scale;
+      const scaledH = media.offsetHeight * scale;
+      const maxPanX = Math.max(40, (scaledW - window.innerWidth) / 2 + 40);
+      const maxPanY = Math.max(40, (scaledH - window.innerHeight) / 2 + 40);
+      panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+      panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+    }
+
+    lb.addEventListener('wheel', e => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY < 0 ? 1.25 : (1 / 1.25);
+      const prevScale = scale;
+      let nextScale = scale * zoomFactor;
+      if (nextScale < 1.05) {
+        scale = 1;
+        panX = 0;
+        panY = 0;
+        applyTransform(true);
+        return;
+      }
+      if (nextScale > 6) {
+        nextScale = 6;
+      }
+      const cx = window.innerWidth / 2 + panX;
+      const cy = window.innerHeight / 2 + panY;
+      const dx = e.clientX - cx;
+      const dy = e.clientY - cy;
+      const ratio = nextScale / prevScale;
+      panX -= dx * (ratio - 1);
+      panY -= dy * (ratio - 1);
+      scale = nextScale;
+      clampPan();
+      applyTransform(true);
+    }, { passive: false });
+
+    media.draggable = false;
+
+    const onMouseMove = e => {
+      if (!isDragging) return;
+      hasDragged = true;
+      panX = e.clientX - startX;
+      panY = e.clientY - startY;
+      clampPan();
+      applyTransform(false);
+    };
+
+    const onMouseUp = () => {
+      if (isDragging) {
+        isDragging = false;
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+        applyTransform(false);
+      }
+    };
+
+    media.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      if (scale > 1) {
+        isDragging = true;
+        hasDragged = false;
+        startX = e.clientX - panX;
+        startY = e.clientY - panY;
+        media.style.cursor = 'grabbing';
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        e.preventDefault();
+      }
+    });
+
+    lb.addEventListener('animationend', () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }, { once: true });
+
+    media.addEventListener('click', e => {
+      if (hasDragged) return;
+      e.stopPropagation();
+      if (scale === 1) {
+        scale = 2.5;
+        const cx = window.innerWidth / 2;
+        const cy = window.innerHeight / 2;
+        panX = -(e.clientX - cx) * 1.5;
+        panY = -(e.clientY - cy) * 1.5;
+        clampPan();
+        applyTransform(true);
+      } else {
+        scale = 1;
+        panX = 0;
+        panY = 0;
+        applyTransform(true);
+      }
+    });
+
+    zoomBadge.addEventListener('click', e => {
+      e.stopPropagation();
+      scale = 1;
+      panX = 0;
+      panY = 0;
+      applyTransform(true);
+    });
   }
 
   function openLightboxAt(index) {
@@ -1155,6 +1349,7 @@
     } else {
       media = document.createElement('img');
       media.src = src;
+      _setupLightboxZoom(lb, media);
     }
     lb.appendChild(media);
 
@@ -1206,6 +1401,16 @@
   const videoProbeQueue = [];
   let galleryMediaObserver = null;
   let archiveMediaObserver = null;
+  let archiveViewActive = false;
+  let currentGalleryItems = [];
+  let activeTypes = new Set();   // empty = show all; populated = show only those types
+  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
+  const SECONDARY_TYPES = new Set(['link', 'document']);  // hidden by default, toggle exclusive
+  let galleryAllLoaded = false;
+  let galleryLoadingMore = false;
+  let galleryBackfillGen = 0;
+  let gallerySentinel = null;
+  let galleryObserver = null;
 
   function teardownMediaObservers() {
     if (galleryMediaObserver) {
@@ -1248,11 +1453,157 @@
   let galleryIsScrolling = false;
   let galleryScrollIdleTimer = null;
 
+  function _findAnchorGalleryElement(grid) {
+    if (!grid) return null;
+    const gRect = grid.getBoundingClientRect();
+    const children = [...grid.children];
+    for (const el of children) {
+      if ((el.classList.contains('gallery-month-header') && !el.classList.contains('month-empty')) ||
+          (el.classList.contains('gallery-item') && !el.classList.contains('type-hidden'))) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom >= gRect.top && r.top <= gRect.bottom) {
+          return el;
+        }
+      }
+    }
+    return null;
+  }
+
+  function _getMinVisibleGalleryTimestamp(grid) {
+    if (!grid) return Infinity;
+    const gRect = grid.getBoundingClientRect();
+    let minTs = Infinity;
+    const children = [...grid.children];
+    for (const el of children) {
+      if (el.classList.contains('type-hidden') || el.classList.contains('month-empty')) continue;
+      const r = el.getBoundingClientRect();
+      if (r.bottom >= gRect.top && r.top <= gRect.bottom + 600) {
+        if (el.dataset.ts) {
+          const ts = parseInt(el.dataset.ts, 10);
+          if (!isNaN(ts) && ts < minTs) minTs = ts;
+        } else if (el.dataset.month) {
+          const mk = parseInt(el.dataset.month, 10);
+          if (!isNaN(mk)) {
+            const y = Math.floor(mk / 100);
+            const m = mk % 100;
+            const monthStartTs = new Date(y, m - 1, 1).getTime();
+            if (monthStartTs < minTs) minTs = monthStartTs;
+          }
+        }
+      }
+    }
+    return minTs;
+  }
+
+  function _hydrateVisibleGalleryItems() {
+    const grid = document.getElementById('media-gallery-grid');
+    if (!grid) return;
+    const gRect = grid.getBoundingClientRect();
+    const cells = grid.querySelectorAll('.gallery-item[data-hydrated="false"]:not(.type-hidden)');
+    for (const cell of cells) {
+      const r = cell.getBoundingClientRect();
+      if (r.bottom >= gRect.top - 200 && r.top <= gRect.bottom + 600) {
+        hydrateGalleryItem(cell);
+      }
+    }
+  }
+
+  function _checkGalleryLoadMore() {
+    if (archiveViewActive || galleryAllLoaded || galleryLoadingMore) return;
+    const grid = document.getElementById('media-gallery-grid');
+    if (!grid) return;
+
+    const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
+    if (!mediaTypesActive) return;
+
+    const oldestMedia = currentGalleryItems[currentGalleryItems.length - 1];
+    if (!oldestMedia) return;
+
+    const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestMedia.timestamp_ms}"]`);
+    if (oldestCell) {
+      const cellRect = oldestCell.getBoundingClientRect();
+      const gridRect = grid.getBoundingClientRect();
+      if (cellRect.top <= gridRect.bottom + 800) {
+        _loadGalleryPage(oldestMedia.timestamp_ms);
+      }
+    } else {
+      _loadGalleryPage(oldestMedia.timestamp_ms);
+    }
+  }
+
+  async function _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen) {
+    if (archiveViewActive || gen !== galleryBackfillGen) return;
+    const grid = document.getElementById('media-gallery-grid');
+    if (!grid) return;
+    const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
+    if (!mediaTypesActive) return;
+
+    const targetMonth = targetTs !== Infinity ? monthKey(targetTs) : null;
+
+    let attempts = 0;
+    while (!galleryAllLoaded && attempts < 50) {
+      if (gen !== galleryBackfillGen) return;
+      attempts++;
+      if (galleryLoadingMore) {
+        await new Promise(r => setTimeout(r, 40));
+        continue;
+      }
+      const oldestMedia = currentGalleryItems[currentGalleryItems.length - 1];
+      if (!oldestMedia) break;
+
+      const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestMedia.timestamp_ms}"]`);
+
+      let needsMore = false;
+      if (targetTs !== Infinity && oldestMedia.timestamp_ms > targetTs) {
+        needsMore = true;
+      } else if (oldestCell && !oldestCell.classList.contains('type-hidden')) {
+        const cellRect = oldestCell.getBoundingClientRect();
+        const gridRect = grid.getBoundingClientRect();
+        if (cellRect.top <= gridRect.bottom + 600) {
+          needsMore = true;
+        }
+      } else {
+        needsMore = true;
+      }
+
+      if (needsMore) {
+        await _loadGalleryPage(oldestMedia.timestamp_ms);
+        if (gen !== galleryBackfillGen) return;
+        if (anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
+          const delta = anchorEl.getBoundingClientRect().top - anchorTopBefore;
+          if (Math.abs(delta) > 1) {
+            grid.scrollTop += delta;
+          }
+        }
+        continue;
+      }
+      break;
+    }
+
+    if (gen !== galleryBackfillGen) return;
+
+    if (anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
+      const anchorTopAfter = anchorEl.getBoundingClientRect().top;
+      const delta = anchorTopAfter - anchorTopBefore;
+      if (Math.abs(delta) > 1) {
+        grid.scrollTop += delta;
+      }
+    } else if (targetMonth) {
+      const monthHdr = grid.querySelector(`.gallery-month-header[data-month="${targetMonth}"]`);
+      if (monthHdr && !monthHdr.classList.contains('month-empty')) {
+        monthHdr.scrollIntoView({ behavior: 'instant', block: 'start' });
+      }
+    }
+
+    _hydrateVisibleGalleryItems();
+  }
+
   function onGalleryScroll() {
     galleryIsScrolling = true;
     clearTimeout(galleryScrollIdleTimer);
     // Pause queued tasks while user is actively scrolling
     videoProbeQueue.length = 0;
+    _checkGalleryLoadMore();
     galleryScrollIdleTimer = setTimeout(() => {
       galleryIsScrolling = false;
       scheduleVisibleVideoExtraction();
@@ -1452,6 +1803,7 @@
   function closeMediaGallery() {
     archiveViewActive = false;
     archiveLoadingAll = false;
+    galleryBackfillGen++;
     document.getElementById('media-gallery').classList.remove('open');
     if (galleryObserver) { galleryObserver.disconnect(); galleryObserver = null; }
     if (gallerySentinel) { gallerySentinel.remove(); gallerySentinel = null; }
@@ -1526,6 +1878,12 @@
       cell.appendChild(name);
       cell.appendChild(meta);
       cell.addEventListener('click', () => window.open(src, '_blank'));
+    } else if (mt === 'vcard') {
+      const d = document.createElement('div');
+      d.className = 'gallery-doc';
+      d.innerHTML = '<span style="font-size:28px">📇</span><span>' + esc(msg.media_name || msg.text_body || 'Contact') + '</span>';
+      d.addEventListener('click', () => window.open(src, '_blank'));
+      cell.appendChild(d);
     } else {
       const d = document.createElement('div');
       d.className = 'gallery-doc';
@@ -1603,6 +1961,7 @@
     // reset to classic view each time
     archiveViewActive = false;
     archiveLoadingAll = false;
+    galleryBackfillGen++;
     switcher.style.display = 'flex';
     document.getElementById('media-archive-tabs').style.display =
       currentChat.type === 'contact' ? 'flex' : 'none';
@@ -1625,7 +1984,7 @@
     galleryLoadingMore = false;
 
     // fetch counts, documents, and links in parallel, then render media
-    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'link'];
+    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
     const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
     const [counts, docItems, linkItems] = await Promise.all([
       fetch('/api/media/count?' + qs).then(r => r.json()),
@@ -1686,8 +2045,12 @@
     galleryLoadingMore = true;
     const grid = document.getElementById('media-gallery-grid');
     try {
+      const typesParam = (activeTypes.size > 0 && [...activeTypes].some(t => !SECONDARY_TYPES.has(t)))
+        ? '&types=' + encodeURIComponent([...activeTypes].filter(t => !SECONDARY_TYPES.has(t)).join(','))
+        : '';
       const url = '/api/media?chat_id=' + encodeURIComponent(currentChat.id) +
                   '&chat_type=' + encodeURIComponent(currentChat.type) +
+                  typesParam +
                   (before != null ? '&before=' + before : '');
       const items = await fetch(url).then(r => r.json());
       if (items.length < 100) galleryAllLoaded = true;
@@ -1740,16 +2103,6 @@
     }
   });
 
-  let archiveViewActive = false;
-  let currentGalleryItems = [];
-  let activeTypes = new Set();   // empty = show all; populated = show only those types
-  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
-  const SECONDARY_TYPES = new Set(['link', 'document']);  // hidden by default, toggle exclusive
-  let galleryAllLoaded = false;
-  let galleryLoadingMore = false;
-  let gallerySentinel = null;
-  let galleryObserver = null;
-
   function _nextLightboxIndex(from, dir) {
     let i = from + dir;
     while (i >= 0 && i < lightboxItems.length) {
@@ -1762,7 +2115,7 @@
   }
 
   function _makeStatPill(label, count, type, missing) {
-    const plurals = { audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links' };
+    const plurals = { audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links', vcard: 'contacts' };
     const displayLabel = count === 1 ? label : (plurals[label] || label + 's');
     const span = document.createElement('span');
     span.className = 'gallery-stat';
@@ -1774,6 +2127,11 @@
   }
 
   function _toggleTypeFilter(type) {
+    const grid = document.getElementById('media-gallery-grid');
+    const targetTs = grid ? _getMinVisibleGalleryTimestamp(grid) : Infinity;
+    const anchorEl = grid ? _findAnchorGalleryElement(grid) : null;
+    const anchorTopBefore = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
+
     if (type === null) {
       // Total: toggle between show-all and the default media-only state
       if (activeTypes.size === 0) {
@@ -1800,8 +2158,16 @@
       activeTypes.add(type);
     }
     _applyTypeFilter();
+    if (grid && anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
+      const delta = anchorEl.getBoundingClientRect().top - anchorTopBefore;
+      if (Math.abs(delta) > 1) {
+        grid.scrollTop += delta;
+      }
+    }
     _syncStatPills();
     scheduleVisibleVideoExtraction();
+    const gen = ++galleryBackfillGen;
+    _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen);
   }
 
   function _applyTypeFilter() {
@@ -1835,8 +2201,12 @@
       }
     });
     _syncMonthHeaders();
+    _hydrateVisibleGalleryItems();
     if (animating) {
-      setTimeout(() => _syncMonthHeaders(), 250);
+      setTimeout(() => {
+        _syncMonthHeaders();
+        _hydrateVisibleGalleryItems();
+      }, 250);
     }
   }
 

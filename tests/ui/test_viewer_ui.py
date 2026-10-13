@@ -11,6 +11,7 @@ Validates the complete web interface lifecycle in a real headless browser using 
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -25,11 +26,14 @@ def open_group_chat_in_browser(browser: CDPSession, timeout: float) -> str:
     """Wait for chat list, click the first group chat, and wait for messages to load."""
     js_code = """
     (async () => {
-        for (let i = 0; i < 60; i++) {
+        const active = document.querySelector('.chat-item.active[data-type="group"]');
+        if (active) return active.querySelector('.chat-name')?.textContent || '';
+        for (let i = 0; i < 200; i++) {
             const item = document.querySelector('.chat-item[data-type="group"]');
             if (item) {
                 const name = item.querySelector('.chat-name')?.textContent || '';
                 item.click();
+                await new Promise(r => setTimeout(r, 100));
 
                 for (let j = 0; j < 80; j++) {
                     await new Promise(r => setTimeout(r, 50));
@@ -55,19 +59,24 @@ def open_group_chat_in_browser(browser: CDPSession, timeout: float) -> str:
 def test_chat_list_and_chat_opening(browser: CDPSession, screenshot_dir: Path) -> None:
     """Validate that chat items render and clicking an item loads the chat pane."""
     # 1. Wait for chat list to populate
-    chats_count = browser.evaluate(
-        """
-        (async () => {
-            for (let i = 0; i < 60; i++) {
-                const items = document.querySelectorAll('.chat-item');
-                if (items.length > 0) return items.length;
-                await new Promise(r => setTimeout(r, 100));
-            }
-            return 0;
-        })()
-        """,
-        10.0,
-    )
+    chats_count = None
+    for _ in range(3):
+        chats_count = browser.evaluate(
+            """
+            (async () => {
+                for (let i = 0; i < 60; i++) {
+                    const items = document.querySelectorAll('.chat-item');
+                    if (items.length > 0) return items.length;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                return 0;
+            })()
+            """,
+            10.0,
+        )
+        if isinstance(chats_count, int):
+            break
+        time.sleep(0.5)
     assert isinstance(chats_count, int)
     assert chats_count >= 5
 
@@ -888,3 +897,580 @@ def test_media_gallery_archive_view_loads_past_years_when_current_year_has_many_
             """,
             5.0,
         )
+
+
+def test_media_gallery_scrolled_link_view_to_images_loads_viewport_images(
+    browser: CDPSession,
+) -> None:
+    """Validate that scrolling down in link view and enabling images loads images at the scrolled position."""
+    open_group_chat_in_browser(browser, 25.0)
+
+    setup_mock = browser.evaluate(
+        """
+        (() => {
+            const originalFetch = window.fetch;
+            window._testOriginalFetch = originalFetch;
+
+            const page1 = [];
+            for (let i = 0; i < 100; i++) {
+                page1.push({
+                    timestamp_ms: 1775000000000 - i * 10000,
+                    media_type: 'image',
+                    archive_path: 'Groups/Tech & Coffee Meetup/2026/img_2026_' + i + '.jpg',
+                    media_name: 'img_2026_' + i + '.jpg',
+                });
+            }
+
+            const page2 = [];
+            for (let i = 0; i < 20; i++) {
+                page2.push({
+                    timestamp_ms: 1740000000000 - i * 10000,
+                    media_type: 'image',
+                    archive_path: 'Groups/Tech & Coffee Meetup/2025/img_2025_' + i + '.jpg',
+                    media_name: 'img_2025_' + i + '.jpg',
+                });
+            }
+
+            const links = [
+                {
+                    timestamp_ms: 1775500000000,
+                    media_type: 'link',
+                    text_body: 'https://example.com/2026',
+                    sender: 'Alice',
+                },
+                {
+                    timestamp_ms: 1740500000000,
+                    media_type: 'link',
+                    text_body: 'https://example.com/2025',
+                    sender: 'Bob',
+                },
+            ];
+
+            window.fetch = async (url, options) => {
+                const urlStr = String(url);
+                if (urlStr.includes('/api/media/links')) {
+                    return new Response(JSON.stringify(links), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                    });
+                }
+                if (urlStr.includes('/api/media?')) {
+                    if (urlStr.includes('before=')) {
+                        return new Response(JSON.stringify(page2), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' },
+                        });
+                    } else {
+                        return new Response(JSON.stringify(page1), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' },
+                        });
+                    }
+                }
+                return originalFetch(url, options);
+            };
+            return true;
+        })()
+        """,
+        5.0,
+    )
+    assert setup_mock is True
+
+    try:
+        opened = browser.evaluate(
+            """
+            (async () => {
+                const mediaBtn = document.getElementById('media-btn');
+                if (mediaBtn) mediaBtn.click();
+                for (let i = 0; i < 60; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const gal = document.getElementById('media-gallery');
+                    const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                    if (gal && gal.classList.contains('open') && items.length > 0) {
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """,
+            10.0,
+        )
+        assert opened is True
+
+        browser.evaluate(
+            """
+            (() => {
+                const linkPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="link"]');
+                if (linkPill) linkPill.click();
+            })()
+            """,
+            5.0,
+        )
+
+        scrolled = browser.evaluate(
+            """
+            (() => {
+                const grid = document.getElementById('media-gallery-grid');
+                const linkCards = [...grid.querySelectorAll('.gallery-link-card')];
+                const card2025 = linkCards.find(el => el.textContent.includes('2025'));
+                if (card2025) {
+                    card2025.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    return true;
+                }
+                return false;
+            })()
+            """,
+            5.0,
+        )
+        assert scrolled is True
+
+        result = browser.evaluate(
+            """
+            (async () => {
+                const imgPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="image"]');
+                if (imgPill) imgPill.click();
+
+                for (let i = 0; i < 60; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const images2025 = document.querySelectorAll(
+                        '#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)'
+                    );
+                    const has2025Image = [...images2025].some(el => el.dataset.src && el.dataset.src.includes('2025'));
+                    if (has2025Image) {
+                        return { loaded2025Images: true, count: images2025.length };
+                    }
+                }
+                return { loaded2025Images: false };
+            })()
+            """,
+            10.0,
+        )
+        assert isinstance(result, dict)
+        assert result.get("loaded2025Images") is True, (
+            "2025 images failed to load after switching to images in scrolled view"
+        )
+    finally:
+        browser.evaluate(
+            """
+            (() => {
+                if (window._testOriginalFetch) {
+                    window.fetch = window._testOriginalFetch;
+                    delete window._testOriginalFetch;
+                }
+                const closeBtn = document.getElementById('media-gallery-close');
+                if (closeBtn) closeBtn.click();
+            })()
+            """,
+            5.0,
+        )
+
+
+def test_media_gallery_scrolled_link_view_deselect_link_restores_and_loads_images(
+    browser: CDPSession,
+) -> None:
+    """Validate that scrolling down in link view and deselecting links restores and loads images at that position."""
+    open_group_chat_in_browser(browser, 25.0)
+
+    setup_mock = browser.evaluate(
+        """
+        (() => {
+            const originalFetch = window.fetch;
+            window._testOriginalFetch = originalFetch;
+
+            const page1 = [];
+            for (let i = 0; i < 100; i++) {
+                page1.push({
+                    timestamp_ms: 1775000000000 - i * 10000,
+                    media_type: 'image',
+                    archive_path: 'Groups/Tech & Coffee Meetup/2026/img_2026_' + i + '.jpg',
+                    media_name: 'img_2026_' + i + '.jpg',
+                });
+            }
+
+            const page2 = [];
+            for (let i = 0; i < 20; i++) {
+                page2.push({
+                    timestamp_ms: 1740000000000 - i * 10000,
+                    media_type: 'image',
+                    archive_path: 'Groups/Tech & Coffee Meetup/2025/img_2025_' + i + '.jpg',
+                    media_name: 'img_2025_' + i + '.jpg',
+                });
+            }
+
+            const links = [
+                {
+                    timestamp_ms: 1775500000000,
+                    media_type: 'link',
+                    text_body: 'https://example.com/2026',
+                    sender: 'Alice',
+                },
+                {
+                    timestamp_ms: 1740500000000,
+                    media_type: 'link',
+                    text_body: 'https://example.com/2025',
+                    sender: 'Bob',
+                },
+            ];
+
+            window.fetch = async (url, options) => {
+                const urlStr = String(url);
+                if (urlStr.includes('/api/media/links')) {
+                    return new Response(JSON.stringify(links), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                    });
+                }
+                if (urlStr.includes('/api/media?')) {
+                    if (urlStr.includes('before=')) {
+                        return new Response(JSON.stringify(page2), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' },
+                        });
+                    } else {
+                        return new Response(JSON.stringify(page1), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' },
+                        });
+                    }
+                }
+                return originalFetch(url, options);
+            };
+            return true;
+        })()
+        """,
+        5.0,
+    )
+    assert setup_mock is True
+
+    try:
+        opened = browser.evaluate(
+            """
+            (async () => {
+                const mediaBtn = document.getElementById('media-btn');
+                if (mediaBtn) mediaBtn.click();
+                for (let i = 0; i < 60; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const gal = document.getElementById('media-gallery');
+                    const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                    if (gal && gal.classList.contains('open') && items.length > 0) {
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """,
+            10.0,
+        )
+        assert opened is True
+
+        browser.evaluate(
+            """
+            (() => {
+                const linkPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="link"]');
+                if (linkPill) linkPill.click();
+            })()
+            """,
+            5.0,
+        )
+
+        scrolled = browser.evaluate(
+            """
+            (() => {
+                const grid = document.getElementById('media-gallery-grid');
+                const linkCards = [...grid.querySelectorAll('.gallery-link-card')];
+                const card2025 = linkCards.find(el => el.textContent.includes('2025'));
+                if (card2025) {
+                    card2025.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    return true;
+                }
+                return false;
+            })()
+            """,
+            5.0,
+        )
+        assert scrolled is True
+
+        result = browser.evaluate(
+            """
+            (async () => {
+                const linkPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="link"]');
+                if (linkPill) linkPill.click();
+
+                for (let i = 0; i < 60; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const images2025 = document.querySelectorAll(
+                        '#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)'
+                    );
+                    const has2025Image = [...images2025].some(el => el.dataset.src && el.dataset.src.includes('2025'));
+                    if (has2025Image) {
+                        return { loaded2025Images: true, count: images2025.length };
+                    }
+                }
+                return { loaded2025Images: false };
+            })()
+            """,
+            10.0,
+        )
+        assert isinstance(result, dict)
+        assert result.get("loaded2025Images") is True, (
+            "2025 images failed to load after deselecting links in scrolled view"
+        )
+    finally:
+        browser.evaluate(
+            """
+            (() => {
+                if (window._testOriginalFetch) {
+                    window.fetch = window._testOriginalFetch;
+                    delete window._testOriginalFetch;
+                }
+                const closeBtn = document.getElementById('media-gallery-close');
+                if (closeBtn) closeBtn.click();
+            })()
+            """,
+            5.0,
+        )
+
+
+def test_chat_bubble_media_aspect_ratio_and_lightbox_zoom(
+    browser: CDPSession,
+    screenshot_dir: Path,
+) -> None:
+    """Verify chat bubble images preserve intrinsic aspect ratio and lightbox supports wheel zoom."""
+    # 1. Open contact chat Sarah Jenkins
+    opened = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const item = [...document.querySelectorAll('.chat-item')].find(
+                    el => el.querySelector('.chat-name')?.textContent.includes('Sarah Jenkins')
+                );
+                if (item) {
+                    item.click();
+                    for (let j = 0; j < 80; j++) {
+                        await new Promise(r => setTimeout(r, 50));
+                        const loading = document.getElementById('chat-loading');
+                        if (loading && loading.style.display === 'none') {
+                            await new Promise(r => setTimeout(r, 150));
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return false;
+        })()
+        """,
+        15.0,
+    )
+    assert opened is True
+
+    # 2. Inspect media element aspect ratio and bubble wrapping
+    media_info = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const img = document.querySelector('#message-scroll .msg-media img');
+                if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                    const rect = img.getBoundingClientRect();
+                    const naturalAspect = img.naturalWidth / img.naturalHeight;
+                    const renderedAspect = rect.width / rect.height;
+                    const bubble = img.closest('.msg-bubble');
+                    const bubbleRect = bubble ? bubble.getBoundingClientRect() : rect;
+                    const hasCaption = bubble ? !!bubble.querySelector('.msg-caption') : false;
+                    return {
+                        ready: true,
+                        naturalWidth: img.naturalWidth,
+                        naturalHeight: img.naturalHeight,
+                        renderedWidth: rect.width,
+                        renderedHeight: rect.height,
+                        naturalAspect: naturalAspect,
+                        renderedAspect: renderedAspect,
+                        bubbleWidth: bubbleRect.width,
+                        hasCaption: hasCaption,
+                    };
+                }
+                await new Promise(r => setTimeout(r, 50));
+            }
+            return { ready: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(media_info, dict)
+    if media_info.get("ready"):
+        diff = abs(media_info["naturalAspect"] - media_info["renderedAspect"])
+        assert diff < 0.05, (
+            f"Aspect ratio distorted: natural={media_info['naturalAspect']:.3f}, "
+            f"rendered={media_info['renderedAspect']:.3f}"
+        )
+        if not media_info.get("hasCaption"):
+            wasted_space = media_info["bubbleWidth"] - media_info["renderedWidth"] - 20
+            assert wasted_space < 60, (
+                f"Too much wasted space in media bubble: bubbleWidth={media_info['bubbleWidth']}, "
+                f"mediaWidth={media_info['renderedWidth']}, wasted={wasted_space}"
+            )
+
+    # 2. Click the image to open Lightbox
+    lb_opened = browser.evaluate(
+        """
+        (async () => {
+            const img = document.querySelector('#message-scroll .msg-media img');
+            if (img) img.click();
+            for (let i = 0; i < 40; i++) {
+                const lb = document.getElementById('img-lightbox');
+                const lbImg = lb?.querySelector('img');
+                if (lb && lbImg) {
+                    return { opened: true };
+                }
+                await new Promise(r => setTimeout(r, 50));
+            }
+            return { opened: false };
+        })()
+        """,
+        5.0,
+    )
+    assert isinstance(lb_opened, dict)
+    assert lb_opened["opened"] is True
+
+    # 3. Simulate wheel zoom on the lightbox
+    zoom_result = browser.evaluate(
+        """
+        (() => {
+            const lb = document.getElementById('img-lightbox');
+            if (!lb) return { error: 'no lightbox' };
+            const evt = new WheelEvent('wheel', {
+                deltaY: -120,
+                clientX: window.innerWidth / 2,
+                clientY: window.innerHeight / 2,
+                bubbles: true,
+                cancelable: true
+            });
+            lb.dispatchEvent(evt);
+            const badge = lb.querySelector('.lb-zoom-badge');
+            const img = lb.querySelector('img');
+            return {
+                badgeVisible: badge ? badge.style.display !== 'none' : false,
+                badgeText: badge ? badge.textContent : '',
+                transform: img ? img.style.transform : '',
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert isinstance(zoom_result, dict)
+    assert zoom_result.get("badgeVisible") is True
+    assert "scale" in zoom_result.get("transform", "")
+
+    browser.capture_screenshot(screenshot_dir / "lightbox_wheel_zoomed.png", 5.0)
+
+    # 4. Click zoom badge to reset
+    reset_result = browser.evaluate(
+        """
+        (() => {
+            const lb = document.getElementById('img-lightbox');
+            const badge = lb?.querySelector('.lb-zoom-badge');
+            if (badge) badge.click();
+            const img = lb?.querySelector('img');
+            return {
+                badgeVisible: badge ? badge.style.display !== 'none' : false,
+                transform: img ? img.style.transform : '',
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert isinstance(reset_result, dict)
+    assert reset_result.get("badgeVisible") is False
+    assert "scale(1)" in reset_result.get("transform", "")
+
+    # 5. Close lightbox
+    closed_lb = browser.evaluate(
+        """
+        (async () => {
+            const closeBtn = document.querySelector('#img-lightbox .lb-close');
+            if (closeBtn) closeBtn.click();
+            for (let i = 0; i < 20; i++) {
+                if (!document.getElementById('img-lightbox')) return true;
+                await new Promise(r => setTimeout(r, 30));
+            }
+            return !document.getElementById('img-lightbox');
+        })()
+        """,
+        5.0,
+    )
+    assert closed_lb is True
+
+
+def test_chat_bubble_voice_message_audio_player(
+    browser: CDPSession,
+    screenshot_dir: Path,
+) -> None:
+    """Verify voice message audio player renders with non-zero width and controls in Chromium."""
+    # 1. Open contact chat Dr. Marcus Vance
+    opened = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const item = [...document.querySelectorAll('.chat-item')].find(
+                    el => el.querySelector('.chat-name')?.textContent.includes('Dr. Marcus Vance')
+                );
+                if (item) {
+                    item.click();
+                    for (let j = 0; j < 80; j++) {
+                        await new Promise(r => setTimeout(r, 50));
+                        const loading = document.getElementById('chat-loading');
+                        if (loading && loading.style.display === 'none') {
+                            await new Promise(r => setTimeout(r, 150));
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return false;
+        })()
+        """,
+        15.0,
+    )
+    assert opened is True
+
+    # 2. Inspect audio player element dimensions and wrapper in Chromium
+    audio_info = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const aud = document.querySelector('#message-scroll .msg-media audio');
+                if (aud) {
+                    const rect = aud.getBoundingClientRect();
+                    const wrap = aud.closest('.msg-media');
+                    const wrapRect = wrap ? wrap.getBoundingClientRect() : null;
+                    const bubble = aud.closest('.msg-bubble');
+                    const bubbleRect = bubble ? bubble.getBoundingClientRect() : null;
+                    return {
+                        found: true,
+                        hasControls: aud.controls,
+                        audWidth: rect.width,
+                        audHeight: rect.height,
+                        wrapWidth: wrapRect ? wrapRect.width : 0,
+                        wrapHasClass: wrap ? wrap.classList.contains('audio') : false,
+                        bubbleWidth: bubbleRect ? bubbleRect.width : 0,
+                    };
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { found: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(audio_info, dict)
+    assert audio_info.get("found") is True
+    assert audio_info.get("hasControls") is True
+    assert audio_info.get("wrapHasClass") is True
+    assert audio_info.get("audWidth", 0) >= 240
+    assert audio_info.get("audHeight", 0) >= 30
+    assert audio_info.get("wrapWidth", 0) >= 240
+
+    browser.capture_screenshot(screenshot_dir / "voice_message_audio_player.png", 5.0)

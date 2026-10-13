@@ -33,7 +33,7 @@ pip install .
 You can also download pre-built `.whl` packages from [GitHub Releases](https://github.com/auanasgheps/whatsapp-backup-tools/releases) and install them:
 
 ```bash
-pip install wab_tools-x.xx-py3-none-any.whl
+pip install whatsapp_backup_tools-x.xx-py3-none-any.whl
 ```
 
 > 💡 **Windows users:** If `pip install` is not recognized, run `py -m pip install .` instead.
@@ -63,6 +63,7 @@ When using manual execution, you must manually install required packages.
 
 - **Android Users**:
   - Enable **End-to-End Encrypted Backup** in WhatsApp (`Settings → Chats → Chat Backup → End-to-end Encrypted Backup`) and save your 64-digit key.
+  - ADB (Android Debug Bridge) installed on your computer.
   - No root is required.
   - Review the [Android Setup Guide](archiver/setup-android.md).
 
