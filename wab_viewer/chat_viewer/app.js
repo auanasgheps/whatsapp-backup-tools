@@ -995,6 +995,7 @@
       txt.className = 'deleted-text';
       txt.textContent = msg.text_body || 'This message was deleted';
       delEl.appendChild(icon);
+      delEl.appendChild(document.createTextNode(' '));
       delEl.appendChild(txt);
       bubble.appendChild(delEl);
     } else if (msg.is_view_once && !msg.archive_path) {

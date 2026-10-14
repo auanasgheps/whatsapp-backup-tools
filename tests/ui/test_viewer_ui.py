@@ -7,6 +7,9 @@ Validates the complete web interface lifecycle in a real headless browser using 
 - Message elements rendering (bubbles, date separators, service messages, quotes, reactions)
 - Design token compliance and dual-theme switching (Dark / Light)
 - Modals and drawers (Chat Info panel, Media Gallery, Settings)
+- Revoked (deleted) messages tombstones and suppressions
+- View-once status pills, badges, and media preview isolation
+- Chat list sidebar previews for revoked and view-once messages
 """
 
 from __future__ import annotations
@@ -53,6 +56,39 @@ def open_group_chat_in_browser(browser: CDPSession, timeout: float) -> str:
     res = browser.evaluate(js_code, timeout)
     if not isinstance(res, str) or not res:
         raise RuntimeError("Failed to find or open a group chat in the browser.")
+    return res
+
+
+def open_chat_by_id(browser: CDPSession, chat_id: str, timeout: float) -> str:
+    """Wait for chat list, click chat matching data-id, and wait for messages to load."""
+    js_code = f"""
+    (async () => {{
+        for (let i = 0; i < 200; i++) {{
+            const item = document.querySelector('.chat-item[data-id="{chat_id}"]');
+            if (item) {{
+                const name = item.querySelector('.chat-name')?.textContent || '';
+                const loading = document.getElementById('chat-loading');
+                const alreadyActive = item.classList.contains('active') && loading && loading.style.display === 'none';
+                if (!alreadyActive) {{
+                    item.click();
+                    for (let j = 0; j < 100; j++) {{
+                        await new Promise(r => setTimeout(r, 50));
+                        if (loading && loading.style.display === 'none') {{
+                            await new Promise(r => setTimeout(r, 150));
+                            return name;
+                        }}
+                    }}
+                }}
+                return name;
+            }}
+            await new Promise(r => setTimeout(r, 100));
+        }}
+        return '';
+    }})()
+    """
+    res = browser.evaluate(js_code, timeout)
+    if not isinstance(res, str) or not res:
+        raise RuntimeError(f"Failed to find or open chat id '{chat_id}' in the browser.")
     return res
 
 
@@ -1579,3 +1615,249 @@ def test_chat_bubble_voice_message_audio_player(
     assert audio_info.get("wrapWidth", 0) >= 240
 
     browser.capture_screenshot(screenshot_dir / "voice_message_audio_player.png", 5.0)
+
+
+def test_deleted_messages_visual_rendering(browser: CDPSession, screenshot_dir: Path) -> None:
+    """Validate visual rendering of deleted (revoked) messages in group and outgoing chats."""
+    # 1. Open Alpine Hikers (chat_id = "1")
+    chat_name = open_chat_by_id(browser, "1", 15.0)
+    assert len(chat_name) > 0
+
+    # 2. Inspect deleted message elements in Alpine Hikers
+    alpine_deleted = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 50; i++) {
+                const bubbles = [...document.querySelectorAll('#message-scroll .msg-bubble.deleted')];
+                if (bubbles.length >= 2) {
+                    return bubbles.map(b => {
+                        const content = b.querySelector('.msg-deleted-content');
+                        const icon = b.querySelector('.deleted-icon');
+                        const txt = b.querySelector('.deleted-text');
+                        const infoBtn = b.querySelector('.msg-info-btn');
+                        const quote = b.querySelector('.msg-quote');
+                        const rx = b.querySelector('.msg-reactions');
+                        const style = window.getComputedStyle(b);
+                        return {
+                            hasContent: !!content,
+                            iconText: icon ? icon.textContent : '',
+                            deletedText: txt ? txt.textContent : '',
+                            hasInfoBtn: !!infoBtn,
+                            hasQuote: !!quote,
+                            hasReactions: !!rx,
+                            fontStyle: style.fontStyle,
+                            borderStyle: style.borderStyle,
+                        };
+                    });
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return [];
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(alpine_deleted, list)
+    assert len(alpine_deleted) >= 2
+
+    # Check both admin-deleted and sender-deleted messages
+    texts = [item["deletedText"] for item in alpine_deleted]
+    assert "This message was deleted by an admin" in texts
+    assert "This message was deleted" in texts
+
+    for item in alpine_deleted:
+        assert item["hasContent"] is True
+        assert item["iconText"] == "⃠"
+        assert item["hasInfoBtn"] is False
+        assert item["hasQuote"] is False
+        assert item["hasReactions"] is False
+        assert item["fontStyle"] == "italic"
+        assert "dashed" in item["borderStyle"]
+
+    browser.capture_screenshot(screenshot_dir / "deleted_messages_alpine.png", 5.0)
+
+    # 3. Open Tech & Coffee (chat_id = "2") to verify outgoing deleted message
+    tc_name = open_chat_by_id(browser, "2", 15.0)
+    assert len(tc_name) > 0
+
+    outgoing_deleted = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 50; i++) {
+                const bubbles = [...document.querySelectorAll('#message-scroll .msg-bubble.deleted')];
+                const outBubble = bubbles.find(b => {
+                    const row = b.closest('.msg-row');
+                    return row && row.classList.contains('sent');
+                });
+                if (outBubble) {
+                    const txt = outBubble.querySelector('.deleted-text');
+                    const icon = outBubble.querySelector('.deleted-icon');
+                    const badge = outBubble.querySelector('.direction-badge.sent');
+                    const infoBtn = outBubble.querySelector('.msg-info-btn');
+                    return {
+                        found: true,
+                        iconText: icon ? icon.textContent : '',
+                        deletedText: txt ? txt.textContent : '',
+                        badgeText: badge ? badge.textContent : '',
+                        hasInfoBtn: !!infoBtn,
+                    };
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { found: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(outgoing_deleted, dict)
+    assert outgoing_deleted.get("found") is True
+    assert outgoing_deleted.get("iconText") == "⃠"
+    assert outgoing_deleted.get("deletedText") == "You deleted this message"
+    assert outgoing_deleted.get("badgeText") == "You"
+    assert outgoing_deleted.get("hasInfoBtn") is False
+
+    browser.capture_screenshot(screenshot_dir / "deleted_messages_outgoing.png", 5.0)
+
+
+def test_view_once_messages_visual_rendering(browser: CDPSession, screenshot_dir: Path) -> None:
+    """Validate visual rendering of view-once messages (opened pills and preserved badge)."""
+    # 1. Open Sarah Jenkins (chat_id = "15550101")
+    chat_name = open_chat_by_id(browser, "15550101", 15.0)
+    assert len(chat_name) > 0
+
+    # 2. Inspect view-once message elements in Sarah Jenkins
+    vo_info = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 50; i++) {
+                const openedPills = [...document.querySelectorAll('#message-scroll .msg-view-once-pill')];
+                const badges = [...document.querySelectorAll('#message-scroll .msg-view-once-badge')];
+                if (openedPills.length >= 2 && badges.length >= 1) {
+                    const pillsData = openedPills.map(p => {
+                        const icon = p.querySelector('.vo-icon');
+                        const label = p.querySelector('.vo-label');
+                        const bubble = p.closest('.msg-bubble');
+                        const hasMedia = bubble ? !!bubble.querySelector('.msg-media') : false;
+                        const isOpenedBubble = bubble ? bubble.classList.contains('view-once-opened') : false;
+                        return {
+                            iconText: icon ? icon.textContent : '',
+                            labelText: label ? label.textContent : '',
+                            hasMedia: hasMedia,
+                            isOpenedBubble: isOpenedBubble,
+                        };
+                    });
+
+                    const badge = badges[0];
+                    const bIcon = badge.querySelector('.vo-icon');
+                    const bWrap = badge.closest('.msg-media');
+                    const hasVideo = bWrap ? !!bWrap.querySelector('video') : false;
+                    const bStyle = window.getComputedStyle(badge);
+
+                    return {
+                        found: true,
+                        pills: pillsData,
+                        badge: {
+                            iconText: bIcon ? bIcon.textContent : '',
+                            badgeText: badge.textContent.trim(),
+                            hasVideo: hasVideo,
+                            position: bStyle.position,
+                            pointerEvents: bStyle.pointerEvents,
+                        },
+                    };
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { found: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(vo_info, dict)
+    assert vo_info.get("found") is True
+
+    # Validate opened pills (photo and voice message)
+    pills = vo_info.get("pills", [])
+    labels = [p["labelText"] for p in pills]
+    assert "Photo · Opened" in labels
+    assert "Voice message · Opened" in labels
+
+    for p in pills:
+        assert p["iconText"] == "①"
+        assert p["hasMedia"] is False
+        assert p["isOpenedBubble"] is True
+
+    # Validate preserved view-once video badge
+    badge = vo_info.get("badge", {})
+    assert badge.get("iconText") == "①"
+    assert "View Once" in badge.get("badgeText", "")
+    assert badge.get("hasVideo") is True
+    assert badge.get("position") == "absolute"
+    assert badge.get("pointerEvents") == "none"
+
+    browser.capture_screenshot(screenshot_dir / "view_once_messages_sarah.png", 5.0)
+
+
+def test_chat_list_previews_deleted_and_view_once(
+    browser: CDPSession, screenshot_dir: Path
+) -> None:
+    """Validate sidebar chat item previews display authentic deleted and view-once indicators."""
+    previews = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 50; i++) {
+                const itemTc = document.querySelector('.chat-item[data-id="2"]');
+                const itemSj = document.querySelector('.chat-item[data-id="15550101"]');
+                const itemMv = document.querySelector('.chat-item[data-id="15550102"]');
+                if (itemTc && itemSj && itemMv) {
+                    const getMetaInfo = (el) => {
+                        const delPreview = el.querySelector('.chat-meta .deleted-preview');
+                        const voPreview = el.querySelector('.chat-meta .vo-preview');
+                        const meta = el.querySelector('.chat-meta');
+                        const delStyle = delPreview ? window.getComputedStyle(delPreview) : null;
+                        const voStyle = voPreview ? window.getComputedStyle(voPreview) : null;
+                        return {
+                            hasDelPreview: !!delPreview,
+                            delText: delPreview ? delPreview.textContent : '',
+                            delFontStyle: delStyle ? delStyle.fontStyle : '',
+                            hasVoPreview: !!voPreview,
+                            voText: voPreview ? voPreview.textContent : '',
+                            voFontStyle: voStyle ? voStyle.fontStyle : '',
+                            metaText: meta ? meta.textContent : '',
+                        };
+                    };
+                    return {
+                        ready: true,
+                        tc: getMetaInfo(itemTc),
+                        sj: getMetaInfo(itemSj),
+                        mv: getMetaInfo(itemMv),
+                    };
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { ready: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(previews, dict)
+    assert previews.get("ready") is True
+
+    # Tech & Coffee (chat_id = "2"): outgoing deleted preview
+    tc = previews.get("tc", {})
+    assert tc.get("hasDelPreview") is True
+    assert "🚫 You deleted this message" in tc.get("delText", "")
+    assert tc.get("delFontStyle") == "italic"
+
+    # Sarah Jenkins (chat_id = "15550101"): incoming deleted preview
+    sj = previews.get("sj", {})
+    assert sj.get("hasDelPreview") is True
+    assert "🚫 This message was deleted" in sj.get("delText", "")
+    assert sj.get("delFontStyle") == "italic"
+
+    # Dr. Marcus Vance (chat_id = "15550102"): view-once preview
+    mv = previews.get("mv", {})
+    assert mv.get("hasVoPreview") is True
+    assert "① Photo" in mv.get("voText", "")
+    assert mv.get("voFontStyle") == "italic"
+
+    browser.capture_screenshot(screenshot_dir / "chat_sidebar_previews.png", 5.0)
