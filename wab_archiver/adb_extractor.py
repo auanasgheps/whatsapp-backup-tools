@@ -42,7 +42,24 @@ def check_adb(logger) -> bool:
     return False
 
 
-def check_device_connected(logger) -> bool:
+def _parse_adb_devices(stdout: str) -> list[tuple[str, str]]:
+    devices = []
+    for line in stdout.splitlines():
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("*") or trimmed.startswith("List of devices"):
+            continue
+        parts = trimmed.split()
+        if len(parts) >= 2:
+            serial = parts[0]
+            if parts[1] == "no" and len(parts) >= 3 and parts[2].startswith("permission"):
+                state = "no permissions"
+            else:
+                state = parts[1]
+            devices.append((serial, state))
+    return devices
+
+
+def _query_adb_devices(logger) -> list[tuple[str, str]] | None:
     try:
         result = subprocess.run(
             ["adb", "devices"],
@@ -51,18 +68,113 @@ def check_device_connected(logger) -> bool:
         )
     except subprocess.CalledProcessError as e:
         logger.error(f"'adb devices' failed: {e.stderr.decode(errors='replace').strip()}")
+        return None
+    return _parse_adb_devices(result.stdout.decode(errors="replace"))
+
+
+def _confirm_restart_prompt(prompt: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    try:
+        response = input(prompt)
+        return response.strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
         return False
 
-    lines = result.stdout.decode(errors="replace").splitlines()
-    connected = [line for line in lines if line.strip().endswith("device")]
-    if connected:
+
+def _restart_adb_server(logger) -> None:
+    logger.info("Restarting ADB server...")
+    try:
+        subprocess.run(
+            ["adb", "kill-server"],
+            check=True,
+            capture_output=True,
+            timeout=_ADB_TIMEOUT,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"'adb kill-server' warning: {e}")
+    time.sleep(2)
+
+
+def check_device_connected(logger) -> bool:
+    devices = _query_adb_devices(logger)
+    if devices is None:
+        return False
+
+    if not devices:
+        logger.error(
+            "No Android device detected over USB or Wi-Fi. Ensure:\n"
+            "  1. The device is connected via a data-capable USB cable\n"
+            "  2. USB debugging is enabled in Settings > Developer options"
+        )
+        return False
+
+    if len(devices) > 1:
+        summary = ", ".join(f"{s} ({st})" for s, st in devices)
+        logger.error(
+            f"Multiple Android devices detected: {summary}.\n"
+            "  Disconnect all devices except the one you wish to archive."
+        )
+        return False
+
+    serial, state = devices[0]
+    if state == "device":
+        logger.info(f"Android device connected and authorized: {serial}")
         return True
 
+    if state == "unauthorized":
+        logger.warning(
+            f"Android device '{serial}' is connected but unauthorized "
+            "(the USB debugging authorization prompt was not accepted on the phone)."
+        )
+        prompt_msg = "Restart ADB server to re-trigger authorization prompt on your phone? [y/N]: "
+        if _confirm_restart_prompt(prompt_msg):
+            logger.info("Restarting ADB server... Please ensure your phone screen is unlocked.")
+            _restart_adb_server(logger)
+            devices_after = _query_adb_devices(logger)
+            if devices_after and len(devices_after) == 1 and devices_after[0][1] == "device":
+                logger.info(f"Android device connected and authorized: {devices_after[0][0]}")
+                return True
+            logger.error(
+                f"Device '{serial}' is still unauthorized.\n"
+                "  1. Unlock your phone screen and look for the 'Allow USB debugging' prompt\n"
+                "  2. In Settings > Developer options, tap 'Revoke USB debugging authorizations'\n"
+                "  3. Ensure USB connection mode is set to 'File Transfer (MTP)' rather than 'Charge only'"
+            )
+            return False
+
+        logger.error(
+            f"Android device '{serial}' is connected but unauthorized.\n"
+            "  Unlock your phone and accept the 'Allow USB debugging' prompt "
+            "(check 'Always allow from this computer')."
+        )
+        return False
+
+    if state == "offline":
+        logger.error(
+            f"Android device '{serial}' is connected but offline.\n"
+            "  Reconnect the USB cable, toggle USB debugging off and on in Developer options, "
+            "or restart the ADB server ('adb kill-server')."
+        )
+        return False
+
+    if state == "no permissions":
+        logger.error(
+            f"Android device '{serial}' detected, but ADB lacks host permissions to access it.\n"
+            "  Check your USB permissions or driver (on Linux, check udev rules / plugdev group)."
+        )
+        return False
+
+    if state in ("recovery", "sideload", "bootloader"):
+        logger.error(
+            f"Android device '{serial}' is in '{state}' mode.\n"
+            "  Normal Android OS is required for WhatsApp extraction."
+        )
+        return False
+
     logger.error(
-        "No Android device detected. Ensure:\n"
-        "  1. USB debugging is enabled on the device (Settings > Developer options)\n"
-        "  2. The device is connected via USB\n"
-        "  3. You have authorised the connection on the phone when prompted"
+        f"Android device '{serial}' is in unexpected state '{state}'.\n"
+        "  Reconnect the device and ensure USB debugging is enabled."
     )
     return False
 
@@ -80,12 +192,19 @@ def pull_msgstore(output_dir: str, business: bool = False, logger=None) -> str:
         )
     except subprocess.CalledProcessError as e:
         if logger:
-            logger.error(
-                f"ADB pull failed.\n"
-                f"  {e.stderr.decode(errors='replace').strip()}\n"
-                f"  Make sure the device is connected, USB debugging is enabled, "
-                f"and the connection is authorised on the phone."
-            )
+            stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
+            if "does not exist" in stderr or "No such file" in stderr:
+                logger.error(
+                    f"WhatsApp backup file not found on device at '{remote}'.\n"
+                    "  Ensure 'End-to-end encrypted backup' is enabled in WhatsApp "
+                    "(Settings > Chats > Chat backup) and a backup has been created."
+                )
+            elif "Permission denied" in stderr or "open failed" in stderr:
+                logger.error(f"Permission denied accessing '{remote}' on device.")
+            elif "device offline" in stderr or "device not found" in stderr:
+                logger.error(f"Android device disconnected or went offline during pull: {stderr}")
+            else:
+                logger.error(f"ADB pull failed: {stderr}")
         raise
     return dest
 

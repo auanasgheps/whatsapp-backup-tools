@@ -2367,6 +2367,39 @@ class TestCheckAdb:
             assert adb.check_adb(logger) is False
 
 
+class TestParseAdbDevices:
+    def test_empty_output(self):
+        assert adb._parse_adb_devices("") == []
+        assert adb._parse_adb_devices("List of devices attached\n\n") == []
+
+    def test_daemon_noise_skipped(self):
+        output = (
+            "* daemon not running; starting now at tcp:5037 *\n"
+            "* daemon started successfully *\n"
+            "List of devices attached\n"
+            "emulator-5554\tdevice\n"
+        )
+        assert adb._parse_adb_devices(output) == [("emulator-5554", "device")]
+
+    def test_multiple_devices_and_states(self):
+        output = (
+            "List of devices attached\n"
+            "dev1\tdevice\n"
+            "dev2\tunauthorized\n"
+            "dev3\toffline\n"
+            "dev4\tno permissions (missing udev rules?); see [url]\n"
+            "dev5\trecovery\n"
+        )
+        parsed = adb._parse_adb_devices(output)
+        assert parsed == [
+            ("dev1", "device"),
+            ("dev2", "unauthorized"),
+            ("dev3", "offline"),
+            ("dev4", "no permissions"),
+            ("dev5", "recovery"),
+        ]
+
+
 class TestCheckDeviceConnected:
     def _make_result(self, stdout):
         r = MagicMock()
@@ -2375,24 +2408,141 @@ class TestCheckDeviceConnected:
 
     def test_device_connected(self, logger):
         output = "List of devices attached\nemulator-5554\tdevice\n"
-        with patch(
-            "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+            ),
+            patch.object(logger, "info") as mock_info,
         ):
             assert adb.check_device_connected(logger) is True
+            assert any("emulator-5554" in str(c) for c in mock_info.call_args_list)
 
     def test_no_devices(self, logger):
         output = "List of devices attached\n"
-        with patch(
-            "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+            ),
+            patch.object(logger, "error") as mock_err,
         ):
             assert adb.check_device_connected(logger) is False
+            err_msg = mock_err.call_args[0][0]
+            assert "No Android device detected" in err_msg
+            assert "USB debugging is enabled" in err_msg
 
-    def test_unauthorized_not_counted(self, logger):
+    def test_unauthorized_non_tty(self, logger):
         output = "List of devices attached\n98abc123\tunauthorized\n"
-        with patch(
-            "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+            ),
+            patch("sys.stdin.isatty", return_value=False),
+            patch.object(logger, "error") as mock_err,
+            patch.object(logger, "warning") as mock_warn,
         ):
             assert adb.check_device_connected(logger) is False
+            assert "unauthorized" in mock_warn.call_args[0][0]
+            assert "98abc123" in mock_err.call_args[0][0]
+            assert "Unlock your phone" in mock_err.call_args[0][0]
+
+    def test_unauthorized_user_declines_restart(self, logger):
+        output = "List of devices attached\n98abc123\tunauthorized\n"
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+            ),
+            patch("sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value="n"),
+            patch.object(logger, "error") as mock_err,
+        ):
+            assert adb.check_device_connected(logger) is False
+            assert "98abc123" in mock_err.call_args[0][0]
+            assert "Unlock your phone" in mock_err.call_args[0][0]
+
+    def test_unauthorized_user_confirms_restart_success(self, logger):
+        unauth_out = self._make_result("List of devices attached\n98abc123\tunauthorized\n")
+        auth_out = self._make_result("List of devices attached\n98abc123\tdevice\n")
+        kill_out = self._make_result("")
+
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=[unauth_out, kill_out, auth_out],
+            ) as mock_run,
+            patch("sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value="y"),
+            patch("time.sleep") as mock_sleep,
+            patch.object(logger, "info") as mock_info,
+        ):
+            assert adb.check_device_connected(logger) is True
+            mock_sleep.assert_called_once_with(2)
+            assert mock_run.call_args_list[1][0][0] == ["adb", "kill-server"]
+            assert any(
+                "connected and authorized: 98abc123" in str(c) for c in mock_info.call_args_list
+            )
+
+    def test_unauthorized_user_confirms_restart_still_unauthorized(self, logger):
+        unauth_out = self._make_result("List of devices attached\n98abc123\tunauthorized\n")
+        kill_out = self._make_result("")
+
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=[unauth_out, kill_out, unauth_out],
+            ),
+            patch("sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value="yes"),
+            patch("time.sleep"),
+            patch.object(logger, "error") as mock_err,
+        ):
+            assert adb.check_device_connected(logger) is False
+            err_msg = mock_err.call_args[0][0]
+            assert "still unauthorized" in err_msg
+            assert "Revoke USB debugging authorizations" in err_msg
+
+    def test_offline_device(self, logger):
+        output = "List of devices attached\n98abc123\toffline\n"
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            assert adb.check_device_connected(logger) is False
+            assert "offline" in mock_err.call_args[0][0]
+
+    def test_no_permissions_device(self, logger):
+        output = "List of devices attached\n98abc123\tno permissions (missing udev rules?)\n"
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            assert adb.check_device_connected(logger) is False
+            assert "host permissions" in mock_err.call_args[0][0]
+
+    def test_recovery_device(self, logger):
+        output = "List of devices attached\n98abc123\trecovery\n"
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            assert adb.check_device_connected(logger) is False
+            assert "recovery" in mock_err.call_args[0][0]
+
+    def test_multiple_devices(self, logger):
+        output = "List of devices attached\ndev1\tdevice\ndev2\tdevice\n"
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            assert adb.check_device_connected(logger) is False
+            assert "Multiple Android devices detected" in mock_err.call_args[0][0]
 
     def test_adb_failure(self, logger):
         with patch(
@@ -2426,6 +2576,35 @@ class TestPullMsgstore:
         ):
             with pytest.raises(subprocess.CalledProcessError):
                 adb.pull_msgstore(str(tmp_path), logger=logger)
+
+    def test_failure_file_not_found_message(self, logger, tmp_path):
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=subprocess.CalledProcessError(
+                    1, "adb", stderr=b"remote object does not exist"
+                ),
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb.pull_msgstore(str(tmp_path), logger=logger)
+            err_msg = mock_err.call_args[0][0]
+            assert "WhatsApp backup file not found on device" in err_msg
+            assert "End-to-end encrypted backup" in err_msg
+
+    def test_failure_permission_denied_message(self, logger, tmp_path):
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, "adb", stderr=b"Permission denied"),
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb.pull_msgstore(str(tmp_path), logger=logger)
+            err_msg = mock_err.call_args[0][0]
+            assert "Permission denied accessing" in err_msg
 
 
 class TestPullContacts:
