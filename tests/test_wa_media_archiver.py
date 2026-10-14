@@ -1185,7 +1185,7 @@ class TestCheckDbHealth:
     def test_archive_db_user_version_and_reactions_cache(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert user_version == 2
+        assert user_version == 3
         auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
         assert auto_vacuum == 2  # INCREMENTAL
         tables = {
@@ -5834,9 +5834,13 @@ class TestArchiveDbMigrationV2:
         conn.close()
 
         migrated_conn = arc.open_archive_db(str(tmp_path))
-        assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 3
         cols = {r[1] for r in migrated_conn.execute("PRAGMA table_info(archive_copies)").fetchall()}
         assert "is_hardlink" in cols
+        recent_cols = {
+            r[1] for r in migrated_conn.execute("PRAGMA table_info(recent_messages)").fetchall()
+        }
+        assert "is_view_once" in recent_cols
 
         row = migrated_conn.execute(
             "SELECT original_path, archive_path, is_hardlink FROM archive_copies"
@@ -5844,12 +5848,67 @@ class TestArchiveDbMigrationV2:
         assert row == ("Media/1.jpg", "Contacts/Alice/1.jpg", 0)
         migrated_conn.close()
 
-    def test_fresh_db_is_v2_with_is_hardlink(self, tmp_path):
+    def test_fresh_db_is_v3_with_is_hardlink_and_view_once(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_copies)").fetchall()}
         assert "is_hardlink" in cols
+        recent_cols = {r[1] for r in conn.execute("PRAGMA table_info(recent_messages)").fetchall()}
+        assert "is_view_once" in recent_cols
         conn.close()
+
+    def test_archive_db_migration_v2_to_v3_adds_is_view_once(self, tmp_path):
+        db_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE files (
+                original_path TEXT PRIMARY KEY,
+                md5 BLOB NOT NULL,
+                size INTEGER
+            );
+            CREATE TABLE archive_copies (
+                original_path TEXT NOT NULL REFERENCES files(original_path),
+                archive_path TEXT NOT NULL,
+                is_hardlink INTEGER NOT NULL DEFAULT 0,
+                timestamp_ms INTEGER,
+                PRIMARY KEY (original_path, archive_path)
+            );
+            CREATE TABLE recent_messages (
+                chat_id TEXT NOT NULL,
+                chat_type TEXT NOT NULL,
+                msg_id INTEGER NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                sender TEXT NOT NULL,
+                from_me INTEGER NOT NULL,
+                archive_path TEXT,
+                media_type TEXT NOT NULL DEFAULT 'text',
+                media_name TEXT,
+                text_body TEXT NOT NULL,
+                quoted_text TEXT,
+                quoted_sender TEXT,
+                quoted_ts INTEGER,
+                reactions TEXT,
+                is_edited INTEGER NOT NULL DEFAULT 0,
+                edited_ts INTEGER,
+                PRIMARY KEY (chat_id, chat_type, msg_id)
+            );
+            PRAGMA user_version = 2;
+        """)
+        conn.execute(
+            "INSERT INTO recent_messages VALUES ('10', 'contact', 1, 1000, 'Alice', 0, NULL, 'text', NULL, 'Hi', NULL, NULL, NULL, NULL, 0, NULL)"
+        )
+        conn.commit()
+        conn.close()
+
+        migrated = arc.open_archive_db(str(tmp_path))
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 3
+        cols = {r[1] for r in migrated.execute("PRAGMA table_info(recent_messages)").fetchall()}
+        assert "is_view_once" in cols
+        row = migrated.execute(
+            "SELECT msg_id, is_view_once FROM recent_messages WHERE msg_id = 1"
+        ).fetchone()
+        assert row == (1, 0)
+        migrated.close()
 
     def test_load_canonical_copies_retrieves_existing_files(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))

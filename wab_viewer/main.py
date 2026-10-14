@@ -1140,8 +1140,8 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
             (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
              archive_path, media_type, media_name, text_body,
              quoted_text, quoted_sender, quoted_ts, reactions,
-             is_edited, edited_ts)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             is_edited, edited_ts, is_view_once)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     keys = rows[0].keys()
     archive_conn.executemany(
@@ -1164,6 +1164,7 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
                 r["reactions"] if "reactions" in keys else None,
                 r["is_edited"] if "is_edited" in keys else 0,
                 r["edited_ts"] if "edited_ts" in keys else None,
+                r["is_view_once"] if "is_view_once" in keys else 0,
             )
             for r in rows
         ],
@@ -1660,6 +1661,8 @@ _ANDROID_FILTER = """
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
         OR (m.message_type IN (4, 14))
+        OR (m.message_type IN (15, 64))
+        OR (m.message_type IN (42, 43, 82))
         OR (m.message_type = 7)
     )
 """
@@ -1707,9 +1710,13 @@ _IOS_SELECT = f"""
         m.ZISFROMME                                                  AS from_me,
         ac.archive_path,
         CASE
+            WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
             WHEN m.ZMESSAGETYPE = 6 THEN 'service'
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
+            WHEN m.ZMESSAGETYPE = 38 THEN 'image'
+            WHEN m.ZMESSAGETYPE = 39 THEN 'video'
+            WHEN m.ZMESSAGETYPE = 53 THEN 'audio'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -1718,7 +1725,14 @@ _IOS_SELECT = f"""
             ELSE {_MEDIA_TYPE_EXPR.format(col="('Message/' || COALESCE(mi.ZMEDIALOCALPATH,''))")}
         END                                                           AS media_type,
         COALESCE(mi.ZTITLE, '')                                      AS media_name,
-        COALESCE(m.ZTEXT, '')                                        AS text_body,
+        COALESCE(
+            m.ZTEXT,
+            CASE
+                WHEN m.ZISFROMME = 1 AND m.ZMESSAGETYPE = 14 THEN 'You deleted this message'
+                WHEN m.ZMESSAGETYPE = 14 THEN 'This message was deleted'
+            END,
+            ''
+        )                                                             AS text_body,
         COALESCE(qm.ZTEXT, '')                                       AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
@@ -1735,6 +1749,7 @@ _IOS_SELECT = f"""
         NULL                                                          AS reactions,
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
+        CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         0                                                            AS group_event_type,
         gm.ZMEMBERJID                                                AS member_jid
@@ -1768,6 +1783,8 @@ _BASE_IOS_FILTER = """
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
         OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
         OR (m.ZMESSAGETYPE = 4)
+        OR (m.ZMESSAGETYPE = 14)
+        OR (m.ZMESSAGETYPE IN (38, 39, 53))
         OR (m.ZMESSAGETYPE = 6)
     )
 """
@@ -1782,8 +1799,8 @@ _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
 
 _ANDROID_FILTER_TS = _ANDROID_FILTER
 
-_ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type = 0)"
-_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+_ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type IN (0, 7, 15, 64))"
+_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 6, 14))"
 
 _ANDROID_IS_LINK = (
     "(m.message_type IS NULL OR m.message_type = 0)"
@@ -2531,6 +2548,7 @@ def create_app(output_root: Path, rescan: bool = False):
             reactions      TEXT,
             is_edited      INTEGER NOT NULL DEFAULT 0,
             edited_ts      INTEGER,
+            is_view_once   INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -2562,6 +2580,13 @@ def create_app(output_root: Path, rescan: bool = False):
         )
     if "edited_ts" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN edited_ts INTEGER")
+    if "is_view_once" not in cols:
+        _archive_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_view_once INTEGER NOT NULL DEFAULT 0"
+        )
+    if _archive_conn.execute("PRAGMA user_version").fetchone()[0] < 3:
+        _archive_conn.execute("PRAGMA user_version = 3")
+    _archive_conn.commit()
 
     _run_db_maintenance(cache_conn, _archive_conn)
 
@@ -2644,6 +2669,8 @@ def create_app(output_root: Path, rescan: bool = False):
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
         OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
         OR (m.ZMESSAGETYPE = 4)
+        OR (m.ZMESSAGETYPE = 14)
+        OR (m.ZMESSAGETYPE IN (38, 39, 53))
         {ios_service_filter}
     )
 """
@@ -2686,9 +2713,13 @@ def create_app(output_root: Path, rescan: bool = False):
         m.ZISFROMME                                                  AS from_me,
         ac.archive_path,
         CASE
+            WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
             WHEN m.ZMESSAGETYPE = 6 THEN 'service'
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
+            WHEN m.ZMESSAGETYPE = 38 THEN 'image'
+            WHEN m.ZMESSAGETYPE = 39 THEN 'video'
+            WHEN m.ZMESSAGETYPE = 53 THEN 'audio'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -2697,7 +2728,15 @@ def create_app(output_root: Path, rescan: bool = False):
             ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE('Message/' || mi.ZMEDIALOCALPATH, mi.ZTITLE)")}
         END                                                           AS media_type,
         COALESCE(mi.ZTITLE, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '') AS media_name,
-        COALESCE(m.ZTEXT, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '')   AS text_body,
+        COALESCE(
+            m.ZTEXT,
+            CASE
+                WHEN m.ZISFROMME = 1 AND m.ZMESSAGETYPE = 14 THEN 'You deleted this message'
+                WHEN m.ZMESSAGETYPE = 14 THEN 'This message was deleted'
+                WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios}
+            END,
+            ''
+        )                                                             AS text_body,
         COALESCE(qm.ZTEXT, '')                                       AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
@@ -2714,6 +2753,7 @@ def create_app(output_root: Path, rescan: bool = False):
         NULL                                                          AS reactions,
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
+        CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         {group_ev_col}                                               AS group_event_type,
         gm.ZMEMBERJID                                                AS member_jid
@@ -2757,6 +2797,8 @@ def create_app(output_root: Path, rescan: bool = False):
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
         OR (m.message_type IN (4, 14))
+        OR (m.message_type IN (15, 64))
+        OR (m.message_type IN (42, 43, 82))
         OR (m.message_type = 7 AND {ms_action_clause})
     )
     """
@@ -2830,9 +2872,13 @@ def create_app(output_root: Path, rescan: bool = False):
         m.from_me,
         ac.archive_path,
         CASE
+            WHEN m.message_type IN (15, 64) THEN 'deleted'
             WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IN (4, 14) THEN 'vcard'
             WHEN m.message_type = 20 THEN 'sticker'
+            WHEN m.message_type = 42 THEN 'image'
+            WHEN m.message_type = 43 THEN 'video'
+            WHEN m.message_type = 82 THEN 'audio'
             WHEN m.message_type IS NULL OR m.message_type = 0 THEN
                 CASE WHEN m.text_data IS NOT NULL
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
@@ -2841,7 +2887,16 @@ def create_app(output_root: Path, rescan: bool = False):
             ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE(mm.file_path, mm.media_name)")}
         END                                                          AS media_type,
         COALESCE(mm.media_name, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
-        COALESCE(m.text_data, '')                                    AS text_body,
+        COALESCE(
+            m.text_data,
+            CASE
+                WHEN m.message_type = 64 THEN 'This message was deleted by an admin'
+                WHEN m.from_me = 1 AND m.message_type = 15 THEN 'You deleted this message'
+                WHEN m.message_type = 15 THEN 'This message was deleted'
+                WHEN m.message_type IN (4, 14) THEN m.text_data
+            END,
+            ''
+        )                                                            AS text_body,
         COALESCE(mq.text_data, '')                                   AS quoted_text,
         CASE WHEN mq.from_me = 1 THEN 'You'
              ELSE COALESCE(
@@ -2853,6 +2908,7 @@ def create_app(output_root: Path, rescan: bool = False):
         COALESCE(mq.timestamp, 0)                                    AS quoted_ts,
         {edit_is_edited_col}                                         AS is_edited,
         {edit_ts_col}                                                AS edited_ts,
+        CASE WHEN m.message_type IN (42, 43, 82) THEN 1 ELSE 0 END   AS is_view_once,
         {ms_col}                                                     AS action_type,
         ''                                                           AS participant_name
     FROM message m
@@ -3026,9 +3082,9 @@ def create_app(output_root: Path, rescan: bool = False):
                     FROM ZWAMESSAGE msg
                     LEFT JOIN ZWAMEDIAITEM mi2 ON mi2.Z_PK = msg.ZMEDIAITEM
                     WHERE (msg.ZTEXT IS NOT NULL AND msg.ZTEXT != '' AND (msg.ZMESSAGETYPE IS NULL OR msg.ZMESSAGETYPE = 0))
-                       OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE != 0 AND msg.ZMESSAGETYPE != 6
+                       OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE NOT IN (0, 6, 14, 38, 39, 53)
                            AND mi2.ZMEDIALOCALPATH IS NOT NULL)
-                       OR (msg.ZMESSAGETYPE = 4)
+                       OR (msg.ZMESSAGETYPE IN (4, 14, 38, 39, 53))
                        {ios_service_filter_last_real}
                     GROUP BY msg.ZCHATSESSION
                 ) last_real ON last_real.ZCHATSESSION = cs.Z_PK
@@ -3168,7 +3224,37 @@ def create_app(output_root: Path, rescan: bool = False):
             last_msg_sender_jid = d.pop("last_msg_sender_jid", None)
             last_msg_member_jid = d.pop("last_msg_member_jid", None)
 
-            if source_type == "android" and raw_type == 7:
+            if (source_type == "android" and raw_type in (15, 64)) or (
+                source_type == "ios" and raw_type == 14
+            ):
+                d["last_msg_type"] = "deleted"
+                if source_type == "android" and raw_type == 64:
+                    d["last_msg_preview"] = "This message was deleted by an admin"
+                elif d.get("last_msg_from_me"):
+                    d["last_msg_preview"] = "You deleted this message"
+                else:
+                    d["last_msg_preview"] = "This message was deleted"
+                d["is_view_once"] = 0
+            elif (source_type == "android" and raw_type in (42, 43, 82)) or (
+                source_type == "ios" and raw_type in (38, 39, 53)
+            ):
+                d["is_view_once"] = 1
+                if media_path:
+                    path = media_path if source_type == "android" else f"Message/{media_path}"
+                    d["last_msg_type"] = _media_type_from_path(path)
+                else:
+                    if (source_type == "android" and raw_type == 43) or (
+                        source_type == "ios" and raw_type == 39
+                    ):
+                        d["last_msg_type"] = "video"
+                    elif (source_type == "android" and raw_type == 82) or (
+                        source_type == "ios" and raw_type == 53
+                    ):
+                        d["last_msg_type"] = "audio"
+                    else:
+                        d["last_msg_type"] = "image"
+            elif source_type == "android" and raw_type == 7:
+                d["is_view_once"] = 0
                 if last_msg_action_type in (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79):
                     s_row = {
                         "action_type": last_msg_action_type,
@@ -3183,6 +3269,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     d["last_msg_preview"] = ""
                     d["last_msg_type"] = "text"
             elif source_type == "ios" and raw_type == 6:
+                d["is_view_once"] = 0
                 if not has_ios_group_event or last_msg_group_event_type in (
                     1,
                     2,
@@ -3218,15 +3305,19 @@ def create_app(output_root: Path, rescan: bool = False):
             elif (source_type == "android" and raw_type in (4, 14)) or (
                 source_type == "ios" and raw_type == 4
             ):
+                d["is_view_once"] = 0
                 d["last_msg_type"] = "vcard"
             elif (source_type == "android" and raw_type == 20) or (
                 source_type == "ios" and raw_type == 15
             ):
+                d["is_view_once"] = 0
                 d["last_msg_type"] = "sticker"
             elif raw_type != 0 and media_path:
+                d["is_view_once"] = 0
                 path = media_path if source_type == "android" else f"Message/{media_path}"
                 d["last_msg_type"] = _media_type_from_path(path)
             else:
+                d["is_view_once"] = 0
                 d["last_msg_type"] = "text"
             result.append(d)
         return jsonify(result)
