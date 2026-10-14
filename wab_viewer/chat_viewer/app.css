@@ -453,7 +453,9 @@
       font-style: normal;
       font-size: 1.1em;
       opacity: 0.8;
-      display: inline-block;
+      display: inline-flex;
+      justify-content: center;
+      width: 1.1em;
     }
 
     .msg-view-once-pill {
