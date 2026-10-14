@@ -61,6 +61,7 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
             reactions      TEXT,
             is_edited      INTEGER NOT NULL DEFAULT 0,
             edited_ts      INTEGER,
+            is_view_once   INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -72,6 +73,7 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
             PRIMARY KEY (chat_id, msg_id)
         );
     """)
+    conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.row_factory = sqlite3.Row
     return conn
@@ -2922,6 +2924,7 @@ class TestRecentMessagesRouting:
             "reactions",
             "is_edited",
             "edited_ts",
+            "is_view_once",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -7220,3 +7223,284 @@ class TestStickerSupport:
             counts = count_resp.get_json()
             assert counts["by_type"]["sticker"]["count"] == 1
             assert counts["by_type"]["sticker"]["missing"] == 0
+
+    def test_android_deleted_messages(self, tmp_path):
+        """Android deleted messages (type 15 and 64) are returned as media_type='deleted' with synthesized text."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '123456789')")
+        # Chat whose display_message_row_id is message 4 (deleted by admin)
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (10, 1, NULL, 0, 1700000004000, 4)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES "
+            "(1, 10, 0, 1, 1700000001000, 'Normal message', 0),"
+            "(2, 10, 0, 1, 1700000002000, NULL, 15),"
+            "(3, 10, 1, 1, 1700000003000, NULL, 15),"
+            "(4, 10, 0, 1, 1700000004000, NULL, 64)"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('123456789', 'Alice', 'Alice')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            # 1. /api/messages returns all 4 messages
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert len(msgs) == 4
+
+            # Message 2: Revoked by other
+            assert msgs[2]["media_type"] == "deleted"
+            assert msgs[2]["text_body"] == "This message was deleted"
+            assert msgs[2]["is_view_once"] == 0
+
+            # Message 3: Revoked by me
+            assert msgs[3]["media_type"] == "deleted"
+            assert msgs[3]["text_body"] == "You deleted this message"
+            assert msgs[3]["is_view_once"] == 0
+
+            # Message 4: Revoked by admin
+            assert msgs[4]["media_type"] == "deleted"
+            assert msgs[4]["text_body"] == "This message was deleted by an admin"
+            assert msgs[4]["is_view_once"] == 0
+
+            # 2. Deleted messages do NOT appear in /api/media
+            media_resp = client.get("/api/media?chat_id=123456789&chat_type=contact")
+            assert media_resp.status_code == 200
+            assert len(media_resp.get_json()) == 0
+
+            # 3. Deleted messages are NOT counted in /api/media/count
+            count_resp = client.get("/api/media/count?chat_id=123456789&chat_type=contact")
+            assert count_resp.status_code == 200
+            counts = count_resp.get_json()
+            assert "deleted" not in counts.get("by_type", {})
+            assert counts.get("total", 0) == 0
+
+            # 4. /api/chats reflects deleted message preview
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = [c for c in chats_resp.get_json() if c["id"] == "123456789"]
+            assert len(chats) == 1
+            assert chats[0]["last_msg_type"] == "deleted"
+            assert chats[0]["last_msg_preview"] == "This message was deleted by an admin"
+            assert chats[0]["is_view_once"] == 0
+
+    def test_android_view_once_messages(self, tmp_path):
+        """Android view-once messages (types 42, 43, 82) are distinguished with is_view_once=1."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '987654321')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (20, 1, NULL, 0, 1700000003000, 12)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES "
+            "(10, 20, 0, 1, 1700000001000, NULL, 42),"  # Purged VO photo
+            "(11, 20, 0, 1, 1700000002000, NULL, 43),"  # Preserved VO video
+            "(12, 20, 0, 1, 1700000003000, NULL, 82)"  # Purged VO voice note
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) VALUES "
+            "(11, 'Media/WhatsApp Video/VID_VO.mp4', 'VID_VO.mp4')"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('987654321', 'Bob', 'Bob')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES "
+            "('Media/WhatsApp Video/VID_VO.mp4', 'Contacts/Bob/2026/VID_VO.mp4')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=987654321&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert len(msgs) == 3
+
+            # 10: Purged VO photo
+            assert msgs[10]["media_type"] == "image"
+            assert msgs[10]["is_view_once"] == 1
+            assert msgs[10]["archive_path"] is None
+
+            # 11: Preserved VO video
+            assert msgs[11]["media_type"] == "video"
+            assert msgs[11]["is_view_once"] == 1
+            assert msgs[11]["archive_path"] == "Contacts/Bob/2026/VID_VO.mp4"
+
+            # 12: Purged VO voice note
+            assert msgs[12]["media_type"] == "audio"
+            assert msgs[12]["is_view_once"] == 1
+            assert msgs[12]["archive_path"] is None
+
+            # Preserved VO video appears in /api/media
+            media_resp = client.get("/api/media?chat_id=987654321&chat_type=contact")
+            assert media_resp.status_code == 200
+            media_items = media_resp.get_json()
+            assert len(media_items) == 1
+            assert media_items[0]["msg_id"] == 11
+            assert media_items[0]["is_view_once"] == 1
+
+            # /api/chats reflects VO status
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = [c for c in chats_resp.get_json() if c["id"] == "987654321"]
+            assert len(chats) == 1
+            assert chats[0]["is_view_once"] == 1
+            assert chats[0]["last_msg_type"] == "audio"
+
+    def test_ios_deleted_and_view_once_messages(self, tmp_path):
+        """iOS deleted (type 14) and view-once (types 38, 39, 53) are handled accurately."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = sqlite3.connect(str(wa_path))
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZFROMJID TEXT,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+        """)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Charlie')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE) VALUES "
+            "(1, 'vo_video.mp4', 'vo_video.mp4')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES "
+            "(1, 1, 0, 700000001.0, 14, NULL, NULL),"  # Revoked by sender
+            "(2, 1, 1, 700000002.0, 14, NULL, NULL),"  # Revoked by me
+            "(3, 1, 0, 700000003.0, 38, NULL, NULL),"  # Purged VO image
+            "(4, 1, 0, 700000004.0, 39, NULL, 1),"  # Preserved VO video
+            "(5, 1, 0, 700000005.0, 53, NULL, NULL)"  # Purged VO audio
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES "
+            "('Message/vo_video.mp4', 'Contacts/Charlie/2026/vo_video.mp4')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert len(msgs) == 5
+
+            # Message 1: Revoked
+            assert msgs[1]["media_type"] == "deleted"
+            assert msgs[1]["text_body"] == "This message was deleted"
+            assert msgs[1]["is_view_once"] == 0
+
+            # Message 2: Revoked by me
+            assert msgs[2]["media_type"] == "deleted"
+            assert msgs[2]["text_body"] == "You deleted this message"
+            assert msgs[2]["is_view_once"] == 0
+
+            # Message 3: VO image purged
+            assert msgs[3]["media_type"] == "image"
+            assert msgs[3]["is_view_once"] == 1
+            assert msgs[3]["archive_path"] is None
+
+            # Message 4: VO video preserved
+            assert msgs[4]["media_type"] == "video"
+            assert msgs[4]["is_view_once"] == 1
+            assert msgs[4]["archive_path"] == "Contacts/Charlie/2026/vo_video.mp4"
+
+            # Message 5: VO audio purged
+            assert msgs[5]["media_type"] == "audio"
+            assert msgs[5]["is_view_once"] == 1
+            assert msgs[5]["archive_path"] is None
+
+            # /api/chats selects message 5 as last real message
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = [c for c in chats_resp.get_json() if c["id"] == "1"]
+            assert len(chats) == 1
+            assert chats[0]["is_view_once"] == 1
+            assert chats[0]["last_msg_type"] == "audio"
+
+    def test_recent_messages_persistence_with_view_once(self, tmp_path):
+        """recent_messages table stores and returns is_view_once."""
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+
+        rows = [
+            {
+                "chat_id": "12345",
+                "chat_type": "contact",
+                "msg_id": 1,
+                "timestamp_ms": 1700000000000,
+                "sender": "Alice",
+                "from_me": 0,
+                "archive_path": None,
+                "media_type": "image",
+                "media_name": None,
+                "text_body": "",
+                "is_view_once": 1,
+            }
+        ]
+        viewer._backfill_recent_messages(archive_conn, rows)
+
+        res = archive_conn.execute("SELECT * FROM recent_messages WHERE msg_id = 1").fetchone()
+        assert res["is_view_once"] == 1
+        assert res["media_type"] == "image"
+        archive_conn.close()

@@ -435,11 +435,84 @@
       color: var(--text);
     }
 
+    .msg-bubble.deleted {
+      background: var(--surface2) !important;
+      color: var(--bubble-meta) !important;
+      font-style: italic;
+      border: 1px dashed var(--border);
+      user-select: none;
+    }
+    .msg-deleted-content {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: var(--font-size);
+      line-height: 1.4;
+    }
+    .msg-deleted-content .deleted-icon {
+      font-style: normal;
+      font-size: 1.1em;
+      opacity: 0.8;
+      display: inline-block;
+    }
+
+    .msg-view-once-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 8px;
+      background: var(--surface2);
+      color: var(--text-muted);
+      font-size: var(--font-size);
+      font-weight: 500;
+      user-select: none;
+    }
+    .msg-view-once-pill .vo-icon {
+      font-size: 1.15em;
+      color: var(--accent);
+      font-weight: 700;
+      line-height: 1;
+    }
+    .msg-view-once-pill .vo-label {
+      font-style: normal;
+    }
+
+    .msg-view-once-badge {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      z-index: 3;
+      pointer-events: none;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    }
+    .msg-view-once-badge .vo-icon {
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 12px;
+    }
+
+    .chat-meta .vo-preview, .chat-meta .deleted-preview {
+      font-style: italic;
+    }
+
     .msg-media {
       border-radius: 4px;
       overflow: hidden;
       max-width: 320px;
       width: fit-content;
+      position: relative;
     }
     .msg-media img, .msg-media video {
       display: block;

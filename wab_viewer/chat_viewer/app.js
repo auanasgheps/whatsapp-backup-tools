@@ -406,6 +406,13 @@
     if (chat.last_msg_type === 'service') {
       return esc(chat.last_msg_preview || '…');
     }
+    if (chat.last_msg_type === 'deleted') {
+      return '<span class="deleted-preview">🚫 ' + esc(chat.last_msg_preview || 'This message was deleted') + '</span>';
+    }
+    if (chat.is_view_once) {
+      const voLabel = chat.last_msg_type === 'video' ? 'Video' : (chat.last_msg_type === 'audio' ? 'Voice message' : 'Photo');
+      return prefix + '<span class="vo-preview">① ' + voLabel + '</span>';
+    }
     if (chat.last_msg_type !== 'text') {
       return prefix + (MEDIA_LABELS[chat.last_msg_type] || '📎 Media');
     }
@@ -575,7 +582,7 @@
   const MEDIA_GROUP_MIN = 4;
 
   function isGrouableMedia(msg) {
-    return msg.archive_path && (msg.media_type === 'image' || msg.media_type === 'video');
+    return !msg.is_view_once && msg.archive_path && (msg.media_type === 'image' || msg.media_type === 'video');
   }
 
   function sameSender(a, b) {
@@ -927,7 +934,7 @@
     senderEl.textContent = msg.sender || '';
     if (msg.sender && !msg.from_me && currentChat && currentChat.type === 'group') bubble.appendChild(senderEl);
 
-    if (msg.quoted_text) {
+    if (msg.quoted_text && msg.media_type !== 'deleted') {
       const quote = document.createElement('div');
       quote.className = 'msg-quote';
       const qSender = document.createElement('div');
@@ -955,7 +962,7 @@
       badge.textContent = 'You';
       meta.appendChild(badge);
     }
-    const showInfo = msg.from_me ? !!msg.msg_id : !!msg.archive_path;
+    const showInfo = msg.media_type !== 'deleted' && (msg.from_me ? !!msg.msg_id : !!msg.archive_path);
     if (showInfo) {
       const infoBtn = document.createElement('span');
       infoBtn.className = 'msg-info-btn';
@@ -967,7 +974,7 @@
       });
       meta.appendChild(infoBtn);
     }
-    if (msg.is_edited) {
+    if (msg.is_edited && msg.media_type !== 'deleted') {
       const editedSpan = document.createElement('span');
       editedSpan.className = 'msg-edited';
       editedSpan.textContent = 'Edited';
@@ -977,7 +984,34 @@
       meta.appendChild(editedSpan);
     }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
-    if (msg.media_type === 'text' || !msg.archive_path) {
+    if (msg.media_type === 'deleted') {
+      bubble.classList.add('deleted');
+      const delEl = document.createElement('div');
+      delEl.className = 'msg-deleted-content';
+      const icon = document.createElement('span');
+      icon.className = 'deleted-icon';
+      icon.textContent = '⃠';
+      const txt = document.createElement('span');
+      txt.className = 'deleted-text';
+      txt.textContent = msg.text_body || 'This message was deleted';
+      delEl.appendChild(icon);
+      delEl.appendChild(txt);
+      bubble.appendChild(delEl);
+    } else if (msg.is_view_once && !msg.archive_path) {
+      bubble.classList.add('view-once-opened');
+      const voEl = document.createElement('div');
+      voEl.className = 'msg-view-once-pill';
+      const voIcon = document.createElement('span');
+      voIcon.className = 'vo-icon';
+      voIcon.textContent = '①';
+      const voLabel = document.createElement('span');
+      voLabel.className = 'vo-label';
+      const typeLabel = msg.media_type === 'video' ? 'Video' : (msg.media_type === 'audio' ? 'Voice message' : 'Photo');
+      voLabel.textContent = typeLabel + ' · Opened';
+      voEl.appendChild(voIcon);
+      voEl.appendChild(voLabel);
+      bubble.appendChild(voEl);
+    } else if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
         const txt = document.createElement('div');
         txt.className = 'msg-text msg-unavailable';
@@ -1005,7 +1039,7 @@
 
     bubble.appendChild(meta);
 
-    if (msg.reactions) {
+    if (msg.reactions && msg.media_type !== 'deleted') {
       const emojis = msg.reactions.split(',').filter(Boolean);
       if (emojis.length) {
         row.classList.add('has-reactions');
@@ -1129,6 +1163,12 @@
       a.download = msg.media_name || 'file';
       a.innerHTML = `<span class="doc-icon">📄</span><span>${esc(msg.media_name || 'Download')}</span>`;
       wrap.appendChild(a);
+    }
+    if (msg.is_view_once) {
+      const voBadge = document.createElement('span');
+      voBadge.className = 'msg-view-once-badge';
+      voBadge.innerHTML = '<span class="vo-icon">①</span> View Once';
+      wrap.appendChild(voBadge);
     }
     return wrap;
   }

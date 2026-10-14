@@ -64,6 +64,7 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             reactions      TEXT,
             is_edited      INTEGER NOT NULL DEFAULT 0,
             edited_ts      INTEGER,
+            is_view_once   INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -96,8 +97,12 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")
     if "edited_ts" not in existing_recent:
         conn.execute("ALTER TABLE recent_messages ADD COLUMN edited_ts INTEGER")
-    if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
-        conn.execute("PRAGMA user_version = 2")
+    if "is_view_once" not in existing_recent:
+        conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_view_once INTEGER NOT NULL DEFAULT 0"
+        )
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 3:
+        conn.execute("PRAGMA user_version = 3")
     conn.commit()
     return conn
 
