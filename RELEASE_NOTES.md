@@ -1,44 +1,29 @@
-# WhatsApp Backup Tools v0.60
+# WhatsApp Backup Tools v0.70
 
-Version 0.60 brings support for shared contact cards across both tools, complete sticker archiving and gallery viewing, disk space savings with media hardlinking, and a smoother viewing experience in the offline web viewer.
-
-> 📇 **Shared Contact Cards (.vcf)**: WhatsApp stores shared contacts directly inside backup databases rather than as media files. WhatsApp Backup Tools now extracts and saves contacts as standard `.vcf` files and displays them as native contact cards in the web viewer, complete with search and 1-click download support!
+Version 0.70 introduces smarter Android ADB status troubleshooting with interactive authorization recovery in the archiver, alongside an adaptable, scrollable Settings modal for the web viewer on smaller screens.
 
 ---
 
 ### 📁 WhatsApp Archiver
 
 #### ✨ New Features
-- **Sticker Archiving on Android**: Stickers sent and received on Android (`.webp` and `.was`) are now fully extracted, archived to disk, and recorded in the archive database alongside all other media types.
-- **Shared Contact Cards Archiving (`.vcf`)**: Automatically extracts contacts shared in 1:1 and group chats into organized `.vcf` files with original message timestamps and duplicate collision protection.
-- **Hardlink Duplicate Media Files (`--link-duplicates`)**: Drastically save disk storage by hardlinking identical media files shared across chats instead of duplicating files on disk. Unsupported filesystems (such as exFAT or network drives) are automatically detected upfront with safe fallback to copying.
+- **Interactive ADB Authorization Recovery**: If your Android device is detected but unauthorized, the archiver can now prompt you to restart the ADB server on the spot to re-trigger the "Allow USB debugging" prompt directly on your phone.
 
 #### ⚡ Improvements
-- **Clearer Duplicate Media Reports**: The `duplicate_media_report.csv` now features a clear `link_status` column (distinguishing zero-byte filesystem hardlinks from physical duplicate copies) and records original WhatsApp message dates and times for easy auditing.
-- **Detailed Run Summary & Duplicate Breakdown**: The archiver's final report now explains why files were skipped (differentiating files already archived in previous runs from duplicate messages within the same chat), reports hardlink counts under copied files, and highlights overall duplicate totals found across the archive.
+- **Accurate Connection & Status Troubleshooting**: Instead of displaying a generic checklist of possibilities, the archiver now tells you the exact device status (distinguishing between unplugged phones, multiple connected devices, offline links, and missing host permissions).
+- **Clearer Backup Retrieval Errors**: If pulling a WhatsApp backup database fails over ADB, the archiver provides direct actionable instructions (such as reminding you to create an End-to-End Encrypted Backup in WhatsApp).
 
 #### 🐛 Bug Fixes
-- Fixed duplicate reporting when identical files were shared across multiple messages, and ensured address book documents are properly preserved during restore mode.
 - Minor bug fixes and reliability improvements.
 
 ---
 
 ### 🌐 WhatsApp Viewer
 
-#### ✨ New Features
-- **Dedicated Stickers Section in Media Gallery**: Stickers now have a dedicated section and filter pill in the Media Gallery on both iOS and Android, with server-side filtering and count badges.
-- **Contact Cards in Chat & Gallery**: Received contacts now display in native WhatsApp-style contact cards with contact avatars, names, and a 1-click download button. Contact cards are also browsable in the Media Gallery and fully indexed in search.
-- **"Edited" Message Indicator**: Messages edited in WhatsApp now display an "Edited" badge next to the timestamp.
-- **Lightbox Wheel Zoom & Pan**: Zoom smoothly into photos up to 6× using your mouse wheel, drag to pan around, and reset back to fit with a single click.
-
 #### ⚡ Improvements
-- **Media Gallery Filter Synchronization**: Switching media filters (such as switching from links back to photos) after scrolling down multiple months now seamlessly loads items at your current position without jumping or showing empty areas.
-- **Photo Aspect Ratio & Shrink-Wrapping**: Vertical and tall photos now keep their natural aspect ratio without horizontal stretching, and chat bubbles fit snugly around images without empty space.
+- **Responsive Settings Modal**: The Settings panel now smoothly adapts to small browser windows, split-screen views, and compact laptop screens with internal scrolling and a pinned header so controls remain accessible at any height.
 
 #### 🐛 Bug Fixes
-- **iOS Sticker Classification**: Fixed an issue where iOS stickers were treated as standard photos in chat bubbles and the Media Gallery instead of appearing under the dedicated Stickers section.
-- **Voice Message Audio Player**: Fixed an issue where the inline audio player for voice messages was invisible in Google Chrome, Microsoft Edge, and other Chromium-based browsers.
-- **macOS / Older SQLite Compatibility**: Fixed a startup crash (`unrecognized option: "contentless_delete"`) when running on macOS or systems with SQLite versions older than 3.43.
 - Minor UI polish and rendering fixes.
 
 ---

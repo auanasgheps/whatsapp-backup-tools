@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.70]
+
+### 📁 WhatsApp Backup Archiver (`wab-archiver`)
+
+- **Exact ADB Status Diagnosis**: Replaced generic connectivity checklist with targeted diagnoses distinguishing between 0 devices detected, multiple attached devices, host permission issues (`no permissions`), offline devices, and unauthorized devices.
+- **Interactive Authorization Recovery Flow**: When an Android device is detected as `unauthorized`, prompts interactive users to optionally restart the ADB server (`adb kill-server`) to re-trigger the on-device "Allow USB debugging?" dialog, re-verifying device readiness automatically.
+- **Precise Database Pull Error Messages**: Replaced generic fallback text on `pull_msgstore` failures with exact guidance based on command output (e.g., reminding users to enable End-to-End Encrypted Backup in WhatsApp settings when backups are missing on the phone).
+
+### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
+
+- **Responsive Settings Modal Adaptability**: Added dynamic height constraints and internal scrolling (`#settings-body`) with a pinned header, ensuring the Settings modal adapts smoothly to small screens, split windows, and low-height viewports without overflowing.
+
+---
+
 ## [0.60]
 
 ### 📁 WhatsApp Backup Archiver (`wab-archiver`)
