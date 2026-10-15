@@ -951,3 +951,141 @@ def test_forward_mode_preservation_summary_logging(tmp_path: Path, caplog) -> No
     assert "Preservation complete: 1 new message(s) preserved across 1 chat(s)." in caplog.text
     assert "Preserved           : 1 message(s) across 1 chat(s)" in caplog.text
     assert "Preserved DB        :" in caplog.text
+
+
+def test_decrypt_msgstore_preservation_lifecycle_and_rollback(tmp_path: Path, monkeypatch) -> None:
+    """Verify that _decrypt_msgstore_if_needed manages .old lifecycle and safely rolls back on failure."""
+    import argparse
+    import importlib.util
+
+    from wab_archiver import main as wa
+
+    if importlib.util.find_spec("wa_crypt_tools") is None:
+        return
+
+    import zlib
+
+    from wa_crypt_tools.lib.db.db15 import Database15
+    from wa_crypt_tools.lib.key.keyfactory import KeyFactory
+    from wa_crypt_tools.lib.props import Props
+
+    key_hex = "22" * 32
+    key = KeyFactory.new(key_hex)
+    db15 = Database15(key=key)
+
+    # 1. Prepare original msgstore.db on disk
+    db_dir = tmp_path / "archive_out" / "Whatsapp Databases"
+    db_dir.mkdir(parents=True)
+    canonical_db = db_dir / "msgstore.db"
+    old_db_file = db_dir / "msgstore.db.old"
+    incoming_db_file = db_dir / "msgstore.db.incoming"
+
+    original_bytes = b"SQLite format 3\x00_ORIGINAL_BASELINE_DB_CONTENT"
+    canonical_db.write_bytes(original_bytes)
+
+    # 2. Prepare encrypted incoming file
+    incoming_bytes = b"SQLite format 3\x00_NEW_INCOMING_DECRYPTED_DB_CONTENT"
+    encrypted_payload = db15.encrypt(key, Props(), zlib.compress(incoming_bytes, 1))
+    crypt_file = tmp_path / "msgstore.db.crypt15"
+    crypt_file.write_bytes(encrypted_payload)
+
+    args = argparse.Namespace(
+        output=str(tmp_path / "archive_out"),
+        msgstore=str(crypt_file),
+        e2e_key=key_hex,
+        preserve_deleted=True,
+    )
+
+    # --- Test Case A: Preservation fails -> original db MUST be restored, .old cleaned up ---
+    def mock_preserve_fail(*_args, **_kwargs):
+        raise RuntimeError("Simulated failure during message diffing")
+
+    monkeypatch.setattr(preservation, "preserve_deleted_messages", mock_preserve_fail)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Simulated failure"):
+        wa._decrypt_msgstore_if_needed(args, _TEST_LOGGER)
+
+    # Database must have rolled back to original content
+    assert canonical_db.is_file()
+    assert canonical_db.read_bytes() == original_bytes
+    assert not old_db_file.exists()
+    assert not incoming_db_file.exists()
+
+    # --- Test Case B: Preservation succeeds -> new db active, .old cleaned up ---
+    def mock_preserve_success(*_args, **_kwargs):
+        return preservation.PreservationResult(messages=2, chats=1)
+
+    monkeypatch.setattr(preservation, "preserve_deleted_messages", mock_preserve_success)
+
+    # Reset args.msgstore back to the crypt file
+    args.msgstore = str(crypt_file)
+    wa._decrypt_msgstore_if_needed(args, _TEST_LOGGER)
+
+    assert canonical_db.is_file()
+    assert canonical_db.read_bytes() == incoming_bytes
+    assert not old_db_file.exists()
+    assert not incoming_db_file.exists()
+    assert args._preservation_stats.messages == 2
+    assert args._preservation_stats.chats == 1
+
+
+def test_forward_mode_unencrypted_preservation_rollback_on_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Verify that unencrypted forward mode restores dest_db from dest_db.old if diff fails."""
+    import argparse
+
+    import pytest
+    from wab_archiver import main as wa
+
+    db_dir = tmp_path / "archive_out" / "Whatsapp Databases"
+    db_dir.mkdir(parents=True)
+    dest_db = db_dir / "msgstore.db"
+    old_dest_db = db_dir / "msgstore.db.old"
+
+    import contextlib
+
+    with contextlib.closing(sqlite3.connect(dest_db)) as conn:
+        conn.execute("CREATE TABLE original_marker (id INTEGER)")
+        conn.commit()
+    original_bytes = dest_db.read_bytes()
+
+    new_db_file = tmp_path / "incoming_src.db"
+    with contextlib.closing(sqlite3.connect(new_db_file)) as conn:
+        conn.execute("CREATE TABLE new_marker (id INTEGER)")
+        conn.commit()
+
+    root = tmp_path / "wa_root"
+    (root / "Media" / "WhatsApp Images").mkdir(parents=True)
+
+    args = argparse.Namespace(
+        from_adb=False,
+        e2e_key=None,
+        ios_password=None,
+        timezone=None,
+        since=None,
+        limit=None,
+        ios_backup=None,
+        dry_run=False,
+        preserve_deleted=True,
+        msgstore=str(new_db_file),
+        wa_roots=[str(root)],
+        output=str(tmp_path / "archive_out"),
+        contacts=None,
+        log=None,
+    )
+
+    def mock_preserve_fail(*_args, **_kwargs):
+        raise RuntimeError("Diff failure in forward mode")
+
+    monkeypatch.setattr(preservation, "preserve_deleted_messages", mock_preserve_fail)
+
+    with pytest.raises(RuntimeError, match="Diff failure in forward mode"):
+        wa.run_forward_mode(args, _TEST_LOGGER)
+
+    # Dest db must be restored to original content
+    assert dest_db.is_file()
+    assert dest_db.read_bytes() == original_bytes
+    assert not old_dest_db.exists()
