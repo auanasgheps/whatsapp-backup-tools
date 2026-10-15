@@ -266,7 +266,7 @@ wab-archiver archive \
   --preserve-deleted
 ```
 
-> 💡 Preserved messages and sender-revoked messages ("Delete for Everyone") are automatically surfaced in the viewer with visual badges and preserved chat indicators.
+> 💡 Preserved messages and sender-revoked messages ("Delete for Everyone") are automatically surfaced in the viewer with visual badges and preserved chat indicators. The archiver logs the exact counts of preserved messages and affected chats during execution and in the completion run summary (`Preserved: X message(s) across Y chat(s)`).
 
 #### iOS — pre-extracted mode
 
