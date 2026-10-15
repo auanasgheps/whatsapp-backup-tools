@@ -409,6 +409,9 @@
     if (chat.last_msg_type === 'deleted') {
       return '<span class="deleted-preview">🚫 ' + esc(chat.last_msg_preview || 'This message was deleted') + '</span>';
     }
+    if (chat.last_msg_type === 'poll') {
+      return prefix + '📊 ' + esc(chat.last_msg_preview || 'Poll');
+    }
     if (chat.is_view_once) {
       const voLabel = chat.last_msg_type === 'video' ? 'Video' : (chat.last_msg_type === 'audio' ? 'Voice message' : 'Photo');
       return prefix + '<span class="vo-preview">① ' + voLabel + '</span>';
@@ -1012,6 +1015,8 @@
       voEl.appendChild(voIcon);
       voEl.appendChild(voLabel);
       bubble.appendChild(voEl);
+    } else if (msg.media_type === 'poll') {
+      bubble.appendChild(renderPoll(msg));
     } else if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
         const txt = document.createElement('div');
@@ -1172,6 +1177,106 @@
       wrap.appendChild(voBadge);
     }
     return wrap;
+  }
+
+  function renderPoll(msg) {
+    const poll = msg.poll || {
+      question: msg.text_body || 'Poll',
+      multiple_answers: false,
+      total_votes: 0,
+      total_voters: 0,
+      options: [],
+    };
+
+    const container = document.createElement('div');
+    container.className = 'msg-poll';
+    container.setAttribute('role', 'group');
+    container.setAttribute('aria-label', 'Poll: ' + (poll.question || 'Poll'));
+
+    const header = document.createElement('div');
+    header.className = 'msg-poll-header';
+
+    const q = document.createElement('div');
+    q.className = 'msg-poll-question';
+    q.innerHTML = highlight(poll.question || 'Poll', '');
+    header.appendChild(q);
+
+    const badge = document.createElement('div');
+    badge.className = 'msg-poll-badge';
+    badge.textContent = poll.multiple_answers ? 'Select one or more' : 'Select one';
+    header.appendChild(badge);
+
+    container.appendChild(header);
+
+    const optionsList = document.createElement('div');
+    optionsList.className = 'msg-poll-options';
+
+    const totalVotes = poll.total_votes || 0;
+
+    for (const opt of poll.options || []) {
+      const optEl = document.createElement('div');
+      optEl.className = 'msg-poll-option' + (opt.user_selected ? ' user-selected' : '');
+
+      const pct = totalVotes > 0 ? Math.round(((opt.vote_count || 0) / totalVotes) * 100) : 0;
+
+      const fill = document.createElement('div');
+      fill.className = 'msg-poll-option-fill';
+      fill.style.width = pct + '%';
+      fill.setAttribute('role', 'progressbar');
+      fill.setAttribute('aria-valuenow', String(pct));
+      fill.setAttribute('aria-valuemin', '0');
+      fill.setAttribute('aria-valuemax', '100');
+      optEl.appendChild(fill);
+
+      const content = document.createElement('div');
+      content.className = 'msg-poll-option-content';
+
+      const titleEl = document.createElement('span');
+      titleEl.className = 'msg-poll-option-title';
+      if (opt.user_selected) {
+        const checkIcon = document.createElement('span');
+        checkIcon.className = 'msg-poll-check';
+        checkIcon.textContent = '✓ ';
+        titleEl.appendChild(checkIcon);
+      }
+      const nameSpan = document.createElement('span');
+      nameSpan.innerHTML = highlight(opt.name || '', '');
+      titleEl.appendChild(nameSpan);
+      content.appendChild(titleEl);
+
+      const countEl = document.createElement('span');
+      countEl.className = 'msg-poll-option-count';
+      countEl.textContent = String(opt.vote_count || 0);
+      content.appendChild(countEl);
+
+      optEl.appendChild(content);
+      optionsList.appendChild(optEl);
+    }
+
+    container.appendChild(optionsList);
+
+    const footer = document.createElement('div');
+    footer.className = 'msg-poll-footer';
+
+    const totalEl = document.createElement('span');
+    totalEl.className = 'msg-poll-total';
+    const vCount = poll.total_voters !== undefined ? poll.total_voters : totalVotes;
+    totalEl.textContent = vCount === 1 ? '1 vote' : vCount + ' votes';
+    footer.appendChild(totalEl);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'msg-poll-view-votes-btn';
+    btn.textContent = 'View votes';
+    btn.setAttribute('aria-haspopup', 'dialog');
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      showPollDetails(msg.msg_id, btn);
+    });
+    footer.appendChild(btn);
+
+    container.appendChild(footer);
+    return container;
   }
 
   let lightboxItems = [];
@@ -3051,6 +3156,48 @@
       for (const r of data.reactors) {
         const name = r.from_me ? 'You' : esc(r.name || '?');
         html += `<div class="msg-details-row"><span class="msg-details-label">${esc(r.emoji)}</span><span class="msg-details-value">${name}</span></div>`;
+      }
+    }
+
+    msgDetailsPopup.innerHTML = html;
+    positionPopup(anchorEl);
+    msgDetailsPopup.classList.add('visible');
+  }
+
+  async function showPollDetails(msgId, anchorEl) {
+    msgDetailsPopup.innerHTML = '<span style="color:var(--text-muted)">Loading…</span>';
+    positionPopup(anchorEl);
+    msgDetailsPopup.classList.add('visible');
+
+    let data;
+    try {
+      const res = await fetch('/api/poll_details/' + msgId);
+      data = await res.json();
+    } catch (_) {
+      data = { available: false };
+    }
+
+    let html;
+    if (!data.available || !data.options) {
+      html = '<span class="msg-details-na">No poll vote data available.</span>';
+    } else {
+      const totalVoters = data.total_voters || 0;
+      const label = totalVoters === 1 ? '1 voter' : `${totalVoters} voters`;
+      html = `<div class="rx-details-total" style="margin-bottom:8px;font-weight:600">Poll votes · ${label}</div>`;
+
+      let hasAnyVotes = false;
+      for (const opt of data.options) {
+        if (!opt.voters || !opt.voters.length) continue;
+        hasAnyVotes = true;
+        html += `<div style="font-weight:600;font-size:12px;color:var(--text);margin-top:8px;margin-bottom:4px;padding-bottom:2px;border-bottom:1px solid var(--border)">${esc(opt.name)} (${opt.vote_count || opt.voters.length})</div>`;
+        for (const v of opt.voters) {
+          const name = esc(v.name || '?');
+          const timeStr = v.timestamp_ms ? fmtTime(v.timestamp_ms) : '';
+          html += `<div class="msg-details-row"><span class="msg-details-label">${name}</span><span class="msg-details-value">${timeStr}</span></div>`;
+        }
+      }
+      if (!hasAnyVotes) {
+        html += '<span class="msg-details-na">No votes recorded yet.</span>';
       }
     }
 

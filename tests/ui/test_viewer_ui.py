@@ -1861,3 +1861,218 @@ def test_chat_list_previews_deleted_and_view_once(
     assert mv.get("voFontStyle") == "italic"
 
     browser.capture_screenshot(screenshot_dir / "chat_sidebar_previews.png", 5.0)
+
+
+def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Path) -> None:
+    """Validate visual rendering of poll bubbles and progressive disclosure vote popups."""
+    # 1. Open Alpine Hikers (chat_id = "1")
+    chat_name = open_chat_by_id(browser, "1", 15.0)
+    assert len(chat_name) > 0
+
+    # 2. Inspect multi-choice poll bubble
+    poll_info = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 50; i++) {
+                const poll = document.querySelector('#message-scroll .msg-poll');
+                if (poll) {
+                    const question = poll.querySelector('.msg-poll-question')?.textContent || '';
+                    const badge = poll.querySelector('.msg-poll-badge')?.textContent || '';
+                    const options = [...poll.querySelectorAll('.msg-poll-option')].map(opt => {
+                        const title = opt.querySelector('.msg-poll-option-title span:last-child')?.textContent || '';
+                        const count = opt.querySelector('.msg-poll-option-count')?.textContent || '0';
+                        const check = opt.querySelector('.msg-poll-check');
+                        const isUserSelected = opt.classList.contains('user-selected');
+                        return {
+                            title: title,
+                            count: parseInt(count, 10),
+                            hasCheck: !!check,
+                            isUserSelected: isUserSelected,
+                        };
+                    });
+                    const viewVotesBtn = poll.querySelector('.msg-poll-view-votes-btn');
+                    return {
+                        ready: true,
+                        question: question,
+                        badge: badge,
+                        options: options,
+                        hasViewVotesBtn: !!viewVotesBtn,
+                    };
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { ready: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(poll_info, dict)
+    assert poll_info.get("ready") is True
+    assert "Trail choice" in poll_info.get("question", "")
+    assert poll_info.get("badge") == "Select one or more"
+    assert poll_info.get("hasViewVotesBtn") is True
+
+    options = poll_info.get("options", [])
+    assert len(options) == 3
+    # Option 1: Passo del Vento (3 votes, selected by You)
+    assert "Passo del Vento" in options[0]["title"]
+    assert options[0]["count"] == 3
+    assert options[0]["isUserSelected"] is True
+    assert options[0]["hasCheck"] is True
+    # Option 2: Valle dei Larici (2 votes)
+    assert "Valle dei Larici" in options[1]["title"]
+    assert options[1]["count"] == 2
+    # Option 3: Monte Cristallo (1 vote, selected by You)
+    assert "Monte Cristallo" in options[2]["title"]
+    assert options[2]["count"] == 1
+    assert options[2]["isUserSelected"] is True
+    assert options[2]["hasCheck"] is True
+
+    browser.capture_screenshot(screenshot_dir / "poll_message_alpine.png", 5.0)
+
+    # 3. Test Progressive Disclosure modal / popup
+    popup_info = browser.evaluate(
+        """
+        (async () => {
+            const btn = document.querySelector('#message-scroll .msg-poll .msg-poll-view-votes-btn');
+            if (btn) btn.click();
+
+            for (let i = 0; i < 50; i++) {
+                const popup = document.getElementById('msg-details-popup');
+                if (popup && popup.classList.contains('visible') && !popup.textContent.includes('Loading')) {
+                    const title = popup.querySelector('.rx-details-total')?.textContent || '';
+                    const voters = [...popup.querySelectorAll('.msg-details-row .msg-details-label')].map(
+                        el => el.textContent.trim()
+                    );
+                    if (voters.length > 0) {
+                        return {
+                            open: true,
+                            title: title,
+                            voters: voters,
+                        };
+                    }
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { open: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(popup_info, dict)
+    assert popup_info.get("open") is True
+    assert "4 voters" in popup_info.get("title", "")
+    voters = popup_info.get("voters", [])
+    assert "Maya Lin" in voters
+    assert "Lucas Silva" in voters
+    assert "Sam O'Connor" in voters
+    assert "You" in voters
+
+    browser.capture_screenshot(screenshot_dir / "poll_votes_popup_alpine.png", 5.0)
+
+    # Close popup
+    browser.evaluate(
+        """
+        (() => {
+            const popup = document.getElementById('msg-details-popup');
+            if (popup) popup.classList.remove('visible');
+        })()
+        """,
+        3.0,
+    )
+
+    # 4. Open Tech & Coffee (chat_id = "2") for single-choice poll
+    tc_name = open_chat_by_id(browser, "2", 15.0)
+    assert len(tc_name) > 0
+
+    tc_poll = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 50; i++) {
+                const poll = document.querySelector('#message-scroll .msg-poll');
+                if (poll) {
+                    const question = poll.querySelector('.msg-poll-question')?.textContent || '';
+                    const badge = poll.querySelector('.msg-poll-badge')?.textContent || '';
+                    const options = [...poll.querySelectorAll('.msg-poll-option')].map(opt => {
+                        const title = opt.querySelector('.msg-poll-option-title span:last-child')?.textContent || '';
+                        const count = opt.querySelector('.msg-poll-option-count')?.textContent || '0';
+                        const isUserSelected = opt.classList.contains('user-selected');
+                        return {
+                            title: title,
+                            count: parseInt(count, 10),
+                            isUserSelected: isUserSelected,
+                        };
+                    });
+                    return {
+                        ready: true,
+                        question: question,
+                        badge: badge,
+                        options: options,
+                    };
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { ready: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(tc_poll, dict)
+    assert tc_poll.get("ready") is True
+    assert "Preferred brewing method" in tc_poll.get("question", "")
+    assert tc_poll.get("badge") == "Select one"
+
+    tc_opts = tc_poll.get("options", [])
+    assert len(tc_opts) == 3
+    # V60 Pour-over (2 votes, selected by You)
+    assert "V60 Pour-over" in tc_opts[0]["title"]
+    assert tc_opts[0]["count"] == 2
+    assert tc_opts[0]["isUserSelected"] is True
+
+    # Check vote details popup for single-choice poll
+    tc_popup = browser.evaluate(
+        """
+        (async () => {
+            const btn = document.querySelector('#message-scroll .msg-poll .msg-poll-view-votes-btn');
+            if (btn) btn.click();
+
+            for (let i = 0; i < 50; i++) {
+                const popup = document.getElementById('msg-details-popup');
+                if (popup && popup.classList.contains('visible') && !popup.textContent.includes('Loading')) {
+                    const voters = [...popup.querySelectorAll('.msg-details-row .msg-details-label')].map(
+                        el => el.textContent.trim()
+                    );
+                    if (voters.length > 0) {
+                        return {
+                            open: true,
+                            voters: voters,
+                        };
+                    }
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return { open: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(tc_popup, dict)
+    assert tc_popup.get("open") is True
+    tc_voters = tc_popup.get("voters", [])
+    assert "Jordan Lee" in tc_voters
+    assert "Chloe Bennett" in tc_voters
+    assert "Alex Rivera" in tc_voters
+    assert "You" in tc_voters
+
+    browser.capture_screenshot(screenshot_dir / "poll_votes_popup_tech_coffee.png", 5.0)
+
+    # Close popup
+    browser.evaluate(
+        """
+        (() => {
+            const popup = document.getElementById('msg-details-popup');
+            if (popup) popup.classList.remove('visible');
+        })()
+        """,
+        3.0,
+    )

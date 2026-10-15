@@ -7504,3 +7504,376 @@ class TestStickerSupport:
         assert res["is_view_once"] == 1
         assert res["media_type"] == "image"
         archive_conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Polls (Android msgstore.db & iOS ChatStorage.sqlite)
+# ---------------------------------------------------------------------------
+
+
+class TestPollSupport:
+    """Test suite for poll bubbles, hydration, vote details, and FTS search."""
+
+    @staticmethod
+    def _make_poll_blob(
+        question: str, options: list[str], multiple: bool, votes: list[dict]
+    ) -> bytes:
+        def encode_varint(n: int) -> bytes:
+            res = bytearray()
+            while True:
+                b = n & 0x7F
+                n >>= 7
+                if n:
+                    res.append(b | 0x80)
+                else:
+                    res.append(b)
+                    break
+            return bytes(res)
+
+        def encode_field(tag: int, wire: int, val: bytes) -> bytes:
+            header = encode_varint((tag << 3) | wire)
+            if wire == 0:
+                return header + val
+            elif wire == 2:
+                return header + encode_varint(len(val)) + val
+            raise ValueError(f"Unsupported wire {wire}")
+
+        f8 = bytearray()
+        f8.extend(encode_field(2, 2, question.encode("utf-8")))
+        for opt in options:
+            opt_b = encode_field(1, 2, opt.encode("utf-8"))
+            f8.extend(encode_field(3, 2, opt_b))
+        mode_val = 0 if multiple else 1
+        f8.extend(encode_field(4, 0, encode_varint(mode_val)))
+        for v in votes:
+            vp = bytearray()
+            packed = bytearray()
+            for idx in v.get("option_indices", []):
+                packed.extend(encode_varint(idx))
+            if packed:
+                vp.extend(encode_field(1, 2, bytes(packed)))
+            if "client_ts" in v:
+                vp.extend(encode_field(2, 0, encode_varint(v["client_ts"])))
+            if "stanza_id" in v:
+                vp.extend(encode_field(3, 2, v["stanza_id"].encode("utf-8")))
+            if "voter_jid" in v:
+                vp.extend(encode_field(4, 2, v["voter_jid"].encode("utf-8")))
+            if "server_ts" in v:
+                vp.extend(encode_field(5, 0, encode_varint(v["server_ts"])))
+            f8.extend(encode_field(5, 2, bytes(vp)))
+
+        return encode_field(8, 2, bytes(f8))
+
+    def test_parse_ios_poll_blob(self):
+        votes = [
+            {
+                "option_indices": [0],
+                "client_ts": 1700000000000,
+                "voter_jid": "15551112222@s.whatsapp.net",
+            },
+            {
+                "option_indices": [0, 1],
+                "client_ts": 1700000001000,
+                "voter_jid": "15553334444@s.whatsapp.net",
+            },
+        ]
+        blob = self._make_poll_blob("Weekend plan?", ["Option A", "Option B"], True, votes)
+        parsed = viewer._parse_ios_poll_blob(blob)
+        assert parsed is not None
+        assert parsed["question"] == "Weekend plan?"
+        assert parsed["options"] == ["Option A", "Option B"]
+        assert parsed["multiple_answers"] is True
+        assert len(parsed["votes"]) == 2
+        assert parsed["votes"][0]["voter_jid"] == "15551112222@s.whatsapp.net"
+        assert parsed["votes"][1]["option_indices"] == [0, 1]
+
+        # Empty/corrupt blob
+        assert viewer._parse_ios_poll_blob(b"") is None
+        assert viewer._parse_ios_poll_blob(b"random bytes") is None
+
+    def test_android_poll_messages_and_details(self, tmp_path):
+        """Test Android poll hydration in /api/messages and /api/poll_details."""
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+
+        wa_path = tmp_path / "msgstore.db"
+        wa_conn = sqlite3.connect(str(wa_path))
+        wa_conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER, text_data TEXT, message_type INTEGER DEFAULT 0);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (message_row_id INTEGER PRIMARY KEY, text_data TEXT, from_me INTEGER DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER DEFAULT 0);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE message_poll (message_row_id INTEGER PRIMARY KEY, selectable_options_count INTEGER);
+            CREATE TABLE message_poll_option (_id INTEGER PRIMARY KEY, message_row_id INTEGER, option_name TEXT, vote_total INTEGER);
+            CREATE TABLE message_add_on (_id INTEGER PRIMARY KEY, parent_message_row_id INTEGER, message_add_on_type INTEGER, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE message_add_on_poll_vote_selected_option (message_add_on_row_id INTEGER, message_poll_option_id INTEGER);
+        """)
+
+        # Chat
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '15551111111')")
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '15552222222')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (1, 1, 'Group Chat', 0, 1700000000000, 10)"
+        )
+
+        # Poll message
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES (10, 1, 0, 2, 1700000000000, 'Lunch spot?', 66)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_poll (message_row_id, selectable_options_count) VALUES (10, 0)"
+        )  # Multi-choice
+        wa_conn.execute(
+            "INSERT INTO message_poll_option (_id, message_row_id, option_name, vote_total) VALUES (101, 10, 'Tacos', 2)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_poll_option (_id, message_row_id, option_name, vote_total) VALUES (102, 10, 'Pizza', 1)"
+        )
+
+        # Votes: Bob (jid 2) voted Tacos. Device user (from_me 1) voted Tacos and Pizza.
+        wa_conn.execute(
+            "INSERT INTO message_add_on (_id, parent_message_row_id, message_add_on_type, from_me, sender_jid_row_id, timestamp) VALUES (201, 10, 67, 0, 2, 1700000001000)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on (_id, parent_message_row_id, message_add_on_type, from_me, sender_jid_row_id, timestamp) VALUES (202, 10, 67, 1, NULL, 1700000002000)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_poll_vote_selected_option (message_add_on_row_id, message_poll_option_id) VALUES (201, 101)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_poll_vote_selected_option (message_add_on_row_id, message_poll_option_id) VALUES (202, 101)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_poll_vote_selected_option (message_add_on_row_id, message_poll_option_id) VALUES (202, 102)"
+        )
+        wa_conn.commit()
+
+        # Contacts
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15552222222', 'Bob (15552222222)', 'Bob')"
+        )
+        archive_conn.commit()
+
+        app = viewer.create_app(tmp_path)
+        client = app.test_client()
+
+        # Test /api/messages
+        res = client.get("/api/messages?chat_id=1&chat_type=group")
+        assert res.status_code == 200
+        msgs = res.get_json()
+        assert len(msgs) == 1
+        poll_msg = msgs[0]
+        assert poll_msg["media_type"] == "poll"
+        assert poll_msg["poll"]["question"] == "Lunch spot?"
+        assert poll_msg["poll"]["multiple_answers"] is True
+        assert poll_msg["poll"]["total_votes"] == 3
+        assert poll_msg["poll"]["total_voters"] == 2
+        opts = poll_msg["poll"]["options"]
+        assert len(opts) == 2
+        assert opts[0]["name"] == "Tacos"
+        assert opts[0]["vote_count"] == 2
+        assert opts[0]["user_selected"] is True
+        assert opts[1]["name"] == "Pizza"
+        assert opts[1]["vote_count"] == 1
+        assert opts[1]["user_selected"] is True
+
+        # Test /api/poll_details/<msg_id>
+        res_det = client.get("/api/poll_details/10")
+        assert res_det.status_code == 200
+        det = res_det.get_json()
+        assert det["available"] is True
+        assert det["question"] == "Lunch spot?"
+        assert det["total_voters"] == 2
+        opt_map = {o["id"]: o for o in det["options"]}
+        assert len(opt_map[101]["voters"]) == 2
+        voter_names = [v["name"] for v in opt_map[101]["voters"]]
+        assert "Bob" in voter_names
+        assert "You" in voter_names
+        assert len(opt_map[102]["voters"]) == 1
+        assert opt_map[102]["voters"][0]["name"] == "You"
+
+        # Test non-existent poll details
+        res_none = client.get("/api/poll_details/9999")
+        assert res_none.status_code == 200
+        assert res_none.get_json()["available"] is True
+        assert len(res_none.get_json()["options"]) == 0
+
+    def test_ios_poll_messages_and_details(self, tmp_path):
+        """Test iOS poll hydration in /api/messages and /api/poll_details."""
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        wa_conn = sqlite3.connect(str(wa_path))
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZHIDDEN INTEGER DEFAULT 0);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER, ZMESSAGEINFO INTEGER,
+                ZMESSAGEDATE INTEGER, ZFROMJID TEXT, ZGROUPMEMBER INTEGER, ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT, ZMEDIAITEM INTEGER, ZPARENTMESSAGE INTEGER, ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT, ZMEDIALOCALPATH TEXT);
+            CREATE TABLE ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+        """)
+
+        # Contacts in ContactsV2
+        cv2_path = tmp_path / "ContactsV2.sqlite"
+        cv2_conn = sqlite3.connect(str(cv2_path))
+        cv2_conn.executescript("""
+            CREATE TABLE ZWAADDRESSBOOKCONTACT (Z_PK INTEGER PRIMARY KEY, ZWHATSAPPID TEXT, ZFULLNAME TEXT);
+        """)
+        cv2_conn.execute(
+            "INSERT INTO ZWAADDRESSBOOKCONTACT (Z_PK, ZWHATSAPPID, ZFULLNAME) VALUES (1, '15553333333@s.whatsapp.net', 'Charlie')"
+        )
+        cv2_conn.commit()
+        cv2_conn.close()
+
+        # Chat
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO, ZCONTACTJID) VALUES (5, 1, '15550009999-12345@g.us')"
+        )
+
+        # Synthetic poll protobuf: question "Meeting day?", options ["Monday", "Friday"], single choice
+        votes = [
+            {
+                "option_indices": [0],
+                "client_ts": 1700000000000,
+                "voter_jid": "15553333333@s.whatsapp.net",
+            },
+            {"option_indices": [1], "client_ts": 1700000001000, "voter_jid": "You"},
+        ]
+        blob = self._make_poll_blob("Meeting day?", ["Monday", "Friday"], False, votes)
+
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT) "
+            "VALUES (50, 5, 0, 1000, 46, NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (1, 50, ?)", (blob,)
+        )
+        wa_conn.commit()
+
+        app = viewer.create_app(tmp_path)
+        client = app.test_client()
+
+        # Test /api/messages
+        res = client.get("/api/messages?chat_id=5&chat_type=group")
+        assert res.status_code == 200
+        msgs = res.get_json()
+        assert len(msgs) == 1
+        poll_msg = msgs[0]
+        assert poll_msg["media_type"] == "poll"
+        assert poll_msg["text_body"] == "Meeting day?"
+        assert poll_msg["poll"]["question"] == "Meeting day?"
+        assert poll_msg["poll"]["multiple_answers"] is False
+        assert poll_msg["poll"]["total_votes"] == 2
+        assert poll_msg["poll"]["total_voters"] == 2
+        opts = poll_msg["poll"]["options"]
+        assert len(opts) == 2
+        assert opts[0]["name"] == "Monday"
+        assert opts[0]["vote_count"] == 1
+        assert opts[1]["name"] == "Friday"
+        assert opts[1]["vote_count"] == 1
+        assert opts[1]["user_selected"] is True
+
+        # Test /api/poll_details/50
+        res_det = client.get("/api/poll_details/50")
+        assert res_det.status_code == 200
+        det = res_det.get_json()
+        assert det["available"] is True
+        assert det["question"] == "Meeting day?"
+        assert det["total_voters"] == 2
+        opt_map = {o["id"]: o for o in det["options"]}
+        assert len(opt_map[0]["voters"]) == 1
+        assert opt_map[0]["voters"][0]["name"] == "Charlie"
+        assert len(opt_map[1]["voters"]) == 1
+        assert opt_map[1]["voters"][0]["name"] == "You"
+
+    def test_poll_chat_preview(self, tmp_path):
+        """Test that polls format properly in /api/chats sidebar previews."""
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        make_archive_db(archive_path)
+
+        wa_path = tmp_path / "msgstore.db"
+        wa_conn = sqlite3.connect(str(wa_path))
+        wa_conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER, text_data TEXT, message_type INTEGER DEFAULT 0);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (message_row_id INTEGER PRIMARY KEY, text_data TEXT, from_me INTEGER DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER DEFAULT 0);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE message_poll (message_row_id INTEGER PRIMARY KEY, selectable_options_count INTEGER);
+            CREATE TABLE message_poll_option (_id INTEGER PRIMARY KEY, message_row_id INTEGER, option_name TEXT, vote_total INTEGER);
+        """)
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '15551111111')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (1, 1, 'Event Planning', 0, 1700000000000, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES (1, 1, 0, 1, 1700000000000, 'Picnic or Hike?', 66)"
+        )
+        wa_conn.commit()
+
+        app = viewer.create_app(tmp_path)
+        client = app.test_client()
+
+        res = client.get("/api/chats")
+        assert res.status_code == 200
+        chats = res.get_json()
+        assert len(chats) == 1
+        assert chats[0]["last_msg_type"] == "poll"
+        assert chats[0]["last_msg_preview"] == "Picnic or Hike?"
+
+    def test_poll_search_indexing(self, tmp_path):
+        """Test FTS search indexing matches poll questions and options."""
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        make_archive_db(archive_path)
+
+        wa_path = tmp_path / "msgstore.db"
+        wa_conn = sqlite3.connect(str(wa_path))
+        wa_conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER, text_data TEXT, message_type INTEGER DEFAULT 0);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (message_row_id INTEGER PRIMARY KEY, text_data TEXT, from_me INTEGER DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER DEFAULT 0);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE message_poll (message_row_id INTEGER PRIMARY KEY, selectable_options_count INTEGER);
+            CREATE TABLE message_poll_option (_id INTEGER PRIMARY KEY, message_row_id INTEGER, option_name TEXT, vote_total INTEGER);
+        """)
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '15551111111')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (1, 1, 'Game Night', 0, 1700000000000, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES (1, 1, 0, 1, 1700000000000, 'Boardgames?', 66)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_poll_option (_id, message_row_id, option_name, vote_total) VALUES (1, 1, 'Catan', 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_poll_option (_id, message_row_id, option_name, vote_total) VALUES (2, 1, 'Carcassonne', 1)"
+        )
+        wa_conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=True)
+        client = app.test_client()
+
+        # Trigger indexing
+        client.get("/api/messages?chat_id=1&chat_type=group")
+        time.sleep(0.5)
+
+        # Match question
+        q_res = client.get("/api/search?q=Boardgames")
+        assert q_res.status_code == 200
+        assert len(q_res.get_json()["results"]) == 1
+
+        # Match option
+        opt_res = client.get("/api/search?q=Carcassonne")
+        assert opt_res.status_code == 200
+        assert len(opt_res.get_json()["results"]) == 1
