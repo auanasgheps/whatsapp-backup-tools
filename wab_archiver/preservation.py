@@ -2,10 +2,13 @@ import contextlib
 import logging
 import os
 import sqlite3
+import sys
 from datetime import UTC, datetime
 from typing import NamedTuple
 
 from shared.source_detection import WA_DATABASES_DIR_NAME
+
+from .progress import ProgressReporter
 
 # ==============================================================================
 # preservation.py — Preserving Deleted Messages Between Archival Runs
@@ -194,6 +197,34 @@ def verify_account_match(
     return True
 
 
+def _ensure_android_diff_indexes(conn: sqlite3.Connection) -> None:
+    """Ensure indexes on key_id and fallback columns exist for fast diff performance."""
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pres_cur_key_id ON message(key_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pres_old_key_id ON old_db.message(key_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pres_cur_fallback ON message(chat_row_id, timestamp, from_me)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pres_cur_revoked ON message(key_id) WHERE message_type = 15"
+        )
+
+
+def _ensure_ios_diff_indexes(conn: sqlite3.Connection) -> None:
+    """Ensure indexes on ZSTANZAID and fallback columns exist for fast diff performance."""
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pres_cur_stanza ON ZWAMESSAGE(ZSTANZAID)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pres_old_stanza ON old_db.ZWAMESSAGE(ZSTANZAID)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pres_cur_fallback ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE, ZISFROMME)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pres_cur_revoked ON ZWAMESSAGE(ZSTANZAID) WHERE ZMESSAGETYPE = 14"
+        )
+
+
 def diff_and_extract_android(
     old_db_path: str, new_db_path: str, archive_db_path: str, logger: logging.Logger
 ) -> list[dict]:
@@ -208,6 +239,7 @@ def diff_and_extract_android(
         conn.row_factory = sqlite3.Row
         conn.execute("ATTACH DATABASE ? AS old_db", (old_db_path,))
         conn.execute("ATTACH DATABASE ? AS arch", (archive_db_path,))
+        _ensure_android_diff_indexes(conn)
 
         # Inspect table schema in old_db and arch to adapt queries gracefully
         old_tables = {
@@ -293,9 +325,15 @@ def diff_and_extract_android(
         ms_action_col = "ms.action_type" if has_system else "NULL"
 
         # Check total messages in old vs new to detect device reset scenario
-        old_count = conn.execute("SELECT COUNT(*) FROM old_db.message").fetchone()[0]
+        row_span = conn.execute(
+            "SELECT MIN(_id), MAX(_id), COUNT(*) FROM old_db.message"
+        ).fetchone()
+        min_id, max_id, old_count = row_span[0], row_span[1], row_span[2]
         new_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
         is_device_reset = (old_count >= 100) and (new_count < old_count * 0.1)
+
+        if old_count == 0 or min_id is None or max_id is None:
+            return []
 
         # 1. Identify missing messages (deleted on device)
         sql_deleted = f"""
@@ -386,26 +424,21 @@ def diff_and_extract_android(
             {con_s_join}
             {con_sq_join}
             {ac_join}
-            WHERE (
-                m.key_id IS NOT NULL AND m.key_id != ''
-                AND NOT EXISTS (SELECT 1 FROM message cur WHERE cur.key_id = m.key_id)
-            ) OR (
-                (m.key_id IS NULL OR m.key_id = '')
-                AND NOT EXISTS (
-                    SELECT 1 FROM message cur
-                    WHERE cur.chat_row_id = m.chat_row_id
-                      AND cur.timestamp = m.timestamp
-                      AND cur.from_me = m.from_me
+            WHERE m._id >= ? AND m._id < ? AND (
+                (
+                    m.key_id IS NOT NULL AND m.key_id != ''
+                    AND NOT EXISTS (SELECT 1 FROM message cur WHERE cur.key_id = m.key_id)
+                ) OR (
+                    (m.key_id IS NULL OR m.key_id = '')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM message cur
+                        WHERE cur.chat_row_id = m.chat_row_id
+                          AND cur.timestamp = m.timestamp
+                          AND cur.from_me = m.from_me
+                    )
                 )
             )
         """
-        for r in conn.execute(sql_deleted):
-            row_dict = dict(r)
-            row_dict["preserved_at"] = now_iso
-            row_dict["source_platform"] = "android"
-            row_dict["reactions"] = None
-            row_dict["participant_name"] = ""
-            extracted_rows.append(row_dict)
 
         # 2. Identify revoked messages ("Delete for everyone")
         sql_revoked = f"""
@@ -464,34 +497,65 @@ def diff_and_extract_android(
             {ac_join}
             WHERE m.message_type != 15 AND cur.message_type = 15
         """
-        for r in conn.execute(sql_revoked):
-            row_dict = dict(r)
-            row_dict["preserved_at"] = now_iso
-            row_dict["source_platform"] = "android"
-            row_dict["reactions"] = None
-            row_dict["participant_name"] = ""
-            extracted_rows.append(row_dict)
 
-        # Hydrate reactions from old_db if available
-        if has_add_on and extracted_rows:
-            msg_ids = [r["msg_id"] for r in extracted_rows]
-            # Batch into chunks of 900 for SQLite parameter limits
-            chunk_size = 900
-            for i in range(0, len(msg_ids), chunk_size):
-                chunk = msg_ids[i : i + chunk_size]
-                ph = ",".join("?" * len(chunk))
-                rx_sql = f"""
-                    SELECT ao.parent_message_row_id AS msg_id,
-                           GROUP_CONCAT(r.reaction) AS reactions
-                    FROM old_db.message_add_on ao
-                    JOIN old_db.message_add_on_reaction r ON r.message_add_on_row_id = ao._id
-                    WHERE ao.parent_message_row_id IN ({ph})
-                    GROUP BY ao.parent_message_row_id
-                """
-                rx_map = dict(conn.execute(rx_sql, chunk).fetchall())
-                for row in extracted_rows:
-                    if row["msg_id"] in rx_map:
-                        row["reactions"] = rx_map[row["msg_id"]]
+        span = max_id - min_id + 1
+        chunk_size = max(5000, span // 50)
+        progress = ProgressReporter("Preservation", old_count, logger, sys.stderr, 0.2)
+
+        try:
+            for start_id in range(min_id, max_id + 1, chunk_size):
+                end_id = start_id + chunk_size
+                for r in conn.execute(sql_deleted, (start_id, end_id)):
+                    row_dict = dict(r)
+                    row_dict["preserved_at"] = now_iso
+                    row_dict["source_platform"] = "android"
+                    row_dict["reactions"] = None
+                    row_dict["participant_name"] = ""
+                    extracted_rows.append(row_dict)
+
+                curr_progress = min(
+                    old_count, int((min(end_id, max_id + 1) - min_id) / span * old_count)
+                )
+                progress.update(curr_progress, {"deleted": len(extracted_rows)})
+
+            progress.update(old_count, {"deleted": len(extracted_rows)})
+            deleted_count = len(extracted_rows)
+
+            for r in conn.execute(sql_revoked):
+                row_dict = dict(r)
+                row_dict["preserved_at"] = now_iso
+                row_dict["source_platform"] = "android"
+                row_dict["reactions"] = None
+                row_dict["participant_name"] = ""
+                extracted_rows.append(row_dict)
+
+            revoked_count = len(extracted_rows) - deleted_count
+
+            # Hydrate reactions from old_db if available
+            if has_add_on and extracted_rows:
+                msg_ids = [r["msg_id"] for r in extracted_rows]
+                # Batch into chunks of 900 for SQLite parameter limits
+                chunk_size_rx = 900
+                for i in range(0, len(msg_ids), chunk_size_rx):
+                    chunk = msg_ids[i : i + chunk_size_rx]
+                    ph = ",".join("?" * len(chunk))
+                    rx_sql = f"""
+                        SELECT ao.parent_message_row_id AS msg_id,
+                               GROUP_CONCAT(r.reaction) AS reactions
+                        FROM old_db.message_add_on ao
+                        JOIN old_db.message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+                        WHERE ao.parent_message_row_id IN ({ph})
+                        GROUP BY ao.parent_message_row_id
+                    """
+                    rx_map = dict(conn.execute(rx_sql, chunk).fetchall())
+                    for row in extracted_rows:
+                        if row["msg_id"] in rx_map:
+                            row["reactions"] = rx_map[row["msg_id"]]
+
+            progress.finish({"deleted": deleted_count, "revoked": revoked_count})
+        except Exception:
+            progress.finish({"deleted": len(extracted_rows), "revoked": 0})
+            raise
 
     logger.debug(f"Android diff completed: {len(extracted_rows)} candidates for preservation.")
     return extracted_rows
@@ -511,6 +575,7 @@ def diff_and_extract_ios(
         conn.row_factory = sqlite3.Row
         conn.execute("ATTACH DATABASE ? AS old_db", (old_db_path,))
         conn.execute("ATTACH DATABASE ? AS arch", (archive_db_path,))
+        _ensure_ios_diff_indexes(conn)
 
         old_tables = {
             r[0]
@@ -583,9 +648,15 @@ def diff_and_extract_ios(
         )
         ac_path_col = "ac.archive_path" if has_arch_copies else "NULL"
 
-        old_count = conn.execute("SELECT COUNT(*) FROM old_db.ZWAMESSAGE").fetchone()[0]
+        row_span = conn.execute(
+            "SELECT MIN(Z_PK), MAX(Z_PK), COUNT(*) FROM old_db.ZWAMESSAGE"
+        ).fetchone()
+        min_id, max_id, old_count = row_span[0], row_span[1], row_span[2]
         new_count = conn.execute("SELECT COUNT(*) FROM ZWAMESSAGE").fetchone()[0]
         is_device_reset = (old_count >= 100) and (new_count < old_count * 0.1)
+
+        if old_count == 0 or min_id is None or max_id is None:
+            return []
 
         sql_deleted = f"""
             SELECT
@@ -655,26 +726,21 @@ def diff_and_extract_ios(
             {con_s_join}
             {con_sq_join}
             {ac_join}
-            WHERE (
-                m.ZSTANZAID IS NOT NULL AND m.ZSTANZAID != ''
-                AND NOT EXISTS (SELECT 1 FROM ZWAMESSAGE cur WHERE cur.ZSTANZAID = m.ZSTANZAID)
-            ) OR (
-                (m.ZSTANZAID IS NULL OR m.ZSTANZAID = '')
-                AND NOT EXISTS (
-                    SELECT 1 FROM ZWAMESSAGE cur
-                    WHERE cur.ZCHATSESSION = m.ZCHATSESSION
-                      AND cur.ZMESSAGEDATE = m.ZMESSAGEDATE
-                      AND cur.ZISFROMME = m.ZISFROMME
+            WHERE m.Z_PK >= ? AND m.Z_PK < ? AND (
+                (
+                    m.ZSTANZAID IS NOT NULL AND m.ZSTANZAID != ''
+                    AND NOT EXISTS (SELECT 1 FROM ZWAMESSAGE cur WHERE cur.ZSTANZAID = m.ZSTANZAID)
+                ) OR (
+                    (m.ZSTANZAID IS NULL OR m.ZSTANZAID = '')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM ZWAMESSAGE cur
+                        WHERE cur.ZCHATSESSION = m.ZCHATSESSION
+                          AND cur.ZMESSAGEDATE = m.ZMESSAGEDATE
+                          AND cur.ZISFROMME = m.ZISFROMME
+                    )
                 )
             )
         """
-        for r in conn.execute(sql_deleted):
-            row_dict = dict(r)
-            row_dict["preserved_at"] = now_iso
-            row_dict["source_platform"] = "ios"
-            row_dict["reactions"] = None
-            row_dict["participant_name"] = ""
-            extracted_rows.append(row_dict)
 
         sql_revoked = f"""
             SELECT
@@ -716,13 +782,43 @@ def diff_and_extract_ios(
             {ac_join}
             WHERE m.ZMESSAGETYPE != 14 AND cur.ZMESSAGETYPE = 14
         """
-        for r in conn.execute(sql_revoked):
-            row_dict = dict(r)
-            row_dict["preserved_at"] = now_iso
-            row_dict["source_platform"] = "ios"
-            row_dict["reactions"] = None
-            row_dict["participant_name"] = ""
-            extracted_rows.append(row_dict)
+
+        span = max_id - min_id + 1
+        chunk_size = max(5000, span // 50)
+        progress = ProgressReporter("Preservation", old_count, logger, sys.stderr, 0.2)
+
+        try:
+            for start_id in range(min_id, max_id + 1, chunk_size):
+                end_id = start_id + chunk_size
+                for r in conn.execute(sql_deleted, (start_id, end_id)):
+                    row_dict = dict(r)
+                    row_dict["preserved_at"] = now_iso
+                    row_dict["source_platform"] = "ios"
+                    row_dict["reactions"] = None
+                    row_dict["participant_name"] = ""
+                    extracted_rows.append(row_dict)
+
+                curr_progress = min(
+                    old_count, int((min(end_id, max_id + 1) - min_id) / span * old_count)
+                )
+                progress.update(curr_progress, {"deleted": len(extracted_rows)})
+
+            progress.update(old_count, {"deleted": len(extracted_rows)})
+            deleted_count = len(extracted_rows)
+
+            for r in conn.execute(sql_revoked):
+                row_dict = dict(r)
+                row_dict["preserved_at"] = now_iso
+                row_dict["source_platform"] = "ios"
+                row_dict["reactions"] = None
+                row_dict["participant_name"] = ""
+                extracted_rows.append(row_dict)
+
+            revoked_count = len(extracted_rows) - deleted_count
+            progress.finish({"deleted": deleted_count, "revoked": revoked_count})
+        except Exception:
+            progress.finish({"deleted": len(extracted_rows), "revoked": 0})
+            raise
 
     logger.debug(f"iOS diff completed: {len(extracted_rows)} candidates for preservation.")
     return extracted_rows
