@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import json
 import logging
 import mimetypes
@@ -140,6 +141,177 @@ def _extract_ios_group_description(raw_pic_id: str) -> str | None:
         else:
             break
     return None
+
+
+def _parse_ios_poll_blob(data: bytes) -> dict | None:
+    """Parse poll question, options, selection mode, and votes from iOS ZRECEIPTINFO protobuf."""
+    if not data:
+        return None
+    offset = 0
+    poll_blob = None
+    while offset < len(data):
+        try:
+            tag, offset = _read_varint(data, offset)
+        except ValueError:
+            break
+        field_num = tag >> 3
+        wire_type = tag & 0x07
+        if wire_type == 0:
+            try:
+                _, offset = _read_varint(data, offset)
+            except ValueError:
+                break
+        elif wire_type == 1:
+            offset += 8
+        elif wire_type == 2:
+            try:
+                length, offset = _read_varint(data, offset)
+            except ValueError:
+                break
+            val = data[offset : offset + length]
+            offset += length
+            if field_num == 8:
+                poll_blob = val
+        elif wire_type == 5:
+            offset += 4
+        else:
+            break
+
+    if not poll_blob:
+        return None
+
+    p_offset = 0
+    question = ""
+    options = []
+    selectable_count = 0
+    votes = []
+
+    while p_offset < len(poll_blob):
+        try:
+            p_tag, p_offset = _read_varint(poll_blob, p_offset)
+        except ValueError:
+            break
+        p_num = p_tag >> 3
+        p_wire = p_tag & 0x07
+        if p_wire == 0:
+            try:
+                val, p_offset = _read_varint(poll_blob, p_offset)
+            except ValueError:
+                break
+            if p_num == 4:
+                selectable_count = val
+        elif p_wire == 1:
+            p_offset += 8
+        elif p_wire == 2:
+            try:
+                p_len, p_offset = _read_varint(poll_blob, p_offset)
+            except ValueError:
+                break
+            p_data = poll_blob[p_offset : p_offset + p_len]
+            p_offset += p_len
+            if p_num == 2:
+                question = p_data.decode("utf-8", errors="replace")
+            elif p_num == 3:
+                opt_offset = 0
+                opt_name = ""
+                while opt_offset < len(p_data):
+                    try:
+                        o_tag, opt_offset = _read_varint(p_data, opt_offset)
+                    except ValueError:
+                        break
+                    o_num = o_tag >> 3
+                    o_wire = o_tag & 0x07
+                    if o_wire == 0:
+                        try:
+                            _, opt_offset = _read_varint(p_data, opt_offset)
+                        except ValueError:
+                            break
+                    elif o_wire == 1:
+                        opt_offset += 8
+                    elif o_wire == 2:
+                        try:
+                            o_len, opt_offset = _read_varint(p_data, opt_offset)
+                        except ValueError:
+                            break
+                        o_bytes = p_data[opt_offset : opt_offset + o_len]
+                        opt_offset += o_len
+                        if o_num == 1:
+                            opt_name = o_bytes.decode("utf-8", errors="replace")
+                    elif o_wire == 5:
+                        opt_offset += 4
+                    else:
+                        break
+                options.append(opt_name)
+            elif p_num == 5:
+                v_offset = 0
+                v_opt_indices = []
+                client_ts = 0
+                stanza_id = ""
+                voter_jid = ""
+                server_ts = 0
+                while v_offset < len(p_data):
+                    try:
+                        v_tag, v_offset = _read_varint(p_data, v_offset)
+                    except ValueError:
+                        break
+                    v_num = v_tag >> 3
+                    v_wire = v_tag & 0x07
+                    if v_wire == 0:
+                        try:
+                            v_val, v_offset = _read_varint(p_data, v_offset)
+                        except ValueError:
+                            break
+                        if v_num == 1:
+                            v_opt_indices.append(v_val)
+                        elif v_num == 2:
+                            client_ts = v_val
+                        elif v_num == 5:
+                            server_ts = v_val
+                    elif v_wire == 1:
+                        v_offset += 8
+                    elif v_wire == 2:
+                        try:
+                            v_len, v_offset = _read_varint(p_data, v_offset)
+                        except ValueError:
+                            break
+                        v_bytes = p_data[v_offset : v_offset + v_len]
+                        v_offset += v_len
+                        if v_num == 1:
+                            p_idx = 0
+                            while p_idx < len(v_bytes):
+                                try:
+                                    idx_val, p_idx = _read_varint(v_bytes, p_idx)
+                                except ValueError:
+                                    break
+                                v_opt_indices.append(idx_val)
+                        elif v_num == 3:
+                            stanza_id = v_bytes.decode("utf-8", errors="replace")
+                        elif v_num == 4:
+                            voter_jid = v_bytes.decode("utf-8", errors="replace")
+                    elif v_wire == 5:
+                        v_offset += 4
+                    else:
+                        break
+                votes.append(
+                    {
+                        "option_indices": v_opt_indices,
+                        "client_ts": client_ts,
+                        "stanza_id": stanza_id,
+                        "voter_jid": voter_jid,
+                        "server_ts": server_ts,
+                    }
+                )
+        elif p_wire == 5:
+            p_offset += 4
+        else:
+            break
+
+    return {
+        "question": question,
+        "options": options,
+        "multiple_answers": (selectable_count == 0),
+        "votes": votes,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +486,30 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                     "CREATE INDEX IF NOT EXISTS idx_message_chat_ts "
                     "ON message(chat_row_id, timestamp)"
                 )
+        if "idx_poll_option_msg" not in existing:
+            has_poll_opt = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_poll_option'"
+            ).fetchone()
+            if has_poll_opt:
+                cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(message_poll_option)").fetchall()
+                }
+                if "message_row_id" in cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_poll_option_msg "
+                        "ON message_poll_option(message_row_id)"
+                    )
+        if "idx_message_add_on_parent" not in existing:
+            has_add_on = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
+            ).fetchone()
+            if has_add_on:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(message_add_on)").fetchall()}
+                if "parent_message_row_id" in cols and "message_add_on_type" in cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_message_add_on_parent "
+                        "ON message_add_on(parent_message_row_id, message_add_on_type)"
+                    )
         if "idx_zwamessage_chat_ts" not in existing:
             has_ios = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
@@ -1132,6 +1328,143 @@ def _resolve_and_cache_reactions(
     archive_conn.commit()
 
 
+def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection) -> None:
+    """Hydrate poll structured data for poll messages in rows."""
+    if not rows or wa_conn is None:
+        return
+    poll_rows = [r for r in rows if r.get("media_type") == "poll"]
+    if not poll_rows:
+        return
+
+    if source_type == "android":
+        tables = {
+            r[0]
+            for r in wa_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "message_poll" not in tables or "message_poll_option" not in tables:
+            return
+        mids = [r["msg_id"] for r in poll_rows]
+        ph = ",".join("?" * len(mids))
+
+        meta_rows = wa_conn.execute(
+            f"SELECT message_row_id, selectable_options_count FROM message_poll WHERE message_row_id IN ({ph})",
+            mids,
+        ).fetchall()
+        meta_map = {r["message_row_id"]: r["selectable_options_count"] for r in meta_rows}
+
+        opt_rows = wa_conn.execute(
+            f"SELECT _id, message_row_id, option_name, vote_total FROM message_poll_option WHERE message_row_id IN ({ph}) ORDER BY _id ASC",
+            mids,
+        ).fetchall()
+
+        user_voted_options = set()
+        voter_counts = {}
+        if "message_add_on" in tables and "message_add_on_poll_vote_selected_option" in tables:
+            try:
+                user_v_rows = wa_conn.execute(
+                    f"""
+                    SELECT ps.message_poll_option_id
+                    FROM message_add_on mao
+                    JOIN message_add_on_poll_vote_selected_option ps ON ps.message_add_on_row_id = mao._id
+                    WHERE mao.parent_message_row_id IN ({ph}) AND mao.from_me = 1 AND mao.message_add_on_type = 67
+                    """,
+                    mids,
+                ).fetchall()
+                user_voted_options = {r[0] for r in user_v_rows}
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                vc_rows = wa_conn.execute(
+                    f"""
+                    SELECT parent_message_row_id, COUNT(DISTINCT _id) AS voter_cnt
+                    FROM message_add_on
+                    WHERE parent_message_row_id IN ({ph}) AND message_add_on_type = 67
+                    GROUP BY parent_message_row_id
+                    """,
+                    mids,
+                ).fetchall()
+                voter_counts = {r["parent_message_row_id"]: r["voter_cnt"] for r in vc_rows}
+            except sqlite3.OperationalError:
+                pass
+
+        options_by_mid = collections.defaultdict(list)
+        for opt in opt_rows:
+            options_by_mid[opt["message_row_id"]].append(
+                {
+                    "id": opt["_id"],
+                    "name": opt["option_name"] or "",
+                    "vote_count": opt["vote_total"] or 0,
+                    "user_selected": opt["_id"] in user_voted_options,
+                }
+            )
+
+        for r in poll_rows:
+            mid = r["msg_id"]
+            opts = options_by_mid.get(mid, [])
+            total_votes = sum(o["vote_count"] for o in opts)
+            total_voters = voter_counts.get(mid, total_votes)
+            r["poll"] = {
+                "question": r.get("text_body") or "",
+                "multiple_answers": (meta_map.get(mid, 0) == 0),
+                "total_votes": total_votes,
+                "total_voters": total_voters,
+                "options": opts,
+            }
+
+    elif source_type == "ios":
+        tables = {
+            r[0]
+            for r in wa_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "ZWAMESSAGEINFO" not in tables:
+            return
+        mids = [r["msg_id"] for r in poll_rows]
+        ph = ",".join("?" * len(mids))
+        info_rows = wa_conn.execute(
+            f"SELECT ZMESSAGE, ZRECEIPTINFO FROM ZWAMESSAGEINFO WHERE ZMESSAGE IN ({ph}) AND ZRECEIPTINFO IS NOT NULL",
+            mids,
+        ).fetchall()
+        info_map = {r["ZMESSAGE"]: r["ZRECEIPTINFO"] for r in info_rows}
+
+        for r in poll_rows:
+            mid = r["msg_id"]
+            blob = info_map.get(mid)
+            if not blob:
+                r["poll"] = None
+                continue
+            parsed = _parse_ios_poll_blob(bytes(blob))
+            if not parsed:
+                r["poll"] = None
+                continue
+            votes = parsed["votes"]
+            opts = []
+            for idx, opt_name in enumerate(parsed["options"]):
+                cnt = sum(1 for v in votes if idx in v["option_indices"])
+                user_selected = any(
+                    idx in v["option_indices"]
+                    for v in votes
+                    if not v["voter_jid"] or v["voter_jid"] == "You"
+                )
+                opts.append(
+                    {
+                        "id": idx,
+                        "name": opt_name,
+                        "vote_count": cnt,
+                        "user_selected": user_selected,
+                    }
+                )
+            total_votes = sum(o["vote_count"] for o in opts)
+            r["text_body"] = parsed["question"]
+            r["poll"] = {
+                "question": parsed["question"],
+                "multiple_answers": parsed["multiple_answers"],
+                "total_votes": total_votes,
+                "total_voters": len(votes),
+                "options": opts,
+            }
+
+
 def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> None:
     if not rows:
         return
@@ -1332,9 +1665,17 @@ def _stream_fts_rows(
             or text_body in ("true", "false")
         ):
             continue
+        if msg_type == 46 and not text_body:
+            receipt = row["poll_receipt_info"] if "poll_receipt_info" in row.keys() else None
+            if receipt:
+                parsed_poll = _parse_ios_poll_blob(bytes(receipt))
+                if parsed_poll:
+                    opts_text = " ".join(parsed_poll["options"])
+                    text_body = f"{parsed_poll['question']} {opts_text}".strip()
         is_media = (
             row["message_type"] is not None
             and row["message_type"] != 0
+            and row["message_type"] not in (46, 66)
             and (row["media_file"] is not None or row["message_type"] in (4, 14))
         )
         if not text_body and not is_media:
@@ -1386,6 +1727,14 @@ def _fts_android_chat(
     else:
         where = "WHERE c.subject IS NULL AND COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT)) = ?"
         params = (chat_id,)
+    has_poll_opt = wa_conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_poll_option'"
+    ).fetchone()
+    poll_opt_sql = (
+        " || ' ' || COALESCE((SELECT GROUP_CONCAT(option_name, ' ') FROM message_poll_option WHERE message_row_id = m._id), '')"
+        if has_poll_opt
+        else ""
+    )
     cursor = wa_conn.execute(
         f"""
         SELECT
@@ -1396,7 +1745,12 @@ def _fts_android_chat(
             END                                                      AS chat_id,
             CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
             COALESCE(m.timestamp, 0)                                AS timestamp_ms,
-            COALESCE(m.text_data, '')                                AS text_body,
+            COALESCE(
+                CASE WHEN m.message_type = 66 THEN m.text_data {poll_opt_sql}
+                     ELSE m.text_data
+                END,
+                ''
+            )                                                        AS text_body,
             m.message_type,
             mm.file_path                                            AS media_file
         FROM message m
@@ -1476,6 +1830,17 @@ def _fts_ios_chat(
 ):
     mi_cols = {row[1] for row in wa_conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
     vcard_name_col = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
+    has_msg_info = wa_conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
+    ).fetchone()
+    msg_info_join = (
+        "LEFT JOIN ZWAMESSAGEINFO mi_info ON mi_info.ZMESSAGE = m.Z_PK" if has_msg_info else ""
+    )
+    poll_receipt_col = (
+        "mi_info.ZRECEIPTINFO AS poll_receipt_info,"
+        if has_msg_info
+        else "NULL AS poll_receipt_info,"
+    )
     sql = f"""
         SELECT
             m.Z_PK                                                      AS rowid,
@@ -1484,11 +1849,13 @@ def _fts_ios_chat(
                  ELSE 'contact' END                                     AS chat_type,
             CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
             COALESCE(m.ZTEXT, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_col} END, '') AS text_body,
+            {poll_receipt_col}
             m.ZMESSAGETYPE                                              AS message_type,
             mi.ZMEDIALOCALPATH                                          AS media_file
         FROM ZWAMESSAGE m
         LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
         LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+        {msg_info_join}
         WHERE CAST(m.ZCHATSESSION AS TEXT) = ?
           {hd_clause}
         ORDER BY m.ZMESSAGEDATE ASC
@@ -1664,6 +2031,7 @@ _ANDROID_FILTER = """
         OR (m.message_type IN (15, 64))
         OR (m.message_type IN (42, 43, 82))
         OR (m.message_type = 7)
+        OR (m.message_type = 66)
     )
 """
 
@@ -1717,6 +2085,7 @@ _IOS_SELECT = f"""
             WHEN m.ZMESSAGETYPE = 38 THEN 'image'
             WHEN m.ZMESSAGETYPE = 39 THEN 'video'
             WHEN m.ZMESSAGETYPE = 53 THEN 'audio'
+            WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -1733,7 +2102,7 @@ _IOS_SELECT = f"""
             END,
             ''
         )                                                             AS text_body,
-        COALESCE(qm.ZTEXT, '')                                       AS quoted_text,
+        COALESCE(qm.ZTEXT, CASE WHEN qm.ZMESSAGETYPE = 46 THEN 'Poll' END, '') AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
@@ -1785,6 +2154,7 @@ _BASE_IOS_FILTER = """
         OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
+        OR (m.ZMESSAGETYPE = 46)
         OR (m.ZMESSAGETYPE = 6)
     )
 """
@@ -1799,8 +2169,8 @@ _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
 
 _ANDROID_FILTER_TS = _ANDROID_FILTER
 
-_ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type IN (0, 7, 15, 64))"
-_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 6, 14))"
+_ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type IN (0, 7, 15, 64, 66))"
+_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 6, 14, 46))"
 
 _ANDROID_IS_LINK = (
     "(m.message_type IS NULL OR m.message_type = 0)"
@@ -2671,6 +3041,7 @@ def create_app(output_root: Path, rescan: bool = False):
         OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
+        OR (m.ZMESSAGETYPE = 46)
         {ios_service_filter}
     )
 """
@@ -2720,6 +3091,7 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.ZMESSAGETYPE = 38 THEN 'image'
             WHEN m.ZMESSAGETYPE = 39 THEN 'video'
             WHEN m.ZMESSAGETYPE = 53 THEN 'audio'
+            WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -2737,7 +3109,7 @@ def create_app(output_root: Path, rescan: bool = False):
             END,
             ''
         )                                                             AS text_body,
-        COALESCE(qm.ZTEXT, '')                                       AS quoted_text,
+        COALESCE(qm.ZTEXT, CASE WHEN qm.ZMESSAGETYPE = 46 THEN 'Poll' END, '') AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
@@ -2800,6 +3172,7 @@ def create_app(output_root: Path, rescan: bool = False):
         OR (m.message_type IN (15, 64))
         OR (m.message_type IN (42, 43, 82))
         OR (m.message_type = 7 AND {ms_action_clause})
+        OR (m.message_type = 66)
     )
     """
     globals()["_ANDROID_FILTER_TS"] = globals()["_ANDROID_FILTER"]
@@ -2879,6 +3252,7 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.message_type = 42 THEN 'image'
             WHEN m.message_type = 43 THEN 'video'
             WHEN m.message_type = 82 THEN 'audio'
+            WHEN m.message_type = 66 THEN 'poll'
             WHEN m.message_type IS NULL OR m.message_type = 0 THEN
                 CASE WHEN m.text_data IS NOT NULL
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
@@ -3302,6 +3676,28 @@ def create_app(output_root: Path, rescan: bool = False):
                 else:
                     d["last_msg_preview"] = ""
                     d["last_msg_type"] = "text"
+            elif (source_type == "android" and raw_type == 66) or (
+                source_type == "ios" and raw_type == 46
+            ):
+                d["is_view_once"] = 0
+                d["last_msg_type"] = "poll"
+                if source_type == "android":
+                    d["last_msg_preview"] = d.get("last_msg_preview") or "Poll"
+                else:
+                    poll_q = ""
+                    if last_msg_id:
+                        try:
+                            info_r = conn.execute(
+                                "SELECT ZRECEIPTINFO FROM ZWAMESSAGEINFO WHERE ZMESSAGE = ? AND ZRECEIPTINFO IS NOT NULL",
+                                (last_msg_id,),
+                            ).fetchone()
+                            if info_r and info_r[0]:
+                                parsed = _parse_ios_poll_blob(bytes(info_r[0]))
+                                if parsed and parsed["question"]:
+                                    poll_q = parsed["question"]
+                        except sqlite3.OperationalError:
+                            pass
+                    d["last_msg_preview"] = poll_q or "Poll"
             elif (source_type == "android" and raw_type in (4, 14)) or (
                 source_type == "ios" and raw_type == 4
             ):
@@ -3373,6 +3769,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         for row in rows:
                             if row["msg_id"] in rx_map:
                                 row["reactions"] = rx_map[row["msg_id"]]
+                    _hydrate_poll_rows(rows, source_type, get_wa())
                 return jsonify(rows)
 
         conn = get_wa()
@@ -3484,6 +3881,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 daemon=True,
             ).start()
 
+        _hydrate_poll_rows(rows, source_type, conn)
         return jsonify(rows)
 
     # ---- API: messages around a timestamp ----------------------------------
@@ -3549,6 +3947,7 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("group_event_type", None)
             row.pop("raw_msg_type", None)
             row.pop("member_jid", None)
+        _hydrate_poll_rows(combined, source_type, conn)
         return jsonify(_strip_none_reactions(combined))
 
     # ---- API: media gallery ------------------------------------------------
@@ -4135,6 +4534,274 @@ def create_app(output_root: Path, rescan: bool = False):
                     reactors.append({"name": name, "emoji": emoji_char, "from_me": 0})
 
             return jsonify({"available": True, "total": len(reactors), "reactors": reactors})
+
+    # ---- API: poll details ----------------------------------------------------
+
+    @app.route("/api/poll_details/<int:message_id>")
+    def api_poll_details(message_id):
+        conn = get_wa()
+        if conn is None:
+            return jsonify({"available": False})
+
+        if source_type == "android":
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "message_poll" not in tables or "message_poll_option" not in tables:
+                return jsonify({"available": False})
+
+            q_row = conn.execute(
+                "SELECT text_data FROM message WHERE _id = ?", (message_id,)
+            ).fetchone()
+            question = q_row[0] if q_row and q_row[0] else ""
+
+            meta_row = conn.execute(
+                "SELECT selectable_options_count FROM message_poll WHERE message_row_id = ?",
+                (message_id,),
+            ).fetchone()
+            selectable_count = meta_row[0] if meta_row else 0
+
+            opt_rows = conn.execute(
+                "SELECT _id, option_name, vote_total FROM message_poll_option WHERE message_row_id = ? ORDER BY _id ASC",
+                (message_id,),
+            ).fetchall()
+
+            voters_by_opt = {opt["_id"]: [] for opt in opt_rows}
+            total_voters_set = set()
+            if "message_add_on" in tables and "message_add_on_poll_vote_selected_option" in tables:
+                has_lid_dn = "lid_display_name" in tables
+                ldn_rx_join = (
+                    """
+                    LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = mao.sender_jid_row_id
+                    LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = mao.sender_jid_row_id
+                    LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
+                    """
+                    if has_lid_dn
+                    else ""
+                )
+                ldn_rx_arm = (
+                    """
+                    NULLIF(ldn_direct.display_name, ''),
+                    NULLIF(ldn_mapped.display_name, ''),
+                    """
+                    if has_lid_dn
+                    else ""
+                )
+                mao_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(message_add_on)").fetchall()
+                }
+                has_pv = "message_add_on_poll_vote" in tables
+                pv_join = (
+                    "LEFT JOIN message_add_on_poll_vote pv ON pv.message_add_on_row_id = mao._id"
+                    if has_pv
+                    else ""
+                )
+                if "timestamp" in mao_cols and has_pv:
+                    ts_expr = "COALESCE(mao.timestamp, pv.sender_timestamp, 0)"
+                    order_expr = "COALESCE(mao.timestamp, pv.sender_timestamp, 0) ASC"
+                elif "timestamp" in mao_cols:
+                    ts_expr = "COALESCE(mao.timestamp, 0)"
+                    order_expr = "mao.timestamp ASC"
+                elif has_pv:
+                    ts_expr = "COALESCE(pv.sender_timestamp, 0)"
+                    order_expr = "pv.sender_timestamp ASC"
+                else:
+                    ts_expr = "0"
+                    order_expr = "mao._id ASC"
+
+                try:
+                    vote_rows = conn.execute(
+                        f"""
+                        SELECT
+                            ps.message_poll_option_id,
+                            mao._id AS add_on_id,
+                            mao.from_me,
+                            {ts_expr} AS timestamp_ms,
+                            COALESCE(
+                                NULLIF(con_s.display_name, ''),
+                                CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
+                                CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
+                                     THEN '+' || COALESCE(j2.user, j.user) END,
+                                {ldn_rx_arm}
+                                ''
+                            ) AS sender_name
+                        FROM message_add_on mao
+                        JOIN message_add_on_poll_vote_selected_option ps ON ps.message_add_on_row_id = mao._id
+                        {pv_join}
+                        LEFT JOIN jid j ON j._id = mao.sender_jid_row_id
+                        LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = mao.sender_jid_row_id
+                        LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
+                        {ldn_rx_join}
+                        LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)
+                        WHERE mao.parent_message_row_id = ? AND mao.message_add_on_type = 67
+                        ORDER BY {order_expr}
+                        """,
+                        (message_id,),
+                    ).fetchall()
+
+                    for vr in vote_rows:
+                        total_voters_set.add(vr["add_on_id"])
+                        opt_id = vr["message_poll_option_id"]
+                        if opt_id in voters_by_opt:
+                            voter_name = (
+                                "You" if vr["from_me"] == 1 else (vr["sender_name"] or "Unknown")
+                            )
+                            voters_by_opt[opt_id].append(
+                                {
+                                    "name": voter_name,
+                                    "timestamp_ms": vr["timestamp_ms"],
+                                }
+                            )
+                except sqlite3.OperationalError:
+                    pass
+
+            return jsonify(
+                {
+                    "available": True,
+                    "msg_id": message_id,
+                    "question": question,
+                    "multiple_answers": (selectable_count == 0),
+                    "total_voters": len(total_voters_set),
+                    "options": [
+                        {
+                            "id": opt["_id"],
+                            "name": opt["option_name"] or "",
+                            "vote_count": opt["vote_total"] or len(voters_by_opt[opt["_id"]]),
+                            "voters": voters_by_opt[opt["_id"]],
+                        }
+                        for opt in opt_rows
+                    ],
+                }
+            )
+
+        else:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGEINFO'"
+            ).fetchone()
+            if not table_exists:
+                return jsonify({"available": False})
+
+            row = conn.execute(
+                """
+                SELECT mi.ZRECEIPTINFO, m.ZCHATSESSION AS chat_session_pk
+                FROM ZWAMESSAGEINFO mi
+                JOIN ZWAMESSAGE m ON m.Z_PK = mi.ZMESSAGE
+                WHERE mi.ZMESSAGE = ?
+                """,
+                (message_id,),
+            ).fetchone()
+            if not row or not row[0]:
+                return jsonify({"available": False})
+
+            parsed = _parse_ios_poll_blob(bytes(row[0]))
+            if not parsed:
+                return jsonify({"available": False})
+
+            my_row = conn.execute(
+                """
+                SELECT COALESCE(gm.ZMEMBERJID, m.ZFROMJID) AS me_jid
+                FROM ZWAMESSAGE m
+                LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+                WHERE m.ZCHATSESSION = ? AND m.ZISFROMME = 1
+                LIMIT 1
+                """,
+                (row["chat_session_pk"],),
+            ).fetchone()
+            my_phone = None
+            if my_row and my_row["me_jid"]:
+                at = my_row["me_jid"].find("@")
+                if at > 0:
+                    my_phone = my_row["me_jid"][:at]
+
+            def _resolve_number(num: str) -> str | None:
+                r = conn.execute(
+                    "SELECT full_name FROM _ios_contacts WHERE jid = ?", (f"{num}@s.whatsapp.net",)
+                ).fetchone()
+                if r and r[0]:
+                    return r[0]
+                r = conn.execute(
+                    "SELECT display_name FROM arch.contacts WHERE number = ?", (num,)
+                ).fetchone()
+                if r and r[0]:
+                    return r[0]
+                return None
+
+            def _resolve_lid(lid_jid: str) -> str | None:
+                r = conn.execute(
+                    "SELECT full_name, phone_number FROM _ios_contacts WHERE jid = ?", (lid_jid,)
+                ).fetchone()
+                if r and r[0] and not r[0].startswith("+"):
+                    return r[0]
+                try:
+                    r_cs = conn.execute(
+                        "SELECT ZPARTNERNAME FROM ZWACHATSESSION WHERE ZCONTACTJID = ? "
+                        "AND ZPARTNERNAME IS NOT NULL AND ZPARTNERNAME != '' LIMIT 1",
+                        (lid_jid,),
+                    ).fetchone()
+                    if r_cs and r_cs[0]:
+                        return r_cs[0]
+                    r_pp = conn.execute(
+                        "SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ? "
+                        "AND ZPUSHNAME IS NOT NULL AND ZPUSHNAME != '' LIMIT 1",
+                        (lid_jid,),
+                    ).fetchone()
+                    if r_pp and r_pp[0]:
+                        return r_pp[0]
+                except sqlite3.OperationalError as e:
+                    if "no such table" not in str(e).lower():
+                        raise
+                if r and r[1]:
+                    return f"+{r[1]}"
+                if r and r[0]:
+                    return r[0]
+                return None
+
+            voters_by_opt = {idx: [] for idx in range(len(parsed["options"]))}
+            for v in parsed["votes"]:
+                v_jid = v["voter_jid"]
+                v_ts = v["server_ts"] or v["client_ts"] or 0
+                if not v_jid or v_jid == "You" or (my_phone and v_jid.startswith(my_phone)):
+                    v_name = "You"
+                elif v_jid.endswith("@s.whatsapp.net"):
+                    phone = v_jid.split("@")[0]
+                    v_name = _resolve_number(phone) or f"+{phone}"
+                elif v_jid.endswith("@lid"):
+                    v_name = _resolve_lid(v_jid) or "Unknown"
+                elif v_jid.isdigit():
+                    v_name = _resolve_number(v_jid) or f"+{v_jid}"
+                else:
+                    v_name = v_jid
+
+                for o_idx in v["option_indices"]:
+                    if o_idx in voters_by_opt:
+                        voters_by_opt[o_idx].append(
+                            {
+                                "name": v_name,
+                                "timestamp_ms": v_ts,
+                            }
+                        )
+
+            return jsonify(
+                {
+                    "available": True,
+                    "msg_id": message_id,
+                    "question": parsed["question"],
+                    "multiple_answers": parsed["multiple_answers"],
+                    "total_voters": len(parsed["votes"]),
+                    "options": [
+                        {
+                            "id": idx,
+                            "name": opt_name,
+                            "vote_count": len(voters_by_opt[idx]),
+                            "voters": voters_by_opt[idx],
+                        }
+                        for idx, opt_name in enumerate(parsed["options"])
+                    ],
+                }
+            )
 
     # ---- API: chat info -------------------------------------------------------
 
