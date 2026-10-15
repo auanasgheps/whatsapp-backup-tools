@@ -2835,6 +2835,26 @@ class TestConfigInParseArgs:
             args = wa.parse_args()
         assert args.link_duplicates is True
 
+    def test_config_sections_flattened(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        toml_content = f"""
+output = "{out}"
+
+[features]
+link_duplicates = true
+since = "2024-01-01"
+
+[android]
+wa_root = "/wa"
+"""
+        self._write_config(cfg, toml_content)
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.link_duplicates is True
+        assert args.since == "2024-01-01"
+        assert args.wa_roots == ["/wa"]
+
     def test_autodetect_single_config_yes(self, tmp_path):
         cfg = tmp_path / "config.toml"
         out = self._toml_path(tmp_path)
