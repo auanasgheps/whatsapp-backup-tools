@@ -432,7 +432,10 @@
       el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
       el.dataset.id = chat.id;
       el.dataset.type = chat.type;
-      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
+      const tagHtml = chat.is_preserved_only
+        ? '<span class="chat-preserved-tag" title="Preserved from previous backup (chat deleted on device)">Preserved</span>'
+        : '';
+      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
       el.addEventListener('click', () => selectChat(chat, el));
       list.appendChild(el);
     });
@@ -965,7 +968,7 @@
       badge.textContent = 'You';
       meta.appendChild(badge);
     }
-    const showInfo = msg.media_type !== 'deleted' && (msg.from_me ? !!msg.msg_id : !!msg.archive_path);
+    const showInfo = msg.media_type !== 'deleted' && ((msg.from_me && !msg.is_preserved) ? !!msg.msg_id : (!!msg.archive_path || !!msg.is_preserved));
     if (showInfo) {
       const infoBtn = document.createElement('span');
       infoBtn.className = 'msg-info-btn';
@@ -973,9 +976,28 @@
       infoBtn.textContent = 'ⓘ';
       infoBtn.addEventListener('click', e => {
         e.stopPropagation();
-        showMsgDetails(msg.from_me ? msg.msg_id : null, infoBtn, msg.archive_path || null);
+        showMsgDetails(
+          (msg.from_me && !msg.is_preserved) ? msg.msg_id : null,
+          infoBtn,
+          msg.archive_path || null,
+          msg.is_preserved ? { reason: msg.preservation_reason, at: msg.preserved_at } : null
+        );
       });
       meta.appendChild(infoBtn);
+    }
+    if (msg.is_preserved) {
+      const presSpan = document.createElement('span');
+      presSpan.className = 'msg-preserved';
+      presSpan.textContent = 'Preserved';
+      const reasonLabel = msg.preservation_reason === 'revoked_by_sender'
+        ? 'Preserved from previous backup (revoked by sender)'
+        : (msg.preservation_reason === 'chat_deleted'
+          ? 'Preserved from previous backup (chat deleted on device)'
+          : 'Preserved from previous backup (deleted on device)');
+      const presTs = typeof msg.preserved_at === 'number' ? msg.preserved_at * 1000 : Date.parse(msg.preserved_at);
+      const presDate = !isNaN(presTs) ? ' on ' + fmtTime(presTs) : '';
+      presSpan.title = reasonLabel + presDate;
+      meta.appendChild(presSpan);
     }
     if (msg.is_edited && msg.media_type !== 'deleted') {
       const editedSpan = document.createElement('span');
@@ -3068,8 +3090,17 @@
     return '—';
   }
 
-  async function showMsgDetails(msgId, anchorEl, archivePath) {
+  async function showMsgDetails(msgId, anchorEl, archivePath, presInfo) {
     let html = '';
+
+    if (presInfo) {
+      const reasonText = presInfo.reason === 'revoked_by_sender'
+        ? 'Revoked by sender'
+        : (presInfo.reason === 'chat_deleted' ? 'Chat deleted on device' : 'Deleted on device');
+      const presTs = typeof presInfo.at === 'number' ? presInfo.at * 1000 : Date.parse(presInfo.at);
+      const atText = !isNaN(presTs) ? fmtTime(presTs) : (presInfo.at || 'Unknown');
+      html += `<div class="msg-details-row"><span class="msg-details-label">Preserved</span><span class="msg-details-value">${reasonText} (${atText})</span></div>`;
+    }
 
     if (msgId !== null) {
       msgDetailsPopup.innerHTML = '<span style="color:var(--text-muted)">Loading…</span>';

@@ -26,7 +26,7 @@ from datetime import date, datetime
 
 from shared import db, hashing
 
-from . import adb_extractor, android_handler, archive_db, backup_reader, ios_handler
+from . import adb_extractor, android_handler, archive_db, backup_reader, ios_handler, preservation
 from .progress import ProgressReporter
 
 # ==============================================================================
@@ -1153,6 +1153,7 @@ _VALID_CONFIG_KEYS = {
     "pull_media",
     "staging",
     "link_duplicates",
+    "preserve_deleted",
 }
 
 _EXAMPLE_CONFIG = """\
@@ -1178,6 +1179,7 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # -----------------------------------------------------------------------------
 # Archiving Features & Filtering
 # -----------------------------------------------------------------------------
+# preserve_deleted = false              # Preserve messages/chats deleted on phone or revoked by sender across runs
 # link_duplicates  = false              # Save disk space by hardlinking duplicate media across chats
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 
@@ -1522,6 +1524,14 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Hardlink duplicate media files across chats instead of copying bytes.",
     )
+    archive_p.add_argument(
+        "-P",
+        "--preserve-deleted",
+        action="store_true",
+        dest="preserve_deleted",
+        default=False,
+        help="Preserve messages deleted or revoked on device into preserved_messages.db.",
+    )
     # Apply config defaults to the archive subparser.
     archive_p.set_defaults(**_config)
 
@@ -1726,7 +1736,35 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
         db_dir = os.path.join(args.output, "Whatsapp Databases")
         os.makedirs(db_dir, exist_ok=True)
         decrypted_db = os.path.join(db_dir, "msgstore.db")
+
+        old_android_db_copy = None
+        if getattr(args, "preserve_deleted", False):
+            if os.path.isfile(decrypted_db):
+                tmp_f = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+                old_android_db_copy = tmp_f.name
+                tmp_f.close()
+                shutil.copy2(decrypted_db, old_android_db_copy)
+            else:
+                logger.info(
+                    "Preserve-deleted: First run detected in output directory; no previous database to diff."
+                )
+
         args.msgstore = decrypt_msgstore(args.msgstore, args.e2e_key, decrypted_db, logger)
+
+        if old_android_db_copy is not None:
+            try:
+                archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+                preservation.preserve_deleted_messages(
+                    old_android_db_copy,
+                    decrypted_db,
+                    args.output,
+                    archive_db_path,
+                    "android",
+                    logger,
+                )
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(old_android_db_copy)
 
 
 def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: logging.Logger):
@@ -1741,6 +1779,21 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
     # iOS backup mode
     # -------------------------------------------------------------------------
     if args.ios_backup:
+        existing_chat_storage = os.path.join(
+            args.output, "Whatsapp Databases", "ChatStorage.sqlite"
+        )
+        old_ios_db_copy = None
+        if getattr(args, "preserve_deleted", False):
+            if os.path.isfile(existing_chat_storage):
+                tmp_f = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
+                old_ios_db_copy = tmp_f.name
+                tmp_f.close()
+                shutil.copy2(existing_chat_storage, old_ios_db_copy)
+            else:
+                logger.info(
+                    "Preserve-deleted: First run detected in output directory; no previous database to diff."
+                )
+
         is_encrypted = backup_reader.detect_encrypted(args.ios_backup, logger)
         if is_encrypted and not args.ios_password:
             logger.error("Your iPhone backup is encrypted. Re-run with --ios-password <password>.")
@@ -1764,6 +1817,21 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
                 logger,
             )
             media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
+
+        if old_ios_db_copy is not None:
+            try:
+                archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+                preservation.preserve_deleted_messages(
+                    old_ios_db_copy,
+                    msgstore_path,
+                    args.output,
+                    archive_db_path,
+                    "ios",
+                    logger,
+                )
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(old_ios_db_copy)
 
         args.msgstore = msgstore_path
         platform = "ios"
@@ -1988,6 +2056,22 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     if platform is None:
         platform = detect_db_platform(args.msgstore)
         logger.info(f"Detected platform: {platform}")
+
+    if getattr(args, "preserve_deleted", False) and not args.ios_backup:
+        target_name = "msgstore.db" if platform == "android" else "ChatStorage.sqlite"
+        dest_db = os.path.join(args.output, "Whatsapp Databases", target_name)
+        if os.path.isfile(dest_db) and os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
+            archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+            preservation.preserve_deleted_messages(
+                dest_db,
+                args.msgstore,
+                args.output,
+                archive_db_path,
+                platform or "android",
+                logger,
+            )
+            shutil.copy2(args.msgstore, dest_db)
+            args.msgstore = dest_db
 
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()

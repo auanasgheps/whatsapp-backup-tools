@@ -2835,6 +2835,14 @@ class TestConfigInParseArgs:
             args = wa.parse_args()
         assert args.link_duplicates is True
 
+    def test_config_preserve_deleted(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\npreserve_deleted = true\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.preserve_deleted is True
+
     def test_config_sections_flattened(self, tmp_path):
         cfg = tmp_path / "config.toml"
         out = self._toml_path(tmp_path)

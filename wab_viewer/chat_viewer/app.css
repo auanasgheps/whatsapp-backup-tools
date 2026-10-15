@@ -12,6 +12,9 @@
       --text-muted: #8696a0;
       --accent: #00a884;
       --border: #222d34;
+      --preserved-bg: rgba(234, 179, 8, 0.15);
+      --preserved-text: #eab308;
+      --preserved-border: rgba(234, 179, 8, 0.35);
       --sidebar-w: 300px;
       --font-size: 15px;
     }
@@ -29,6 +32,9 @@
       --text-muted: #54656f;
       --accent: #00a884;
       --border: #d1d7db;
+      --preserved-bg: #fef9c3;
+      --preserved-text: #854d0e;
+      --preserved-border: #facc15;
     }
 
     /* ---- Pico overrides: reset opinionated defaults that break our layout ---- */
@@ -245,6 +251,21 @@
     .chat-item .chat-name { font-size: var(--font-size); font-weight: 500; margin-bottom: 2px; }
     .chat-item .chat-meta { font-size: 12px; color: var(--text-muted); }
     .chat-item.group .chat-name::before { content: '👥 '; }
+    .chat-preserved-tag {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.2;
+      padding: 1px 5px;
+      margin-left: 6px;
+      border-radius: 3px;
+      background: var(--preserved-bg);
+      color: var(--preserved-text);
+      border: 1px solid var(--preserved-border);
+      vertical-align: middle;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
 
     #search-results { display: none; transition: opacity 0.12s; }
     #search-results.has-results { display: block; }
@@ -399,6 +420,21 @@
     .msg-text li, .msg-caption li { margin: 0; }
     .msg-meta { font-size: 10px; color: var(--text-muted); text-align: right; margin-top: 2px; }
     .msg-edited { display: inline; font-size: 10px; margin-right: 4px; color: inherit; user-select: none; }
+    .msg-preserved {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.2;
+      padding: 1px 5px;
+      margin-right: 4px;
+      border-radius: 3px;
+      background: var(--preserved-bg);
+      color: var(--preserved-text);
+      border: 1px solid var(--preserved-border);
+      vertical-align: middle;
+      cursor: help;
+      user-select: none;
+    }
 
     .msg-row.sent .msg-meta { color: var(--bubble-meta); }
     .msg-row.recv .msg-meta { color: var(--bubble-meta); }
