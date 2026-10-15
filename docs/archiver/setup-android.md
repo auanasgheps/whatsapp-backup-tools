@@ -144,6 +144,8 @@ wab-archiver archive \
 
 The archiver pulls the encrypted backup and contacts directly from the device and decrypts on the fly. No separate steps needed.
 
+> 💡 **Connection Troubleshooting & Authorization Recovery:** If your phone is unauthorized, offline, or multiple devices are connected, the archiver diagnoses the exact connection state. For unauthorized devices, it offers to restart the ADB server on the spot to re-prompt the "Allow USB debugging" dialog on your phone.
+
 > 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 
 ---

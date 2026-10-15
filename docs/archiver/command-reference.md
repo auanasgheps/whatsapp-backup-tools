@@ -256,6 +256,18 @@ wab-archiver archive \
 >
 > ⚠️ **File Modification Timestamps:** Because filesystem hardlinks share the same record on disk, updating a hardlinked file's modification time updates it across all linked paths. When duplicate media is forwarded across different dates, the file modification timestamp (`mtime`) on disk will reflect the timestamp of the most recent message. To preserve the exact date context for every copy, the archiver records the original message timestamp of each duplicate in `.wa_media_archiver.db` and exports it in the `original_timestamp` column of `duplicate_media_report.csv`.
 
+#### Preserve Deleted Messages (`-P`, `--preserve-deleted`)
+
+By default, the archiver reflects your current backup database. If you delete messages or chats from your phone between backup runs, passing `-P` / `--preserve-deleted` retains any messages that are missing from the current run into `preserved_messages.db`:
+
+```bash
+wab-archiver archive \
+  --config config.toml \
+  --preserve-deleted
+```
+
+> 💡 Preserved messages and sender-revoked messages ("Delete for Everyone") are automatically surfaced in the viewer with visual badges and preserved chat indicators.
+
 #### iOS — pre-extracted mode
 
 Only use this mode if you know what you are doing.
@@ -279,6 +291,7 @@ wab-archiver archive \
 | `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths. One row per path, sortable by `file_count`. Includes columns `link_status` (`hardlink` if sharing physical storage, `duplicate_copy` if an independent physical file) and `original_timestamp` (message timestamp formatted in run timezone, preserving original file date context for hardlinks). Only written when duplicates exist |
 | `source_conflicts_report.csv` | Written when multiple `--wa-root` roots contain different versions of the same file. Only written when conflicts exist |
 | `.wa_media_archiver.db` | SQLite database storing all persistent state: contact folder index, group folder index, and the file archive map. Health checks run automatically on every open. Do not delete unless you want to reset all tracking |
+| `preserved_messages.db` | SQLite database storing preserved messages, sender-revoked messages, and deleted chats across backup cycles. Only written when `-P` / `--preserve-deleted` is enabled |
 | `adb_conflicts_report.csv` | Written when `--pull-media` finds a file with the same name but different content on the device vs the archive. Only written when conflicts exist; resolve manually |
 | `restore_report.csv` | Written by restore mode when issues are encountered. Not written if there are no issues |
 
@@ -286,7 +299,7 @@ wab-archiver archive \
 
 ## Restore Mode
 
-Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly inside the archive folder, without needing the original device or database.
+Restore mode reconstructs the flat `WhatsApp/Media/` folder structure and restores the latest WhatsApp database (`Databases/msgstore.db`) directly inside the archive folder, without needing the original device or database.
 
 > ⚠️ **Android archives only.** iOS media cannot be restored this way.
 
@@ -294,12 +307,13 @@ Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly i
 wab-archiver restore --output /path/to/output
 ```
 
-The reconstructed tree is written to `<output>/Media/`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
+The reconstructed tree is written to `<output>/Media/` and `<output>/Databases/msgstore.db`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
 
-**How it works:** During every real (non-dry-run) forward run, the archiver records each original `file_path` and the archive path it was copied to in `.wa_media_archiver.db`. Restore mode reads this data and copies each unique original file back to its original relative path. If the same file was archived from multiple chats, it is restored exactly once.
+**How it works:** During every real (non-dry-run) forward run, the archiver records each original `file_path` and the archive path it was copied to in `.wa_media_archiver.db`. Restore mode reads this data and copies each unique original file back to its original relative path. If the same file was archived from multiple chats, it is restored exactly once. In addition, the latest database from `Whatsapp Databases/msgstore.db` is restored to `Databases/msgstore.db`.
 
 **Behavior & Limitations:**
 - Restored files are reconstructed as independent physical copies (never hardlinks) to faithfully recreate the original phone filesystem layout
+- The latest WhatsApp database (`msgstore.db`) is automatically restored to `<output>/Databases/msgstore.db` alongside media files
 - Virtual contact cards (`.vcf`) are ignored during restore mode since they were generated from database records rather than files on the phone
 - Restored file timestamps reflect the WhatsApp message timestamp (same as in the archive), not the original on-device creation date
 - If a forward run was filtered with `--since` or `--limit`, the restore index only covers what was actually archived
