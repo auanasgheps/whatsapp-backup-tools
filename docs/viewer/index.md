@@ -65,6 +65,7 @@ The source WA database must be present for the viewer to resolve media file path
 - **Image lightbox** — click any image to open it full-screen with smooth zoom and pan
 - **Media gallery & stickers** — browse chat media by thumbnail grid or folder tree, with dedicated stickers section and contact cards (.vcf)
 - **Fast, lightweight scrolling** — chats and massive media collections load smoothly on demand without slowing down your browser
+- **Message & chat preservation** — messages deleted on the device ("Delete for Me"), messages revoked by sender ("Delete for Everyone"), or chats entirely deleted from the device are seamlessly preserved and badged when archiving with `-P` / `--preserve-deleted`
 
 ## Cache Invalidation
 
@@ -95,7 +96,7 @@ The server binds to `127.0.0.1` by default — it is not accessible from other m
 
 ## Known Limitations
 
-- **Timeline scope**: Call history and poll interactions/votes are not yet rendered in the chat timeline.
+- **Timeline scope**: Call history logs are not rendered in the chat timeline.
 - **Profile pictures are not displayed.** On Android this requires extracting `wa.db` (not yet implemented). On iOS no local image data is available in the backup.
 - **Friendly profile push names for unsaved contacts are not available on Android without root.** On Android, user-chosen friendly push names (`wa_name`) reside exclusively in `/data/data/com.whatsapp/databases/wa.db` within WhatsApp's private application sandbox. WhatsApp excludes contact records from local backups (`WhatsApp/Backups/wa.db.crypt14/15`), so extracting `wa.db` requires root access on the device, which is not implemented in the Viewer or Archiver. Unsaved contacts on Android will therefore display their phone number. On iOS, WhatsApp stores push names directly in `ChatStorage.sqlite` (`ZWAPROFILEPUSHNAME`), so they are preserved in standard backups.
 - **iOS read and played receipts require `MessagingInfraDatabase.sqlite`.** On modern iOS backups (v2.24+), delivery, read, and voice message played timestamps are read directly from `MessagingInfraDatabase.sqlite`. For older backups or messages not recorded in it (such as those sent via web or companion devices), the viewer falls back to `ChatStorage.sqlite`'s `ZRECEIPTINFO`, which shows "Read (time not stored)" when a read state is confirmed without a timestamp.

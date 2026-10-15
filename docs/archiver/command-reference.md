@@ -29,6 +29,7 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # business = false                      # Target WhatsApp Business instead of regular WhatsApp
 
 # --- Archiving Features & Filtering ---
+# preserve_deleted = false              # Preserve messages/chats deleted on phone or revoked by sender across runs
 # link_duplicates  = false              # Hardlink duplicate media across chats instead of copying bytes to save disk space
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 
@@ -81,7 +82,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
                      [--business] [--pull-media] [--staging PATH]
                      -o PATH [-l PATH] [--timezone TZ] [--config PATH]
                      [--dry-run] [--limit N] [--since DATE]
-                     [--link-duplicates]
+                     [--link-duplicates] [-P]
 ```
 
 | Argument | Required | Description |
@@ -105,6 +106,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--limit N` | No | Cap rows returned per chat type. Total rows ≤ N. Useful for test runs |
 | `--since DATE` | No | Only archive media from messages sent or received on or after this date (`YYYY-MM-DD`) |
 | `--link-duplicates` | No | Hardlink duplicate media files across chats instead of copying bytes, saving disk space. Gracefully falls back to copying if the destination filesystem does not support hardlinks (e.g. exFAT, FAT32, unsupported network shares) |
+| `-P`, `--preserve-deleted` | No | Preserve messages deleted on the phone ("Delete for Me"), messages revoked by sender ("Delete for Everyone"), and deleted chats from previous backup runs into `preserved_messages.db` |
 
 ### `restore`
 

@@ -1608,6 +1608,220 @@ def _detect_source_db(output_root: Path):
     return (None, None)
 
 
+def _detect_preserved_db(output_root: Path) -> Path | None:
+    wa_db_dir = output_root / "Whatsapp Databases"
+    for base in (wa_db_dir, output_root):
+        cand = base / "preserved_messages.db"
+        if cand.exists():
+            return cand
+    return None
+
+
+def _fts_preserved_chat(
+    pres_conn: sqlite3.Connection,
+    cache_conn: sqlite3.Connection,
+    chat_id: str,
+    chat_type: str,
+    on_progress,
+) -> None:
+    rows = pres_conn.execute(
+        """
+        SELECT rowid, chat_id, chat_type, timestamp_ms, text_body, media_type, archive_path
+        FROM preserved_messages
+        WHERE chat_id = ? AND chat_type = ?
+        """,
+        (chat_id, chat_type),
+    ).fetchall()
+    idx_batch = []
+    fts_batch = []
+    for r in rows:
+        rowid = -int(r["rowid"])
+        text_body = r["text_body"] or ""
+        is_media = bool(r["archive_path"] or r["media_type"] not in ("text", "service"))
+        if not text_body and not is_media:
+            continue
+        idx_batch.append((rowid, r["chat_id"], r["chat_type"], r["timestamp_ms"]))
+        if text_body:
+            fts_batch.append((rowid, text_body))
+    if idx_batch:
+        cache_conn.executemany(
+            "INSERT OR IGNORE INTO message_index (rowid, chat_id, chat_type, timestamp_ms) VALUES (?, ?, ?, ?)",
+            idx_batch,
+        )
+    if fts_batch:
+        cache_conn.executemany(
+            "INSERT OR IGNORE INTO message_index_fts (rowid, text_body) VALUES (?, ?)",
+            fts_batch,
+        )
+    cache_conn.commit()
+    if on_progress and idx_batch:
+        on_progress(len(idx_batch))
+
+
+def _query_preserved_messages(
+    pres_conn: sqlite3.Connection,
+    chat_id: str,
+    chat_type: str,
+    before: int | None,
+    after: int | None,
+    limit: int,
+) -> list[dict]:
+    if before is not None:
+        sql = """
+            SELECT rowid, * FROM preserved_messages
+            WHERE chat_id = ? AND chat_type = ? AND timestamp_ms < ?
+            ORDER BY timestamp_ms DESC LIMIT ?
+        """
+        rows = pres_conn.execute(sql, (chat_id, chat_type, before, limit)).fetchall()
+    elif after is not None:
+        sql = """
+            SELECT rowid, * FROM preserved_messages
+            WHERE chat_id = ? AND chat_type = ? AND timestamp_ms > ?
+            ORDER BY timestamp_ms ASC LIMIT ?
+        """
+        rows = pres_conn.execute(sql, (chat_id, chat_type, after, limit)).fetchall()
+    else:
+        sql = """
+            SELECT rowid, * FROM preserved_messages
+            WHERE chat_id = ? AND chat_type = ?
+            ORDER BY timestamp_ms DESC LIMIT ?
+        """
+        rows = pres_conn.execute(sql, (chat_id, chat_type, limit)).fetchall()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["msg_id"] = -int(d["rowid"])
+        d["sort_id"] = -int(d["rowid"])
+        d["is_preserved"] = 1
+        d["is_view_once"] = 0
+        d.pop("rowid", None)
+        d.pop("action_type", None)
+        d.pop("participant_name", None)
+        d.pop("source_platform", None)
+        result.append(d)
+    return result
+
+
+def _merge_messages(
+    live_rows: list[dict],
+    pres_rows: list[dict],
+    descending: bool,
+    limit: int,
+) -> list[dict]:
+    if not pres_rows:
+        return live_rows[:limit]
+    if not live_rows:
+        return pres_rows[:limit]
+
+    merged = list(live_rows)
+    used_pres_indexes = set()
+
+    for i, p in enumerate(pres_rows):
+        if p.get("preservation_reason") == "revoked_by_sender":
+            p_ts = p.get("timestamp_ms", 0)
+            p_fm = p.get("from_me", 0)
+            for j, live in enumerate(merged):
+                if live.get("media_type") == "deleted" and live.get("from_me") == p_fm:
+                    if abs(live.get("timestamp_ms", 0) - p_ts) < 2000:
+                        merged[j] = p
+                        used_pres_indexes.add(i)
+                        break
+
+    live_keys = {(r.get("timestamp_ms"), r.get("from_me")) for r in merged}
+
+    for i, p in enumerate(pres_rows):
+        if i in used_pres_indexes:
+            continue
+        key = (p.get("timestamp_ms"), p.get("from_me"))
+        if key not in live_keys:
+            merged.append(p)
+            live_keys.add(key)
+
+    merged.sort(
+        key=lambda r: (r.get("timestamp_ms", 0), r.get("sort_id") or r.get("msg_id") or 0),
+        reverse=descending,
+    )
+    return merged[:limit]
+
+
+def _merge_preserved_chats(
+    result: list[dict],
+    pres_conn: sqlite3.Connection,
+    archive_conn: sqlite3.Connection,
+) -> list[dict]:
+    existing_chats = {(c["id"], c["type"]) for c in result}
+    for c in result:
+        c.setdefault("is_preserved_only", False)
+
+    pres_chats = pres_conn.execute(
+        "SELECT chat_id, chat_type, newest_ts FROM preserved_chats"
+    ).fetchall()
+
+    for pc in pres_chats:
+        cid = pc["chat_id"]
+        ctype = pc["chat_type"]
+        if (cid, ctype) in existing_chats:
+            continue
+
+        display_name = cid
+        if ctype == "group":
+            grp_row = archive_conn.execute(
+                "SELECT subject, folder FROM groups WHERE chat_row_id = ?", (cid,)
+            ).fetchone()
+            if grp_row and grp_row["subject"]:
+                display_name = grp_row["subject"]
+            elif grp_row and grp_row["folder"]:
+                display_name = grp_row["folder"]
+        else:
+            con_row = archive_conn.execute(
+                "SELECT display_name, folder FROM contacts WHERE number = ?", (cid,)
+            ).fetchone()
+            if con_row and con_row["display_name"]:
+                display_name = con_row["display_name"]
+            elif cid == "0":
+                display_name = "WhatsApp"
+            elif con_row and con_row["folder"]:
+                display_name = con_row["folder"]
+            else:
+                display_name = f"+{cid}"
+
+        last_msg = pres_conn.execute(
+            """
+            SELECT text_body, media_type, from_me, media_name
+            FROM preserved_messages
+            WHERE chat_id = ? AND chat_type = ?
+            ORDER BY timestamp_ms DESC LIMIT 1
+            """,
+            (cid, ctype),
+        ).fetchone()
+
+        last_preview = ""
+        last_type = "text"
+        last_from_me = 0
+        if last_msg:
+            last_preview = last_msg["text_body"] or last_msg["media_name"] or ""
+            last_type = last_msg["media_type"] or "text"
+            last_from_me = int(last_msg["from_me"])
+
+        result.append(
+            {
+                "id": cid,
+                "type": ctype,
+                "display_name": display_name,
+                "newest_ts": pc["newest_ts"],
+                "last_msg_preview": last_preview,
+                "last_msg_type": last_type,
+                "last_msg_from_me": last_from_me,
+                "is_preserved_only": True,
+            }
+        )
+        existing_chats.add((cid, ctype))
+
+    result.sort(key=lambda c: c.get("newest_ts") or 0, reverse=True)
+    return result
+
+
 def _source_changed(cache_conn: sqlite3.Connection, source_path: str) -> bool:
     try:
         st = os.stat(source_path)
@@ -1872,23 +2086,40 @@ def _build_fts_chat(
     chat_type: str,
     on_progress=None,
 ):
-    wa_conn = sqlite3.connect(wa_db_path)
-    wa_conn.row_factory = sqlite3.Row
-    if source_type == "android":
-        _fts_android_chat(wa_conn, cache_conn, chat_id, chat_type, on_progress=on_progress)
-    else:
-        ext_db = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", None)
-        if not ext_db:
-            ext_db = _find_ios_db(wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", None)
-        has_ios_hd = _check_ios_hd_association(wa_db_path, ext_db)
-        hd_clause = _IOS_HD_DEDUP_CLAUSE if has_ios_hd else ""
-        if has_ios_hd and ext_db:
-            try:
-                wa_conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db),))
-            except sqlite3.OperationalError:
-                hd_clause = ""
-        _fts_ios_chat(wa_conn, cache_conn, chat_id, on_progress, hd_clause)
-    wa_conn.close()
+    if wa_db_path:
+        wa_conn = sqlite3.connect(wa_db_path)
+        wa_conn.row_factory = sqlite3.Row
+        if source_type == "android":
+            _fts_android_chat(wa_conn, cache_conn, chat_id, chat_type, on_progress=on_progress)
+        else:
+            ext_db = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", None)
+            if not ext_db:
+                ext_db = _find_ios_db(wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", None)
+            has_ios_hd = _check_ios_hd_association(wa_db_path, ext_db)
+            hd_clause = _IOS_HD_DEDUP_CLAUSE if has_ios_hd else ""
+            if has_ios_hd and ext_db:
+                try:
+                    wa_conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db),))
+                except sqlite3.OperationalError:
+                    hd_clause = ""
+            _fts_ios_chat(wa_conn, cache_conn, chat_id, on_progress, hd_clause)
+        wa_conn.close()
+
+    pres_path = None
+    if wa_db_path:
+        pres_path = _detect_preserved_db(Path(wa_db_path).parent)
+        if not pres_path:
+            pres_path = _detect_preserved_db(Path(wa_db_path).parent.parent)
+    if pres_path and pres_path.exists():
+        try:
+            with sqlite3.connect(
+                f"file:{pres_path.resolve().as_posix()}?mode=ro", uri=True
+            ) as p_conn:
+                p_conn.row_factory = sqlite3.Row
+                _fts_preserved_chat(p_conn, cache_conn, chat_id, chat_type, on_progress)
+        except Exception:
+            pass
+
     cache_conn.execute(
         "INSERT OR IGNORE INTO indexed_chats (chat_id, chat_type) VALUES (?, ?)",
         (chat_id, chat_type),
@@ -2534,6 +2765,7 @@ def create_app(output_root: Path, rescan: bool = False):
 
     archive_db_path = get_archive_db_path(output_root)
     source_type, wa_db_path = _detect_source_db(output_root)
+    preserved_db_path = _detect_preserved_db(output_root)
     _ensure_writable(archive_db_path)
     if wa_db_path:
         _ensure_writable(Path(wa_db_path))
@@ -2864,14 +3096,34 @@ def create_app(output_root: Path, rescan: bool = False):
             _wa_local.conn = conn
         return conn
 
+    def get_preserved():
+        if preserved_db_path is None or not preserved_db_path.exists():
+            return None
+        conn = getattr(_wa_local, "pres_conn", None)
+        if conn is None:
+            conn = sqlite3.connect(
+                f"file:{preserved_db_path.resolve().as_posix()}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 5000")
+            _wa_local.pres_conn = conn
+        return conn
+
     @app.teardown_appcontext
     def _close_wa_conn(exc):
-        if source_type is None:
-            return
-        conn = getattr(_wa_local, "conn", None)
-        if conn is not None:
+        if source_type is not None:
+            conn = getattr(_wa_local, "conn", None)
+            if conn is not None:
+                try:
+                    conn.commit()
+                except sqlite3.Error:
+                    pass
+        pres_conn = getattr(_wa_local, "pres_conn", None)
+        if pres_conn is not None:
             try:
-                conn.commit()
+                pres_conn.commit()
             except sqlite3.Error:
                 pass
 
@@ -3323,20 +3575,23 @@ def create_app(output_root: Path, rescan: bool = False):
             """)
                 .fetchall()
             )
-            return jsonify(
-                [
-                    {
-                        "id": r["id"],
-                        "type": r["type"],
-                        "display_name": r["id"],
-                        "newest_ts": r["newest_ts"],
-                        "last_msg_preview": "",
-                        "last_msg_type": "text",
-                        "last_msg_from_me": 0,
-                    }
-                    for r in rows
-                ]
-            )
+            result = [
+                {
+                    "id": r["id"],
+                    "type": r["type"],
+                    "display_name": r["id"],
+                    "newest_ts": r["newest_ts"],
+                    "last_msg_preview": "",
+                    "last_msg_type": "text",
+                    "last_msg_from_me": 0,
+                    "is_preserved_only": False,
+                }
+                for r in rows
+            ]
+            pres = get_preserved()
+            if pres is not None:
+                result = _merge_preserved_chats(result, pres, get_archive())
+            return jsonify(result)
 
         if source_type == "android":
             j_s_is_lid = "j_s.server = 'lid'" if has_jid_server else "0"
@@ -3716,6 +3971,12 @@ def create_app(output_root: Path, rescan: bool = False):
                 d["is_view_once"] = 0
                 d["last_msg_type"] = "text"
             result.append(d)
+        pres = get_preserved()
+        if pres is not None:
+            result = _merge_preserved_chats(result, pres, get_archive())
+        else:
+            for c in result:
+                c.setdefault("is_preserved_only", False)
         return jsonify(result)
 
     # ---- API: paginated messages -------------------------------------------
@@ -3770,10 +4031,23 @@ def create_app(output_root: Path, rescan: bool = False):
                             if row["msg_id"] in rx_map:
                                 row["reactions"] = rx_map[row["msg_id"]]
                     _hydrate_poll_rows(rows, source_type, get_wa())
+                    pres = get_preserved()
+                    if pres is not None:
+                        pres_rows = _query_preserved_messages(
+                            pres, chat_id, chat_type, None, None, limit
+                        )
+                        if pres_rows:
+                            rows = _merge_messages(rows, pres_rows, True, limit)
                 return jsonify(rows)
 
         conn = get_wa()
         if conn is None:
+            pres = get_preserved()
+            if pres is not None:
+                b_val = int(before) if before else None
+                a_val = int(after) if after else None
+                pres_rows = _query_preserved_messages(pres, chat_id, chat_type, b_val, a_val, limit)
+                return jsonify(pres_rows)
             return jsonify([])
 
         if not before and not after:
@@ -3882,6 +4156,14 @@ def create_app(output_root: Path, rescan: bool = False):
             ).start()
 
         _hydrate_poll_rows(rows, source_type, conn)
+        pres = get_preserved()
+        if pres is not None:
+            b_val = int(before) if before else None
+            a_val = int(after) if after else None
+            pres_rows = _query_preserved_messages(pres, chat_id, chat_type, b_val, a_val, limit)
+            if pres_rows:
+                descending = after is None
+                rows = _merge_messages(rows, pres_rows, descending, limit)
         return jsonify(rows)
 
     # ---- API: messages around a timestamp ----------------------------------
@@ -3899,13 +4181,20 @@ def create_app(output_root: Path, rescan: bool = False):
         except ValueError:
             return jsonify({"error": "ts must be an integer"}), 400
 
+        half = limit // 2
         conn = get_wa()
         if conn is None:
+            pres = get_preserved()
+            if pres is not None:
+                pres_before = _query_preserved_messages(
+                    pres, chat_id, chat_type, ts + 1, None, half
+                )
+                pres_after = _query_preserved_messages(pres, chat_id, chat_type, None, ts, half)
+                return jsonify(list(reversed(pres_before)) + pres_after)
             return jsonify([])
 
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
-        half = limit // 2
 
         if source_type == "android":
             chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
@@ -3948,6 +4237,15 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("raw_msg_type", None)
             row.pop("member_jid", None)
         _hydrate_poll_rows(combined, source_type, conn)
+        pres = get_preserved()
+        if pres is not None:
+            pres_before = _query_preserved_messages(pres, chat_id, chat_type, ts + 1, None, half)
+            pres_after = _query_preserved_messages(pres, chat_id, chat_type, None, ts, half)
+            live_before = [r for r in combined if r["timestamp_ms"] <= ts]
+            live_after = [r for r in combined if r["timestamp_ms"] > ts]
+            merged_before = _merge_messages(live_before, pres_before, True, half)
+            merged_after = _merge_messages(live_after, pres_after, False, half)
+            combined = list(reversed(merged_before)) + merged_after
         return jsonify(_strip_none_reactions(combined))
 
     # ---- API: media gallery ------------------------------------------------
@@ -4205,22 +4503,47 @@ def create_app(output_root: Path, rescan: bool = False):
             indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             return jsonify({"results": [], "indexed_count": indexed_count})
 
-        if wa is None:
-            indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
-            return jsonify({"results": [dict(r) for r in idx_rows], "indexed_count": indexed_count})
-
         rowids = [r["rowid"] for r in idx_rows]
-        placeholders = ",".join("?" * len(rowids))
-        id_col = "m._id" if source_type == "android" else "m.Z_PK"
-        select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
-        extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
+        live_rowids = [r for r in rowids if r > 0]
+        pres_rowids = [-r for r in rowids if r < 0]
 
-        rows = wa.execute(
-            f"{select} WHERE {id_col} IN ({placeholders}) {extra} ORDER BY timestamp_ms ASC", rowids
-        ).fetchall()
+        results = []
+        if live_rowids and wa is not None:
+            placeholders = ",".join("?" * len(live_rowids))
+            id_col = "m._id" if source_type == "android" else "m.Z_PK"
+            select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
+            extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
+            rows = wa.execute(
+                f"{select} WHERE {id_col} IN ({placeholders}) {extra} ORDER BY timestamp_ms ASC",
+                live_rowids,
+            ).fetchall()
+            results.extend([dict(r) for r in rows])
+        elif live_rowids and wa is None:
+            results.extend([dict(r) for r in idx_rows if r["rowid"] > 0])
 
+        if pres_rowids:
+            pres = get_preserved()
+            if pres is not None:
+                p_placeholders = ",".join("?" * len(pres_rowids))
+                p_rows = pres.execute(
+                    f"SELECT rowid, * FROM preserved_messages WHERE rowid IN ({p_placeholders})",
+                    pres_rowids,
+                ).fetchall()
+                for pr in p_rows:
+                    d = dict(pr)
+                    d["msg_id"] = -int(d["rowid"])
+                    d["sort_id"] = -int(d["rowid"])
+                    d["is_preserved"] = 1
+                    d["is_view_once"] = 0
+                    d.pop("rowid", None)
+                    d.pop("action_type", None)
+                    d.pop("participant_name", None)
+                    d.pop("source_platform", None)
+                    results.append(d)
+
+        results.sort(key=lambda r: (r.get("timestamp_ms", 0), r.get("msg_id", 0)))
         indexed_count = get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
-        return jsonify({"results": [dict(r) for r in rows], "indexed_count": indexed_count})
+        return jsonify({"results": results, "indexed_count": indexed_count})
 
     # ---- API: message receipts -----------------------------------------------
 
