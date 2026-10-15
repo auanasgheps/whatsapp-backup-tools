@@ -1156,47 +1156,79 @@ _VALID_CONFIG_KEYS = {
 }
 
 _EXAMPLE_CONFIG = """\
-# This is an example config file. Rename it to config.toml to activate it.
+# =============================================================================
 # wab-archiver config
-# All paths can be absolute or relative to where you run the script.
-# Remove the leading # to activate a setting.
 #
-# Windows tip: you can paste Windows paths as-is; backslashes are auto-corrected.
+# Rename this file to config.toml to activate it.
+# All paths can be absolute or relative to where you run the command.
+# Remove the leading '#' to uncomment and activate any setting.
+#
+# Windows tip: You can paste Windows paths as-is (e.g. C:\\Users\\...);
+# backslashes are automatically converted to forward slashes.
+# =============================================================================
 
-output     = "/path/to/archive"         # required
-# msgstore = "msgstore.db"
-# e2e_key  = ""
+# -----------------------------------------------------------------------------
+# Archive Destination & General Settings
+# -----------------------------------------------------------------------------
+output     = "/path/to/archive"         # Destination folder for the archive (required)
+# log      = ""                         # Custom log file path (default: <output>/wab-archiver.log)
+# timezone = ""                         # IANA timezone (e.g. Europe/Rome, UTC) for year folders & reports
+# business = false                      # Target WhatsApp Business instead of regular WhatsApp
 
-# Single WhatsApp source folder (Android: folder containing Media/)
+# -----------------------------------------------------------------------------
+# Archiving Features & Filtering
+# -----------------------------------------------------------------------------
+# link_duplicates  = false              # Save disk space by hardlinking duplicate media across chats
+# since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
+
+# -----------------------------------------------------------------------------
+# Source: Android (Local Files & Folders)
+# -----------------------------------------------------------------------------
+# msgstore = "msgstore.db"              # Path to msgstore.db or msgstore.db.crypt15
+# e2e_key  = ""                         # 64-char hex key for encrypted .crypt15 backups
+# contacts = ""                         # Path to contacts CSV or exported wa_contacts
+
+# Single WhatsApp source folder (folder containing Media/)
 # wa_root  = "/path/to/WhatsApp"
 
-# Multiple source folders — tried in order, best copy wins (Android only)
+# Multiple source folders — searched in order, best copy wins
 # wa_root  = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]
 
-# contacts = ""
-# log      = ""
-# business = false
-# timezone = ""                         # e.g. Europe/Rome
-# since    = ""                         # e.g. 2024-01-01
-# link_duplicates = false              # hardlink duplicate media files across chats
+# -----------------------------------------------------------------------------
+# Source: Android (ADB Mode — Automatic USB Pull)
+# See docs/archiver/setup-android.md
+# -----------------------------------------------------------------------------
+# from_adb   = false                    # Pull msgstore and contacts automatically via ADB
+# pull_media = false                    # Also pull media files from phone storage via ADB
+# staging    = ""                       # Permanent local phone backup folder (copied to output)
 
-# Android — pull via ADB  (wab-archiver archive --from-adb; see setup-android.md)
-# from_adb   = false
-# pull_media = false                    # also pull media files (--pull-media)
-# staging    = ""                       # permanent copy of phone storage (treated as wa_root, copied to output)
-
-# iOS
-# ios_backup   = ""
-# ios_password = ""
-# ios_contacts = ""
+# -----------------------------------------------------------------------------
+# Source: iOS (iPhone Backup)
+# See docs/archiver/setup-ios.md
+# -----------------------------------------------------------------------------
+# ios_backup   = ""                     # Path to iPhone backup folder (containing Manifest.db)
+# ios_password = ""                     # Password for encrypted iPhone backup
+# ios_contacts = ""                     # Path to ContactsV2.sqlite (auto-extracted from backup if omitted)
 """
+
+
+def _flatten_config(data: dict) -> dict:
+    """Flatten single-level TOML sections into a flat configuration dict."""
+    flat = {}
+    for k, v in data.items():
+        if isinstance(v, dict):
+            for sub_k, sub_v in v.items():
+                flat[sub_k] = sub_v
+        else:
+            flat[k] = v
+    return flat
 
 
 def _load_toml(path: str) -> dict:
     try:
         with open(path, "rb") as f:
             raw = f.read()
-        return tomllib.loads(raw.decode("utf-8"))
+        return _flatten_config(tomllib.loads(raw.decode("utf-8")))
     except tomllib.TOMLDecodeError:
         fixed = re.sub(
             r'"([^"]*)"', lambda m: '"' + m.group(1).replace("\\", "/") + '"', raw.decode("utf-8")
@@ -1210,7 +1242,7 @@ def _load_toml(path: str) -> dict:
                 "to forward slashes and the file was updated.",
                 file=sys.stderr,
             )
-            return result
+            return _flatten_config(result)
         except tomllib.TOMLDecodeError as e:
             print(f"ERROR: Could not parse config file {path}:\n  {e}", file=sys.stderr)
             sys.exit(1)

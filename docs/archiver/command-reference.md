@@ -17,32 +17,37 @@ This writes `example-config.toml` next to the package. Open it, fill in your val
 ### Format
 
 ```toml
+# =============================================================================
 # wab-archiver config
-# All paths can be absolute or relative to where you run the script.
+# All paths can be absolute or relative to where you run the command.
+# =============================================================================
 
-output     = "/path/to/archive"
+# --- Archive Destination & General Settings ---
+output     = "/path/to/archive"         # Destination folder for the archive (required)
+# log      = ""                         # Custom log file path (default: <output>/wab-archiver.log)
+# timezone = ""                         # IANA timezone (e.g. Europe/Rome, UTC) for folders & reports
+# business = false                      # Target WhatsApp Business instead of regular WhatsApp
 
-# Optional settings — uncomment to activate:
-# msgstore  = "msgstore.db"
-# e2e_key   = ""
-# wa_root   = ""              # single source folder
-# wa_root   = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]  # multiple source folders
-# contacts  = ""
-# log       = ""
-# business  = false
-# timezone  = ""          # e.g. Europe/Rome
-# since     = ""          # e.g. 2024-01-01
-# link_duplicates = false # hardlink duplicate media files across chats
+# --- Archiving Features & Filtering ---
+# link_duplicates  = false              # Hardlink duplicate media across chats instead of copying bytes to save disk space
+# since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 
-# Android — pull via ADB (wab-archiver archive --from-adb; see setup-android.md)
-# from_adb  = false
-# pull_media = false
-# staging    = ""         # permanent copy of phone storage (treated as wa_root, copied to output)
+# --- Source: Android (Local Files & Folders) ---
+# msgstore = "msgstore.db"              # Path to msgstore.db or msgstore.db.crypt15
+# e2e_key  = ""                         # 64-char hex key for encrypted .crypt15 backups
+# contacts = ""                         # Path to contacts CSV or exported wa_contacts
+# wa_root  = "/path/to/WhatsApp"        # Single source folder (containing Media/)
+# wa_root  = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]  # Multiple source folders
 
-# iOS
-# ios_backup   = ""
-# ios_password = ""
-# ios_contacts = ""
+# --- Source: Android (ADB Mode — USB Connection) ---
+# from_adb   = false                    # Pull msgstore and contacts automatically via ADB
+# pull_media = false                    # Also pull media files from phone storage via ADB
+# staging    = ""                       # Permanent local phone backup folder (copied to output)
+
+# --- Source: iOS (iPhone Backup) ---
+# ios_backup   = ""                     # Path to iPhone backup folder (containing Manifest.db)
+# ios_password = ""                     # Password for encrypted iPhone backup
+# ios_contacts = ""                     # Path to ContactsV2.sqlite (auto-extracted from backup if omitted)
 ```
 
 > 💡 **Windows users:** You can paste Windows paths directly (e.g. `C:\Users\...`). The archiver automatically converts backslashes to forward slashes and updates the config file in place.
