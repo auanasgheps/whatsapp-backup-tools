@@ -102,6 +102,7 @@ When finished, your output folder will be structured as follows:
 │   └── Family Chat/
 │       └── 2024/
 ├── Whatsapp Databases/          ← Decrypted SQLite databases saved for viewer
+├── preserved_messages.db        ← Preserved deleted messages & chats (when using -P)
 ├── missing_media_report.csv     ← Media referenced in chats but missing from storage
 ├── duplicate_media_report.csv   ← Duplicate media files audited
 └── .wa_media_archiver.db        ← Archive state database

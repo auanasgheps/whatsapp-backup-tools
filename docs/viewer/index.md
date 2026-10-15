@@ -60,6 +60,8 @@ The source WA database must be present for the viewer to resolve media file path
 
 - **Sidebar** — all contacts and groups listed with message counts and last activity time
 - **Chat timeline** — messages displayed chronologically (oldest at top, newest at bottom), lazy-loaded as you scroll
+- **Interactive WhatsApp polls** — poll cards rendered with options, vote count bars, percentages, checkmarks, and an interactive "View votes" popup detailing voter identities (Android & iOS)
+- **Revoked & view-once badges** — "This message was deleted" tombstones and View-Once badges for ephemeral media
 - **Full-text search** — search across all messages; scoped to the current chat or across all chats
 - **Media playback** — images, videos, and audio stream directly in the browser with HTTP Range support (seeking works in video/audio players)
 - **Image lightbox** — click any image to open it full-screen with smooth zoom and pan
