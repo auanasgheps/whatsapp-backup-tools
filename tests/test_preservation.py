@@ -1089,3 +1089,171 @@ def test_forward_mode_unencrypted_preservation_rollback_on_failure(
     assert dest_db.is_file()
     assert dest_db.read_bytes() == original_bytes
     assert not old_dest_db.exists()
+
+
+def test_diff_indexes_creation_and_chunked_progress_android(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_msgstore.db"
+    new_db = tmp_path / "new_msgstore.db"
+    arch_db = tmp_path / "arch.db"
+    _make_dummy_archive_db(arch_db)
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, 'user_a');
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (1, 1, 'Group');
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                key_id TEXT,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+        """)
+        # Insert 12,000 rows (exceeds single chunk minimum of 5,000)
+        rows_old = [(i, 1, f"key_{i}", 0, 1, 100000 + i, 0, f"msg {i}") for i in range(1, 12001)]
+        conn.executemany("INSERT INTO message VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows_old)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, 'user_a');
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (1, 1, 'Group');
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                key_id TEXT,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+        """)
+        # Omit key_500 (deleted) and make key_600 revoked (message_type=15)
+        rows_new = [
+            (
+                i,
+                1,
+                f"key_{i}",
+                0,
+                1,
+                100000 + i,
+                15 if i == 600 else 0,
+                "" if i == 600 else f"msg {i}",
+            )
+            for i in range(1, 12001)
+            if i != 500
+        ]
+        conn.executemany("INSERT INTO message VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows_new)
+
+    extracted = preservation.diff_and_extract_android(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    by_key = {r["stanza_id"]: r for r in extracted}
+    assert "key_500" in by_key
+    assert by_key["key_500"]["preservation_reason"] == "deleted_on_phone"
+    assert "key_600" in by_key
+    assert by_key["key_600"]["preservation_reason"] == "revoked_by_sender"
+
+    # Verify that performance indexes were created
+    with sqlite3.connect(new_db) as conn:
+        indexes = {
+            r[1] for r in conn.execute("SELECT * FROM sqlite_master WHERE type='index'").fetchall()
+        }
+        assert "idx_pres_cur_key_id" in indexes
+
+
+def test_diff_indexes_creation_and_chunked_progress_ios(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_chatstorage.sqlite"
+    new_db = tmp_path / "new_chatstorage.sqlite"
+    arch_db = tmp_path / "arch.db"
+    _make_dummy_archive_db(arch_db)
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+            );
+        """)
+        rows_old = [
+            (
+                i,
+                1,
+                f"ios_key_{i}",
+                0,
+                "partner@s.whatsapp.net",
+                1000.0 + i,
+                0,
+                f"msg {i}",
+                "Partner",
+                None,
+                None,
+            )
+            for i in range(1, 12001)
+        ]
+        conn.executemany(
+            "INSERT INTO ZWAMESSAGE VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows_old
+        )
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+            );
+        """)
+        rows_new = [
+            (
+                i,
+                1,
+                f"ios_key_{i}",
+                0,
+                "partner@s.whatsapp.net",
+                1000.0 + i,
+                14 if i == 700 else 0,
+                "" if i == 700 else f"msg {i}",
+                "Partner",
+                None,
+                None,
+            )
+            for i in range(1, 12001)
+            if i != 500
+        ]
+        conn.executemany(
+            "INSERT INTO ZWAMESSAGE VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows_new
+        )
+
+    extracted = preservation.diff_and_extract_ios(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    by_key = {r["stanza_id"]: r for r in extracted}
+    assert "ios_key_500" in by_key
+    assert by_key["ios_key_500"]["preservation_reason"] == "deleted_on_phone"
+    assert "ios_key_700" in by_key
+    assert by_key["ios_key_700"]["preservation_reason"] == "revoked_by_sender"
+
+    # Verify that performance indexes were created
+    with sqlite3.connect(new_db) as conn:
+        indexes = {
+            r[1] for r in conn.execute("SELECT * FROM sqlite_master WHERE type='index'").fetchall()
+        }
+        assert "idx_pres_cur_stanza" in indexes
