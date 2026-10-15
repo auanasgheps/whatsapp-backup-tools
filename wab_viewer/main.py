@@ -1056,22 +1056,6 @@ def _format_service_rows(
 # ---------------------------------------------------------------------------
 
 
-def _read_varint(data: bytes, pos: int) -> tuple:
-    """Read a base-128 varint from data at pos. Returns (value, new_pos).
-
-    Each byte contributes 7 bits; the high bit (0x80) signals continuation.
-    """
-    val, shift = 0, 0
-    while pos < len(data):
-        b = data[pos]
-        pos += 1
-        val |= (b & 0x7F) << shift
-        if not (b & 0x80):
-            break
-        shift += 7
-    return val, pos
-
-
 def _parse_protobuf(data: bytes) -> list:
     """Parse a protobuf blob into (field, wire_type, value) triples.
 
@@ -1719,24 +1703,36 @@ def _merge_messages(
 
     for i, p in enumerate(pres_rows):
         if p.get("preservation_reason") == "revoked_by_sender":
+            p_stanza = p.get("stanza_id")
             p_ts = p.get("timestamp_ms", 0)
             p_fm = p.get("from_me", 0)
             for j, live in enumerate(merged):
                 if live.get("media_type") == "deleted" and live.get("from_me") == p_fm:
-                    if abs(live.get("timestamp_ms", 0) - p_ts) < 2000:
+                    if p_stanza and live.get("stanza_id") == p_stanza:
+                        merged[j] = p
+                        used_pres_indexes.add(i)
+                        break
+                    elif abs(live.get("timestamp_ms", 0) - p_ts) < 2000:
                         merged[j] = p
                         used_pres_indexes.add(i)
                         break
 
+    live_stanzas = {r["stanza_id"] for r in merged if r.get("stanza_id")}
     live_keys = {(r.get("timestamp_ms"), r.get("from_me")) for r in merged}
 
     for i, p in enumerate(pres_rows):
         if i in used_pres_indexes:
             continue
-        key = (p.get("timestamp_ms"), p.get("from_me"))
-        if key not in live_keys:
-            merged.append(p)
-            live_keys.add(key)
+        p_stanza = p.get("stanza_id")
+        if p_stanza:
+            if p_stanza not in live_stanzas:
+                merged.append(p)
+                live_stanzas.add(p_stanza)
+        else:
+            key = (p.get("timestamp_ms"), p.get("from_me"))
+            if key not in live_keys:
+                merged.append(p)
+                live_keys.add(key)
 
     merged.sort(
         key=lambda r: (r.get("timestamp_ms", 0), r.get("sort_id") or r.get("msg_id") or 0),
@@ -3225,6 +3221,8 @@ def create_app(output_root: Path, rescan: bool = False):
     has_android_add_on = False
     has_mei_ts = False
     has_mao_ts = False
+    has_android_key_id = False
+    has_ios_stanza_id = False
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
         _wa_tables = {
@@ -3236,6 +3234,12 @@ def create_app(output_root: Path, rescan: bool = False):
         has_lid_dn = "lid_display_name" in _wa_tables
         has_message_system = "message_system" in _wa_tables
         has_mcp = "message_system_chat_participant" in _wa_tables
+        _msg_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message)").fetchall()}
+            if "message" in _wa_tables
+            else set()
+        )
+        has_android_key_id = "key_id" in _msg_cols
         _mei_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_edit_info)").fetchall()}
             if "message_edit_info" in _wa_tables
@@ -3274,6 +3278,7 @@ def create_app(output_root: Path, rescan: bool = False):
             else set()
         )
         has_ios_group_event = "ZGROUPEVENTTYPE" in _zwa_cols
+        has_ios_stanza_id = "ZSTANZAID" in _zwa_cols
         _tmp_wa.close()
 
     if source_type == "ios":
@@ -3281,6 +3286,11 @@ def create_app(output_root: Path, rescan: bool = False):
         group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
         has_ios_sort = "ZSORT" in _zwa_cols
         sort_col_ios = "COALESCE(m.ZSORT, m.Z_PK)" if has_ios_sort else "m.Z_PK"
+        stanza_col_ios = (
+            "COALESCE(NULLIF(m.ZSTANZAID, ''), 'msg_' || m.Z_PK)"
+            if has_ios_stanza_id
+            else "'msg_' || m.Z_PK"
+        )
         ios_service_filter = (
             "OR (m.ZMESSAGETYPE = 6 AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))"
             if has_ios_group_event
@@ -3308,6 +3318,7 @@ def create_app(output_root: Path, rescan: bool = False):
         globals()["_IOS_SELECT"] = f"""
     SELECT
         m.Z_PK                                                       AS msg_id,
+        {stanza_col_ios}                                             AS stanza_id,
         {sort_col_ios}                                               AS sort_id,
         {_IOS_CHAT_ID}                                               AS chat_id,
         {_IOS_CHAT_TYPE}                                             AS chat_type,
@@ -3480,9 +3491,15 @@ def create_app(output_root: Path, rescan: bool = False):
         edit_is_edited_col = "0"
         edit_ts_col = "NULL"
 
+    stanza_col_android = (
+        "COALESCE(NULLIF(m.key_id, ''), 'msg_' || m._id)"
+        if has_android_key_id
+        else "'msg_' || m._id"
+    )
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
+        {stanza_col_android}                                         AS stanza_id,
         {_ANDROID_CHAT_ID}                                           AS chat_id,
         {_ANDROID_CHAT_TYPE}                                         AS chat_type,
         COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
@@ -5461,6 +5478,7 @@ def create_app(output_root: Path, rescan: bool = False):
             return []
 
     @app.route("/api/chat-info")
+    @app.route("/api/chat_info")
     def api_chat_info():
         chat_id = request.args.get("chat_id", "")
         chat_type = request.args.get("chat_type", "")
@@ -5824,6 +5842,49 @@ def create_app(output_root: Path, rescan: bool = False):
                             ).fetchone()
                             if arch_desc_row and arch_desc_row["description"]:
                                 description = arch_desc_row["description"].strip() or None
+
+        if total is None or total == 0:
+            pres = get_preserved()
+            if pres is not None:
+                p_stat = pres.execute(
+                    """
+                    SELECT COUNT(*) AS total,
+                           SUM(CASE WHEN from_me=1 THEN 1 ELSE 0 END) AS sent,
+                           SUM(CASE WHEN from_me=0 THEN 1 ELSE 0 END) AS received,
+                           MIN(timestamp_ms) AS first_ts,
+                           MAX(timestamp_ms) AS last_ts
+                    FROM preserved_messages
+                    WHERE chat_id = ? AND chat_type = ?
+                    """,
+                    (chat_id, chat_type),
+                ).fetchone()
+                if p_stat and p_stat["total"]:
+                    total = p_stat["total"]
+                    sent = p_stat["sent"] or 0
+                    received = p_stat["received"] or 0
+                    first_ts = first_ts or p_stat["first_ts"]
+                    last_ts = last_ts or p_stat["last_ts"]
+                    if not display_name:
+                        arch = get_archive()
+                        if chat_type == "group":
+                            g_row = arch.execute(
+                                "SELECT subject, folder FROM groups WHERE chat_row_id = ?",
+                                (chat_id,),
+                            ).fetchone()
+                            if g_row:
+                                display_name = g_row["subject"] or g_row["folder"]
+                        else:
+                            c_row = arch.execute(
+                                "SELECT display_name, folder FROM contacts WHERE number = ?",
+                                (chat_id,),
+                            ).fetchone()
+                            if c_row:
+                                display_name = c_row["display_name"] or c_row["folder"]
+                            elif chat_id == "0":
+                                display_name = "WhatsApp"
+                            else:
+                                display_name = f"+{chat_id}"
+                            number = chat_id
 
         result = {
             "display_name": display_name,

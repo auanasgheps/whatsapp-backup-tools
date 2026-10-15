@@ -2925,6 +2925,7 @@ class TestRecentMessagesRouting:
             "is_edited",
             "edited_ts",
             "is_view_once",
+            "stanza_id",
         }
         assert set(data[0].keys()) == expected_keys
 

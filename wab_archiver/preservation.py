@@ -202,11 +202,17 @@ def diff_and_extract_android(
         conn.execute("ATTACH DATABASE ? AS old_db", (old_db_path,))
         conn.execute("ATTACH DATABASE ? AS arch", (archive_db_path,))
 
-        # Inspect table schema in old_db to adapt queries gracefully
+        # Inspect table schema in old_db and arch to adapt queries gracefully
         old_tables = {
             r[0]
             for r in conn.execute(
                 "SELECT name FROM old_db.sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        arch_tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM arch.sqlite_master WHERE type='table'"
             ).fetchall()
         }
         has_media = "message_media" in old_tables
@@ -215,6 +221,8 @@ def diff_and_extract_android(
         has_edit_info = "message_edit_info" in old_tables
         has_add_on = "message_add_on" in old_tables
         has_jid_map = "jid_map" in old_tables
+        has_arch_contacts = "contacts" in arch_tables
+        has_arch_copies = "archive_copies" in arch_tables
 
         mm_join = (
             "LEFT JOIN old_db.message_media mm ON mm.message_row_id = m._id" if has_media else ""
@@ -247,9 +255,27 @@ def diff_and_extract_android(
             if has_quoted
             else "LEFT JOIN old_db.jid jq ON 0 = 1"
         )
+        con_s_join = (
+            "LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)"
+            if has_arch_contacts
+            else ""
+        )
+        con_sq_join = (
+            "LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)"
+            if has_arch_contacts
+            else ""
+        )
+        con_s_arm = "NULLIF(con_s.display_name, '')," if has_arch_contacts else ""
+        con_sq_arm = "NULLIF(con_sq.display_name, '')," if has_arch_contacts else ""
 
         file_path_col = "mm.file_path" if has_media else "NULL"
         media_name_col = "mm.media_name" if has_media else "NULL"
+        ac_join = (
+            f"LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE({file_path_col}, 'vcard:' || m._id)"
+            if has_arch_copies
+            else ""
+        )
+        archive_path_expr = "ac.archive_path" if has_arch_copies else "NULL"
         quoted_text_col = "mq.text_data" if has_quoted else "NULL"
         quoted_ts_col = "mq.timestamp" if has_quoted else "0"
         quoted_from_me_col = "mq.from_me" if has_quoted else "0"
@@ -270,13 +296,17 @@ def diff_and_extract_android(
                 m._id AS msg_id,
                 COALESCE(NULLIF(m.key_id, ''), 'msg_' || m._id) AS stanza_id,
                 CASE
-                    WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
+                    WHEN c.subject IS NOT NULL THEN
+                        COALESCE(
+                            (SELECT CAST(cur_c._id AS TEXT) FROM chat cur_c JOIN jid cur_j ON cur_j._id = cur_c.jid_row_id WHERE cur_j.user = j_chat.user),
+                            CAST(m.chat_row_id AS TEXT)
+                        )
                     ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
                 END AS chat_id,
                 CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
                 COALESCE(m.timestamp, 0) AS timestamp_ms,
                 COALESCE(
-                    NULLIF(con_s.display_name, ''),
+                    {con_s_arm}
                     CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
                     CASE WHEN j2.user IS NOT NULL THEN '+' || j2.user END,
                     CASE WHEN j.user IS NOT NULL THEN '+' || j.user END,
@@ -311,11 +341,11 @@ def diff_and_extract_android(
                         END
                 END AS media_type,
                 COALESCE({media_name_col}, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
-                ac.archive_path AS archive_path,
+                {archive_path_expr} AS archive_path,
                 COALESCE({quoted_text_col}, '') AS quoted_text,
                 CASE WHEN {quoted_from_me_col} = 1 THEN 'You'
                      ELSE COALESCE(
-                         NULLIF(con_sq.display_name, ''),
+                         {con_sq_arm}
                          CASE WHEN jq2.user IS NOT NULL THEN '+' || jq2.user END,
                          CASE WHEN jq.user IS NOT NULL THEN '+' || jq.user END,
                          '')
@@ -326,7 +356,13 @@ def diff_and_extract_android(
                 {ms_action_col} AS action_type,
                 CASE
                     WHEN {is_device_reset} THEN 'device_reset'
-                    WHEN NOT EXISTS (SELECT 1 FROM chat cur_c WHERE cur_c._id = m.chat_row_id) THEN 'chat_deleted'
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM chat cur_c
+                        JOIN jid cur_j ON cur_j._id = cur_c.jid_row_id
+                        WHERE cur_j.user = j_chat.user
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM chat cur_c WHERE cur_c._id = m.chat_row_id
+                    ) THEN 'chat_deleted'
                     ELSE 'deleted_on_phone'
                 END AS preservation_reason
             FROM old_db.message m
@@ -340,9 +376,9 @@ def diff_and_extract_android(
             {jmq_join}
             {ms_join}
             {edit_join}
-            LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)
-            LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)
-            LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE({file_path_col}, 'vcard:' || m._id)
+            {con_s_join}
+            {con_sq_join}
+            {ac_join}
             WHERE (
                 m.key_id IS NOT NULL AND m.key_id != ''
                 AND NOT EXISTS (SELECT 1 FROM message cur WHERE cur.key_id = m.key_id)
@@ -370,13 +406,17 @@ def diff_and_extract_android(
                 m._id AS msg_id,
                 COALESCE(NULLIF(m.key_id, ''), 'msg_' || m._id) AS stanza_id,
                 CASE
-                    WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
+                    WHEN c.subject IS NOT NULL THEN
+                        COALESCE(
+                            (SELECT CAST(cur_c._id AS TEXT) FROM chat cur_c JOIN jid cur_j ON cur_j._id = cur_c.jid_row_id WHERE cur_j.user = j_chat.user),
+                            CAST(m.chat_row_id AS TEXT)
+                        )
                     ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
                 END AS chat_id,
                 CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
                 COALESCE(m.timestamp, 0) AS timestamp_ms,
                 COALESCE(
-                    NULLIF(con_s.display_name, ''),
+                    {con_s_arm}
                     CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
                     CASE WHEN j2.user IS NOT NULL THEN '+' || j2.user END,
                     CASE WHEN j.user IS NOT NULL THEN '+' || j.user END,
@@ -386,11 +426,11 @@ def diff_and_extract_android(
                 COALESCE(m.text_data, '') AS text_body,
                 'text' AS media_type,
                 COALESCE({media_name_col}, '') AS media_name,
-                ac.archive_path AS archive_path,
+                {archive_path_expr} AS archive_path,
                 COALESCE({quoted_text_col}, '') AS quoted_text,
                 CASE WHEN {quoted_from_me_col} = 1 THEN 'You'
                      ELSE COALESCE(
-                         NULLIF(con_sq.display_name, ''),
+                         {con_sq_arm}
                          CASE WHEN jq2.user IS NOT NULL THEN '+' || jq2.user END,
                          CASE WHEN jq.user IS NOT NULL THEN '+' || jq.user END,
                          '')
@@ -412,9 +452,9 @@ def diff_and_extract_android(
             {jmq_join}
             {ms_join}
             {edit_join}
-            LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)
-            LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)
-            LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE({file_path_col}, 'vcard:' || m._id)
+            {con_s_join}
+            {con_sq_join}
+            {ac_join}
             WHERE m.message_type != 15 AND cur.message_type = 15
         """
         for r in conn.execute(sql_revoked):
@@ -471,10 +511,18 @@ def diff_and_extract_ios(
                 "SELECT name FROM old_db.sqlite_master WHERE type='table'"
             ).fetchall()
         }
+        arch_tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM arch.sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
         old_cols = {r[1] for r in conn.execute("PRAGMA old_db.table_info(ZWAMESSAGE)").fetchall()}
         has_parent = "ZPARENTMESSAGE" in old_cols
         has_media = "ZWAMEDIAITEM" in old_tables
         has_profile = "ZWAPROFILEPUSHNAME" in old_tables
+        has_arch_contacts = "contacts" in arch_tables
+        has_arch_copies = "archive_copies" in arch_tables
 
         mi_join = "LEFT JOIN old_db.ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM" if has_media else ""
         pp_join = (
@@ -488,13 +536,23 @@ def diff_and_extract_ios(
         con_sq_join = (
             "LEFT JOIN arch.contacts con_sq ON con_sq.number = SUBSTR(COALESCE(qm.ZFROMJID,''), 1, "
             "INSTR(COALESCE(qm.ZFROMJID,'') || '@', '@') - 1)"
-            if has_parent
+            if (has_parent and has_arch_contacts)
             else ""
+        )
+        con_s_join = (
+            "LEFT JOIN arch.contacts con_s ON con_s.number = SUBSTR(COALESCE(m.ZFROMJID,''), 1, "
+            "INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)"
+            if has_arch_contacts
+            else ""
+        )
+        con_s_arm = "NULLIF(con_s.display_name, '')," if has_arch_contacts else ""
+        con_sq_arm = (
+            "NULLIF(con_sq.display_name, '')," if (has_parent and has_arch_contacts) else ""
         )
         quoted_text_col = "COALESCE(qm.ZTEXT, '')" if has_parent else "''"
         quoted_sender_col = (
             "CASE WHEN qm.ZISFROMME = 1 THEN 'You' "
-            "ELSE COALESCE(NULLIF(con_sq.display_name, ''), NULLIF(qm.ZPUSHNAME, ''), '') END"
+            f"ELSE COALESCE({con_sq_arm} NULLIF(qm.ZPUSHNAME, ''), '') END"
             if has_parent
             else "''"
         )
@@ -511,6 +569,12 @@ def diff_and_extract_ios(
         media_name_col = "COALESCE(mi.ZTITLE, '')" if has_media else "''"
         media_local_expr = "COALESCE(mi.ZMEDIALOCALPATH, mi.ZTITLE, '')" if has_media else "''"
         pp_arm = "NULLIF(pp_phone.ZPUSHNAME, '')," if has_profile else ""
+        ac_join = (
+            f"LEFT JOIN arch.archive_copies ac ON ac.original_path = {media_path_col}"
+            if has_arch_copies
+            else ""
+        )
+        ac_path_col = "ac.archive_path" if has_arch_copies else "NULL"
 
         old_count = conn.execute("SELECT COUNT(*) FROM old_db.ZWAMESSAGE").fetchone()[0]
         new_count = conn.execute("SELECT COUNT(*) FROM ZWAMESSAGE").fetchone()[0]
@@ -520,11 +584,14 @@ def diff_and_extract_ios(
             SELECT
                 m.Z_PK AS msg_id,
                 COALESCE(NULLIF(m.ZSTANZAID, ''), 'msg_' || m.Z_PK) AS stanza_id,
-                CAST(m.ZCHATSESSION AS TEXT) AS chat_id,
+                COALESCE(
+                    (SELECT CAST(cur_cs.Z_PK AS TEXT) FROM ZWACHATSESSION cur_cs WHERE cur_cs.ZCONTACTJID = cs.ZCONTACTJID),
+                    CAST(m.ZCHATSESSION AS TEXT)
+                ) AS chat_id,
                 CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
                 CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS timestamp_ms,
                 COALESCE(
-                    NULLIF(con_s.display_name, ''),
+                    {con_s_arm}
                     {pp_arm}
                     NULLIF(cs.ZPARTNERNAME, ''),
                     CASE WHEN m.ZFROMJID NOT LIKE '%@g.us' THEN NULLIF(m.ZPUSHNAME, '') END,
@@ -557,7 +624,7 @@ def diff_and_extract_ios(
                         END
                 END AS media_type,
                 {media_name_col} AS media_name,
-                ac.archive_path AS archive_path,
+                {ac_path_col} AS archive_path,
                 {quoted_text_col} AS quoted_text,
                 {quoted_sender_col} AS quoted_sender,
                 {quoted_ts_col} AS quoted_ts,
@@ -566,7 +633,11 @@ def diff_and_extract_ios(
                 NULL AS action_type,
                 CASE
                     WHEN {is_device_reset} THEN 'device_reset'
-                    WHEN NOT EXISTS (SELECT 1 FROM ZWACHATSESSION cur_cs WHERE cur_cs.Z_PK = m.ZCHATSESSION) THEN 'chat_deleted'
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM ZWACHATSESSION cur_cs WHERE cur_cs.ZCONTACTJID = cs.ZCONTACTJID
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM ZWACHATSESSION cur_cs WHERE cur_cs.Z_PK = m.ZCHATSESSION
+                    ) THEN 'chat_deleted'
                     ELSE 'deleted_on_phone'
                 END AS preservation_reason
             FROM old_db.ZWAMESSAGE m
@@ -574,10 +645,9 @@ def diff_and_extract_ios(
             LEFT JOIN old_db.ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
             {pp_join}
             {qm_join}
-            LEFT JOIN arch.contacts con_s ON con_s.number = SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                                                            INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+            {con_s_join}
             {con_sq_join}
-            LEFT JOIN arch.archive_copies ac ON ac.original_path = {media_path_col}
+            {ac_join}
             WHERE (
                 m.ZSTANZAID IS NOT NULL AND m.ZSTANZAID != ''
                 AND NOT EXISTS (SELECT 1 FROM ZWAMESSAGE cur WHERE cur.ZSTANZAID = m.ZSTANZAID)
@@ -603,11 +673,14 @@ def diff_and_extract_ios(
             SELECT
                 m.Z_PK AS msg_id,
                 COALESCE(NULLIF(m.ZSTANZAID, ''), 'msg_' || m.Z_PK) AS stanza_id,
-                CAST(m.ZCHATSESSION AS TEXT) AS chat_id,
+                COALESCE(
+                    (SELECT CAST(cur_cs.Z_PK AS TEXT) FROM ZWACHATSESSION cur_cs WHERE cur_cs.ZCONTACTJID = cs.ZCONTACTJID),
+                    CAST(m.ZCHATSESSION AS TEXT)
+                ) AS chat_id,
                 CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
                 CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS timestamp_ms,
                 COALESCE(
-                    NULLIF(con_s.display_name, ''),
+                    {con_s_arm}
                     {pp_arm}
                     NULLIF(cs.ZPARTNERNAME, ''),
                     CASE WHEN m.ZFROMJID NOT LIKE '%@g.us' THEN NULLIF(m.ZPUSHNAME, '') END,
@@ -617,7 +690,7 @@ def diff_and_extract_ios(
                 COALESCE(m.ZTEXT, '') AS text_body,
                 'text' AS media_type,
                 {media_name_col} AS media_name,
-                ac.archive_path AS archive_path,
+                {ac_path_col} AS archive_path,
                 {quoted_text_col} AS quoted_text,
                 {quoted_sender_col} AS quoted_sender,
                 {quoted_ts_col} AS quoted_ts,
@@ -631,10 +704,9 @@ def diff_and_extract_ios(
             LEFT JOIN old_db.ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
             {pp_join}
             {qm_join}
-            LEFT JOIN arch.contacts con_s ON con_s.number = SUBSTR(COALESCE(m.ZFROMJID,''), 1,
-                                                            INSTR(COALESCE(m.ZFROMJID,'') || '@', '@') - 1)
+            {con_s_join}
             {con_sq_join}
-            LEFT JOIN arch.archive_copies ac ON ac.original_path = {media_path_col}
+            {ac_join}
             WHERE m.ZMESSAGETYPE != 14 AND cur.ZMESSAGETYPE = 14
         """
         for r in conn.execute(sql_revoked):
@@ -757,6 +829,11 @@ def preserve_deleted_messages(
 
     if not verify_account_match(old_db_path, new_db_path, platform, logger):
         return 0
+
+    from . import archive_db
+
+    with contextlib.closing(archive_db.open_archive_db(output_root)):
+        pass
 
     logger.info("Checking for deleted or revoked messages against previous database snapshot...")
     if platform == "android":

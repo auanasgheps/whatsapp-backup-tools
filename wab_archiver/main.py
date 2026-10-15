@@ -1104,6 +1104,32 @@ def run_restore_mode(args, logger):
             }
         )
 
+        arch_db_source = os.path.join(args.output, "Whatsapp Databases", "msgstore.db")
+        if os.path.isfile(arch_db_source):
+            db_dest = os.path.join(args.output, "Databases", "msgstore.db")
+            if os.path.exists(db_dest) and file_md5(arch_db_source) == file_md5(db_dest):
+                logger.debug("SKIP database (identical already restored): Databases/msgstore.db")
+                stats["skipped"] += 1
+            elif args.dry_run:
+                logger.info("[DRY RUN] Would restore database: Databases/msgstore.db")
+                stats["restored"] += 1
+            else:
+                os.makedirs(os.path.dirname(db_dest), exist_ok=True)
+                try:
+                    shutil.copy2(arch_db_source, db_dest)
+                    logger.info("RESTORED database: Databases/msgstore.db")
+                    stats["restored"] += 1
+                except Exception as e:
+                    logger.error(f"ERROR restoring database Databases/msgstore.db: {e}")
+                    stats["warnings"] += 1
+                    report_rows.append(
+                        {
+                            "original_path": "Databases/msgstore.db",
+                            "source_archive_path": "Whatsapp Databases/msgstore.db",
+                            "status": f"error: {e}",
+                        }
+                    )
+
         if not args.dry_run:
             if report_rows:
                 fieldnames = ["original_path", "source_archive_path", "status"]
@@ -1215,12 +1241,11 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 
 
 def _flatten_config(data: dict) -> dict:
-    """Flatten single-level TOML sections into a flat configuration dict."""
+    """Recursively flatten TOML sections into a flat configuration dict."""
     flat = {}
     for k, v in data.items():
         if isinstance(v, dict):
-            for sub_k, sub_v in v.items():
-                flat[sub_k] = sub_v
+            flat.update(_flatten_config(v))
         else:
             flat[k] = v
     return flat
@@ -2060,18 +2085,28 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     if getattr(args, "preserve_deleted", False) and not args.ios_backup:
         target_name = "msgstore.db" if platform == "android" else "ChatStorage.sqlite"
         dest_db = os.path.join(args.output, "Whatsapp Databases", target_name)
-        if os.path.isfile(dest_db) and os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
-            archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
-            preservation.preserve_deleted_messages(
-                dest_db,
-                args.msgstore,
-                args.output,
-                archive_db_path,
-                platform or "android",
-                logger,
-            )
-            shutil.copy2(args.msgstore, dest_db)
-            args.msgstore = dest_db
+        if not getattr(args, "dry_run", False):
+            os.makedirs(os.path.dirname(dest_db), exist_ok=True)
+            if os.path.isfile(dest_db):
+                if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
+                    archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+                    preservation.preserve_deleted_messages(
+                        dest_db,
+                        args.msgstore,
+                        args.output,
+                        archive_db_path,
+                        platform or "android",
+                        logger,
+                    )
+                    shutil.copy2(args.msgstore, dest_db)
+                    args.msgstore = dest_db
+            else:
+                logger.info(
+                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot."
+                )
+                if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
+                    shutil.copy2(args.msgstore, dest_db)
+                    args.msgstore = dest_db
 
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()

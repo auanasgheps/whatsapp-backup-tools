@@ -82,6 +82,16 @@ def _confirm_restart_prompt(prompt: str) -> bool:
         return False
 
 
+def _prompt_user_to_continue(prompt: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    try:
+        input(prompt)
+        return True
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def _restart_adb_server(logger) -> None:
     logger.info("Restarting ADB server...")
     try:
@@ -131,6 +141,14 @@ def check_device_connected(logger) -> bool:
         if _confirm_restart_prompt(prompt_msg):
             logger.info("Restarting ADB server... Please ensure your phone screen is unlocked.")
             _restart_adb_server(logger)
+            _query_adb_devices(logger)
+            continue_prompt = (
+                "Unlock your phone, tap 'Allow USB debugging' (check 'Always allow'), "
+                "then press Enter to continue: "
+            )
+            if not _prompt_user_to_continue(continue_prompt):
+                logger.error("Authorization check cancelled by user.")
+                return False
             devices_after = _query_adb_devices(logger)
             if devices_after and len(devices_after) == 1 and devices_after[0][1] == "device":
                 logger.info(f"Android device connected and authorized: {devices_after[0][0]}")
