@@ -2467,10 +2467,10 @@ class TestCheckDeviceConnected:
         with (
             patch(
                 "wab_archiver.adb_extractor.subprocess.run",
-                side_effect=[unauth_out, kill_out, auth_out],
+                side_effect=[unauth_out, kill_out, unauth_out, auth_out],
             ) as mock_run,
             patch("sys.stdin.isatty", return_value=True),
-            patch("builtins.input", return_value="y"),
+            patch("builtins.input", side_effect=["y", ""]),
             patch("time.sleep") as mock_sleep,
             patch.object(logger, "info") as mock_info,
         ):
@@ -2488,10 +2488,10 @@ class TestCheckDeviceConnected:
         with (
             patch(
                 "wab_archiver.adb_extractor.subprocess.run",
-                side_effect=[unauth_out, kill_out, unauth_out],
+                side_effect=[unauth_out, kill_out, unauth_out, unauth_out],
             ),
             patch("sys.stdin.isatty", return_value=True),
-            patch("builtins.input", return_value="yes"),
+            patch("builtins.input", side_effect=["yes", ""]),
             patch("time.sleep"),
             patch.object(logger, "error") as mock_err,
         ):
@@ -2499,6 +2499,23 @@ class TestCheckDeviceConnected:
             err_msg = mock_err.call_args[0][0]
             assert "still unauthorized" in err_msg
             assert "Revoke USB debugging authorizations" in err_msg
+
+    def test_unauthorized_user_cancels_continue_prompt(self, logger):
+        unauth_out = self._make_result("List of devices attached\n98abc123\tunauthorized\n")
+        kill_out = self._make_result("")
+
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=[unauth_out, kill_out, unauth_out],
+            ),
+            patch("sys.stdin.isatty", return_value=True),
+            patch("builtins.input", side_effect=["y", KeyboardInterrupt()]),
+            patch("time.sleep"),
+            patch.object(logger, "error") as mock_err,
+        ):
+            assert adb.check_device_connected(logger) is False
+            assert "cancelled" in mock_err.call_args[0][0]
 
     def test_offline_device(self, logger):
         output = "List of devices attached\n98abc123\toffline\n"
@@ -2862,6 +2879,26 @@ wa_root = "/wa"
         assert args.link_duplicates is True
         assert args.since == "2024-01-01"
         assert args.wa_roots == ["/wa"]
+
+    def test_config_nested_sections_flattened(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        toml_content = f"""
+output = "{out}"
+
+[source.android]
+wa_root = "/wa_nested"
+
+[options.filtering]
+since = "2024-06-01"
+link_duplicates = true
+"""
+        self._write_config(cfg, toml_content)
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.link_duplicates is True
+        assert args.since == "2024-06-01"
+        assert args.wa_roots == ["/wa_nested"]
 
     def test_autodetect_single_config_yes(self, tmp_path):
         cfg = tmp_path / "config.toml"
@@ -4125,6 +4162,48 @@ class TestRunRestoreMode:
         report = tmp_path / "restore_report.csv"
         assert report.exists()
         assert "error:" in report.read_text(encoding="utf-8")
+
+    def test_restore_mode_restores_database(self, tmp_path, logger):
+        _seed_archive(
+            tmp_path, "Media/WhatsApp Images/img.jpg", "Contacts/Alice/2024/Received/img.jpg"
+        )
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir(parents=True)
+        (db_dir / "msgstore.db").write_bytes(b"sqlite_db_payload_bytes")
+
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+
+        restored_db = tmp_path / "Databases" / "msgstore.db"
+        assert restored_db.exists()
+        assert restored_db.read_bytes() == b"sqlite_db_payload_bytes"
+
+    def test_restore_mode_database_dry_run(self, tmp_path, logger):
+        _seed_archive(
+            tmp_path, "Media/WhatsApp Images/img.jpg", "Contacts/Alice/2024/Received/img.jpg"
+        )
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir(parents=True)
+        (db_dir / "msgstore.db").write_bytes(b"sqlite_db_payload_bytes")
+
+        wa.run_restore_mode(_restore_args(tmp_path, dry_run=True), logger)
+
+        restored_db = tmp_path / "Databases" / "msgstore.db"
+        assert not restored_db.exists()
+
+    def test_restore_mode_database_identical_skipped(self, tmp_path, logger):
+        _seed_archive(
+            tmp_path, "Media/WhatsApp Images/img.jpg", "Contacts/Alice/2024/Received/img.jpg"
+        )
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir(parents=True)
+        (db_dir / "msgstore.db").write_bytes(b"sqlite_db_payload_bytes")
+
+        restored_db = tmp_path / "Databases" / "msgstore.db"
+        restored_db.parent.mkdir(parents=True)
+        restored_db.write_bytes(b"sqlite_db_payload_bytes")
+
+        wa.run_restore_mode(_restore_args(tmp_path), logger)
+        assert restored_db.read_bytes() == b"sqlite_db_payload_bytes"
 
 
 # ===========================================================================
@@ -5593,6 +5672,115 @@ class TestRunForwardModeAndroid:
 
         conflict_report = output_dir / "source_conflicts_report.csv"
         assert conflict_report.exists()
+
+    def test_run_forward_mode_preserve_deleted_baseline_and_incremental(self, tmp_path, logger):
+        # 1. Setup source db 1 with 2 messages
+        db_path1 = tmp_path / "src1_msgstore.db"
+        conn1 = sqlite3.connect(str(db_path1))
+        conn1.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, subject TEXT, jid_row_id INTEGER);
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                timestamp INTEGER,
+                sender_jid_row_id INTEGER,
+                from_me INTEGER,
+                key_id TEXT,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            CREATE TABLE message_media (
+                _id INTEGER PRIMARY KEY,
+                file_path TEXT,
+                mime_type TEXT,
+                chat_row_id INTEGER,
+                message_row_id INTEGER,
+                message_url TEXT,
+                media_name TEXT
+            );
+            INSERT INTO jid VALUES (1, '390111222'), (2, '390333444');
+            INSERT INTO chat VALUES (1, NULL, 1);
+            INSERT INTO message VALUES
+                (1, 1, 1718000000000, 2, 0, 'k1', 0, 'First message'),
+                (2, 1, 1718001000000, 2, 0, 'k2', 0, 'Message to be deleted');
+        """)
+        conn1.close()
+
+        root = tmp_path / "wa_root"
+        (root / "Media" / "WhatsApp Images").mkdir(parents=True)
+        output_dir = tmp_path / "archive_output"
+        output_dir.mkdir()
+
+        args = argparse.Namespace(
+            from_adb=False,
+            e2e_key=None,
+            ios_password=None,
+            timezone=None,
+            since=None,
+            limit=None,
+            ios_backup=None,
+            dry_run=False,
+            preserve_deleted=True,
+            msgstore=str(db_path1),
+            wa_roots=[str(root)],
+            output=str(output_dir),
+            contacts=None,
+            log=None,
+        )
+
+        # Run 1: First run with preserve_deleted
+        wa.run_forward_mode(args, logger)
+
+        baseline_db = output_dir / "Whatsapp Databases" / "msgstore.db"
+        assert baseline_db.exists()
+        pres_db = output_dir / "Whatsapp Databases" / "preserved_messages.db"
+        assert not pres_db.exists()
+
+        # 2. Setup source db 2 where message 2 ('k2') was deleted
+        db_path2 = tmp_path / "src2_msgstore.db"
+        conn2 = sqlite3.connect(str(db_path2))
+        conn2.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, subject TEXT, jid_row_id INTEGER);
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                timestamp INTEGER,
+                sender_jid_row_id INTEGER,
+                from_me INTEGER,
+                key_id TEXT,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            CREATE TABLE message_media (
+                _id INTEGER PRIMARY KEY,
+                file_path TEXT,
+                mime_type TEXT,
+                chat_row_id INTEGER,
+                message_row_id INTEGER,
+                message_url TEXT,
+                media_name TEXT
+            );
+            INSERT INTO jid VALUES (1, '390111222'), (2, '390333444');
+            INSERT INTO chat VALUES (1, NULL, 1);
+            INSERT INTO message VALUES
+                (1, 1, 1718000000000, 2, 0, 'k1', 0, 'First message');
+        """)
+        conn2.close()
+
+        # Run 2: Incremental run with preserve_deleted
+        args.msgstore = str(db_path2)
+        wa.run_forward_mode(args, logger)
+
+        assert pres_db.exists()
+        with sqlite3.connect(str(pres_db)) as pres_conn:
+            row = pres_conn.execute(
+                "SELECT stanza_id, text_body, preservation_reason FROM preserved_messages"
+            ).fetchone()
+            assert row == ("k2", "Message to be deleted", "deleted_on_phone")
 
 
 # ===========================================================================

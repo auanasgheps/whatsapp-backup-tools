@@ -1,15 +1,18 @@
 # WhatsApp Backup Tools v0.70
 
-Version 0.70 introduces smarter Android ADB status troubleshooting with interactive authorization recovery in the archiver, alongside an adaptable, scrollable Settings modal for the web viewer on smaller screens.
+Version 0.70 brings powerful new tools to keep your archives complete and authentic: deleted message preservation across backup cycles, interactive WhatsApp polls, view-once indicators, and smoother device setup.
 
 ---
 
 ### 📁 WhatsApp Archiver
 
 #### ✨ New Features
+- **Preserve Deleted Messages**: With the new `-P` / `--preserve-deleted` option, messages that were deleted from your phone between backup runs are safely retained in a preserved history database instead of vanishing from your archive.
+- **Database Restoration in Reverse Mode**: When restoring media back to your phone, the archiver now automatically restores your latest WhatsApp database (`msgstore.db`) alongside media files.
 - **Interactive ADB Authorization Recovery**: If your Android device is detected but unauthorized, the archiver can now prompt you to restart the ADB server on the spot to re-trigger the "Allow USB debugging" prompt directly on your phone.
 
 #### ⚡ Improvements
+- **Organized Configuration Files**: You can now structure your configuration file using nested sections (such as `[source.android]` or `[options.filtering]`) for cleaner management.
 - **Accurate Connection & Status Troubleshooting**: Instead of displaying a generic checklist of possibilities, the archiver now tells you the exact device status (distinguishing between unplugged phones, multiple connected devices, offline links, and missing host permissions).
 - **Clearer Backup Retrieval Errors**: If pulling a WhatsApp backup database fails over ADB, the archiver provides direct actionable instructions (such as reminding you to create an End-to-End Encrypted Backup in WhatsApp).
 
@@ -19,6 +22,12 @@ Version 0.70 introduces smarter Android ADB status troubleshooting with interact
 ---
 
 ### 🌐 WhatsApp Viewer
+
+#### ✨ New Features
+- **Interactive WhatsApp Polls**: Polls on both Android and iOS are now rendered just like in WhatsApp, showing options, vote bars, and who voted for each choice.
+- **Preserved & Revoked Message Visibility**: Messages deleted on the phone or revoked via "Delete for Everyone" are clearly labeled with preserved badges and status indicators.
+- **View-Once Media Badges**: Ephemeral photos and videos are highlighted with View-Once badges so you know which media was originally sent with single-view privacy.
+- **Preserved-Only Chat Browsing**: Easily browse and inspect chats and contacts that only exist in preserved backups, complete with message counts and dates.
 
 #### ⚡ Improvements
 - **Responsive Settings Modal**: The Settings panel now smoothly adapts to small browser windows, split-screen views, and compact laptop screens with internal scrolling and a pinned header so controls remain accessible at any height.

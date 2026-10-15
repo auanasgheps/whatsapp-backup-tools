@@ -3,8 +3,13 @@ Tests for WhatsApp message preservation across archival runs.
 """
 
 import logging
+import os
 import sqlite3
+import sys
 from pathlib import Path
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 
 from wab_archiver import preservation
 
@@ -293,6 +298,239 @@ def test_diff_and_extract_ios(tmp_path: Path) -> None:
     assert by_key["ios_rev"]["preservation_reason"] == "revoked_by_sender"
 
 
+def test_diff_and_extract_android_fresh_archive_db(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_fresh.db"
+    new_db = tmp_path / "new_fresh.db"
+    arch_db = tmp_path / "empty_arch.db"
+    sqlite3.connect(arch_db).close()
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, 'user_a'), (2, 'user_b');
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (1, 1, 'Chat A');
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT,
+                from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER,
+                message_type INTEGER, text_data TEXT
+            );
+            INSERT INTO message VALUES (1, 1, 'k1', 0, 2, 1000, 0, 'Deleted');
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, 'user_a'), (2, 'user_b');
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (1, 1, 'Chat A');
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT,
+                from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER,
+                message_type INTEGER, text_data TEXT
+            );
+        """)
+
+    extracted = preservation.diff_and_extract_android(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    assert len(extracted) == 1
+    assert extracted[0]["stanza_id"] == "k1"
+    assert extracted[0]["text_body"] == "Deleted"
+    assert extracted[0]["sender"] == "+user_b"
+
+
+def test_diff_and_extract_android_rowid_shift(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_shift.db"
+    new_db = tmp_path / "new_shift.db"
+    arch_db = tmp_path / "empty_arch_shift.db"
+    sqlite3.connect(arch_db).close()
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, 'group-family@g.us'), (2, '39111');
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (5, 1, 'Family Group');
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT,
+                from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER,
+                message_type INTEGER, text_data TEXT
+            );
+            INSERT INTO message VALUES (10, 5, 'msg_group_1', 0, 2, 1000, 0, 'Group message');
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (90, 'group-family@g.us'), (91, '39111');
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (99, 90, 'Family Group');
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT,
+                from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER,
+                message_type INTEGER, text_data TEXT
+            );
+        """)
+
+    extracted = preservation.diff_and_extract_android(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    assert len(extracted) == 1
+    assert extracted[0]["stanza_id"] == "msg_group_1"
+    # chat_id is updated to the new database's chat_row_id (99), not 5
+    assert extracted[0]["chat_id"] == "99"
+    # preservation_reason is deleted_on_phone since group still exists
+    assert extracted[0]["preservation_reason"] == "deleted_on_phone"
+
+
+def test_diff_and_extract_ios_rowid_shift(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_ios_shift.db"
+    new_db = tmp_path / "new_ios_shift.db"
+    arch_db = tmp_path / "empty_arch_ios_shift.db"
+    sqlite3.connect(arch_db).close()
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (10, 'partner@s.whatsapp.net', 'Partner', NULL);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+            );
+            INSERT INTO ZWAMESSAGE VALUES
+                (1, 10, 'ios_shift_k1', 0, 'partner@s.whatsapp.net', 1000.0, 0, 'iOS Message', 'Partner', NULL, NULL);
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (88, 'partner@s.whatsapp.net', 'Partner', NULL);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+            );
+        """)
+
+    extracted = preservation.diff_and_extract_ios(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    assert len(extracted) == 1
+    assert extracted[0]["stanza_id"] == "ios_shift_k1"
+    # chat_id is updated to 88
+    assert extracted[0]["chat_id"] == "88"
+    assert extracted[0]["preservation_reason"] == "deleted_on_phone"
+
+
+def test_diff_and_extract_ios_fresh_archive_db(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_ios_fresh.db"
+    new_db = tmp_path / "new_ios_fresh.db"
+    arch_db = tmp_path / "empty_arch_ios.db"
+    sqlite3.connect(arch_db).close()
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+            );
+            INSERT INTO ZWAMESSAGE VALUES
+                (1, 1, 'ios_k1', 0, 'partner@s.whatsapp.net', 1000.0, 0, 'iOS Deleted', 'Partner', NULL, NULL);
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+            );
+        """)
+
+    extracted = preservation.diff_and_extract_ios(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    assert len(extracted) == 1
+    assert extracted[0]["stanza_id"] == "ios_k1"
+    assert extracted[0]["text_body"] == "iOS Deleted"
+
+
+def test_preserve_deleted_messages_orchestrator_fresh_output_dir(tmp_path: Path) -> None:
+    output_root = tmp_path / "fresh_run_out"
+    output_root.mkdir()
+    old_db = tmp_path / "old_orch.db"
+    new_db = tmp_path / "new_orch.db"
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, 'user_a'), (2, 'user_b');
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (1, 1, 'Chat A');
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT,
+                from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER,
+                message_type INTEGER, text_data TEXT
+            );
+            INSERT INTO message VALUES (1, 1, 'msg_to_delete', 0, 2, 1000, 0, 'Will be deleted');
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, 'user_a'), (2, 'user_b');
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (1, 1, 'Chat A');
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT,
+                from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER,
+                message_type INTEGER, text_data TEXT
+            );
+        """)
+
+    archive_db_path = output_root / ".wa_media_archiver.db"
+    assert not archive_db_path.exists()
+
+    preserved_count = preservation.preserve_deleted_messages(
+        old_db_path=str(old_db),
+        new_db_path=str(new_db),
+        output_root=str(output_root),
+        archive_db_path=str(archive_db_path),
+        platform="android",
+        logger=_TEST_LOGGER,
+    )
+
+    assert preserved_count == 1
+    assert archive_db_path.exists()
+    pres_db_path = output_root / "Whatsapp Databases" / "preserved_messages.db"
+    assert pres_db_path.exists()
+
+    with sqlite3.connect(pres_db_path) as pconn:
+        row = pconn.execute(
+            "SELECT stanza_id, text_body, preservation_reason FROM preserved_messages"
+        ).fetchone()
+        assert row == ("msg_to_delete", "Will be deleted", "deleted_on_phone")
+
+
 def test_record_preserved_messages_idempotent(tmp_path: Path) -> None:
     pres_conn = preservation.open_preservation_db(str(tmp_path))
 
@@ -559,3 +797,39 @@ def test_viewer_preserved_messages_integration(tmp_path: Path) -> None:
     assert at_res.status_code == 200
     at_msgs = at_res.get_json()
     assert len(at_msgs) == 4
+
+    # Verify /api/chat_info for preserved-only chat
+    info_res = client.get("/api/chat_info?chat_id=deleted_contact&chat_type=contact")
+    assert info_res.status_code == 200
+    info_data = info_res.get_json()
+    assert info_data["total"] == 1
+    assert info_data["display_name"] == "+deleted_contact"
+    assert info_data["first_ts"] == 5000
+    assert info_data["last_ts"] == 5000
+
+
+def test_merge_messages_same_timestamp_burst_not_dropped() -> None:
+    from wab_viewer.main import _merge_messages
+
+    live_rows = [
+        {
+            "msg_id": 1,
+            "stanza_id": "live_stanza_1",
+            "timestamp_ms": 5000,
+            "from_me": 0,
+            "text_body": "Live burst 1",
+        }
+    ]
+    pres_rows = [
+        {
+            "msg_id": -2,
+            "stanza_id": "pres_stanza_2",
+            "timestamp_ms": 5000,
+            "from_me": 0,
+            "text_body": "Preserved burst 2",
+            "preservation_reason": "deleted_on_phone",
+        }
+    ]
+    merged = _merge_messages(live_rows, pres_rows, False, 50)
+    assert len(merged) == 2
+    assert {m["stanza_id"] for m in merged} == {"live_stanza_1", "pres_stanza_2"}
