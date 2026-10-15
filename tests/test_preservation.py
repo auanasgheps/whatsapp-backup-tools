@@ -510,7 +510,7 @@ def test_preserve_deleted_messages_orchestrator_fresh_output_dir(tmp_path: Path)
     archive_db_path = output_root / ".wa_media_archiver.db"
     assert not archive_db_path.exists()
 
-    preserved_count = preservation.preserve_deleted_messages(
+    preserved_result = preservation.preserve_deleted_messages(
         old_db_path=str(old_db),
         new_db_path=str(new_db),
         output_root=str(output_root),
@@ -519,7 +519,9 @@ def test_preserve_deleted_messages_orchestrator_fresh_output_dir(tmp_path: Path)
         logger=_TEST_LOGGER,
     )
 
-    assert preserved_count == 1
+    assert preserved_result == (1, 1)
+    assert preserved_result.messages == 1
+    assert preserved_result.chats == 1
     assert archive_db_path.exists()
     pres_db_path = output_root / "Whatsapp Databases" / "preserved_messages.db"
     assert pres_db_path.exists()
@@ -587,7 +589,9 @@ def test_record_preserved_messages_idempotent(tmp_path: Path) -> None:
 
     # First run
     inserted_1 = preservation.record_preserved_messages(pres_conn, rows, "android", _TEST_LOGGER)
-    assert inserted_1 == 2
+    assert inserted_1 == (2, 1)
+    assert inserted_1.messages == 2
+    assert inserted_1.chats == 1
 
     chat_stats = pres_conn.execute(
         "SELECT newest_ts, msg_count FROM preserved_chats WHERE chat_id = 'chat_1'"
@@ -597,7 +601,9 @@ def test_record_preserved_messages_idempotent(tmp_path: Path) -> None:
 
     # Second run with same data (idempotency check)
     inserted_2 = preservation.record_preserved_messages(pres_conn, rows, "android", _TEST_LOGGER)
-    assert inserted_2 == 0
+    assert inserted_2 == (0, 0)
+    assert inserted_2.messages == 0
+    assert inserted_2.chats == 0
 
     total_msgs = pres_conn.execute("SELECT COUNT(*) FROM preserved_messages").fetchone()[0]
     assert total_msgs == 2
@@ -833,3 +839,115 @@ def test_merge_messages_same_timestamp_burst_not_dropped() -> None:
     merged = _merge_messages(live_rows, pres_rows, False, 50)
     assert len(merged) == 2
     assert {m["stanza_id"] for m in merged} == {"live_stanza_1", "pres_stanza_2"}
+
+
+def test_preserve_deleted_messages_logging_no_messages(tmp_path: Path, caplog) -> None:
+    old_db = tmp_path / "old.db"
+    new_db = tmp_path / "new.db"
+    for db_p in (old_db, new_db):
+        with sqlite3.connect(db_p) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER, message_type INTEGER, text_data TEXT);
+                INSERT INTO jid VALUES (1, 'user_a');
+                INSERT INTO chat VALUES (1, 1, 'Chat A');
+                INSERT INTO message VALUES (1, 1, 'k1', 0, 1, 1000, 0, 'Same');
+            """)
+    arch_db = tmp_path / ".wa_media_archiver.db"
+    sqlite3.connect(arch_db).close()
+
+    with caplog.at_level(logging.INFO):
+        res = preservation.preserve_deleted_messages(
+            old_db_path=str(old_db),
+            new_db_path=str(new_db),
+            output_root=str(tmp_path),
+            archive_db_path=str(arch_db),
+            platform="android",
+            logger=_TEST_LOGGER,
+        )
+
+    assert res == (0, 0)
+    assert res.messages == 0
+    assert res.chats == 0
+    assert (
+        "No deleted or revoked messages detected (0 messages preserved across 0 chats)."
+        in caplog.text
+    )
+
+
+def test_forward_mode_preservation_summary_logging(tmp_path: Path, caplog) -> None:
+    import argparse
+
+    from wab_archiver import main as wa
+
+    db_path1 = tmp_path / "src1.db"
+    with sqlite3.connect(db_path1) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, subject TEXT, jid_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, timestamp INTEGER, sender_jid_row_id INTEGER, from_me INTEGER, key_id TEXT, message_type INTEGER, text_data TEXT);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, mime_type TEXT, chat_row_id INTEGER, message_url TEXT, media_name TEXT);
+            INSERT INTO jid VALUES (1, '390111222'), (2, '390333444');
+            INSERT INTO chat VALUES (1, NULL, 1);
+            INSERT INTO message VALUES
+                (1, 1, 1718000000000, 2, 0, 'k1', 0, 'M1'),
+                (2, 1, 1718001000000, 2, 0, 'k2', 0, 'M2');
+        """)
+
+    output_dir = tmp_path / "archive_out"
+    output_dir.mkdir()
+    root = tmp_path / "wa_root"
+    (root / "Media" / "WhatsApp Images").mkdir(parents=True)
+
+    args = argparse.Namespace(
+        from_adb=False,
+        e2e_key=None,
+        ios_password=None,
+        timezone=None,
+        since=None,
+        limit=None,
+        ios_backup=None,
+        dry_run=False,
+        preserve_deleted=True,
+        msgstore=str(db_path1),
+        wa_roots=[str(root)],
+        output=str(output_dir),
+        contacts=None,
+        log=None,
+    )
+
+    # Run 1: baseline run
+    with caplog.at_level(logging.INFO):
+        wa.run_forward_mode(args, _TEST_LOGGER)
+
+    assert (
+        "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
+        in caplog.text
+    )
+    assert "Preserved           : 0 message(s) across 0 chat(s)" in caplog.text
+
+    # Run 2: incremental run with a deleted message
+    db_path2 = tmp_path / "src2.db"
+    with sqlite3.connect(db_path2) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, subject TEXT, jid_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, timestamp INTEGER, sender_jid_row_id INTEGER, from_me INTEGER, key_id TEXT, message_type INTEGER, text_data TEXT);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, mime_type TEXT, chat_row_id INTEGER, message_url TEXT, media_name TEXT);
+            INSERT INTO jid VALUES (1, '390111222'), (2, '390333444');
+            INSERT INTO chat VALUES (1, NULL, 1);
+            INSERT INTO message VALUES
+                (1, 1, 1718000000000, 2, 0, 'k1', 0, 'M1');
+        """)
+
+    args.msgstore = str(db_path2)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        wa.run_forward_mode(args, _TEST_LOGGER)
+
+    assert "Preservation complete: 1 new message(s) preserved across 1 chat(s)." in caplog.text
+    assert "Preserved           : 1 message(s) across 1 chat(s)" in caplog.text
+    assert "Preserved DB        :" in caplog.text

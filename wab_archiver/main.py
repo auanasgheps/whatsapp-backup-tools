@@ -1771,15 +1771,16 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
                 shutil.copy2(decrypted_db, old_android_db_copy)
             else:
                 logger.info(
-                    "Preserve-deleted: First run detected in output directory; no previous database to diff."
+                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
                 )
+                args._preservation_stats = preservation.PreservationResult(messages=0, chats=0)
 
         args.msgstore = decrypt_msgstore(args.msgstore, args.e2e_key, decrypted_db, logger)
 
         if old_android_db_copy is not None:
             try:
                 archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
-                preservation.preserve_deleted_messages(
+                args._preservation_stats = preservation.preserve_deleted_messages(
                     old_android_db_copy,
                     decrypted_db,
                     args.output,
@@ -1816,8 +1817,9 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
                 shutil.copy2(existing_chat_storage, old_ios_db_copy)
             else:
                 logger.info(
-                    "Preserve-deleted: First run detected in output directory; no previous database to diff."
+                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
                 )
+                args._preservation_stats = preservation.PreservationResult(messages=0, chats=0)
 
         is_encrypted = backup_reader.detect_encrypted(args.ios_backup, logger)
         if is_encrypted and not args.ios_password:
@@ -1846,7 +1848,7 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
         if old_ios_db_copy is not None:
             try:
                 archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
-                preservation.preserve_deleted_messages(
+                args._preservation_stats = preservation.preserve_deleted_messages(
                     old_ios_db_copy,
                     msgstore_path,
                     args.output,
@@ -2082,6 +2084,10 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
         platform = detect_db_platform(args.msgstore)
         logger.info(f"Detected platform: {platform}")
 
+    pres_stats = getattr(
+        args, "_preservation_stats", preservation.PreservationResult(messages=0, chats=0)
+    )
+
     if getattr(args, "preserve_deleted", False) and not args.ios_backup:
         target_name = "msgstore.db" if platform == "android" else "ChatStorage.sqlite"
         dest_db = os.path.join(args.output, "Whatsapp Databases", target_name)
@@ -2090,7 +2096,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             if os.path.isfile(dest_db):
                 if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
                     archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
-                    preservation.preserve_deleted_messages(
+                    pres_stats = preservation.preserve_deleted_messages(
                         dest_db,
                         args.msgstore,
                         args.output,
@@ -2102,11 +2108,16 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                     args.msgstore = dest_db
             else:
                 logger.info(
-                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot."
+                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
                 )
+                pres_stats = preservation.PreservationResult(messages=0, chats=0)
                 if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
                     shutil.copy2(args.msgstore, dest_db)
                     args.msgstore = dest_db
+        else:
+            logger.info(
+                "Preserve-deleted: [DRY RUN] Skipping database preservation (0 messages preserved across 0 chats)."
+            )
 
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()
@@ -2318,6 +2329,11 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
     logger.info(f"  Missing source files: {stats['missing']}")
     logger.info(f"  Errors / Warnings   : {stats['warnings']}")
+    if getattr(args, "preserve_deleted", False):
+        pres_label = "Would preserve" if args.dry_run else "Preserved"
+        logger.info(
+            f"  {pres_label:<20}: {pres_stats.messages} message(s) across {pres_stats.chats} chat(s)"
+        )
     if dup_summary[1] > 0:
         logger.info(
             f"  Duplicate media     : {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
@@ -2341,6 +2357,10 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
         if hasattr(media_resolver, "conflict_rows") and media_resolver.conflict_rows:
             logger.info(f"  {'Conflicts report':<20}: {conflict_report_path}")
         logger.info(f"  {'Archive DB':<20}: {db_path}")
+        if getattr(args, "preserve_deleted", False):
+            pres_db_path = preservation.get_preserved_db_path(args.output)
+            if os.path.isfile(pres_db_path):
+                logger.info(f"  {'Preserved DB':<20}: {pres_db_path}")
 
 
 def main():

@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 from shared.source_detection import WA_DATABASES_DIR_NAME
 
@@ -14,6 +15,12 @@ from shared.source_detection import WA_DATABASES_DIR_NAME
 # ==============================================================================
 
 PRESERVED_DB_NAME = "preserved_messages.db"
+
+
+class PreservationResult(NamedTuple):
+    messages: int
+    chats: int
+
 
 PRESERVED_SCHEMA = """
     CREATE TABLE IF NOT EXISTS preserved_messages (
@@ -723,14 +730,14 @@ def diff_and_extract_ios(
 
 def record_preserved_messages(
     pres_conn: sqlite3.Connection, rows: list[dict], platform: str, logger: logging.Logger
-) -> int:
+) -> PreservationResult:
     """
     Bulk insert extracted rows into preserved_messages, update preserved_chats,
     and log an entry in preservation_runs within an atomic transaction.
-    Returns the count of newly inserted preserved messages.
+    Returns PreservationResult(messages, chats).
     """
     if not rows:
-        return 0
+        return PreservationResult(messages=0, chats=0)
 
     now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     insert_sql = """
@@ -752,33 +759,47 @@ def record_preserved_messages(
     cursor = pres_conn.cursor()
     cursor.execute("BEGIN IMMEDIATE")
     try:
-        initial_count = pres_conn.execute("SELECT COUNT(*) FROM preserved_messages").fetchone()[0]
-        cursor.executemany(insert_sql, rows)
-        final_count = pres_conn.execute("SELECT COUNT(*) FROM preserved_messages").fetchone()[0]
-        newly_inserted = final_count - initial_count
-
-        # Recompute rollups for affected chats
-        affected_chats = {(r["chat_id"], r["chat_type"]) for r in rows}
-        for chat_id, chat_type in affected_chats:
-            stat = pres_conn.execute(
-                """
-                SELECT MAX(timestamp_ms), COUNT(*)
-                FROM preserved_messages
-                WHERE chat_id = ? AND chat_type = ?
-            """,
-                (chat_id, chat_type),
+        new_rows = []
+        seen_keys = set()
+        for r in rows:
+            key = (r["chat_id"], r["stanza_id"])
+            if key in seen_keys:
+                continue
+            exists = pres_conn.execute(
+                "SELECT 1 FROM preserved_messages WHERE chat_id = ? AND stanza_id = ? LIMIT 1",
+                key,
             ).fetchone()
-            if stat and stat[0] is not None:
-                cursor.execute(
+            if not exists:
+                new_rows.append(r)
+                seen_keys.add(key)
+
+        if new_rows:
+            cursor.executemany(insert_sql, new_rows)
+            newly_inserted = len(new_rows)
+            affected_chats = {(r["chat_id"], r["chat_type"]) for r in new_rows}
+            for chat_id, chat_type in affected_chats:
+                stat = pres_conn.execute(
                     """
-                    INSERT INTO preserved_chats (chat_id, chat_type, newest_ts, msg_count)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(chat_id, chat_type) DO UPDATE SET
-                        newest_ts = excluded.newest_ts,
-                        msg_count = excluded.msg_count
+                    SELECT MAX(timestamp_ms), COUNT(*)
+                    FROM preserved_messages
+                    WHERE chat_id = ? AND chat_type = ?
                 """,
-                    (chat_id, chat_type, stat[0], stat[1]),
-                )
+                    (chat_id, chat_type),
+                ).fetchone()
+                if stat and stat[0] is not None:
+                    cursor.execute(
+                        """
+                        INSERT INTO preserved_chats (chat_id, chat_type, newest_ts, msg_count)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(chat_id, chat_type) DO UPDATE SET
+                            newest_ts = excluded.newest_ts,
+                            msg_count = excluded.msg_count
+                    """,
+                        (chat_id, chat_type, stat[0], stat[1]),
+                    )
+        else:
+            newly_inserted = 0
+            affected_chats = set()
 
         cursor.execute(
             """
@@ -799,7 +820,7 @@ def record_preserved_messages(
             f"Preservation complete: {newly_inserted} new message(s) preserved across "
             f"{len(affected_chats)} chat(s)."
         )
-        return newly_inserted
+        return PreservationResult(messages=newly_inserted, chats=len(affected_chats))
     except Exception as e:
         pres_conn.rollback()
         logger.error(f"Failed to record preserved messages ({e}); rolled back.")
@@ -813,22 +834,22 @@ def preserve_deleted_messages(
     archive_db_path: str,
     platform: str,
     logger: logging.Logger,
-) -> int:
+) -> PreservationResult:
     """
     High-level orchestrator: verifies account match, diffs old and new databases,
     and commits any deleted/revoked messages to preserved_messages.db.
-    Returns the number of messages preserved.
+    Returns PreservationResult(messages, chats).
     """
     if not os.path.isfile(old_db_path):
         logger.debug(f"Previous database not found at {old_db_path}; skipping preservation.")
-        return 0
+        return PreservationResult(messages=0, chats=0)
 
     if not os.path.isfile(new_db_path):
         logger.error(f"Incoming database not found at {new_db_path}; cannot run preservation.")
-        return 0
+        return PreservationResult(messages=0, chats=0)
 
     if not verify_account_match(old_db_path, new_db_path, platform, logger):
-        return 0
+        return PreservationResult(messages=0, chats=0)
 
     from . import archive_db
 
@@ -842,11 +863,13 @@ def preserve_deleted_messages(
         extracted = diff_and_extract_ios(old_db_path, new_db_path, archive_db_path, logger)
     else:
         logger.warning(f"Unsupported platform '{platform}' for preservation diff; skipping.")
-        return 0
+        return PreservationResult(messages=0, chats=0)
 
     if not extracted:
-        logger.info("No deleted or revoked messages detected.")
-        return 0
+        logger.info(
+            "No deleted or revoked messages detected (0 messages preserved across 0 chats)."
+        )
+        return PreservationResult(messages=0, chats=0)
 
     with contextlib.closing(open_preservation_db(output_root)) as pres_conn:
         return record_preserved_messages(pres_conn, extracted, platform, logger)
