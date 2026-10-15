@@ -1752,7 +1752,7 @@ def decrypt_msgstore(
     return output_path
 
 
-def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger):
+def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger) -> None:
     """Decrypt encrypted msgstore if necessary."""
     if hasattr(args, "msgstore") and args.msgstore and args.msgstore.endswith(".crypt15"):
         if not getattr(args, "e2e_key", None):
@@ -1761,36 +1761,68 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
         db_dir = os.path.join(args.output, "Whatsapp Databases")
         os.makedirs(db_dir, exist_ok=True)
         decrypted_db = os.path.join(db_dir, "msgstore.db")
+        old_db = os.path.join(db_dir, "msgstore.db.old")
+        incoming_db = os.path.join(db_dir, "msgstore.db.incoming")
 
-        old_android_db_copy = None
+        if os.path.exists(incoming_db):
+            with contextlib.suppress(OSError):
+                os.remove(incoming_db)
+
+        try:
+            decrypt_msgstore(args.msgstore, args.e2e_key, incoming_db, logger)
+        except BaseException:
+            if os.path.exists(incoming_db):
+                with contextlib.suppress(OSError):
+                    os.remove(incoming_db)
+            raise
+
+        has_previous_db = os.path.isfile(decrypted_db)
+
         if getattr(args, "preserve_deleted", False):
-            if os.path.isfile(decrypted_db):
-                tmp_f = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-                old_android_db_copy = tmp_f.name
-                tmp_f.close()
-                shutil.copy2(decrypted_db, old_android_db_copy)
+            if has_previous_db:
+                if os.path.exists(old_db):
+                    with contextlib.suppress(OSError):
+                        os.remove(old_db)
+                os.replace(decrypted_db, old_db)
+                os.replace(incoming_db, decrypted_db)
+                args.msgstore = decrypted_db
+
+                try:
+                    archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+                    args._preservation_stats = preservation.preserve_deleted_messages(
+                        old_db,
+                        decrypted_db,
+                        args.output,
+                        archive_db_path,
+                        "android",
+                        logger,
+                    )
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.error(
+                        f"Preservation failed ({e}). Restoring previous database from {old_db}."
+                    )
+                    if os.path.exists(decrypted_db):
+                        with contextlib.suppress(OSError):
+                            os.remove(decrypted_db)
+                    with contextlib.suppress(OSError):
+                        os.replace(old_db, decrypted_db)
+                    raise
+                finally:
+                    if os.path.exists(old_db):
+                        with contextlib.suppress(OSError):
+                            os.remove(old_db)
             else:
                 logger.info(
                     "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
                 )
                 args._preservation_stats = preservation.PreservationResult(messages=0, chats=0)
-
-        args.msgstore = decrypt_msgstore(args.msgstore, args.e2e_key, decrypted_db, logger)
-
-        if old_android_db_copy is not None:
-            try:
-                archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
-                args._preservation_stats = preservation.preserve_deleted_messages(
-                    old_android_db_copy,
-                    decrypted_db,
-                    args.output,
-                    archive_db_path,
-                    "android",
-                    logger,
-                )
-            finally:
-                with contextlib.suppress(OSError):
-                    os.unlink(old_android_db_copy)
+                os.replace(incoming_db, decrypted_db)
+                args.msgstore = decrypted_db
+        else:
+            if has_previous_db:
+                logger.warning(f"Overwriting existing {decrypted_db} with decrypted database.")
+            os.replace(incoming_db, decrypted_db)
+            args.msgstore = decrypted_db
 
 
 def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: logging.Logger):
@@ -1808,57 +1840,114 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
         existing_chat_storage = os.path.join(
             args.output, "Whatsapp Databases", "ChatStorage.sqlite"
         )
-        old_ios_db_copy = None
-        if getattr(args, "preserve_deleted", False):
-            if os.path.isfile(existing_chat_storage):
-                tmp_f = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
-                old_ios_db_copy = tmp_f.name
-                tmp_f.close()
-                shutil.copy2(existing_chat_storage, old_ios_db_copy)
-            else:
-                logger.info(
-                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
-                )
-                args._preservation_stats = preservation.PreservationResult(messages=0, chats=0)
+        old_ios_db = os.path.join(args.output, "Whatsapp Databases", "ChatStorage.sqlite.old")
+        has_previous_ios_db = os.path.isfile(existing_chat_storage)
 
         is_encrypted = backup_reader.detect_encrypted(args.ios_backup, logger)
         if is_encrypted and not args.ios_password:
             logger.error("Your iPhone backup is encrypted. Re-run with --ios-password <password>.")
             raise SystemExit(1)
 
-        if is_encrypted:
-            msgstore_path, ios_contacts_path, media_resolver = backup_reader.extract_encrypted(
-                args.ios_backup,
-                args.ios_password,
-                args.output,
-                args.ios_contacts,
-                args.business,
-                logger,
-            )
-        else:
-            manifest_map, msgstore_path, ios_contacts_path = backup_reader.extract_plaintext(
-                args.ios_backup,
-                args.output,
-                args.ios_contacts,
-                args.business,
-                logger,
-            )
-            media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
+        if getattr(args, "preserve_deleted", False):
+            if has_previous_ios_db:
+                if os.path.exists(old_ios_db):
+                    with contextlib.suppress(OSError):
+                        os.remove(old_ios_db)
+                os.replace(existing_chat_storage, old_ios_db)
 
-        if old_ios_db_copy is not None:
-            try:
-                archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
-                args._preservation_stats = preservation.preserve_deleted_messages(
-                    old_ios_db_copy,
-                    msgstore_path,
+                try:
+                    if is_encrypted:
+                        msgstore_path, ios_contacts_path, media_resolver = (
+                            backup_reader.extract_encrypted(
+                                args.ios_backup,
+                                args.ios_password,
+                                args.output,
+                                args.ios_contacts,
+                                args.business,
+                                logger,
+                            )
+                        )
+                    else:
+                        manifest_map, msgstore_path, ios_contacts_path = (
+                            backup_reader.extract_plaintext(
+                                args.ios_backup,
+                                args.output,
+                                args.ios_contacts,
+                                args.business,
+                                logger,
+                            )
+                        )
+                        media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
+
+                    archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+                    args._preservation_stats = preservation.preserve_deleted_messages(
+                        old_ios_db,
+                        msgstore_path,
+                        args.output,
+                        archive_db_path,
+                        "ios",
+                        logger,
+                    )
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.error(
+                        f"Preservation failed ({e}). Restoring previous database from {old_ios_db}."
+                    )
+                    if os.path.exists(existing_chat_storage):
+                        with contextlib.suppress(OSError):
+                            os.remove(existing_chat_storage)
+                    with contextlib.suppress(OSError):
+                        os.replace(old_ios_db, existing_chat_storage)
+                    raise
+                finally:
+                    if os.path.exists(old_ios_db):
+                        with contextlib.suppress(OSError):
+                            os.remove(old_ios_db)
+            else:
+                logger.info(
+                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
+                )
+                args._preservation_stats = preservation.PreservationResult(messages=0, chats=0)
+                if is_encrypted:
+                    msgstore_path, ios_contacts_path, media_resolver = (
+                        backup_reader.extract_encrypted(
+                            args.ios_backup,
+                            args.ios_password,
+                            args.output,
+                            args.ios_contacts,
+                            args.business,
+                            logger,
+                        )
+                    )
+                else:
+                    manifest_map, msgstore_path, ios_contacts_path = (
+                        backup_reader.extract_plaintext(
+                            args.ios_backup,
+                            args.output,
+                            args.ios_contacts,
+                            args.business,
+                            logger,
+                        )
+                    )
+                    media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
+        else:
+            if is_encrypted:
+                msgstore_path, ios_contacts_path, media_resolver = backup_reader.extract_encrypted(
+                    args.ios_backup,
+                    args.ios_password,
                     args.output,
-                    archive_db_path,
-                    "ios",
+                    args.ios_contacts,
+                    args.business,
                     logger,
                 )
-            finally:
-                with contextlib.suppress(OSError):
-                    os.unlink(old_ios_db_copy)
+            else:
+                manifest_map, msgstore_path, ios_contacts_path = backup_reader.extract_plaintext(
+                    args.ios_backup,
+                    args.output,
+                    args.ios_contacts,
+                    args.business,
+                    logger,
+                )
+                media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
 
         args.msgstore = msgstore_path
         platform = "ios"
@@ -2096,15 +2185,35 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             if os.path.isfile(dest_db):
                 if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
                     archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
-                    pres_stats = preservation.preserve_deleted_messages(
-                        dest_db,
-                        args.msgstore,
-                        args.output,
-                        archive_db_path,
-                        platform or "android",
-                        logger,
-                    )
+                    old_db = dest_db + ".old"
+                    if os.path.exists(old_db):
+                        with contextlib.suppress(OSError):
+                            os.remove(old_db)
+                    os.replace(dest_db, old_db)
                     shutil.copy2(args.msgstore, dest_db)
+                    try:
+                        pres_stats = preservation.preserve_deleted_messages(
+                            old_db,
+                            dest_db,
+                            args.output,
+                            archive_db_path,
+                            platform or "android",
+                            logger,
+                        )
+                    except (Exception, KeyboardInterrupt) as e:
+                        logger.error(
+                            f"Preservation failed ({e}). Restoring previous database from {old_db}."
+                        )
+                        if os.path.exists(dest_db):
+                            with contextlib.suppress(OSError):
+                                os.remove(dest_db)
+                        with contextlib.suppress(OSError):
+                            os.replace(old_db, dest_db)
+                        raise
+                    finally:
+                        if os.path.exists(old_db):
+                            with contextlib.suppress(OSError):
+                                os.remove(old_db)
                     args.msgstore = dest_db
             else:
                 logger.info(
