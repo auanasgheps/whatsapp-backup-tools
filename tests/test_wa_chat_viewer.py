@@ -2926,6 +2926,12 @@ class TestRecentMessagesRouting:
             "edited_ts",
             "is_view_once",
             "stanza_id",
+            "media_width",
+            "media_height",
+            "media_size",
+            "media_duration",
+            "aspect_ratio",
+            "has_thumbnail",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -7878,3 +7884,229 @@ class TestPollSupport:
         opt_res = client.get("/api/search?q=Carcassonne")
         assert opt_res.status_code == 200
         assert len(opt_res.get_json()["results"]) == 1
+
+    def test_missing_media_thumbnail_and_dimensions(self, tmp_path):
+        """Verify media dimensions and thumbnail streaming for Android missing media."""
+        arch_conn = sqlite3.connect(tmp_path / ".wa_media_archiver.db")
+        arch_conn.execute("CREATE TABLE archive_copies (original_path TEXT, archive_path TEXT)")
+        arch_conn.execute("CREATE TABLE contacts (number TEXT, display_name TEXT)")
+        arch_conn.commit()
+
+        wa_conn = sqlite3.connect(tmp_path / "msgstore.db")
+        wa_conn.execute("CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT)")
+        wa_conn.execute(
+            "CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER)"
+        )
+        wa_conn.execute("""
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE message_media (
+                message_row_id INTEGER PRIMARY KEY,
+                file_path TEXT,
+                file_size INTEGER,
+                width INTEGER,
+                height INTEGER,
+                media_duration INTEGER,
+                file_hash TEXT,
+                media_name TEXT
+            )
+        """)
+        wa_conn.execute(
+            "CREATE TABLE message_thumbnail (message_row_id INTEGER PRIMARY KEY, thumbnail BLOB)"
+        )
+        wa_conn.execute(
+            "CREATE TABLE media_hash_thumbnail (media_hash TEXT PRIMARY KEY, thumbnail BLOB)"
+        )
+        wa_conn.execute(
+            "CREATE TABLE message_quoted (message_row_id INTEGER PRIMARY KEY, from_me INTEGER, text_data TEXT, sender_jid_row_id INTEGER, timestamp INTEGER)"
+        )
+
+        wa_conn.execute("INSERT INTO jid VALUES (1, '15551234567')")
+        wa_conn.execute("INSERT INTO chat VALUES (1, 1, 'Test Chat', 0)")
+
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb"
+        # msg 1: has thumbnail in message_thumbnail
+        wa_conn.execute("INSERT INTO message VALUES (1, 1, 0, 1, 1700000000000, 'caption 1', 1)")
+        wa_conn.execute(
+            "INSERT INTO message_media VALUES (1, 'Media/WhatsApp Images/missing1.jpg', 12345, 800, 600, 0, 'hash1', 'missing1.jpg')"
+        )
+        wa_conn.execute("INSERT INTO message_thumbnail VALUES (1, ?)", (fake_jpeg,))
+
+        # msg 2: has thumbnail in media_hash_thumbnail
+        wa_conn.execute("INSERT INTO message VALUES (2, 1, 0, 1, 1700000001000, 'caption 2', 1)")
+        wa_conn.execute(
+            "INSERT INTO message_media VALUES (2, 'Media/WhatsApp Images/missing2.jpg', 67890, 1920, 1080, 0, 'hash2', 'missing2.jpg')"
+        )
+        wa_conn.execute("INSERT INTO media_hash_thumbnail VALUES ('hash2', ?)", (fake_jpeg,))
+
+        # msg 3: no thumbnail
+        wa_conn.execute("INSERT INTO message VALUES (3, 1, 0, 1, 1700000002000, 'caption 3', 3)")
+        wa_conn.execute(
+            "INSERT INTO message_media VALUES (3, 'Media/WhatsApp Video/missing3.mp4', 99999, 1280, 720, 45, 'hash3', 'missing3.mp4')"
+        )
+
+        wa_conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=True)
+        client = app.test_client()
+
+        res = client.get("/api/messages?chat_id=15551234567&chat_type=contact")
+        assert res.status_code == 200
+        msgs = {m["msg_id"]: m for m in res.get_json()}
+
+        # Check msg 1
+        m1 = msgs[1]
+        assert m1["has_thumbnail"] == 1
+        assert m1["media_width"] == 800
+        assert m1["media_height"] == 600
+        assert m1["media_size"] == 12345
+        assert m1["aspect_ratio"] == round(800 / 600, 3)
+
+        # Check msg 2
+        m2 = msgs[2]
+        assert m2["has_thumbnail"] == 1
+        assert m2["media_width"] == 1920
+        assert m2["media_height"] == 1080
+        assert m2["media_size"] == 67890
+
+        # Check msg 3
+        m3 = msgs[3]
+        assert m3["has_thumbnail"] == 0
+        assert m3["media_width"] == 1280
+        assert m3["media_height"] == 720
+        assert m3["media_duration"] == 45
+
+        # Check thumbnail endpoint
+        t1 = client.get("/api/thumbnail/1")
+        assert t1.status_code == 200
+        assert t1.content_type == "image/jpeg"
+        assert t1.data == fake_jpeg
+        assert "public, max-age=86400" in t1.headers.get("Cache-Control", "")
+
+        t2 = client.get("/api/thumbnail/2")
+        assert t2.status_code == 200
+        assert t2.data == fake_jpeg
+
+        t3 = client.get("/api/thumbnail/3")
+        assert t3.status_code == 404
+
+    def test_missing_media_ios_thumbnail_and_dimensions(self, tmp_path):
+        """Verify media dimensions and thumbnail streaming for iOS missing media."""
+        arch_conn = sqlite3.connect(tmp_path / ".wa_media_archiver.db")
+        arch_conn.execute("CREATE TABLE archive_copies (original_path TEXT, archive_path TEXT)")
+        arch_conn.execute("CREATE TABLE contacts (number TEXT, display_name TEXT)")
+        arch_conn.commit()
+
+        # Create a fake thumbnail file on disk for iOS thumb path
+        thumb_dir = tmp_path / "Media" / "15551234567@s.whatsapp.net" / "a" / "b"
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        thumb_file = thumb_dir / "test.thumb"
+        fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10"
+        thumb_file.write_bytes(fake_png)
+
+        wa_conn = sqlite3.connect(tmp_path / "ChatStorage.sqlite")
+        wa_conn.execute("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZFILESIZE INTEGER,
+                ZASPECTRATIO FLOAT,
+                ZMOVIEDURATION INTEGER,
+                ZXMPPTHUMBPATH TEXT,
+                ZTHUMBNAILLOCALPATH TEXT,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE FLOAT,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZFROMJID TEXT,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            )
+        """)
+
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION VALUES (1, '15551234567@s.whatsapp.net', 'Alice', NULL)"
+        )
+        # msg 1: image with thumb on disk
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (1, 54321, 1.333, 0, 'Media/15551234567@s.whatsapp.net/a/b/test.thumb', NULL, 'nonexistent.jpg', 'img.jpg')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (1, 1, 1, 0, 700000000.0, 38, 'photo caption', '15551234567@s.whatsapp.net', NULL, NULL, 'Alice')"
+        )
+
+        # msg 2: video without thumb
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (2, 98765, 1.778, 30, NULL, NULL, 'nonexistent.mp4', 'vid.mp4')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (2, 1, 2, 0, 700000010.0, 39, 'video caption', '15551234567@s.whatsapp.net', NULL, NULL, 'Alice')"
+        )
+
+        wa_conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=True)
+        client = app.test_client()
+
+        res = client.get("/api/messages?chat_id=1&chat_type=contact")
+        assert res.status_code == 200
+        msgs = {m["msg_id"]: m for m in res.get_json()}
+
+        m1 = msgs[1]
+        assert m1["has_thumbnail"] == 1
+        assert m1["media_size"] == 54321
+        assert m1["aspect_ratio"] == 1.333
+
+        m2 = msgs[2]
+        assert m2["has_thumbnail"] == 0
+        assert m2["media_size"] == 98765
+        assert m2["media_duration"] == 30
+        assert m2["aspect_ratio"] == 1.778
+
+        # Test iOS thumbnail endpoint
+        t1 = client.get("/api/thumbnail/1")
+        assert t1.status_code == 200
+        assert t1.content_type == "image/png"
+        assert t1.data == fake_png
+
+        t2 = client.get("/api/thumbnail/2")
+        assert t2.status_code == 404
