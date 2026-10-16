@@ -30,8 +30,8 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # business = false                      # Target WhatsApp Business instead of regular WhatsApp
 
 # --- Archiving Features & Filtering ---
-# preserve_deleted = false              # Preserve messages/chats deleted on phone or revoked by sender across runs
-# link_duplicates  = false              # Hardlink duplicate media across chats instead of copying bytes to save disk space
+# preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
+# link_duplicates  = true               # Hardlink duplicate media across chats instead of copying bytes to save disk space
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 
 # --- Source: Android (Local Files & Folders) ---

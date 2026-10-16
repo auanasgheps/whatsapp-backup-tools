@@ -1308,8 +1308,8 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # -----------------------------------------------------------------------------
 # Archiving Features & Filtering
 # -----------------------------------------------------------------------------
-# preserve_deleted = false              # Preserve messages/chats deleted on phone or revoked by sender across runs
-# link_duplicates  = false              # Save disk space by hardlinking duplicate media across chats
+# preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
+# link_duplicates  = true               # Save disk space by hardlinking duplicate media across chats
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 
 # -----------------------------------------------------------------------------
