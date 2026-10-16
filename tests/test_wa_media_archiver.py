@@ -1382,7 +1382,165 @@ class TestWriteDuplicateReport:
         assert "file_count" in content
         assert "link_status" in content
         assert "original_timestamp" in content
+        assert "media_type" in content
         assert "2024-" in content
+        assert "# --- PHOTOS & IMAGES" in content
+
+    def test_classify_media_type(self):
+        from shared.db import classify_media_type
+
+        # Basic extensions
+        assert classify_media_type("photo.jpg", None) == "image"
+        assert classify_media_type("photo.jpeg", None) == "image"
+        assert classify_media_type("photo.png", None) == "image"
+        assert classify_media_type("photo.heic", None) == "image"
+        assert classify_media_type("clip.mp4", None) == "video"
+        assert classify_media_type("clip.mov", None) == "video"
+        assert classify_media_type("doc.pdf", None) == "document"
+        assert classify_media_type("sheet.xlsx", None) == "document"
+        assert classify_media_type("song.mp3", None) == "audio"
+        assert classify_media_type("voice.opus", None) == "audio"
+        assert classify_media_type("contact.vcf", None) == "vcard"
+        assert classify_media_type("vcard:123", None) == "vcard"
+
+        # Stickers
+        assert classify_media_type("stk-123.webp", None) == "sticker"
+        assert classify_media_type("Media/WhatsApp Stickers/random.webp", None) == "sticker"
+        assert classify_media_type("Message/stickers/abc.webp", None) == "sticker"
+
+        # GIFs (including WhatsApp Android mp4 gif storage)
+        assert classify_media_type("funny.gif", None) == "gif"
+        assert classify_media_type("Media/WhatsApp Animated Gifs/GIF-123.mp4", None) == "gif"
+        assert classify_media_type("GIF-123.mp4", None) == "gif"
+
+        # Fallback to folder structure
+        assert classify_media_type("Media/WhatsApp Images/unknown_blob", None) == "image"
+        assert classify_media_type("Media/WhatsApp Video/unknown_blob", None) == "video"
+        assert classify_media_type("Media/WhatsApp Audio/unknown_blob", None) == "audio"
+        assert classify_media_type("Media/WhatsApp Documents/unknown_blob", None) == "document"
+
+        # Fallback path parameter
+        assert classify_media_type(None, "Media/WhatsApp Images/photo.jpg") == "image"
+
+    def test_duplicate_report_sections_and_ordering(self, tmp_path, logger):
+        import csv
+        import hashlib
+
+        conn = arc.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+
+        # 1. Sticker with highest duplicate count (4 duplicates)
+        stk_h = hashlib.md5(b"sticker_bytes").digest()
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            ("Media/WhatsApp Stickers/stk.webp", stk_h),
+        )
+        for i in range(4):
+            cursor.execute(
+                "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+                (
+                    "Media/WhatsApp Stickers/stk.webp",
+                    f"Contacts/C{i}/2024/stk.webp",
+                    1 if i > 0 else 0,
+                    1718000000000,
+                ),
+            )
+
+        # 2. Animated GIF (2 duplicates)
+        gif_h = hashlib.md5(b"gif_bytes").digest()
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            ("Media/WhatsApp Animated Gifs/GIF-01.mp4", gif_h),
+        )
+        for i in range(2):
+            cursor.execute(
+                "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+                (
+                    "Media/WhatsApp Animated Gifs/GIF-01.mp4",
+                    f"Contacts/C{i}/2024/gif.mp4",
+                    1 if i > 0 else 0,
+                    1718000000000,
+                ),
+            )
+
+        # 3. Photo (2 duplicates)
+        img_h = hashlib.md5(b"image_bytes").digest()
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            ("Media/WhatsApp Images/IMG-01.jpg", img_h),
+        )
+        for i in range(2):
+            cursor.execute(
+                "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+                (
+                    "Media/WhatsApp Images/IMG-01.jpg",
+                    f"Contacts/C{i}/2024/img.jpg",
+                    1 if i > 0 else 0,
+                    1718000000000,
+                ),
+            )
+
+        # 4. Video (2 duplicates)
+        vid_h = hashlib.md5(b"video_bytes").digest()
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            ("Media/WhatsApp Video/VID-01.mp4", vid_h),
+        )
+        for i in range(2):
+            cursor.execute(
+                "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+                (
+                    "Media/WhatsApp Video/VID-01.mp4",
+                    f"Contacts/C{i}/2024/vid.mp4",
+                    1 if i > 0 else 0,
+                    1718000000000,
+                ),
+            )
+
+        conn.commit()
+
+        path = str(tmp_path / "dup_sections.csv")
+        group_count, file_count = wa.write_duplicate_report(path, conn, logger, None)
+        conn.close()
+
+        assert group_count == 4
+        assert file_count == 10
+
+        with open(path, newline="", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        # Check section divider presence and ordering:
+        # High value first: PHOTOS -> VIDEOS -> ANIMATED GIFS -> STICKERS
+        divider_lines = [
+            line for line in lines if line.startswith('"# ---') or line.startswith("# ---")
+        ]
+        assert len(divider_lines) == 4
+        assert "PHOTOS & IMAGES" in divider_lines[0]
+        assert "VIDEOS" in divider_lines[1]
+        assert "ANIMATED GIFS" in divider_lines[2]
+        assert "STICKERS" in divider_lines[3]
+
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+
+        # Filter out divider rows to examine media items
+        media_rows = [r for r in reader if r["group_id"]]
+        assert len(media_rows) == 10
+
+        # Verify group_id numbering increments across sections (1..4)
+        group_ids = [int(r["group_id"]) for r in media_rows]
+        assert set(group_ids) == {1, 2, 3, 4}
+
+        # Photos are group 1, Videos group 2, GIFs group 3, Stickers group 4
+        img_rows = [r for r in media_rows if r["media_type"] == "image"]
+        vid_rows = [r for r in media_rows if r["media_type"] == "video"]
+        gif_rows = [r for r in media_rows if r["media_type"] == "gif"]
+        stk_rows = [r for r in media_rows if r["media_type"] == "sticker"]
+
+        assert all(r["group_id"] == "1" for r in img_rows)
+        assert all(r["group_id"] == "2" for r in vid_rows)
+        assert all(r["group_id"] == "3" for r in gif_rows)
+        assert all(r["group_id"] == "4" for r in stk_rows)
 
 
 # ===========================================================================
@@ -6269,7 +6427,7 @@ class TestHardlinkDuplicates:
         import csv
 
         with open(str(report_path), newline="", encoding="utf-8") as f:
-            reader = list(csv.DictReader(f))
+            reader = [r for r in csv.DictReader(f) if r["group_id"]]
         assert len(reader) == 2
         paths_to_link = {r["archived_path"]: r["link_status"] for r in reader}
         assert paths_to_link["Groups/Family/2024/img_Alice.jpg"] == "duplicate_copy"
@@ -6331,7 +6489,7 @@ class TestHardlinkDuplicates:
         import csv
 
         with open(str(report_path), newline="", encoding="utf-8") as f:
-            reader = list(csv.DictReader(f))
+            reader = [r for r in csv.DictReader(f) if r["group_id"]]
         assert len(reader) == 2
         for r in reader:
             assert r["link_status"] == "duplicate_copy"
@@ -6375,7 +6533,7 @@ class TestHardlinkDuplicates:
         import csv
 
         with open(str(report_path), newline="", encoding="utf-8") as f:
-            reader = list(csv.DictReader(f))
+            reader = [r for r in csv.DictReader(f) if r["group_id"]]
         assert len(reader) == 2
         for r in reader:
             assert r["link_status"] == "hardlink"
@@ -6838,10 +6996,9 @@ class TestRestoreModeFilesystemAndVcard:
         conn.commit()
 
         wa.write_duplicate_report(str(report), conn, logger, None)
-        assert report.exists()
         lines = [line.strip() for line in report.read_text().splitlines() if line.strip()]
-        # Header + 2 distinct archive path rows (Contacts/A/IMG1.jpg and Contacts/B/IMG1.jpg)
-        assert len(lines) == 3
+        # Header + 1 section divider + 2 distinct archive path rows (Contacts/A/IMG1.jpg and Contacts/B/IMG1.jpg)
+        assert len(lines) == 4
         conn.close()
 
 
