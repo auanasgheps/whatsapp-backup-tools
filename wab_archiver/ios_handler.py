@@ -3,6 +3,13 @@ import logging
 import os
 import sqlite3
 
+from shared.schema_validator import (
+    _IOS_REQUIRED_COLUMNS,
+    _IOS_REQUIRED_TABLES,
+    check_wa_schema,
+    get_app_version,
+)
+
 # ==============================================================================
 # ios_handler.py — WhatsApp iOS schema handling
 # Knows nothing about the iPhone backup format; handles only WhatsApp DB schema.
@@ -11,57 +18,17 @@ import sqlite3
 # Seconds between 1970-01-01 (Unix epoch) and 2001-01-01 (Apple Core Data epoch)
 APPLE_EPOCH_OFFSET = 978307200
 
-_IOS_REQUIRED_TABLES = {"ZWAMESSAGE", "ZWACHATSESSION", "ZWAMEDIAITEM", "ZWAGROUPMEMBER"}
-
-_IOS_REQUIRED_COLUMNS = {
-    "ZWAMESSAGE": {
-        "Z_PK",
-        "ZMESSAGEDATE",
-        "ZISFROMME",
-        "ZCHATSESSION",
-        "ZMEDIAITEM",
-        "ZGROUPMEMBER",
-        "ZPUSHNAME",
-    },
-    "ZWACHATSESSION": {
-        "Z_PK",
-        "ZCONTACTJID",
-        "ZGROUPINFO",
-        "ZPARTNERNAME",
-        "ZCONTACTABID",
-        "ZLASTMESSAGEDATE",
-    },
-    "ZWAMEDIAITEM": {
-        "Z_PK",
-        "ZMEDIALOCALPATH",
-        "ZMEDIAURL",
-        "ZTITLE",
-    },
-    "ZWAGROUPMEMBER": {
-        "Z_PK",
-        "ZMEMBERJID",
-    },
-}
+_IOS_REQUIRED_TABLES = _IOS_REQUIRED_TABLES
+_IOS_REQUIRED_COLUMNS = _IOS_REQUIRED_COLUMNS
 
 
 def validate_ios_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
     """Abort with a clear error if any required iOS table or column is missing."""
-    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    missing_tables = _IOS_REQUIRED_TABLES - tables
-    if missing_tables:
-        logger.error(f"iOS schema validation failed — missing tables: {sorted(missing_tables)}")
+    tool_version = get_app_version()
+    result = check_wa_schema(cursor, "ios", tool_version)
+    if not result.is_valid:
+        logger.error(result.banner)
         raise SystemExit(1)
-
-    for table, required_cols in _IOS_REQUIRED_COLUMNS.items():
-        actual_cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
-        missing_cols = required_cols - actual_cols
-        if missing_cols:
-            logger.error(
-                f"iOS schema validation failed — missing columns in '{table}': "
-                f"{sorted(missing_cols)}"
-            )
-            raise SystemExit(1)
-
     logger.info("iOS schema validated.")
 
 

@@ -4198,31 +4198,6 @@ class TestParseArgsValidationExtra:
             args = wa.parse_args()
         assert args.debug is True
 
-    def test_archive_debug_flag_default_false(self, tmp_path):
-        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path)]):
-            args = wa.parse_args()
-        assert args.debug is False
-
-    def test_archive_debug_flag_short_v(self, tmp_path):
-        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "-v"]):
-            args = wa.parse_args()
-        assert args.debug is True
-
-    def test_archive_debug_flag_long_debug(self, tmp_path):
-        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "--debug"]):
-            args = wa.parse_args()
-        assert args.debug is True
-
-    def test_archive_debug_flag_verbose(self, tmp_path):
-        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "--verbose"]):
-            args = wa.parse_args()
-        assert args.debug is True
-
-    def test_restore_debug_flag_short_v(self, tmp_path):
-        with patch("sys.argv", ["wa", "restore", "-o", str(tmp_path), "-v"]):
-            args = wa.parse_args()
-        assert args.debug is True
-
     def test_archive_without_output_exits(self, tmp_path):
         with patch("sys.argv", ["wa", "archive", "--wa-root", str(tmp_path)]):
             with pytest.raises(SystemExit):

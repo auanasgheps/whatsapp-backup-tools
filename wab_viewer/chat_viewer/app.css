@@ -1305,3 +1305,51 @@
       border: 2px solid var(--border); border-top-color: var(--accent);
       border-radius: 50%; animation: spin 0.7s linear infinite;
     }
+
+    /* ---- schema incompatibility alert banner ---- */
+    .schema-alert-banner {
+      background: var(--preserved-bg);
+      border-bottom: 1px solid var(--preserved-border);
+      color: var(--preserved-text);
+      padding: 10px 16px;
+      font-size: 13px;
+      z-index: 20;
+    }
+    .schema-alert-content {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      flex-wrap: wrap;
+    }
+    .schema-alert-icon {
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+    .schema-alert-text {
+      flex: 1;
+      min-width: 280px;
+      line-height: 1.4;
+    }
+    .schema-alert-text code {
+      background: var(--surface);
+      color: var(--text);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: monospace;
+    }
+    .schema-alert-btn {
+      background: var(--accent);
+      color: var(--bubble-out-text);
+      padding: 6px 14px;
+      border-radius: 4px;
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 12px;
+      white-space: nowrap;
+      display: inline-block;
+    }
+    .schema-alert-btn:hover {
+      opacity: 0.9;
+    }

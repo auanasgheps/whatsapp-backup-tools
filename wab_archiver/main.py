@@ -2344,59 +2344,77 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()
 
-        if platform == "ios":
-            ios_handler.validate_ios_schema(cursor, logger)
+        try:
+            if platform == "ios":
+                ios_handler.validate_ios_schema(cursor, logger)
 
-            if args.wa_roots:
-                ios_handler.validate_ios_wa_root(args.wa_roots[0], logger)
+                if args.wa_roots:
+                    ios_handler.validate_ios_wa_root(args.wa_roots[0], logger)
 
-            number_map = ios_handler.build_ios_number_map(cursor, logger)
+                number_map = ios_handler.build_ios_number_map(cursor, logger)
 
-            if not contacts and ios_contacts_path:
-                contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
+                if not contacts and ios_contacts_path:
+                    contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
 
-            pushname_map = ios_handler.build_ios_pushname_map(cursor, logger)
-            for key, name in pushname_map.items():
-                contacts.setdefault(key, name)
+                pushname_map = ios_handler.build_ios_pushname_map(cursor, logger)
+                for key, name in pushname_map.items():
+                    contacts.setdefault(key, name)
 
-            candidate_dirs = [
-                os.path.join(args.output, "Whatsapp Databases"),
-                args.output,
-                os.path.dirname(os.path.abspath(args.msgstore)),
-            ]
-            if args.wa_roots:
-                candidate_dirs.extend(args.wa_roots)
-            ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
-            hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
+                candidate_dirs = [
+                    os.path.join(args.output, "Whatsapp Databases"),
+                    args.output,
+                    os.path.dirname(os.path.abspath(args.msgstore)),
+                ]
+                if args.wa_roots:
+                    candidate_dirs.extend(args.wa_roots)
+                ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
+                hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
 
-            query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup)
-            vcard_query = (
-                ios_handler.build_ios_vcard_query(args.limit, since_ms)
-                if ios_handler.has_ios_vcard_support(cursor)
-                else None
-            )
-            group_subjects = dict(
-                cursor.execute(ios_handler.build_ios_group_subjects_query()).fetchall()
-            )
+                query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup)
+                vcard_query = (
+                    ios_handler.build_ios_vcard_query(args.limit, since_ms)
+                    if ios_handler.has_ios_vcard_support(cursor)
+                    else None
+                )
+                group_subjects = dict(
+                    cursor.execute(ios_handler.build_ios_group_subjects_query()).fetchall()
+                )
 
-        else:
-            android_handler.validate_schema(cursor, logger)
-            android_handler.validate_wa_root(args.wa_roots, logger)
-            number_map = android_handler.build_number_map(cursor, logger)
+            else:
+                android_handler.validate_schema(cursor, logger)
+                android_handler.validate_wa_root(args.wa_roots, logger)
+                number_map = android_handler.build_number_map(cursor, logger)
 
-            hd_dedup = android_handler._check_hd_association(cursor, logger)
-            query = android_handler.build_query(args.limit, since_ms, hd_dedup)
-            vcard_query = (
-                android_handler.build_vcard_query(args.limit, since_ms)
-                if android_handler.has_vcard_support(cursor)
-                else None
-            )
-            group_subjects = dict(
-                cursor.execute(android_handler.build_group_subjects_query()).fetchall()
-            )
+                hd_dedup = android_handler._check_hd_association(cursor, logger)
+                query = android_handler.build_query(args.limit, since_ms, hd_dedup)
+                vcard_query = (
+                    android_handler.build_vcard_query(args.limit, since_ms)
+                    if android_handler.has_vcard_support(cursor)
+                    else None
+                )
+                group_subjects = dict(
+                    cursor.execute(android_handler.build_group_subjects_query()).fetchall()
+                )
 
-        total_rows = cursor.execute(f"SELECT COUNT(*) FROM ({query})").fetchone()[0]
-        logger.info(f"Query returned {total_rows} rows.")
+            total_rows = cursor.execute(f"SELECT COUNT(*) FROM ({query})").fetchone()[0]
+            logger.info(f"Query returned {total_rows} rows.")
+        except sqlite3.OperationalError as e:
+            err_msg = str(e).lower()
+            if "no such column" in err_msg or "no such table" in err_msg:
+                from shared.schema_validator import (
+                    build_github_issue_url,
+                    extract_database_fingerprint,
+                    format_schema_banner,
+                )
+
+                fingerprint = extract_database_fingerprint(cursor, platform)
+                issue_url = build_github_issue_url(
+                    platform, [], {}, f"{fingerprint}; query error={e}", _get_version()
+                )
+                banner = format_schema_banner(platform, [], {}, issue_url)
+                logger.error(banner)
+                raise SystemExit(1)
+            raise
 
         archive_conn = archive_db.open_archive_db(args.output)
         try:

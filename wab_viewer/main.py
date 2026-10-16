@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import collections
+import contextlib
 import json
 import logging
 import mimetypes
@@ -27,6 +28,8 @@ import time
 import traceback
 import webbrowser
 from pathlib import Path
+
+from shared.schema_validator import validate_viewer_schema
 
 try:
     from flask import (
@@ -2774,8 +2777,29 @@ def create_app(output_root: Path, rescan: bool = False):
     app._indexing_lock = _indexing_lock
     app._bulk_index_state = _bulk_index_state
 
+    schema_alert = None
+    if source_type in ("android", "ios") and wa_db_path:
+        with contextlib.closing(sqlite3.connect(str(wa_db_path))) as chk_conn:
+            schema_res = validate_viewer_schema(chk_conn.cursor(), source_type, _get_version())
+            if not schema_res.is_valid:
+                print(schema_res.banner)
+                schema_alert = {
+                    "summary": schema_res.summary,
+                    "issue_url": schema_res.issue_url,
+                    "platform": source_type,
+                    "is_legacy": schema_res.is_legacy,
+                }
+                source_type = None
+
+    app.config["SCHEMA_ALERT"] = schema_alert
+
     if source_type is None:
-        print("[wab_viewer] Warning: No source WA DB found. Media-only mode.")
+        if schema_alert:
+            print(
+                "[wab_viewer] Notice: Falling back to media-only mode due to WhatsApp schema incompatibility."
+            )
+        else:
+            print("[wab_viewer] Warning: No source WA DB found. Media-only mode.")
         archive_conn_tmp = sqlite3.connect(str(archive_db_path), check_same_thread=False)
         archive_conn_tmp.row_factory = sqlite3.Row
         _build_media_only(archive_conn_tmp, cache_conn, output_root)
@@ -6325,7 +6349,10 @@ def create_app(output_root: Path, rescan: bool = False):
     @app.route("/")
     def index():
         return render_template_string(
-            HTML_TEMPLATE, output_root=str(output_root), version=_get_version()
+            HTML_TEMPLATE,
+            output_root=str(output_root),
+            version=_get_version(),
+            schema_alert=app.config.get("SCHEMA_ALERT"),
         )
 
     return app
