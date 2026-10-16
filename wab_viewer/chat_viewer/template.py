@@ -23,6 +23,28 @@ HTML_TEMPLATE = (
 </head>
 <body>
 <div id="app">
+  {% if schema_alert %}
+  <div id="schema-alert-banner" class="schema-alert-banner">
+    <div class="schema-alert-content">
+      <span class="schema-alert-icon">⚠️</span>
+      <div class="schema-alert-text">
+        {% if schema_alert.is_legacy %}
+        <strong>Legacy WhatsApp Database Detected:</strong>
+        {{ schema_alert.summary }}. Only modern WhatsApp database backups (Android 2019+ and iOS CoreData) are supported.
+        {% else %}
+        <strong>WhatsApp Database Schema Incompatibility Detected:</strong>
+        {{ schema_alert.summary }}. Chats could not be read.
+        Please check for updates: <code>pip install --upgrade whatsapp-backup-tools</code>
+        {% endif %}
+      </div>
+      {% if schema_alert.issue_url %}
+      <a href="{{ schema_alert.issue_url }}" target="_blank" rel="noopener noreferrer" class="schema-alert-btn">
+        {% if schema_alert.is_legacy %}Request Support on GitHub{% else %}Report Issue on GitHub{% endif %}
+      </a>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
   <div id="header">
     <h1>WhatsApp Backup Viewer</h1>
     <span class="subtitle">{{ output_root }}</span>
