@@ -162,16 +162,17 @@ def probe_hardlink_support(target_dir: str, logger: logging.Logger) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def setup_logging(log_path: str) -> logging.Logger:
-    """Configure logging to both file (DEBUG) and console (INFO)."""
+def setup_logging(log_path: str, debug: bool) -> logging.Logger:
+    """Configure logging to both file (DEBUG if debug is True else INFO) and console (INFO)."""
     logger = logging.getLogger("wab_archiver")
-    logger.setLevel(logging.DEBUG)
+    target_level = logging.DEBUG if debug else logging.INFO
+    logger.setLevel(target_level)
 
     if not logger.handlers:
         fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
         fh = logging.FileHandler(log_path, encoding="utf-8")
-        fh.setLevel(logging.DEBUG)
+        fh.setLevel(target_level)
         fh.setFormatter(fmt)
 
         ch = logging.StreamHandler()
@@ -180,6 +181,13 @@ def setup_logging(log_path: str) -> logging.Logger:
 
         logger.addHandler(fh)
         logger.addHandler(ch)
+    else:
+        logger.setLevel(target_level)
+        for h in logger.handlers:
+            if isinstance(h, logging.FileHandler):
+                h.setLevel(target_level)
+            elif isinstance(h, logging.StreamHandler):
+                h.setLevel(logging.INFO)
     return logger
 
 
@@ -1254,6 +1262,7 @@ _VALID_CONFIG_KEYS = {
     "wa_root",
     "contacts",
     "log",
+    "debug",
     "business",
     "timezone",
     "since",
@@ -1284,6 +1293,7 @@ _EXAMPLE_CONFIG = """\
 # -----------------------------------------------------------------------------
 output     = "/path/to/archive"         # Destination folder for the archive (required)
 # log      = ""                         # Custom log file path (default: <output>/wab-archiver.log)
+# debug    = false                      # Enable debug logging in the log file (default: false, INFO level)
 # timezone = ""                         # IANA timezone (e.g. Europe/Rome, UTC) for year folders & reports
 # business = false                      # Target WhatsApp Business instead of regular WhatsApp
 
@@ -1642,6 +1652,15 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Preserve messages deleted or revoked on device into preserved_messages.db.",
     )
+    archive_p.add_argument(
+        "-v",
+        "--debug",
+        "--verbose",
+        action="store_true",
+        dest="debug",
+        default=False,
+        help="Enable debug logging in the log file (default: false, INFO level).",
+    )
     # Apply config defaults to the archive subparser.
     archive_p.set_defaults(**_config)
 
@@ -1665,6 +1684,15 @@ def parse_args() -> argparse.Namespace:
         help="Log file path.",
     )
     restore_p.add_argument(
+        "-v",
+        "--debug",
+        "--verbose",
+        action="store_true",
+        dest="debug",
+        default=False,
+        help="Enable debug logging in the log file (default: false, INFO level).",
+    )
+    restore_p.add_argument(
         "--dry-run",
         action="store_true",
         help="Simulate the restore without copying any files.",
@@ -1675,7 +1703,7 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Path to a TOML config file.",
     )
-    _restore_config = {k: v for k, v in _config.items() if k in ("output", "log")}
+    _restore_config = {k: v for k, v in _config.items() if k in ("output", "log", "debug")}
     restore_p.set_defaults(**_restore_config)
 
     # --- config ---
@@ -2561,7 +2589,8 @@ def main():
     args = parse_args()
     os.makedirs(args.output, exist_ok=True)
     log_path = args.log or os.path.join(args.output, "wab-archiver.log")
-    logger = setup_logging(log_path)
+    debug_enabled = getattr(args, "debug", False)
+    logger = setup_logging(log_path, debug_enabled)
     _warn_network_paths(args, logger)
 
     if args.command == "restore":

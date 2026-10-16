@@ -3018,6 +3018,14 @@ class TestConfigInParseArgs:
             args = wa.parse_args()
         assert args.preserve_deleted is True
 
+    def test_config_debug(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        self._write_config(cfg, f'output = "{out}"\nwa_root = "/wa"\ndebug = true\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.debug is True
+
     def test_config_sections_flattened(self, tmp_path):
         cfg = tmp_path / "config.toml"
         out = self._toml_path(tmp_path)
@@ -3582,22 +3590,45 @@ class TestSetupLogging:
         logging.getLogger("wab_archiver").handlers.clear()
 
     def test_creates_file_and_stream_handlers(self, tmp_path):
-        log = wa.setup_logging(str(tmp_path / "app.log"))
+        log = wa.setup_logging(str(tmp_path / "app.log"), False)
         assert len(log.handlers) == 2
         handler_types = {type(h).__name__ for h in log.handlers}
         assert "FileHandler" in handler_types
         assert "StreamHandler" in handler_types
 
     def test_file_handler_targets_correct_path(self, tmp_path):
-        log = wa.setup_logging(str(tmp_path / "app.log"))
+        log = wa.setup_logging(str(tmp_path / "app.log"), False)
         file_handlers = [h for h in log.handlers if isinstance(h, logging.FileHandler)]
         assert len(file_handlers) == 1
         assert file_handlers[0].baseFilename.endswith("app.log")
 
     def test_second_call_does_not_add_handlers(self, tmp_path):
-        wa.setup_logging(str(tmp_path / "app.log"))
-        wa.setup_logging(str(tmp_path / "app.log"))
+        wa.setup_logging(str(tmp_path / "app.log"), False)
+        wa.setup_logging(str(tmp_path / "app.log"), False)
         assert len(logging.getLogger("wab_archiver").handlers) == 2
+
+    def test_default_file_handler_level_is_info(self, tmp_path):
+        log = wa.setup_logging(str(tmp_path / "app.log"), False)
+        file_handlers = [h for h in log.handlers if isinstance(h, logging.FileHandler)]
+        stream_handlers = [h for h in log.handlers if type(h) is logging.StreamHandler]
+        assert file_handlers[0].level == logging.INFO
+        assert stream_handlers[0].level == logging.INFO
+        assert log.level == logging.INFO
+
+    def test_debug_enabled_sets_file_and_logger_to_debug(self, tmp_path):
+        log = wa.setup_logging(str(tmp_path / "app.log"), True)
+        file_handlers = [h for h in log.handlers if isinstance(h, logging.FileHandler)]
+        stream_handlers = [h for h in log.handlers if type(h) is logging.StreamHandler]
+        assert file_handlers[0].level == logging.DEBUG
+        assert stream_handlers[0].level == logging.INFO
+        assert log.level == logging.DEBUG
+
+    def test_subsequent_call_updates_level(self, tmp_path):
+        wa.setup_logging(str(tmp_path / "app.log"), False)
+        log = wa.setup_logging(str(tmp_path / "app.log"), True)
+        file_handlers = [h for h in log.handlers if isinstance(h, logging.FileHandler)]
+        assert file_handlers[0].level == logging.DEBUG
+        assert log.level == logging.DEBUG
 
 
 # ===========================================================================
@@ -4132,6 +4163,65 @@ class TestParseArgsValidationExtra:
             args = wa.parse_args()
         assert args.command == "restore"
         assert args.output == str(tmp_path)
+        assert args.debug is False
+
+    def test_archive_debug_flag_default_false(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path)]):
+            args = wa.parse_args()
+        assert args.debug is False
+
+    def test_archive_debug_flag_short_v(self, tmp_path):
+        with patch(
+            "sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "-v"]
+        ):
+            args = wa.parse_args()
+        assert args.debug is True
+
+    def test_archive_debug_flag_long_debug(self, tmp_path):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "--debug"],
+        ):
+            args = wa.parse_args()
+        assert args.debug is True
+
+    def test_archive_debug_flag_verbose(self, tmp_path):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "--verbose"],
+        ):
+            args = wa.parse_args()
+        assert args.debug is True
+
+    def test_restore_debug_flag_short_v(self, tmp_path):
+        with patch("sys.argv", ["wa", "restore", "-o", str(tmp_path), "-v"]):
+            args = wa.parse_args()
+        assert args.debug is True
+
+    def test_archive_debug_flag_default_false(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path)]):
+            args = wa.parse_args()
+        assert args.debug is False
+
+    def test_archive_debug_flag_short_v(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "-v"]):
+            args = wa.parse_args()
+        assert args.debug is True
+
+    def test_archive_debug_flag_long_debug(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "--debug"]):
+            args = wa.parse_args()
+        assert args.debug is True
+
+    def test_archive_debug_flag_verbose(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "--verbose"]):
+            args = wa.parse_args()
+        assert args.debug is True
+
+    def test_restore_debug_flag_short_v(self, tmp_path):
+        with patch("sys.argv", ["wa", "restore", "-o", str(tmp_path), "-v"]):
+            args = wa.parse_args()
+        assert args.debug is True
 
     def test_archive_without_output_exits(self, tmp_path):
         with patch("sys.argv", ["wa", "archive", "--wa-root", str(tmp_path)]):
@@ -4370,17 +4460,18 @@ class TestRunRestoreMode:
 
 
 class TestMain:
-    def _args(self, tmp_path, command="archive", dry_run=False):
+    def _args(self, tmp_path, command: str, dry_run: bool, debug: bool):
         return argparse.Namespace(
             command=command,
             dry_run=dry_run,
             output=str(tmp_path),
             log=None,
             wa_roots=[],
+            debug=debug,
         )
 
     def test_dispatches_to_forward_mode(self, tmp_path):
-        args = self._args(tmp_path, command="archive")
+        args = self._args(tmp_path, "archive", False, False)
         with (
             patch("wab_archiver.main.parse_args", return_value=args),
             patch("wab_archiver.main.setup_logging", return_value=MagicMock()),
@@ -4393,7 +4484,7 @@ class TestMain:
         mock_rst.assert_not_called()
 
     def test_dispatches_to_restore_mode(self, tmp_path):
-        args = self._args(tmp_path, command="restore")
+        args = self._args(tmp_path, "restore", False, False)
         with (
             patch("wab_archiver.main.parse_args", return_value=args),
             patch("wab_archiver.main.setup_logging", return_value=MagicMock()),
@@ -4406,7 +4497,7 @@ class TestMain:
         mock_fwd.assert_not_called()
 
     def test_dry_run_logged(self, tmp_path):
-        args = self._args(tmp_path, command="archive", dry_run=True)
+        args = self._args(tmp_path, "archive", True, False)
         mock_logger = MagicMock()
         with (
             patch("wab_archiver.main.parse_args", return_value=args),
@@ -4420,7 +4511,7 @@ class TestMain:
         assert any("DRY RUN" in m for m in info_msgs)
 
     def test_restore_dry_run_logged(self, tmp_path):
-        args = self._args(tmp_path, command="restore", dry_run=True)
+        args = self._args(tmp_path, "restore", True, False)
         mock_logger = MagicMock()
         with (
             patch("wab_archiver.main.parse_args", return_value=args),
@@ -4432,6 +4523,18 @@ class TestMain:
             wa.main()
         info_msgs = [str(c) for c in mock_logger.info.call_args_list]
         assert any("DRY RUN MODE" in m for m in info_msgs)
+
+    def test_main_passes_debug_flag_to_setup_logging(self, tmp_path):
+        args = self._args(tmp_path, "archive", False, True)
+        with (
+            patch("wab_archiver.main.parse_args", return_value=args),
+            patch("wab_archiver.main.setup_logging", return_value=MagicMock()) as mock_setup,
+            patch("wab_archiver.main._warn_network_paths"),
+            patch("wab_archiver.main.run_forward_mode"),
+        ):
+            wa.main()
+        expected_log = str(tmp_path / "wab-archiver.log")
+        mock_setup.assert_called_once_with(expected_log, True)
 
 
 # ===========================================================================

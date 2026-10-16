@@ -25,6 +25,7 @@ This writes `example-config.toml` next to the package. Open it, fill in your val
 # --- Archive Destination & General Settings ---
 output     = "/path/to/archive"         # Destination folder for the archive (required)
 # log      = ""                         # Custom log file path (default: <output>/wab-archiver.log)
+# debug    = false                      # Enable debug logging in the log file (default: false, INFO level)
 # timezone = ""                         # IANA timezone (e.g. Europe/Rome, UTC) for folders & reports
 # business = false                      # Target WhatsApp Business instead of regular WhatsApp
 
@@ -100,6 +101,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--staging PATH` | If `--pull-media` | Permanent local folder where ADB-pulled media is stored (phone backup). Treated as `--wa-root`; files are copied to `--output` and never deleted |
 | `-o`, `--output PATH` | **Yes** | Destination folder for the archive |
 | `-l`, `--log PATH` | No | Custom log file path. Defaults to `<output>/wab-archiver.log` |
+| `-v`, `--debug` | No | Enable debug logging in the log file (defaults to `INFO` level without this flag). Aliased as `--verbose` |
 | `--timezone TZ` | No | [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) for year folders and report timestamps. **Windows users: requires `pip install tzdata`** |
 | `--config PATH` | No | Path to a TOML config file. Auto-detects `config.toml` if omitted |
 | `--dry-run` | No | Simulate the run without copying any files |
@@ -113,7 +115,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 Reconstruct the original `Media/` tree from an archive (Android only).
 
 ```
-wab-archiver restore -o PATH [-l PATH] [--dry-run] [--config PATH]
+wab-archiver restore -o PATH [-l PATH] [-v] [--dry-run] [--config PATH]
 ```
 
 ### `config`
@@ -286,7 +288,7 @@ wab-archiver archive \
 
 | File | Description |
 |---|---|
-| `wab-archiver.log` | Full run log including all copied, skipped, and missing files |
+| `wab-archiver.log` | Run log (INFO level by default, or DEBUG when `-v`/`--debug` is enabled) |
 | `missing_media_report.csv` | Structured report of all media referenced in the DB but not found on disk. Useful for manual recovery from old backups |
 | `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths, organized into clear visual sections by media type (Photos & Images, Videos, Documents, Audio, Animated GIFs, Stickers, Contacts) so high-value duplicates are highlighted first. Includes columns `media_type`, `group_id` (continuous numbering across sections), `file_count`, `archived_path`, `md5_hex`, `link_status` (`hardlink` or `duplicate_copy`), and `original_timestamp` (message timestamp formatted in run timezone). Only written when duplicates exist |
 | `source_conflicts_report.csv` | Written when multiple `--wa-root` roots contain different versions of the same file. Only written when conflicts exist |
