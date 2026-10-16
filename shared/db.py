@@ -1,3 +1,4 @@
+import os
 import re
 
 
@@ -80,3 +81,93 @@ def resolve_vcard_display_name(raw_name: str | None, vcard_text: str | None) -> 
         return cleaned
 
     return "Contact"
+
+
+def classify_media_type(path: str | None, fallback_path: str | None) -> str:
+    """Classify a file path or filename into a standard media category.
+
+    Categories returned:
+        'image', 'video', 'document', 'audio', 'gif', 'sticker', 'vcard'
+    """
+    candidates = [p for p in (path, fallback_path) if p]
+    if not candidates:
+        return "document"
+
+    norm_candidates = [p.lower().replace("\\", "/") for p in candidates]
+
+    # 1. Contact cards / vCards
+    for p in norm_candidates:
+        if p.endswith(".vcf") or p.startswith("vcard:"):
+            return "vcard"
+
+    # 2. Stickers (WhatsApp Stickers folder, stk- prefix, .was/.webp sticker files)
+    for p in norm_candidates:
+        fname = os.path.basename(p)
+        if (
+            "/stickers/" in p
+            or "whatsapp stickers" in p
+            or (fname.startswith("stk-") and (p.endswith(".webp") or p.endswith(".was")))
+            or ("sticker" in p and p.endswith(".webp"))
+        ):
+            return "sticker"
+
+    # 3. Animated GIFs (WhatsApp Animated Gifs folder, gif- prefix, .gif extension)
+    for p in norm_candidates:
+        fname = os.path.basename(p)
+        if (
+            p.endswith(".gif")
+            or "/animated gifs/" in p
+            or "whatsapp animated gifs" in p
+            or fname.startswith("gif-")
+        ):
+            return "gif"
+
+    # 4. Extension-based classification
+    for p in norm_candidates:
+        ext = os.path.splitext(p)[1]
+        if ext in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"):
+            return "image"
+        if ext in (".mp4", ".mov", ".avi", ".mkv", ".3gp", ".m4v"):
+            return "video"
+        if ext in (".mp3", ".ogg", ".aac", ".opus", ".m4a", ".wav", ".amr"):
+            return "audio"
+        if ext in (
+            ".pdf",
+            ".doc",
+            ".docx",
+            ".xls",
+            ".xlsx",
+            ".ppt",
+            ".pptx",
+            ".txt",
+            ".csv",
+            ".rtf",
+            ".zip",
+            ".rar",
+            ".7z",
+            ".tar",
+            ".gz",
+        ):
+            return "document"
+
+    # 5. Folder structure fallback (Android / iOS / general media folders)
+    for p in norm_candidates:
+        if "whatsapp images" in p or "/images/" in p or "/photos/" in p:
+            return "image"
+        if "whatsapp video" in p or "/video/" in p or "/videos/" in p:
+            return "video"
+        if (
+            "whatsapp audio" in p
+            or "whatsapp voice notes" in p
+            or "/audio/" in p
+            or "/voice notes/" in p
+        ):
+            return "audio"
+        if "whatsapp documents" in p or "/documents/" in p or "/docs/" in p:
+            return "document"
+        if "sticker" in p:
+            return "sticker"
+        if "gif" in p:
+            return "gif"
+
+    return "document"

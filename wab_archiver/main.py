@@ -251,6 +251,33 @@ def write_missing_report(report_path: str, rows: list, logger: logging.Logger):
 # Duplicate media CSV report
 # ---------------------------------------------------------------------------
 
+_DUPLICATE_SECTIONS = [
+    ("image", "PHOTOS & IMAGES"),
+    ("video", "VIDEOS"),
+    ("document", "DOCUMENTS"),
+    ("audio", "AUDIO & VOICE NOTES"),
+    ("gif", "ANIMATED GIFS"),
+    ("sticker", "STICKERS"),
+    ("vcard", "CONTACTS"),
+    ("other", "OTHER FILES"),
+]
+
+
+def _determine_duplicate_group_media_type(grp_rows: list) -> str:
+    """Determine canonical media type for a duplicate group from candidate paths."""
+    for _, _, _, orig_p in grp_rows:
+        if orig_p:
+            mt = db.classify_media_type(orig_p, None)
+            if mt in ("sticker", "gif", "vcard"):
+                return mt
+    for arch_p, _, _, _ in grp_rows:
+        mt = db.classify_media_type(arch_p, None)
+        if mt in ("sticker", "gif", "vcard"):
+            return mt
+
+    first_arch_p, _, _, first_orig_p = grp_rows[0]
+    return db.classify_media_type(first_arch_p, first_orig_p)
+
 
 def write_duplicate_report(
     report_path: str,
@@ -258,7 +285,7 @@ def write_duplicate_report(
     logger: logging.Logger,
     tz,
 ):
-    """Write a CSV report of media files with identical content at multiple paths."""
+    """Write a CSV report of media files with identical content at multiple paths, grouped into sections."""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_copies)")}
     ts_expr = "MIN(ac.timestamp_ms)" if "timestamp_ms" in cols else "NULL"
     rows = conn.execute(f"""
@@ -269,7 +296,7 @@ def write_duplicate_report(
             GROUP BY f.md5
             HAVING total >= 2
         )
-        SELECT dh.md5, dh.total, ac.archive_path, MAX(ac.is_hardlink) AS is_hardlink, {ts_expr} AS timestamp_ms
+        SELECT dh.md5, dh.total, ac.archive_path, MAX(ac.is_hardlink) AS is_hardlink, {ts_expr} AS timestamp_ms, MIN(f.original_path) AS orig_path
         FROM dup_hashes dh
         JOIN files f ON f.md5 = dh.md5
         JOIN archive_copies ac ON ac.original_path = f.original_path
@@ -281,7 +308,31 @@ def write_duplicate_report(
         logger.info("No duplicate media found.")
         return 0, 0
 
+    groups_by_md5: dict[bytes, dict] = {}
+    for md5_bytes, file_count, archived_path, is_hardlink, timestamp_ms, orig_path in rows:
+        if md5_bytes not in groups_by_md5:
+            groups_by_md5[md5_bytes] = {
+                "file_count": file_count,
+                "md5_bytes": md5_bytes,
+                "rows": [],
+            }
+        groups_by_md5[md5_bytes]["rows"].append(
+            (archived_path, is_hardlink, timestamp_ms, orig_path)
+        )
+
+    known_section_keys = {sec[0] for sec in _DUPLICATE_SECTIONS}
+    sections: dict[str, list[dict]] = {sec[0]: [] for sec in _DUPLICATE_SECTIONS}
+    for grp in groups_by_md5.values():
+        m_type = _determine_duplicate_group_media_type(grp["rows"])
+        grp["media_type"] = m_type
+        sec_key = m_type if m_type in known_section_keys else "other"
+        sections[sec_key].append(grp)
+
+    for sec_key in sections:
+        sections[sec_key].sort(key=lambda g: (-g["file_count"], g["md5_bytes"]))
+
     fieldnames = [
+        "media_type",
         "group_id",
         "file_count",
         "archived_path",
@@ -289,41 +340,75 @@ def write_duplicate_report(
         "link_status",
         "original_timestamp",
     ]
-    current_md5 = None
-    group_id = 0
+    current_group_id = 0
+    total_files = 0
     output_root = os.path.dirname(os.path.abspath(report_path))
+    first_section = True
 
     with open(report_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for md5_bytes, file_count, archived_path, is_hardlink, timestamp_ms in rows:
-            if md5_bytes != current_md5:
-                current_md5 = md5_bytes
-                group_id += 1
-            abs_file = os.path.join(output_root, *archived_path.split("/"))
-            is_hl = 1 if is_hardlink else 0
-            if os.path.isfile(abs_file):
-                try:
-                    if os.stat(abs_file).st_nlink > 1:
-                        is_hl = 1
-                except OSError:
-                    pass
-            link_status = "hardlink" if is_hl else "duplicate_copy"
-            writer.writerow(
-                {
-                    "group_id": group_id,
-                    "file_count": file_count,
-                    "archived_path": archived_path,
-                    "md5_hex": md5_bytes.hex(),
-                    "link_status": link_status,
-                    "original_timestamp": human_datetime(timestamp_ms, tz) if timestamp_ms else "",
-                }
-            )
+        raw_writer = csv.writer(f)
+        dict_writer = csv.DictWriter(f, fieldnames=fieldnames)
+        dict_writer.writeheader()
+
+        for sec_key, sec_title in _DUPLICATE_SECTIONS:
+            sec_groups = sections.get(sec_key, [])
+            if not sec_groups:
+                continue
+
+            sec_file_count = sum(len(g["rows"]) for g in sec_groups)
+            group_label = "duplicate group" if len(sec_groups) == 1 else "duplicate groups"
+            file_label = "file" if sec_file_count == 1 else "files"
+
+            if not first_section:
+                raw_writer.writerow([])
+            first_section = False
+
+            divider_text = f"# --- {sec_title} ({len(sec_groups)} {group_label}, {sec_file_count} {file_label}) ---"
+            raw_writer.writerow([divider_text, "", "", "", "", "", ""])
+
+            for grp in sec_groups:
+                current_group_id += 1
+                md5_hex = grp["md5_bytes"].hex()
+                file_count = grp["file_count"]
+                m_type = grp["media_type"]
+
+                for archived_path, is_hardlink, timestamp_ms, _ in grp["rows"]:
+                    total_files += 1
+                    abs_file = os.path.join(output_root, *archived_path.split("/"))
+                    is_hl = 1 if is_hardlink else 0
+                    if os.path.isfile(abs_file):
+                        try:
+                            if os.stat(abs_file).st_nlink > 1:
+                                is_hl = 1
+                        except OSError:
+                            pass
+                    link_status = "hardlink" if is_hl else "duplicate_copy"
+                    dict_writer.writerow(
+                        {
+                            "media_type": m_type,
+                            "group_id": current_group_id,
+                            "file_count": file_count,
+                            "archived_path": archived_path,
+                            "md5_hex": md5_hex,
+                            "link_status": link_status,
+                            "original_timestamp": human_datetime(timestamp_ms, tz)
+                            if timestamp_ms
+                            else "",
+                        }
+                    )
+
     logger.info(
         f"Duplicate media report written to: {report_path} "
-        f"({group_id} group(s), {len(rows)} file(s))"
+        f"({current_group_id} group(s), {total_files} file(s))"
     )
-    return group_id, len(rows)
+    for sec_key, sec_title in _DUPLICATE_SECTIONS:
+        sec_groups = sections.get(sec_key, [])
+        if sec_groups:
+            sec_file_count = sum(len(g["rows"]) for g in sec_groups)
+            logger.info(
+                f"  - {sec_title:<22}: {len(sec_groups)} group(s), {sec_file_count} file(s)"
+            )
+    return current_group_id, total_files
 
 
 # ---------------------------------------------------------------------------
