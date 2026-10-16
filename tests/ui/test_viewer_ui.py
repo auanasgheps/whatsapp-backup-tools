@@ -1909,7 +1909,7 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
     assert isinstance(poll_info, dict)
     assert poll_info.get("ready") is True
     assert "Trail choice" in poll_info.get("question", "")
-    assert poll_info.get("badge") == "Select one or more"
+    assert poll_info.get("badge") == "Multiple choice"
     assert poll_info.get("hasViewVotesBtn") is True
 
     options = poll_info.get("options", [])
@@ -1941,6 +1941,12 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
                 const popup = document.getElementById('msg-details-popup');
                 if (popup && popup.classList.contains('visible') && !popup.textContent.includes('Loading')) {
                     const title = popup.querySelector('.rx-details-total')?.textContent || '';
+                    const optionHeaders = [...popup.querySelectorAll('.msg-poll-details-option-hdr')].map(
+                        el => ({
+                            text: el.textContent.trim(),
+                            hasStar: !!el.querySelector('.msg-poll-winner-star'),
+                        })
+                    );
                     const voters = [...popup.querySelectorAll('.msg-details-row .msg-details-label')].map(
                         el => el.textContent.trim()
                     );
@@ -1948,6 +1954,7 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
                         return {
                             open: true,
                             title: title,
+                            optionHeaders: optionHeaders,
                             voters: voters,
                         };
                     }
@@ -1962,6 +1969,16 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
     assert isinstance(popup_info, dict)
     assert popup_info.get("open") is True
     assert "4 voters" in popup_info.get("title", "")
+    opt_headers = popup_info.get("optionHeaders", [])
+    assert len(opt_headers) == 3
+    # Sorted by highest votes: 3, 2, 1
+    assert "Passo del Vento" in opt_headers[0]["text"]
+    assert opt_headers[0]["hasStar"] is True
+    assert "Valle dei Larici" in opt_headers[1]["text"]
+    assert opt_headers[1]["hasStar"] is False
+    assert "Monte Cristallo" in opt_headers[2]["text"]
+    assert opt_headers[2]["hasStar"] is False
+
     voters = popup_info.get("voters", [])
     assert "Maya Lin" in voters
     assert "Lucas Silva" in voters
@@ -2020,7 +2037,7 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
     assert isinstance(tc_poll, dict)
     assert tc_poll.get("ready") is True
     assert "Preferred brewing method" in tc_poll.get("question", "")
-    assert tc_poll.get("badge") == "Select one"
+    assert tc_poll.get("badge") == "Single choice"
 
     tc_opts = tc_poll.get("options", [])
     assert len(tc_opts) == 3
@@ -2039,12 +2056,19 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
             for (let i = 0; i < 50; i++) {
                 const popup = document.getElementById('msg-details-popup');
                 if (popup && popup.classList.contains('visible') && !popup.textContent.includes('Loading')) {
+                    const optionHeaders = [...popup.querySelectorAll('.msg-poll-details-option-hdr')].map(
+                        el => ({
+                            text: el.textContent.trim(),
+                            hasStar: !!el.querySelector('.msg-poll-winner-star'),
+                        })
+                    );
                     const voters = [...popup.querySelectorAll('.msg-details-row .msg-details-label')].map(
                         el => el.textContent.trim()
                     );
                     if (voters.length > 0) {
                         return {
                             open: true,
+                            optionHeaders: optionHeaders,
                             voters: voters,
                         };
                     }
@@ -2058,6 +2082,14 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
     )
     assert isinstance(tc_popup, dict)
     assert tc_popup.get("open") is True
+    tc_opt_headers = tc_popup.get("optionHeaders", [])
+    assert len(tc_opt_headers) == 3
+    # Sorted by highest votes: 2, 1, 1
+    assert "V60 Pour-over" in tc_opt_headers[0]["text"]
+    assert tc_opt_headers[0]["hasStar"] is True
+    assert tc_opt_headers[1]["hasStar"] is False
+    assert tc_opt_headers[2]["hasStar"] is False
+
     tc_voters = tc_popup.get("voters", [])
     assert "Jordan Lee" in tc_voters
     assert "Chloe Bennett" in tc_voters

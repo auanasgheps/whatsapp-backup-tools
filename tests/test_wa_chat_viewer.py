@@ -7885,6 +7885,26 @@ class TestPollSupport:
         assert opt_res.status_code == 200
         assert len(opt_res.get_json()["results"]) == 1
 
+    def test_poll_frontend_badge_wording_and_star(self):
+        """Verify poll badge uses descriptive wording without action verbs and winner star is defined."""
+        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        css_path = Path(viewer.__file__).parent / "chat_viewer" / "app.css"
+        js_content = js_path.read_text(encoding="utf-8")
+        css_content = css_path.read_text(encoding="utf-8")
+
+        # Badge wording must describe without an action verb
+        assert "Multiple choice" in js_content
+        assert "Single choice" in js_content
+        assert "Select one or more" not in js_content
+        assert "Select one" not in js_content
+
+        # Star styles and tokens
+        assert "--star-color" in css_content
+        assert "msg-poll-winner-star" in css_content
+        assert "msg-poll-winner-star" in js_content
+        assert "msg-poll-details-option-hdr" in css_content
+        assert "msg-poll-details-option-hdr" in js_content
+
     def test_missing_media_thumbnail_and_dimensions(self, tmp_path):
         """Verify media dimensions and thumbnail streaming for Android missing media."""
         arch_conn = sqlite3.connect(tmp_path / ".wa_media_archiver.db")
