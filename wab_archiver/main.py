@@ -26,7 +26,15 @@ from datetime import date, datetime
 
 from shared import db, hashing
 
-from . import adb_extractor, android_handler, archive_db, backup_reader, ios_handler, preservation
+from . import (
+    adb_extractor,
+    android_handler,
+    archive_db,
+    backup_reader,
+    increment_merger,
+    ios_handler,
+    preservation,
+)
 from .progress import ProgressReporter
 
 # ==============================================================================
@@ -1866,23 +1874,66 @@ def decrypt_msgstore(
 
 
 def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger) -> None:
-    """Decrypt encrypted msgstore if necessary."""
-    if hasattr(args, "msgstore") and args.msgstore and args.msgstore.endswith(".crypt15"):
+    """Decrypt encrypted msgstore and merge incremental diffs if present."""
+    if hasattr(args, "msgstore") and args.msgstore:
+        is_encrypted = args.msgstore.endswith((".crypt15", ".crypt14"))
+        staged_incs = getattr(args, "_staged_increments", None) or []
+        local_incs = []
+        if os.path.isfile(args.msgstore):
+            msgstore_dir = os.path.dirname(os.path.abspath(args.msgstore))
+            local_incs = increment_merger.find_increment_files(msgstore_dir)
+            local_incs = [
+                f for f in local_incs if os.path.abspath(f) != os.path.abspath(args.msgstore)
+            ]
+
+        all_increments = staged_incs if staged_incs else local_incs
+
+        if not is_encrypted and not all_increments:
+            return
+
         if not getattr(args, "e2e_key", None):
-            logger.error("Encrypted msgstore detected but no --e2e-key provided. Exiting.")
+            logger.error("Encrypted backup/increments detected but no --e2e-key provided. Exiting.")
             raise SystemExit(1)
+
         db_dir = os.path.join(args.output, "Whatsapp Databases")
         os.makedirs(db_dir, exist_ok=True)
         decrypted_db = os.path.join(db_dir, "msgstore.db")
         old_db = os.path.join(db_dir, "msgstore.db.old")
         incoming_db = os.path.join(db_dir, "msgstore.db.incoming")
+        merge_staging_dir = os.path.join(db_dir, ".staging_merge")
 
         if os.path.exists(incoming_db):
             with contextlib.suppress(OSError):
                 os.remove(incoming_db)
 
         try:
-            decrypt_msgstore(args.msgstore, args.e2e_key, incoming_db, logger)
+            if all_increments:
+                logger.info(f"Detected {len(all_increments)} incremental backup(s) to merge.")
+                base_decrypted = os.path.join(db_dir, "msgstore.db.base_decrypted")
+                if os.path.exists(base_decrypted):
+                    with contextlib.suppress(OSError):
+                        os.remove(base_decrypted)
+
+                try:
+                    if is_encrypted:
+                        decrypt_msgstore(args.msgstore, args.e2e_key, base_decrypted, logger)
+                    else:
+                        shutil.copy2(args.msgstore, base_decrypted)
+
+                    increment_merger.merge_increments(
+                        base_decrypted,
+                        all_increments,
+                        args.e2e_key,
+                        incoming_db,
+                        merge_staging_dir,
+                        logger,
+                    )
+                finally:
+                    if os.path.exists(base_decrypted):
+                        with contextlib.suppress(OSError):
+                            os.remove(base_decrypted)
+            else:
+                decrypt_msgstore(args.msgstore, args.e2e_key, incoming_db, logger)
         except BaseException:
             if os.path.exists(incoming_db):
                 with contextlib.suppress(OSError):
@@ -1936,6 +1987,14 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
                 logger.warning(f"Overwriting existing {decrypted_db} with decrypted database.")
             os.replace(incoming_db, decrypted_db)
             args.msgstore = decrypted_db
+
+        # Only after successful merge and rotation, clean up temporary staging diff files
+        if os.path.exists(merge_staging_dir):
+            shutil.rmtree(merge_staging_dir, ignore_errors=True)
+        if staged_incs:
+            for sf in staged_incs:
+                with contextlib.suppress(OSError):
+                    os.remove(sf)
 
 
 def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: logging.Logger):
@@ -2146,7 +2205,10 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
         tmp_dir = tempfile.mkdtemp(prefix="wab_adb_")
         atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
         try:
-            args.msgstore = adb_extractor.pull_msgstore(tmp_dir, args.business, logger)
+            args.msgstore, args._staged_increments = adb_extractor.pull_msgstore_and_increments(
+                tmp_dir, args.business, logger
+            )
+            args._staging_dir = tmp_dir
             args.contacts = adb_extractor.pull_contacts(tmp_dir, logger)
         except subprocess.CalledProcessError:
             raise SystemExit(1)
