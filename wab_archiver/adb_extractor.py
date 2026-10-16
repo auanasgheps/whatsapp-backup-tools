@@ -1,5 +1,8 @@
 import csv
+import logging
 import os
+import posixpath
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -225,6 +228,101 @@ def pull_msgstore(output_dir: str, business: bool = False, logger=None) -> str:
                 logger.error(f"ADB pull failed: {stderr}")
         raise
     return dest
+
+
+def enumerate_remote_backup_files(
+    business: bool, logger: logging.Logger
+) -> tuple[str | None, list[str]]:
+    """Discover the base msgstore.db.crypt15 and any msgstore-increment-*.crypt15 on the device."""
+
+    remote_dir = (
+        posixpath.dirname(_MSGSTORE_BUSINESS_PATH)
+        if business
+        else posixpath.dirname(_MSGSTORE_PATH)
+    )
+
+    logger.info(f"Checking for database backups in {remote_dir}...")
+    try:
+        result = _run_adb(
+            ["adb", "shell", f'ls -1 "{remote_dir}"'],
+            logger,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to list remote backups in {remote_dir}: {e}")
+        return None, []
+
+    lines = result.stdout.decode(errors="replace").splitlines()
+    base_file = None
+    increments = []
+    inc_pattern = re.compile(r"msgstore-increment-(\d+)")
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line in ("msgstore.db.crypt15", "msgstore.db.crypt14"):
+            base_file = f"{remote_dir}/{line}"
+        else:
+            m = inc_pattern.search(line)
+            if m and (line.endswith(".crypt15") or line.endswith(".crypt14")):
+                increments.append((int(m.group(1)), f"{remote_dir}/{line}"))
+
+    increments.sort(key=lambda item: item[0])
+    sorted_inc_paths = [path for _, path in increments]
+
+    if base_file is None:
+        logger.warning(f"Base msgstore backup not found in {remote_dir}.")
+    else:
+        logger.info(
+            f"Found base backup '{posixpath.basename(base_file)}' and "
+            f"{len(sorted_inc_paths)} incremental backup(s)."
+        )
+
+    return base_file, sorted_inc_paths
+
+
+def pull_msgstore_and_increments(
+    staging_dir: str, business: bool, logger: logging.Logger
+) -> tuple[str, list[str]]:
+    """Pull the base msgstore database and all active incremental diffs into staging_dir."""
+
+    base_remote, inc_remotes = enumerate_remote_backup_files(business, logger)
+    if base_remote is None:
+        local_base = pull_msgstore(staging_dir, business, logger)
+        return local_base, []
+
+    os.makedirs(staging_dir, exist_ok=True)
+    local_base = os.path.join(staging_dir, posixpath.basename(base_remote))
+    logger.info(f"Pulling base msgstore '{posixpath.basename(base_remote)}'...")
+    try:
+        subprocess.run(
+            ["adb", "pull", base_remote, local_base],
+            check=True,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
+        logger.error(f"Failed to pull base backup from '{base_remote}' via ADB: {stderr}")
+        raise
+
+    local_increments = []
+    for inc_remote in inc_remotes:
+        inc_name = posixpath.basename(inc_remote)
+        local_inc = os.path.join(staging_dir, inc_name)
+        logger.info(f"Pulling increment '{inc_name}'...")
+        try:
+            subprocess.run(
+                ["adb", "pull", inc_remote, local_inc],
+                check=True,
+                stderr=subprocess.PIPE,
+            )
+            local_increments.append(local_inc)
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
+            logger.error(f"Failed to pull increment '{inc_remote}' via ADB: {stderr}")
+            raise
+
+    return local_base, local_increments
 
 
 def pull_contacts(output_dir: str, logger=None) -> str:
