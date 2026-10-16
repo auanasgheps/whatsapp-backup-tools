@@ -1041,13 +1041,13 @@
       bubble.appendChild(renderPoll(msg));
     } else if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
-        const txt = document.createElement('div');
-        txt.className = 'msg-text msg-unavailable';
-        const icon = msg.media_type === 'image' ? '🖼️' : msg.media_type === 'video' ? '🎥' :
-                     msg.media_type === 'audio' ? '🎵' : msg.media_type === 'sticker' ? '🩹' :
-                     msg.media_type === 'gif' ? '🎞️' : msg.media_type === 'vcard' ? '📇' : '📄';
-        txt.innerHTML = esc(icon) + ' ' + highlight(msg.text_body || 'Media not available', '');
-        bubble.appendChild(txt);
+        bubble.appendChild(renderMissingMedia(msg));
+        if (msg.text_body && msg.media_type !== 'vcard') {
+          const cap = document.createElement('div');
+          cap.className = 'msg-caption';
+          cap.innerHTML = highlight(msg.text_body, '');
+          bubble.appendChild(cap);
+        }
       } else {
         const txt = document.createElement('div');
         txt.className = 'msg-text';
@@ -1098,6 +1098,79 @@
 
     row.appendChild(bubble);
     return row;
+  }
+
+  function renderMissingMedia(msg) {
+    const card = document.createElement('div');
+    card.className = 'media-missing-card';
+
+    let ratio = msg.aspect_ratio || 0;
+    if (!ratio && msg.media_width > 0 && msg.media_height > 0) {
+      ratio = msg.media_width / msg.media_height;
+    }
+    if (ratio > 0) {
+      card.style.aspectRatio = ratio.toFixed(3);
+    } else if (msg.media_type === 'video') {
+      card.style.aspectRatio = '16 / 9';
+    } else if (msg.media_type === 'image') {
+      card.style.aspectRatio = '4 / 3';
+    }
+
+    if (msg.has_thumbnail) {
+      const img = document.createElement('img');
+      img.className = 'media-blurred-bg';
+      img.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+      img.loading = 'lazy';
+      img.alt = '';
+      card.appendChild(img);
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'media-missing-overlay';
+
+    const badge = document.createElement('div');
+    badge.className = 'media-missing-badge';
+    const icon = msg.media_type === 'video' ? '🎥' :
+                 msg.media_type === 'audio' ? '🎵' :
+                 msg.media_type === 'sticker' ? '🩹' :
+                 msg.media_type === 'gif' ? '🎞️' :
+                 msg.media_type === 'vcard' ? '📇' :
+                 msg.media_type === 'document' ? '📄' : '🖼️';
+    badge.textContent = icon;
+    overlay.appendChild(badge);
+
+    const info = document.createElement('div');
+    info.className = 'media-missing-info';
+
+    const label = document.createElement('div');
+    label.className = 'media-missing-label';
+    label.textContent = msg.media_type === 'video' ? 'Video' :
+                        msg.media_type === 'audio' ? 'Audio' :
+                        msg.media_type === 'document' ? 'Document' :
+                        msg.media_type === 'sticker' ? 'Sticker' : 'Photo';
+    info.appendChild(label);
+
+    const sizeStr = _formatBytes(msg.media_size);
+    let durStr = '';
+    if (msg.media_duration && msg.media_duration > 0) {
+      const mins = Math.floor(msg.media_duration / 60);
+      const secs = msg.media_duration % 60;
+      durStr = mins + ':' + (secs < 10 ? '0' : '') + secs;
+    }
+
+    const metaParts = [];
+    if (sizeStr) metaParts.push(sizeStr);
+    if (durStr) metaParts.push(durStr);
+    if (metaParts.length > 0) {
+      const meta = document.createElement('div');
+      meta.className = 'media-missing-meta';
+      meta.textContent = metaParts.join(' · ');
+      info.appendChild(meta);
+    }
+
+    overlay.appendChild(info);
+    card.appendChild(overlay);
+    return card;
   }
 
   function renderMedia(msg) {

@@ -3247,6 +3247,19 @@ def create_app(output_root: Path, rescan: bool = False):
     has_mao_ts = False
     has_android_key_id = False
     has_ios_stanza_id = False
+    has_message_thumbnail = False
+    has_media_hash_thumbnail = False
+    has_message_quoted_media = False
+    has_mm_width = False
+    has_mm_height = False
+    has_mm_size = False
+    has_mm_duration = False
+    has_mm_file_hash = False
+    has_ios_xmpp_thumb = False
+    has_ios_aspect_ratio = False
+    has_ios_filesize = False
+    has_ios_duration = False
+    _mi_cols = set()
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
         _wa_tables = {
@@ -3258,6 +3271,19 @@ def create_app(output_root: Path, rescan: bool = False):
         has_lid_dn = "lid_display_name" in _wa_tables
         has_message_system = "message_system" in _wa_tables
         has_mcp = "message_system_chat_participant" in _wa_tables
+        has_message_thumbnail = "message_thumbnail" in _wa_tables
+        has_media_hash_thumbnail = "media_hash_thumbnail" in _wa_tables
+        has_message_quoted_media = "message_quoted_media" in _wa_tables
+        _mm_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_media)").fetchall()}
+            if "message_media" in _wa_tables
+            else set()
+        )
+        has_mm_width = "width" in _mm_cols
+        has_mm_height = "height" in _mm_cols
+        has_mm_size = "file_size" in _mm_cols
+        has_mm_duration = "media_duration" in _mm_cols
+        has_mm_file_hash = "file_hash" in _mm_cols
         _msg_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message)").fetchall()}
             if "message" in _wa_tables
@@ -3296,6 +3322,10 @@ def create_app(output_root: Path, rescan: bool = False):
             else set()
         )
         has_ios_vcard_name = "ZVCARDNAME" in _mi_cols
+        has_ios_xmpp_thumb = "ZXMPPTHUMBPATH" in _mi_cols or "ZTHUMBNAILLOCALPATH" in _mi_cols
+        has_ios_aspect_ratio = "ZASPECTRATIO" in _mi_cols
+        has_ios_filesize = "ZFILESIZE" in _mi_cols
+        has_ios_duration = "ZMOVIEDURATION" in _mi_cols
         _zwa_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
             if "ZWAMESSAGE" in _wa_tables
@@ -3314,6 +3344,14 @@ def create_app(output_root: Path, rescan: bool = False):
             "COALESCE(NULLIF(m.ZSTANZAID, ''), 'msg_' || m.Z_PK)"
             if has_ios_stanza_id
             else "'msg_' || m.Z_PK"
+        )
+        ios_filesize_col = "COALESCE(mi.ZFILESIZE, 0)" if has_ios_filesize else "0"
+        ios_duration_col = "COALESCE(mi.ZMOVIEDURATION, 0)" if has_ios_duration else "0"
+        ios_aspect_ratio_col = "COALESCE(mi.ZASPECTRATIO, 0.0)" if has_ios_aspect_ratio else "0.0"
+        ios_has_thumb_expr = (
+            "CASE WHEN mi.ZXMPPTHUMBPATH IS NOT NULL OR mi.ZTHUMBNAILLOCALPATH IS NOT NULL THEN 1 ELSE 0 END"
+            if has_ios_xmpp_thumb
+            else "0"
         )
         ios_service_filter = (
             "OR (m.ZMESSAGETYPE = 6 AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))"
@@ -3415,7 +3453,13 @@ def create_app(output_root: Path, rescan: bool = False):
         CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         {group_ev_col}                                               AS group_event_type,
-        gm.ZMEMBERJID                                                AS member_jid
+        gm.ZMEMBERJID                                                AS member_jid,
+        0                                                            AS media_width,
+        0                                                            AS media_height,
+        {ios_filesize_col}                                           AS media_size,
+        {ios_duration_col}                                           AS media_duration,
+        {ios_aspect_ratio_col}                                       AS aspect_ratio,
+        {ios_has_thumb_expr}                                         AS has_thumbnail
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
@@ -3520,6 +3564,43 @@ def create_app(output_root: Path, rescan: bool = False):
         if has_android_key_id
         else "'msg_' || m._id"
     )
+
+    mm_width_col = "COALESCE(mm.width, 0)" if has_mm_width else "0"
+    mm_height_col = "COALESCE(mm.height, 0)" if has_mm_height else "0"
+    mm_size_col = "COALESCE(mm.file_size, 0)" if has_mm_size else "0"
+    mm_duration_col = "COALESCE(mm.media_duration, 0)" if has_mm_duration else "0"
+    mm_aspect_col = (
+        "CASE WHEN mm.height > 0 AND mm.width > 0 "
+        "THEN ROUND(CAST(mm.width AS REAL) / CAST(mm.height AS REAL), 3) "
+        "ELSE 0.0 END"
+        if (has_mm_width and has_mm_height)
+        else "0.0"
+    )
+
+    android_thumb_joins = ""
+    android_has_thumb_arms = []
+    if has_message_thumbnail:
+        android_thumb_joins += "    LEFT JOIN message_thumbnail mt ON mt.message_row_id = m._id\n"
+        android_has_thumb_arms.append("mt.message_row_id IS NOT NULL")
+    if has_media_hash_thumbnail and has_mm_file_hash:
+        android_thumb_joins += (
+            "    LEFT JOIN media_hash_thumbnail mht ON mht.media_hash = mm.file_hash\n"
+        )
+        android_has_thumb_arms.append("mht.media_hash IS NOT NULL")
+    if has_message_quoted_media:
+        android_thumb_joins += (
+            "    LEFT JOIN message_quoted_media mqm ON mqm.message_row_id = m._id\n"
+        )
+        android_has_thumb_arms.append(
+            "(mqm.message_row_id IS NOT NULL AND mqm.thumbnail IS NOT NULL)"
+        )
+
+    android_has_thumb_expr = (
+        "CASE WHEN " + " OR ".join(android_has_thumb_arms) + " THEN 1 ELSE 0 END"
+        if android_has_thumb_arms
+        else "0"
+    )
+
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
@@ -3577,10 +3658,16 @@ def create_app(output_root: Path, rescan: bool = False):
         {edit_ts_col}                                                AS edited_ts,
         CASE WHEN m.message_type IN (42, 43, 82) THEN 1 ELSE 0 END   AS is_view_once,
         {ms_col}                                                     AS action_type,
-        ''                                                           AS participant_name
+        ''                                                           AS participant_name,
+        {mm_width_col}                                               AS media_width,
+        {mm_height_col}                                              AS media_height,
+        {mm_size_col}                                                AS media_size,
+        {mm_duration_col}                                            AS media_duration,
+        {mm_aspect_col}                                              AS aspect_ratio,
+        {android_has_thumb_expr}                                     AS has_thumbnail
     FROM message m
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
-    LEFT JOIN chat c ON c._id = m.chat_row_id
+{android_thumb_joins}    LEFT JOIN chat c ON c._id = m.chat_row_id
     LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
     LEFT JOIN jid j ON j._id = m.sender_jid_row_id
     {_ANDROID_JID_MAP}
@@ -6324,6 +6411,92 @@ def create_app(output_root: Path, rescan: bool = False):
             resp.headers["Content-Type"] = content_type or "application/octet-stream"
             resp.headers["Accept-Ranges"] = "bytes"
             return resp
+
+    # ---- API: thumbnail serving --------------------------------------------
+
+    @app.route("/api/thumbnail/<int:msg_id>")
+    def api_thumbnail(msg_id):
+        conn = get_wa()
+        if conn is None:
+            return "Not found", 404
+
+        thumb_bytes = None
+        if source_type == "android":
+            if has_message_thumbnail:
+                row = conn.execute(
+                    "SELECT thumbnail FROM message_thumbnail WHERE message_row_id = ?",
+                    (msg_id,),
+                ).fetchone()
+                if row and row["thumbnail"]:
+                    thumb_bytes = row["thumbnail"]
+
+            if not thumb_bytes and has_media_hash_thumbnail and has_mm_file_hash:
+                row = conn.execute(
+                    """
+                    SELECT mht.thumbnail
+                    FROM media_hash_thumbnail mht
+                    JOIN message_media mm ON mm.file_hash = mht.media_hash
+                    WHERE mm.message_row_id = ?
+                    """,
+                    (msg_id,),
+                ).fetchone()
+                if row and row["thumbnail"]:
+                    thumb_bytes = row["thumbnail"]
+
+            if not thumb_bytes and has_message_quoted_media:
+                row = conn.execute(
+                    "SELECT thumbnail FROM message_quoted_media WHERE message_row_id = ?",
+                    (msg_id,),
+                ).fetchone()
+                if row and row["thumbnail"]:
+                    thumb_bytes = row["thumbnail"]
+        elif source_type == "ios":
+            thumb_cols = []
+            if "ZXMPPTHUMBPATH" in _mi_cols:
+                thumb_cols.append("mi.ZXMPPTHUMBPATH")
+            if "ZTHUMBNAILLOCALPATH" in _mi_cols:
+                thumb_cols.append("mi.ZTHUMBNAILLOCALPATH")
+            if thumb_cols:
+                row = conn.execute(
+                    f"""
+                    SELECT {", ".join(thumb_cols)}
+                    FROM ZWAMESSAGE m
+                    LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                    WHERE m.Z_PK = ?
+                    """,
+                    (msg_id,),
+                ).fetchone()
+                if row:
+                    thumb_path = (
+                        row["ZXMPPTHUMBPATH"]
+                        if "ZXMPPTHUMBPATH" in _mi_cols and row["ZXMPPTHUMBPATH"]
+                        else (
+                            row["ZTHUMBNAILLOCALPATH"]
+                            if "ZTHUMBNAILLOCALPATH" in _mi_cols and row["ZTHUMBNAILLOCALPATH"]
+                            else None
+                        )
+                    )
+                    if thumb_path:
+                        cand = (output_root / thumb_path).resolve()
+                        if cand.exists():
+                            try:
+                                thumb_bytes = cand.read_bytes()
+                            except OSError:
+                                pass
+
+        if not thumb_bytes:
+            return "Thumbnail not found", 404
+
+        mime = "image/jpeg"
+        if thumb_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            mime = "image/png"
+        elif thumb_bytes.startswith(b"RIFF") and b"WEBP" in thumb_bytes[:16]:
+            mime = "image/webp"
+
+        resp = Response(thumb_bytes, 200, mimetype=mime)
+        resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
+        resp.headers["Content-Length"] = len(thumb_bytes)
+        return resp
 
     # ---- static assets ------------------------------------------------------
 
