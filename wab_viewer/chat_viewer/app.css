@@ -15,6 +15,7 @@
       --preserved-bg: rgba(234, 179, 8, 0.15);
       --preserved-text: #eab308;
       --preserved-border: rgba(234, 179, 8, 0.35);
+      --star-color: #eab308;
       --sidebar-w: 300px;
       --font-size: 15px;
     }
@@ -35,6 +36,7 @@
       --preserved-bg: #fef9c3;
       --preserved-text: #854d0e;
       --preserved-border: #facc15;
+      --star-color: #ca8a04;
     }
 
     /* ---- Pico overrides: reset opinionated defaults that break our layout ---- */
@@ -796,6 +798,32 @@
     .msg-poll-view-votes-btn:focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 1px;
+    }
+    .msg-poll-details-option-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--text);
+      margin-top: 8px;
+      margin-bottom: 4px;
+      padding-bottom: 2px;
+      border-bottom: 1px solid var(--border);
+    }
+    .msg-poll-winner-star {
+      color: var(--star-color);
+      font-size: 13px;
+      line-height: 1;
+      margin-left: 4px;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    .msg-poll-details-option-count {
+      font-size: 11px;
+      color: var(--text-muted);
+      flex-shrink: 0;
     }
 
     /* ---- empty / loading states ---- */

@@ -1298,7 +1298,7 @@
 
     const badge = document.createElement('div');
     badge.className = 'msg-poll-badge';
-    badge.textContent = poll.multiple_answers ? 'Select one or more' : 'Select one';
+    badge.textContent = poll.multiple_answers ? 'Multiple choice' : 'Single choice';
     header.appendChild(badge);
 
     container.appendChild(header);
@@ -3289,15 +3289,33 @@
       const label = totalVoters === 1 ? '1 voter' : `${totalVoters} voters`;
       html = `<div class="rx-details-total" style="margin-bottom:8px;font-weight:600">Poll votes · ${label}</div>`;
 
-      let hasAnyVotes = false;
+      const getVoteCount = opt =>
+        opt.vote_count !== undefined ? opt.vote_count : (opt.voters ? opt.voters.length : 0);
+
+      let maxVotes = 0;
       for (const opt of data.options) {
-        if (!opt.voters || !opt.voters.length) continue;
+        const count = getVoteCount(opt);
+        if (count > maxVotes) maxVotes = count;
+      }
+
+      const sortedOptions = [...data.options].sort((a, b) => getVoteCount(b) - getVoteCount(a));
+
+      let hasAnyVotes = false;
+      for (const opt of sortedOptions) {
+        const count = getVoteCount(opt);
+        if (!count && (!opt.voters || !opt.voters.length)) continue;
         hasAnyVotes = true;
-        html += `<div style="font-weight:600;font-size:12px;color:var(--text);margin-top:8px;margin-bottom:4px;padding-bottom:2px;border-bottom:1px solid var(--border)">${esc(opt.name)} (${opt.vote_count || opt.voters.length})</div>`;
-        for (const v of opt.voters) {
-          const name = esc(v.name || '?');
-          const timeStr = v.timestamp_ms ? fmtTime(v.timestamp_ms) : '';
-          html += `<div class="msg-details-row"><span class="msg-details-label">${name}</span><span class="msg-details-value">${timeStr}</span></div>`;
+        const isWinner = maxVotes > 0 && count === maxVotes;
+        const star = isWinner
+          ? '<span class="msg-poll-winner-star" title="Winning option" aria-label="Winner">★</span>'
+          : '';
+        html += `<div class="msg-poll-details-option-hdr"><span>${esc(opt.name)}${star ? ' ' + star : ''}</span><span class="msg-poll-details-option-count">(${count})</span></div>`;
+        if (opt.voters && opt.voters.length) {
+          for (const v of opt.voters) {
+            const name = esc(v.name || '?');
+            const timeStr = v.timestamp_ms ? fmtTime(v.timestamp_ms) : '';
+            html += `<div class="msg-details-row"><span class="msg-details-label">${name}</span><span class="msg-details-value">${timeStr}</span></div>`;
+          }
         }
       }
       if (!hasAnyVotes) {
