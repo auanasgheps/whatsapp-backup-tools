@@ -1511,11 +1511,18 @@ class TestWriteDuplicateReport:
         conn.commit()
 
         path = str(tmp_path / "dup_sections.csv")
-        group_count, file_count = wa.write_duplicate_report(path, conn, logger, None)
+        res = wa.write_duplicate_report(path, conn, logger, None)
+        group_count, file_count = res
         conn.close()
 
         assert group_count == 4
         assert file_count == 10
+        assert res.sections == [
+            ("PHOTOS & IMAGES", 1, 2),
+            ("VIDEOS", 1, 2),
+            ("ANIMATED GIFS", 1, 2),
+            ("STICKERS", 1, 4),
+        ]
 
         with open(path, newline="", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
@@ -7281,7 +7288,11 @@ class TestDuplicateAndSkippedBreakdown:
             "skipped_duplicate": 1,
             "skipped_empty_vcard": 0,
         }
-        dup_summary = (2, 4)
+        dup_summary = wa.DuplicateReportSummary(
+            2,
+            4,
+            [("PHOTOS & IMAGES", 1, 2), ("VIDEOS", 1, 2)],
+        )
 
         # Emulate the summary reporting block
         copied_label = "Copied"
@@ -7305,27 +7316,36 @@ class TestDuplicateAndSkippedBreakdown:
                 parts.append(f"{n_dup} same-chat duplicates")
             if n_empty > 0:
                 parts.append(f"{n_empty} empty vCards")
-            t_logger.info(f"  Skipped             : {n_skipped} ({', '.join(parts)})")
+            t_logger.info(f"  {'Skipped':<20}: {n_skipped} ({', '.join(parts)})")
         else:
-            t_logger.info(f"  Skipped             : {n_skipped}")
+            t_logger.info(f"  {'Skipped':<20}: {n_skipped}")
 
-        t_logger.info(f"  Missing source files: {stats['missing']}")
-        t_logger.info(f"  Errors / Warnings   : {stats['warnings']}")
+        t_logger.info(f"  {'Errors / Warnings':<20}: {stats['warnings']}")
+
+        t_logger.info("")
+        t_logger.info(f"  {'Missing source files':<20}: {stats['missing']}")
+
         if dup_summary[1] > 0:
             t_logger.info(
-                f"  Duplicate media     : {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
+                f"  {'Duplicate media':<20}: {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
                 "→ see duplicate_media_report.csv"
             )
+            for sec_title, sec_groups, sec_files in getattr(dup_summary, "sections", []):
+                t_logger.info(f"    - {sec_title:<18}: {sec_groups} group(s), {sec_files} file(s)")
 
         t_logger.removeHandler(handler)
 
         output_text = "\n".join(log_records)
         assert "Copied              : 10 (2 linked duplicates)" in output_text
         assert "Skipped             : 5 (4 already archived, 1 same-chat duplicates)" in output_text
+        assert "Errors / Warnings   : 0" in output_text
+        assert "Missing source files: 1" in output_text
         assert (
             "Duplicate media     : 4 file(s) across 2 group(s) → see duplicate_media_report.csv"
             in output_text
         )
+        assert "- PHOTOS & IMAGES   : 1 group(s), 2 file(s)" in output_text
+        assert "- VIDEOS            : 1 group(s), 2 file(s)" in output_text
 
     def test_process_vcard_rows_and_merge_stats(self, tmp_path, logger):
         out = tmp_path / "out"

@@ -229,7 +229,7 @@ def detect_db_platform(path: str) -> str:
 def write_conflict_report(report_path: str, rows: list, logger: logging.Logger):
     """Write a CSV report of files that resolved differently across multiple wa_roots."""
     if not rows:
-        logger.info("No source conflicts found.")
+        logger.debug("No source conflicts found.")
         return
     fieldnames = [
         "file_path",
@@ -243,13 +243,13 @@ def write_conflict_report(report_path: str, rows: list, logger: logging.Logger):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    logger.info(f"Source conflicts report written to: {report_path} ({len(rows)} conflict(s))")
+    logger.debug(f"Source conflicts report written to: {report_path} ({len(rows)} conflict(s))")
 
 
 def write_missing_report(report_path: str, rows: list, logger: logging.Logger):
     """Write the collected missing media rows to a CSV file."""
     if not rows:
-        logger.info("No missing media entries to report.")
+        logger.debug("No missing media entries to report.")
         return
     fieldnames = [
         "message_id",
@@ -267,7 +267,7 @@ def write_missing_report(report_path: str, rows: list, logger: logging.Logger):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    logger.info(f"Missing media report written to: {report_path} ({len(rows)} entries)")
+    logger.debug(f"Missing media report written to: {report_path} ({len(rows)} entries)")
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +302,15 @@ def _determine_duplicate_group_media_type(grp_rows: list) -> str:
     return db.classify_media_type(first_arch_p, first_orig_p)
 
 
+class DuplicateReportSummary(tuple):
+    """2-tuple (group_count, file_count) with section breakdown metadata."""
+
+    def __new__(cls, group_count: int, file_count: int, sections: list):
+        obj = super().__new__(cls, (group_count, file_count))
+        obj.sections = sections
+        return obj
+
+
 def write_duplicate_report(
     report_path: str,
     conn: sqlite3.Connection,
@@ -328,8 +337,8 @@ def write_duplicate_report(
     """).fetchall()
 
     if not rows:
-        logger.info("No duplicate media found.")
-        return 0, 0
+        logger.debug("No duplicate media found.")
+        return DuplicateReportSummary(0, 0, [])
 
     groups_by_md5: dict[bytes, dict] = {}
     for md5_bytes, file_count, archived_path, is_hardlink, timestamp_ms, orig_path in rows:
@@ -420,18 +429,20 @@ def write_duplicate_report(
                         }
                     )
 
-    logger.info(
+    logger.debug(
         f"Duplicate media report written to: {report_path} "
         f"({current_group_id} group(s), {total_files} file(s))"
     )
+    section_breakdown = []
     for sec_key, sec_title in _DUPLICATE_SECTIONS:
         sec_groups = sections.get(sec_key, [])
         if sec_groups:
             sec_file_count = sum(len(g["rows"]) for g in sec_groups)
-            logger.info(
+            section_breakdown.append((sec_title, len(sec_groups), sec_file_count))
+            logger.debug(
                 f"  - {sec_title:<22}: {len(sec_groups)} group(s), {sec_file_count} file(s)"
             )
-    return current_group_id, total_files
+    return DuplicateReportSummary(current_group_id, total_files, section_breakdown)
 
 
 # ---------------------------------------------------------------------------
@@ -2591,14 +2602,14 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             if not args.dry_run:
                 write_missing_report(report_path, missing_rows, logger)
             else:
-                logger.info(
+                logger.debug(
                     f"[DRY RUN] Would write missing media report with "
                     f"{len(missing_rows)} entries to: {report_path}"
                 )
 
             dup_report_path = os.path.join(args.output, "duplicate_media_report.csv")
             conflict_report_path = os.path.join(args.output, "source_conflicts_report.csv")
-            dup_summary = (0, 0)
+            dup_summary = DuplicateReportSummary(0, 0, [])
             if not args.dry_run:
                 dup_summary = write_duplicate_report(dup_report_path, archive_conn, logger, tz)
                 if hasattr(media_resolver, "conflict_rows"):
@@ -2635,21 +2646,15 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             parts.append(f"{n_dup} same-chat duplicates")
         if n_empty > 0:
             parts.append(f"{n_empty} empty vCards")
-        logger.info(f"  Skipped             : {n_skipped} ({', '.join(parts)})")
+        logger.info(f"  {'Skipped':<20}: {n_skipped} ({', '.join(parts)})")
     else:
-        logger.info(f"  Skipped             : {n_skipped}")
+        logger.info(f"  {'Skipped':<20}: {n_skipped}")
 
-    logger.info(f"  Missing source files: {stats['missing']}")
-    logger.info(f"  Errors / Warnings   : {stats['warnings']}")
+    logger.info(f"  {'Errors / Warnings':<20}: {stats['warnings']}")
     if getattr(args, "preserve_deleted", False):
         pres_label = "Would preserve" if args.dry_run else "Preserved"
         logger.info(
             f"  {pres_label:<20}: {pres_stats.messages} message(s) across {pres_stats.chats} chat(s)"
-        )
-    if dup_summary[1] > 0:
-        logger.info(
-            f"  Duplicate media     : {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
-            "→ see duplicate_media_report.csv"
         )
     if hasattr(media_resolver, "root_hits"):
         for root, count in media_resolver.root_hits.items():
@@ -2662,17 +2667,37 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             )
         if n_zero:
             logger.info(f"  0-byte skipped      : {n_zero}")
-    logger.info(f"  Log file            : {log_path}")
+
+    logger.info("")
+    logger.info(f"  {'Missing source files':<20}: {stats['missing']}")
+
+    if dup_summary[1] > 0:
+        logger.info(
+            f"  {'Duplicate media':<20}: {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
+            "→ see duplicate_media_report.csv"
+        )
+        for sec_title, sec_groups, sec_files in getattr(dup_summary, "sections", []):
+            logger.info(f"    - {sec_title:<18}: {sec_groups} group(s), {sec_files} file(s)")
+
+    logger.info("")
     if not args.dry_run:
-        logger.info(f"  {'Missing media report':<20}: {report_path}")
-        logger.info(f"  {'Duplicate media report':<20}: {dup_report_path}")
-        if hasattr(media_resolver, "conflict_rows") and media_resolver.conflict_rows:
-            logger.info(f"  {'Conflicts report':<20}: {conflict_report_path}")
         logger.info(f"  {'Archive DB':<20}: {db_path}")
         if getattr(args, "preserve_deleted", False):
             pres_db_path = preservation.get_preserved_db_path(args.output)
             if os.path.isfile(pres_db_path):
                 logger.info(f"  {'Preserved DB':<20}: {pres_db_path}")
+    logger.info(f"  {'Log file':<20}: {log_path}")
+    if not args.dry_run:
+        if stats["missing"] > 0 and os.path.isfile(report_path):
+            logger.info(f"  {'Missing report':<20}: {report_path}")
+        if dup_summary[1] > 0 and os.path.isfile(dup_report_path):
+            logger.info(f"  {'Duplicate report':<20}: {dup_report_path}")
+        if (
+            hasattr(media_resolver, "conflict_rows")
+            and media_resolver.conflict_rows
+            and os.path.isfile(conflict_report_path)
+        ):
+            logger.info(f"  {'Conflicts report':<20}: {conflict_report_path}")
 
 
 def main():
