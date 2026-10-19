@@ -1502,10 +1502,12 @@ def _media_type_from_path(path: str) -> str:
         "sticker" in p
         or "stickers" in p
         or (os.path.basename(p).startswith("stk-") and (p.endswith(".webp") or p.endswith(".was")))
+        or p.endswith(".webp")
+        or p.endswith(".was")
     ):
         return "sticker"
     ext = os.path.splitext(p)[1]
-    if ext in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"):
+    if ext in (".jpg", ".jpeg", ".png", ".heic", ".heif"):
         return "image"
     if ext in (".mp4", ".mov", ".avi", ".mkv", ".3gp"):
         return "video"
@@ -4417,11 +4419,11 @@ def create_app(output_root: Path, rescan: bool = False):
         has_archived_media = has_all or bool(media_types) or has_doc
 
         _EXT_PATTERNS = {
-            "image": ["%.jpg", "%.jpeg", "%.png", "%.webp", "%.heic", "%.heif"],
+            "image": ["%.jpg", "%.jpeg", "%.png", "%.heic", "%.heif"],
             "video": ["%.mp4", "%.mov", "%.avi", "%.mkv", "%.3gp"],
             "audio": ["%.mp3", "%.ogg", "%.aac", "%.opus", "%.m4a"],
             "gif": ["%.gif"],
-            "sticker": ["%sticker%"],
+            "sticker": ["%sticker%", "%.webp", "%.was"],
             "vcard": ["%.vcf"],
         }
 
