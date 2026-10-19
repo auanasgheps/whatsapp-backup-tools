@@ -209,9 +209,16 @@ def detect_db_platform(path: str) -> str:
     Inspect a WhatsApp database and return 'ios' or 'android'.
     iOS databases contain ZWAMESSAGE; Android databases do not.
     """
-    with contextlib.closing(sqlite3.connect(path)) as conn:
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    return "ios" if "ZWAMESSAGE" in tables else "android"
+    try:
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            tables = {
+                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        return "ios" if "ZWAMESSAGE" in tables else "android"
+    except sqlite3.DatabaseError as e:
+        logger = logging.getLogger("wab_archiver")
+        logger.error(f"Database file '{path}' is not a valid SQLite database: {e}")
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -1768,8 +1775,9 @@ def parse_args() -> argparse.Namespace:
 
 def _warn_network_paths(args: argparse.Namespace, logger: logging.Logger):
     """Warn if output or any wa_root appear to be UNC network share paths."""
-    roots = args.wa_roots or []
-    for label, path in [("--output", args.output)] + [("--wa-root", r) for r in roots]:
+    roots = getattr(args, "wa_roots", None) or []
+    output = getattr(args, "output", None)
+    for label, path in [("--output", output)] + [("--wa-root", r) for r in roots]:
         if path and (path.startswith("\\\\") or path.startswith("//")):
             logger.warning(
                 f"{label} appears to be a network share ({path}). "
