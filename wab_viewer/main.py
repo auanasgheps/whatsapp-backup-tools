@@ -46,6 +46,12 @@ except ImportError:
 
 from wab_viewer.chat_viewer.template import HTML_TEMPLATE
 
+from .system_events import (
+    format_android_system_event,
+    format_ios_system_event,
+    format_participant_names,
+)
+
 
 def _get_version() -> str:
     try:
@@ -603,33 +609,34 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
     member_jid = (row.get("member_jid") or "").strip()
     from_me = row.get("from_me", 0)
     sender = row.get("sender") or ""
+    is_from_me = from_me == 1
+
+    actor = None
+    targets: list[str] = []
 
     if ev == 12:  # Group created
         subj = txt
-        creator = None
         if txt.startswith("{"):
             try:
                 data = json.loads(txt)
                 subj = data.get("subject", "")
                 author_jid = data.get("author")
                 if author_jid:
-                    creator = _resolve_ios_jid(author_jid, contacts_map)
+                    actor = _resolve_ios_jid(author_jid, contacts_map)
             except (json.JSONDecodeError, AttributeError):
                 pass
-        if not creator:
+        if not actor:
             if from_me == 1:
-                creator = "You"
+                actor = "You"
             elif member_jid:
-                creator = _resolve_ios_jid(member_jid, contacts_map)
+                actor = _resolve_ios_jid(member_jid, contacts_map)
             elif sender and sender != "Someone":
-                creator = sender
+                actor = sender
             else:
-                creator = "Someone"
-        if subj:
-            return f'{creator} created group "{subj}"'
-        return f"{creator} created this group"
+                actor = "Someone"
+        return format_ios_system_event(ev, actor, [], subj, is_from_me)
 
-    if ev == 1:  # Subject changed
+    if ev in (1, 3, 10):  # Subject, icon, or description changed
         actor = (
             "You"
             if from_me == 1
@@ -637,39 +644,15 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
                 _resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone")
             )
         )
-        if txt:
-            return f'{actor} changed the subject to "{txt}"'
-        return f"{actor} changed the group subject"
+        return format_ios_system_event(ev, actor, [], txt, is_from_me)
 
-    if ev == 3:  # Group icon changed
-        actor = (
-            "You"
-            if from_me == 1
-            else (
-                _resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone")
-            )
-        )
-        return f"{actor} changed this group's icon"
-
-    if ev == 4:  # Participant left
+    if ev in (4, 15):  # Left or joined via invite link
         target = (
             _resolve_ios_jid(member_jid, contacts_map)
             if member_jid
             else ("You" if from_me == 1 else "A participant")
         )
-        if target in ("You", "you"):
-            return "You left"
-        return f"{target} left"
-
-    if ev == 15:  # Joined via invite link
-        target = (
-            _resolve_ios_jid(member_jid, contacts_map)
-            if member_jid
-            else ("You" if from_me == 1 else "A participant")
-        )
-        if target in ("You", "you"):
-            return "You joined using this group's invite link"
-        return f"{target} joined using this group's invite link"
+        return format_ios_system_event(ev, sender or "Someone", [target], txt, is_from_me)
 
     if ev == 2:  # Participant added or joined
         if member_jid:
@@ -686,18 +669,9 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
         else:
             actor = _resolve_ios_jid(txt, contacts_map) if txt else None
             target = "you"
+        return format_ios_system_event(ev, actor or "Someone", [target], txt, is_from_me)
 
-        if target in ("You", "you"):
-            if actor and actor != "Someone":
-                return f"{actor} added you"
-            return "You joined"
-        if actor == "You":
-            return f"You added {target}"
-        if actor and actor != "Someone" and actor != target:
-            return f"{actor} added {target}"
-        return f"{target} joined"
-
-    if ev == 50:  # Multiple participants added
+    if ev in (21, 50):  # Multiple participants added or shared via contact
         if ";" in txt:
             actor_part, targets_part = txt.split(";", 1)
             actor = "You" if from_me == 1 else _resolve_ios_jid(actor_part.strip(), contacts_map)
@@ -705,17 +679,10 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
         else:
             actor = "You" if from_me == 1 else None
             target_jids = [j.strip() for j in txt.split(",") if j.strip()]
-        names = [_resolve_ios_jid(j, contacts_map) for j in target_jids]
-        target_str = (
-            ", ".join("you" if n in ("You", "you") else n for n in names)
-            if names
-            else "participants"
-        )
-        if actor and actor != "Someone":
-            return f"{actor} added {target_str}"
-        return f"{target_str} joined"
+        targets = [_resolve_ios_jid(j, contacts_map) for j in target_jids]
+        return format_ios_system_event(ev, actor or "Someone", targets, txt, is_from_me)
 
-    if ev == 7:  # Participant removed or left
+    if ev == 7:  # Participant removed
         if member_jid:
             actor = (
                 "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
@@ -730,16 +697,7 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
         else:
             actor = _resolve_ios_jid(txt, contacts_map) if txt else None
             target = "you"
-
-        if target in ("You", "you"):
-            if actor and actor != "Someone":
-                return f"{actor} removed you"
-            return "You left"
-        if actor == "You":
-            return f"You removed {target}"
-        if actor and actor != "Someone" and actor != target:
-            return f"{actor} removed {target}"
-        return f"{target} was removed"
+        return format_ios_system_event(ev, actor or "Someone", [target], txt, is_from_me)
 
     if ev in (5, 9):  # Admin changed
         target = (
@@ -747,22 +705,27 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
             if member_jid
             else (_resolve_ios_jid(txt, contacts_map) if txt else "You")
         )
-        if target in ("You", "you"):
-            return "You're now an admin" if ev == 9 else "You're no longer an admin"
-        return f"{target} is now an admin" if ev == 9 else f"{target} is no longer an admin"
+        return format_ios_system_event(ev, sender or "Someone", [target], txt, is_from_me)
 
-    if ev == 26:  # Disappearing messages
-        secs = int(txt) if txt.isdigit() else None
-        if secs and secs > 0:
-            days = secs // 86400
-            if days >= 1:
-                return f"Disappearing messages set to {days} days"
-            hours = secs // 3600
-            return f"Disappearing messages set to {hours} hours"
-        return "Disappearing messages turned off"
+    if ev == 6:  # Phone number changed
+        target_phone = _resolve_ios_jid(txt, contacts_map) if txt else ""
+        return format_ios_system_event(ev, sender or "A contact", [], target_phone, is_from_me)
 
-    if ev in (36, 37):
-        return "Group settings changed"
+    if ev == 56:  # Security code changed
+        contact = sender or (
+            _resolve_ios_jid(member_jid, contacts_map) if member_jid else "this contact"
+        )
+        return format_ios_system_event(ev, contact, [], txt, is_from_me)
+
+    if ev in (26, 36, 37, 38, 58):  # Settings, approvals, and announcements
+        actor_name = (
+            "You"
+            if from_me == 1
+            else (
+                _resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone")
+            )
+        )
+        return format_ios_system_event(ev, actor_name, [], txt, is_from_me)
 
     if txt and not txt.startswith("{") and "@lid" not in txt and not txt.isdigit():
         return txt
@@ -776,80 +739,16 @@ def _format_android_service_row(row: dict) -> str:
     from_me = row.get("from_me")
     sender = row.get("sender")
     part_name = row.get("participant_name")
+    targets = row.get("participant_names")
+    if targets is None:
+        targets = [part_name] if part_name else []
 
     actor = sender if sender else ("You" if from_me == 1 else "Someone")
-    target = (
-        part_name
-        or (sender if act in (4, 5, 13, 79) else None)
-        or ("You" if from_me == 1 and act in (4, 5, 13, 79) else "Someone")
-    )
+    if not targets and act in (4, 5, 13, 79, 123):
+        targets = [sender] if sender else (["You"] if from_me == 1 else [])
 
-    if act == 11:  # Group created
-        if txt:
-            return f'{actor} created group "{txt}"'
-        return f"{actor} created this group"
-
-    if act == 1:  # Subject changed
-        if txt:
-            return f'{actor} changed the subject to "{txt}"'
-        return f"{actor} changed the group subject"
-
-    if act in (12, 4):  # Participant added / joined
-        if target in ("You", "you") and (not actor or actor == "Someone" or actor == "You"):
-            return "You joined"
-        if actor and actor != "Someone" and actor != target:
-            return f"{actor} added {target}"
-        return f"{target} joined"
-
-    if act == 79:  # Joined via invite link
-        if target in ("You", "you"):
-            return "You joined using this group's invite link"
-        return f"{target} joined using this group's invite link"
-
-    if act in (13, 5):  # Participant left
-        if target in ("You", "you"):
-            return "You left"
-        return f"{target} left"
-
-    if act == 14:  # Participant removed
-        if target in ("You", "you"):
-            if actor and actor != "Someone" and actor != "You":
-                return f"{actor} removed you"
-            return "You were removed"
-        if actor and actor != "Someone" and actor != target:
-            return f"{actor} removed {target}"
-        return f"{target} was removed"
-
-    if act == 6:  # Photo / icon changed
-        return f"{actor} changed this group's icon"
-
-    if act == 27:  # Description changed
-        return f"{actor} changed the group description"
-
-    if act == 15:  # Admin promoted
-        if target in ("You", "you"):
-            return "You're now an admin"
-        return f"{target} is now an admin"
-
-    if act == 20:  # Admin demoted
-        if target in ("You", "you"):
-            return "You're no longer an admin"
-        return f"{target} is no longer an admin"
-
-    if act == 58:  # Announcement mode
-        if txt.lower() == "true":
-            return "Only admins can send messages in this group"
-        return "All participants can send messages in this group"
-
-    if (
-        txt
-        and not txt.startswith("{")
-        and "@lid" not in txt
-        and txt.lower() not in ("true", "false")
-        and not txt.isdigit()
-    ):
-        return txt
-    return "Group event"
+    metadata = row.get("service_metadata") or {}
+    return format_android_system_event(act, actor, targets, txt, metadata)
 
 
 def _hydrate_android_service_participants(
@@ -859,8 +758,8 @@ def _hydrate_android_service_participants(
     has_lid_dn: bool,
     has_jid_server: bool,
     has_jid_raw_string: bool,
-) -> dict:
-    """Hydrate participant names for Android service messages on demand."""
+) -> dict[int, list[str]]:
+    """Hydrate participant names list for Android service messages on demand."""
     if not has_mcp or not msg_ids:
         return {}
     ph = ",".join("?" * len(msg_ids))
@@ -899,7 +798,7 @@ def _hydrate_android_service_participants(
     except sqlite3.OperationalError:
         return {}
 
-    p_map: dict = {}
+    p_map: dict[int, list[str]] = {}
     for pr in p_rows:
         mid = pr["message_row_id"]
         raw_str = pr["raw_string"] or ""
@@ -926,7 +825,7 @@ def _hydrate_android_service_participants(
 
         p_map.setdefault(mid, []).append(name)
 
-    return {mid: ", ".join(names) for mid, names in p_map.items()}
+    return p_map
 
 
 def _format_service_rows(
@@ -1049,8 +948,11 @@ def _format_service_rows(
             has_jid_raw_string,
         )
         for r in service_rows:
+            names = p_map.get(r["msg_id"], [])
+            if not r.get("participant_names"):
+                r["participant_names"] = names
             if not r.get("participant_name"):
-                r["participant_name"] = p_map.get(r["msg_id"], "")
+                r["participant_name"] = format_participant_names(names) if names else ""
             r["text_body"] = _format_android_service_row(r)
 
 
@@ -2255,6 +2157,33 @@ _ANDROID_CHAT_TYPE = "CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact
 
 _ANDROID_SELECT = None
 
+_SUPPORTED_ANDROID_SYSTEM_ACTIONS = (
+    1,
+    4,
+    5,
+    6,
+    7,
+    11,
+    12,
+    13,
+    14,
+    15,
+    19,
+    20,
+    27,
+    28,
+    58,
+    61,
+    69,
+    79,
+    123,
+    124,
+    127,
+    136,
+    144,
+    146,
+)
+
 _ANDROID_FILTER = """
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
@@ -2311,7 +2240,7 @@ _IOS_SELECT = f"""
         ac.archive_path,
         CASE
             WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
-            WHEN m.ZMESSAGETYPE = 6 THEN 'service'
+            WHEN m.ZMESSAGETYPE IN (6, 10) THEN 'service'
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE = 38 THEN 'image'
@@ -2382,12 +2311,12 @@ _IOS_SELECT = f"""
 _BASE_IOS_FILTER = """
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND mi.ZMEDIALOCALPATH IS NOT NULL)
         OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
         OR (m.ZMESSAGETYPE = 46)
-        OR (m.ZMESSAGETYPE = 6)
+        OR (m.ZMESSAGETYPE IN (6, 10))
     )
 """
 
@@ -2402,7 +2331,7 @@ _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
 _ANDROID_FILTER_TS = _ANDROID_FILTER
 
 _ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type IN (0, 7, 15, 64, 66))"
-_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 6, 14, 46))"
+_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 6, 10, 14, 46))"
 
 _ANDROID_IS_LINK = (
     "(m.message_type IS NULL OR m.message_type = 0)"
@@ -3356,14 +3285,19 @@ def create_app(output_root: Path, rescan: bool = False):
             else "0"
         )
         ios_service_filter = (
-            "OR (m.ZMESSAGETYPE = 6 AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))"
+            "OR (m.ZMESSAGETYPE IN (6, 10) AND m.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 15, 21, 26, 36, 37, 38, 44, 50, 56, 58))"
             if has_ios_group_event
-            else "OR (m.ZMESSAGETYPE = 6)"
+            else "OR (m.ZMESSAGETYPE IN (6, 10))"
+        )
+        ios_service_case = (
+            "WHEN m.ZMESSAGETYPE = 6 OR (m.ZMESSAGETYPE = 10 AND m.ZGROUPEVENTTYPE IS NOT NULL AND m.ZGROUPEVENTTYPE > 0) THEN 'service'"
+            if has_ios_group_event
+            else "WHEN m.ZMESSAGETYPE IN (6, 10) THEN 'service'"
         )
         globals()["_BASE_IOS_FILTER"] = f"""
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE != 6 AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND mi.ZMEDIALOCALPATH IS NOT NULL)
         OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
@@ -3412,7 +3346,7 @@ def create_app(output_root: Path, rescan: bool = False):
         ac.archive_path,
         CASE
             WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
-            WHEN m.ZMESSAGETYPE = 6 THEN 'service'
+            {ios_service_case}
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE = 38 THEN 'image'
@@ -3493,7 +3427,7 @@ def create_app(output_root: Path, rescan: bool = False):
     ms_col = "ms.action_type" if has_message_system else "NULL"
 
     ms_action_clause = (
-        "ms.action_type IN (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79)"
+        f"ms.action_type IN {tuple(_SUPPORTED_ANDROID_SYSTEM_ACTIONS)}"
         if has_message_system
         else "(m.text_data IS NOT NULL AND m.text_data != '')"
     )
@@ -3799,9 +3733,9 @@ def create_app(output_root: Path, rescan: bool = False):
         else:
             group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
             ios_service_filter_last_real = (
-                "OR (msg.ZMESSAGETYPE = 6 AND msg.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 7, 9, 12, 15, 26, 36, 37, 50))"
+                "OR (msg.ZMESSAGETYPE IN (6, 10) AND msg.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 15, 21, 26, 36, 37, 38, 44, 50, 56, 58))"
                 if has_ios_group_event
-                else "OR (msg.ZMESSAGETYPE = 6)"
+                else "OR (msg.ZMESSAGETYPE IN (6, 10))"
             )
             rows = conn.execute(f"""
                 SELECT
@@ -3841,7 +3775,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     FROM ZWAMESSAGE msg
                     LEFT JOIN ZWAMEDIAITEM mi2 ON mi2.Z_PK = msg.ZMEDIAITEM
                     WHERE (msg.ZTEXT IS NOT NULL AND msg.ZTEXT != '' AND (msg.ZMESSAGETYPE IS NULL OR msg.ZMESSAGETYPE = 0))
-                       OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE NOT IN (0, 6, 14, 38, 39, 53)
+                       OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE NOT IN (0, 6, 10, 14, 38, 39, 53)
                            AND mi2.ZMEDIALOCALPATH IS NOT NULL)
                        OR (msg.ZMESSAGETYPE IN (4, 14, 38, 39, 53))
                        {ios_service_filter_last_real}
@@ -3859,7 +3793,7 @@ def create_app(output_root: Path, rescan: bool = False):
         if source_type == "ios":
             needed_jids = set()
             for r in rows:
-                if r["last_msg_type"] == 6:
+                if r["last_msg_type"] in (6, 10):
                     for s_jid in (r["last_msg_sender_jid"], r["last_msg_member_jid"]):
                         if s_jid:
                             needed_jids.add(s_jid)
@@ -3956,7 +3890,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 r["last_msg_id"]
                 for r in rows
                 if r["last_msg_type"] == 7
-                and r["last_msg_action_type"] in (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79)
+                and r["last_msg_action_type"] in _SUPPORTED_ANDROID_SYSTEM_ACTIONS
                 and r["last_msg_id"]
             ]
             if svc_mids:
@@ -3976,8 +3910,11 @@ def create_app(output_root: Path, rescan: bool = False):
             last_msg_id = d.pop("last_msg_id", None)
             last_msg_action_type = d.pop("last_msg_action_type", None)
             last_msg_participant_name = d.pop("last_msg_participant_name", None)
-            if not last_msg_participant_name and last_msg_id:
-                last_msg_participant_name = android_p_map.get(last_msg_id, "")
+            last_msg_participant_names = None
+            if last_msg_id:
+                last_msg_participant_names = android_p_map.get(last_msg_id)
+            if not last_msg_participant_names and last_msg_participant_name:
+                last_msg_participant_names = [last_msg_participant_name]
             last_msg_group_event_type = d.pop("last_msg_group_event_type", None)
             last_msg_sender = d.pop("last_msg_sender", None)
             last_msg_sender_jid = d.pop("last_msg_sender_jid", None)
@@ -4014,35 +3951,28 @@ def create_app(output_root: Path, rescan: bool = False):
                         d["last_msg_type"] = "image"
             elif source_type == "android" and raw_type == 7:
                 d["is_view_once"] = 0
-                if last_msg_action_type in (1, 4, 5, 6, 11, 12, 13, 14, 15, 20, 27, 58, 79):
+                if last_msg_action_type in _SUPPORTED_ANDROID_SYSTEM_ACTIONS:
                     s_row = {
                         "action_type": last_msg_action_type,
                         "text_body": d.get("last_msg_preview", ""),
                         "from_me": d.get("last_msg_from_me", 0),
                         "sender": last_msg_sender,
-                        "participant_name": last_msg_participant_name,
+                        "participant_names": last_msg_participant_names,
+                        "participant_name": (
+                            format_participant_names(last_msg_participant_names)
+                            if last_msg_participant_names
+                            else (last_msg_participant_name or "")
+                        ),
                     }
                     d["last_msg_preview"] = _format_android_service_row(s_row)
                     d["last_msg_type"] = "service"
                 else:
                     d["last_msg_preview"] = ""
                     d["last_msg_type"] = "text"
-            elif source_type == "ios" and raw_type == 6:
+            elif source_type == "ios" and raw_type in (6, 10):
                 d["is_view_once"] = 0
-                if not has_ios_group_event or last_msg_group_event_type in (
-                    1,
-                    2,
-                    3,
-                    4,
-                    5,
-                    7,
-                    9,
-                    12,
-                    15,
-                    26,
-                    36,
-                    37,
-                    50,
+                if not has_ios_group_event or (
+                    last_msg_group_event_type and last_msg_group_event_type > 0
                 ):
                     sender_name = (
                         _resolve_ios_jid(last_msg_sender_jid, ios_contacts_map)

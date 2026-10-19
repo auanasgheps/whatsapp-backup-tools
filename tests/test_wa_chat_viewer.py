@@ -4888,7 +4888,7 @@ class TestServiceMessages:
 
             # 7. Multiple participants added (event 50)
             assert by_id[106]["media_type"] == "service"
-            assert by_id[106]["text_body"] == "Alice Smith added Bob Jones, Charlie Brown"
+            assert by_id[106]["text_body"] == "Alice Smith added Bob Jones and Charlie Brown"
 
             # Verify ordering at same timestamp:
             # In descending order (newest first): msgs returned by /api/messages
@@ -6044,7 +6044,7 @@ class TestServiceEventFormattingAndJidResolution:
                 },
                 cmap,
             )
-            == "You added Alice, Bob"
+            == "You added Alice and Bob"
         )
         assert (
             viewer._format_ios_service_row(
