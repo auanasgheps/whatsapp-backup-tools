@@ -1995,6 +1995,7 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
             for sf in staged_incs:
                 with contextlib.suppress(OSError):
                     os.remove(sf)
+            args._staged_increments = []
 
 
 def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: logging.Logger):
@@ -2258,7 +2259,8 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
         contacts = android_handler.load_contacts(args.contacts, logger)
 
     # --- Decrypt if needed ---
-    _decrypt_msgstore_if_needed(args, logger)
+    if not getattr(args, "from_adb", False):
+        _decrypt_msgstore_if_needed(args, logger)
 
     return platform, media_resolver, ios_contacts_path, contacts
 
