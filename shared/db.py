@@ -102,12 +102,16 @@ def classify_media_type(path: str | None, fallback_path: str | None) -> str:
 
     # 2. Stickers (WhatsApp Stickers folder, stk- prefix, .was/.webp sticker files)
     for p in norm_candidates:
+        if "/documents/" in p or "whatsapp documents" in p:
+            continue
         fname = os.path.basename(p)
         if (
             "/stickers/" in p
             or "whatsapp stickers" in p
             or (fname.startswith("stk-") and (p.endswith(".webp") or p.endswith(".was")))
             or ("sticker" in p and p.endswith(".webp"))
+            or p.endswith(".webp")
+            or p.endswith(".was")
         ):
             return "sticker"
 
@@ -125,7 +129,7 @@ def classify_media_type(path: str | None, fallback_path: str | None) -> str:
     # 4. Extension-based classification
     for p in norm_candidates:
         ext = os.path.splitext(p)[1]
-        if ext in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"):
+        if ext in (".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".bmp"):
             return "image"
         if ext in (".mp4", ".mov", ".avi", ".mkv", ".3gp", ".m4v"):
             return "video"

@@ -280,8 +280,8 @@ _DUPLICATE_SECTIONS = [
     ("document", "DOCUMENTS"),
     ("audio", "AUDIO & VOICE NOTES"),
     ("gif", "ANIMATED GIFS"),
-    ("sticker", "STICKERS"),
     ("vcard", "CONTACTS"),
+    ("sticker", "STICKERS"),
     ("other", "OTHER FILES"),
 ]
 

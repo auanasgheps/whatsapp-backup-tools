@@ -1403,10 +1403,21 @@ class TestWriteDuplicateReport:
         assert classify_media_type("contact.vcf", None) == "vcard"
         assert classify_media_type("vcard:123", None) == "vcard"
 
-        # Stickers
+        # Stickers (both iOS and Android)
         assert classify_media_type("stk-123.webp", None) == "sticker"
         assert classify_media_type("Media/WhatsApp Stickers/random.webp", None) == "sticker"
         assert classify_media_type("Message/stickers/abc.webp", None) == "sticker"
+        assert classify_media_type("Message/Media/123/abc.webp", None) == "sticker"
+        assert (
+            classify_media_type(
+                "Media/393357214425-1559307313@g.us/6/f/6f89082b-9625-4eb4-a85f-e817ea9a77e4.webp",
+                None,
+            )
+            == "sticker"
+        )
+        assert classify_media_type("Contacts/Alice/2026/Received/abc.webp", None) == "sticker"
+        assert classify_media_type("custom_pack.was", None) == "sticker"
+        assert classify_media_type("random_hash.webp", None) == "sticker"
 
         # GIFs (including WhatsApp Android mp4 gif storage)
         assert classify_media_type("funny.gif", None) == "gif"
@@ -1541,6 +1552,109 @@ class TestWriteDuplicateReport:
         assert all(r["group_id"] == "2" for r in vid_rows)
         assert all(r["group_id"] == "3" for r in gif_rows)
         assert all(r["group_id"] == "4" for r in stk_rows)
+
+    def test_duplicate_report_ios_and_android_stickers_classified_as_stickers(
+        self, tmp_path, logger
+    ):
+        import csv
+        import hashlib
+
+        conn = arc.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+
+        # 1. Photo (2 duplicates)
+        img_h = hashlib.md5(b"real_photo_bytes").digest()
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            ("Media/WhatsApp Images/IMG-01.jpg", img_h),
+        )
+        for i in range(2):
+            cursor.execute(
+                "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+                (
+                    "Media/WhatsApp Images/IMG-01.jpg",
+                    f"Contacts/C{i}/2024/img.jpg",
+                    1 if i > 0 else 0,
+                    1718000000000,
+                ),
+            )
+
+        # 2. iOS Sticker with typical hex hash without stk- prefix or stickers folder
+        ios_stk_h = hashlib.md5(b"ios_sticker_payload").digest()
+        ios_orig = "Message/Media/393357214425-1559307313@g.us/6/f/6f89082b-9625-4eb4-a85f-e817ea9a77e4.webp"
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            (ios_orig, ios_stk_h),
+        )
+        for i in range(2):
+            cursor.execute(
+                "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+                (
+                    ios_orig,
+                    f"Contacts/C{i}/2026/Received/6f89082b-9625-4eb4-a85f-e817ea9a77e4.webp",
+                    1 if i > 0 else 0,
+                    1718000000000,
+                ),
+            )
+
+        # 3. Android Sticker
+        android_stk_h = hashlib.md5(b"android_sticker_payload").digest()
+        android_orig = "Media/WhatsApp Stickers/STK-20240115-WA0001.webp"
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            (android_orig, android_stk_h),
+        )
+        for i in range(2):
+            cursor.execute(
+                "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+                (
+                    android_orig,
+                    f"Contacts/C{i}/2024/STK-20240115-WA0001.webp",
+                    1 if i > 0 else 0,
+                    1718000000000,
+                ),
+            )
+
+        conn.commit()
+
+        path = str(tmp_path / "dup_stickers_report.csv")
+        group_count, file_count = wa.write_duplicate_report(path, conn, logger, None)
+        conn.close()
+
+        assert group_count == 3
+        assert file_count == 6
+
+        with open(path, newline="", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        divider_lines = [
+            line for line in lines if line.startswith('"# ---') or line.startswith("# ---")
+        ]
+        assert len(divider_lines) == 2
+        assert "PHOTOS & IMAGES" in divider_lines[0]
+        assert "STICKERS" in divider_lines[1]
+
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+
+        media_rows = [r for r in reader if r["group_id"]]
+        img_rows = [r for r in media_rows if r["media_type"] == "image"]
+        stk_rows = [r for r in media_rows if r["media_type"] == "sticker"]
+
+        # Only the real photo must be in images
+        assert len(img_rows) == 2
+        assert all("img.jpg" in r["archived_path"] for r in img_rows)
+
+        # Both iOS and Android stickers must be in stickers
+        assert len(stk_rows) == 4
+        ios_in_report = [
+            r for r in stk_rows if "6f89082b-9625-4eb4-a85f-e817ea9a77e4.webp" in r["archived_path"]
+        ]
+        android_in_report = [
+            r for r in stk_rows if "STK-20240115-WA0001.webp" in r["archived_path"]
+        ]
+        assert len(ios_in_report) == 2
+        assert len(android_in_report) == 2
 
 
 # ===========================================================================

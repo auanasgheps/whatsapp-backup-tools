@@ -392,11 +392,12 @@ def diff_and_extract_android(
                     ELSE
                         CASE
                             WHEN LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.vcf' THEN 'vcard'
-                            WHEN LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%sticker%' THEN 'sticker'
+                            WHEN LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%sticker%'
+                              OR LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.webp'
+                              OR LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.was' THEN 'sticker'
                             WHEN LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.jpg'
                               OR LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.jpeg'
-                              OR LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.png'
-                              OR LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.webp' THEN 'image'
+                              OR LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.png' THEN 'image'
                             WHEN LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.mp4'
                               OR LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.mov'
                               OR LOWER(COALESCE({file_path_col}, {media_name_col}, '')) LIKE '%.3gp' THEN 'video'
@@ -709,11 +710,12 @@ def diff_and_extract_ios(
                     ELSE
                         CASE
                             WHEN LOWER({media_local_expr}) LIKE '%.vcf' THEN 'vcard'
-                            WHEN LOWER({media_local_expr}) LIKE '%sticker%' THEN 'sticker'
+                            WHEN LOWER({media_local_expr}) LIKE '%sticker%'
+                              OR LOWER({media_local_expr}) LIKE '%.webp'
+                              OR LOWER({media_local_expr}) LIKE '%.was' THEN 'sticker'
                             WHEN LOWER({media_local_expr}) LIKE '%.jpg'
                               OR LOWER({media_local_expr}) LIKE '%.jpeg'
-                              OR LOWER({media_local_expr}) LIKE '%.png'
-                              OR LOWER({media_local_expr}) LIKE '%.webp' THEN 'image'
+                              OR LOWER({media_local_expr}) LIKE '%.png' THEN 'image'
                             WHEN LOWER({media_local_expr}) LIKE '%.mp4'
                               OR LOWER({media_local_expr}) LIKE '%.mov' THEN 'video'
                             WHEN LOWER({media_local_expr}) LIKE '%.opus'
