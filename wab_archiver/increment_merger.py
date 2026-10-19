@@ -152,6 +152,83 @@ def unwrap_message_container(msg_fields: dict, max_depth: int) -> tuple[dict, di
     return current_fields, flags
 
 
+PROTO_TO_ANDROID_STATUS: dict[int, int] = {
+    0: 0,
+    1: 0,
+    2: 4,  # SERVER_ACK -> 4 (sent to server)
+    3: 5,  # DELIVERY_ACK -> 5 (delivered to recipient)
+    4: 13,  # READ -> 13 (read by recipient)
+    5: 6,  # PLAYED -> 6 (played by recipient)
+}
+
+
+def extract_context_info(payload_fields: dict) -> dict | None:
+    """Extract quoted message information from a ContextInfo protobuf field."""
+    raw_ctx = None
+    if 17 in payload_fields and isinstance(payload_fields[17][0][1], bytes):
+        raw_ctx = payload_fields[17][0][1]
+    elif 14 in payload_fields and isinstance(payload_fields[14][0][1], bytes):
+        raw_ctx = payload_fields[14][0][1]
+    elif 15 in payload_fields and isinstance(payload_fields[15][0][1], bytes):
+        raw_ctx = payload_fields[15][0][1]
+    if raw_ctx is None:
+        return None
+
+    ctx_fields = parse_wire_fields(raw_ctx)
+    stanza_id = (
+        ctx_fields.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+        if 1 in ctx_fields
+        else ""
+    )
+    participant = (
+        ctx_fields.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+        if 2 in ctx_fields
+        else ""
+    )
+
+    quoted_text = None
+    q_from_me = 0
+    if 3 in ctx_fields and isinstance(ctx_fields[3][0][1], bytes):
+        raw_q_fields = parse_wire_fields(ctx_fields[3][0][1])
+        q_fields, _ = unwrap_message_container(raw_q_fields, 4)
+        if 1 in q_fields:
+            quoted_text = q_fields[1][0][1].decode("utf-8", errors="replace")
+        elif 6 in q_fields:
+            sub = parse_wire_fields(q_fields[6][0][1])
+            quoted_text = (
+                sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 1 in sub else ""
+            )
+        elif 3 in q_fields:
+            sub = parse_wire_fields(q_fields[3][0][1])
+            quoted_text = (
+                sub.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 3 in sub else ""
+            )
+        elif 7 in q_fields:
+            sub = parse_wire_fields(q_fields[7][0][1])
+            quoted_text = (
+                (sub.get(3, [(2, b"")])[0][1] or sub.get(8, [(2, b"")])[0][1]).decode(
+                    "utf-8", errors="replace"
+                )
+                if (3 in sub or 8 in sub)
+                else ""
+            )
+        elif 9 in q_fields:
+            sub = parse_wire_fields(q_fields[9][0][1])
+            quoted_text = (
+                sub.get(7, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 7 in sub else ""
+            )
+
+    if not stanza_id and not quoted_text and not participant:
+        return None
+
+    return {
+        "stanza_id": stanza_id,
+        "participant": participant,
+        "quoted_text": quoted_text or "",
+        "from_me": q_from_me,
+    }
+
+
 def decode_wmi(wmi_bytes: bytes) -> dict:
     """Decode a serialized WebMessageInfo (WMI) protobuf into a normalized message dictionary."""
     fields = parse_wire_fields(wmi_bytes)
@@ -177,10 +254,42 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     timestamp_ms = timestamp_raw * 1000 if timestamp_raw < 10000000000 else timestamp_raw
 
     # Field 4: status
-    status = fields.get(4, [(0, 0)])[0][1]
+    raw_status = fields.get(4, [(0, 0)])[0][1]
+    status = PROTO_TO_ANDROID_STATUS.get(raw_status, raw_status) if from_me else 0
 
     # Field 16: starred
     starred = 1 if fields.get(16, [(0, 0)])[0][1] else 0
+
+    # Field 39: userReceipt (repeated UserReceipt)
+    user_receipts: list[dict] = []
+    if 39 in fields:
+        for tuple_item in fields[39]:
+            ur_bytes = tuple_item[1]
+            if not isinstance(ur_bytes, bytes):
+                continue
+            ur_fields = parse_wire_fields(ur_bytes)
+            ujid = (
+                ur_fields.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 1 in ur_fields
+                else ""
+            )
+            rec_raw = ur_fields.get(2, [(0, 0)])[0][1] if 2 in ur_fields else 0
+            read_raw = ur_fields.get(3, [(0, 0)])[0][1] if 3 in ur_fields else 0
+            play_raw = ur_fields.get(4, [(0, 0)])[0][1] if 4 in ur_fields else 0
+
+            def _ts_to_ms(ts_val: int) -> int | None:
+                if not ts_val:
+                    return None
+                return ts_val * 1000 if ts_val < 10000000000 else ts_val
+
+            user_receipts.append(
+                {
+                    "user_jid": ujid,
+                    "receipt_timestamp": _ts_to_ms(rec_raw),
+                    "read_timestamp": _ts_to_ms(read_raw),
+                    "played_timestamp": _ts_to_ms(play_raw),
+                }
+            )
 
     message_type = 0
     text_data = None
@@ -193,6 +302,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     location_info = None
     revoke_info = None
     edit_info = None
+    quoted_info = None
     is_view_once = 0
     is_ephemeral = 0
 
@@ -642,6 +752,22 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "media_type": "video",
             }
 
+        if quoted_info is None:
+            for sub_tag in (6, 3, 7, 8, 9, 20, 4, 5, 18, 42, 45):
+                if (
+                    sub_tag in msg_fields
+                    and msg_fields[sub_tag]
+                    and isinstance(msg_fields[sub_tag][0][1], bytes)
+                ):
+                    try:
+                        sub_fields = parse_wire_fields(msg_fields[sub_tag][0][1])
+                        qi = extract_context_info(sub_fields)
+                        if qi:
+                            quoted_info = qi
+                            break
+                    except (ValueError, Exception):
+                        pass
+
     return {
         "key_id": key_id,
         "from_me": from_me,
@@ -663,6 +789,8 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         "edit_info": edit_info,
         "is_view_once": is_view_once,
         "is_ephemeral": is_ephemeral,
+        "user_receipts": user_receipts,
+        "quoted_info": quoted_info,
     }
 
 
@@ -902,14 +1030,17 @@ def apply_entity_modifications(
         return 0
 
     cur = conn.cursor()
-    table_cols = {r[1] for r in cur.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    col_info = cur.execute(f"PRAGMA table_info({table_name})").fetchall()
+    table_cols = {r[1] for r in col_info}
     if not table_cols:
         logger.debug(
             f"Table '{table_name}' does not exist in target database; skipping modification."
         )
         return 0
 
-    by_cols: dict[tuple[str, ...], list[list]] = {}
+    pk_cols = [r[1] for r in col_info if r[5] > 0]
+    pk_col = pk_cols[0] if len(pk_cols) == 1 else (pk_cols if pk_cols else ["_id"])
+
     count = 0
     for row_dict in rows:
         if not isinstance(row_dict, dict):
@@ -917,16 +1048,30 @@ def apply_entity_modifications(
         filtered = {k: v for k, v in row_dict.items() if k in table_cols}
         if not filtered:
             continue
-        cols_tuple = tuple(sorted(filtered.keys()))
-        by_cols.setdefault(cols_tuple, []).append([filtered[c] for c in cols_tuple])
-        count += 1
 
-    for cols_tuple, rows_values in by_cols.items():
-        placeholders = ", ".join("?" for _ in cols_tuple)
-        sql = (
-            f"INSERT OR REPLACE INTO {table_name} ({', '.join(cols_tuple)}) VALUES ({placeholders})"
-        )
-        cur.executemany(sql, rows_values)
+        # Check if row has a single primary key and already exists in table
+        has_single_pk = isinstance(pk_col, str) and pk_col in filtered
+        row_exists = False
+        if has_single_pk:
+            row_exists = bool(
+                cur.execute(
+                    f"SELECT 1 FROM {table_name} WHERE {pk_col} = ?", (filtered[pk_col],)
+                ).fetchone()
+            )
+
+        if row_exists and has_single_pk:
+            update_cols = [c for c in filtered if c != pk_col]
+            if update_cols:
+                set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+                params = [filtered[c] for c in update_cols] + [filtered[pk_col]]
+                cur.execute(f"UPDATE {table_name} SET {set_clause} WHERE {pk_col} = ?", params)
+        else:
+            cols_tuple = tuple(sorted(filtered.keys()))
+            placeholders = ", ".join("?" for _ in cols_tuple)
+            sql = f"INSERT OR REPLACE INTO {table_name} ({', '.join(cols_tuple)}) VALUES ({placeholders})"
+            cur.execute(sql, [filtered[c] for c in cols_tuple])
+
+        count += 1
 
     return count
 
@@ -1296,6 +1441,27 @@ def apply_message_deletions(
 
         cur.execute(f"DELETE FROM message WHERE _id IN ({placeholders})", chunk)
         total_deleted += cur.rowcount
+
+    if total_deleted > 0:
+        chat_cols = get_table_columns(conn, "chat", schema_cache)
+        if "display_message_row_id" in chat_cols:
+            cur.execute(
+                """
+                UPDATE chat
+                SET display_message_row_id = (
+                    SELECT _id FROM message
+                    WHERE chat_row_id = chat._id
+                      AND message_type NOT IN (25, 67, 74, 79)
+                    ORDER BY timestamp DESC, _id DESC LIMIT 1
+                )
+                WHERE display_message_row_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM message m
+                      WHERE m._id = chat.display_message_row_id
+                        AND m.chat_row_id = chat._id
+                  )
+                """
+            )
     return total_deleted
 
 
@@ -1355,6 +1521,32 @@ def resolve_or_create_chat(
         if chat_cache is not None:
             chat_cache[jid_row_id] = chat_id
         return chat_id
+
+    # Check if this jid_row_id is mapped in jid_map to an existing chat
+    try:
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'")
+        if cur.fetchone() is not None:
+            cur.execute(
+                """
+                SELECT c._id FROM chat c
+                JOIN jid_map jm ON jm.jid_row_id = c.jid_row_id
+                WHERE jm.lid_row_id = ?
+                UNION
+                SELECT c._id FROM chat c
+                JOIN jid_map jm ON jm.lid_row_id = c.jid_row_id
+                WHERE jm.jid_row_id = ?
+                LIMIT 1
+                """,
+                (jid_row_id, jid_row_id),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                chat_id = int(row[0])
+                if chat_cache is not None:
+                    chat_cache[jid_row_id] = chat_id
+                return chat_id
+    except sqlite3.OperationalError:
+        pass
 
     cur.execute("INSERT INTO chat (jid_row_id) VALUES (?)", (jid_row_id,))
     chat_id = int(cur.lastrowid)
@@ -1452,6 +1644,8 @@ def apply_messages_bin(
 
     inserted = 0
     key_cache: dict[str, int] = {}
+    max_ts_per_chat: dict[int, int] = {}
+    max_display_msg_per_chat: dict[int, int] = {}
     for msg in messages:
         remote_jid = msg["remote_jid"]
         if not remote_jid:
@@ -1489,6 +1683,19 @@ def apply_messages_bin(
         cur.execute(sql_insert_msg, [row_map[c] for c in target_msg_cols])
         msg_row_id = cur.lastrowid
         inserted += 1
+
+        is_add_on = bool(
+            msg.get("reaction_info")
+            or msg.get("pin_info")
+            or msg.get("poll_vote_info")
+            or msg.get("revoke_info")
+            or msg.get("edit_info")
+            or msg["message_type"] in (25, 67, 74, 79)
+        )
+        if not is_add_on and msg["timestamp"] >= max_ts_per_chat.get(chat_row_id, 0):
+            max_ts_per_chat[chat_row_id] = msg["timestamp"]
+            if msg_row_id:
+                max_display_msg_per_chat[chat_row_id] = msg_row_id
 
         if msg.get("key_id") and msg_row_id:
             key_cache[msg["key_id"]] = msg_row_id
@@ -1535,6 +1742,62 @@ def apply_messages_bin(
         if msg.get("poll_info") and msg_row_id:
             apply_poll_creation(conn, msg_row_id, msg["poll_info"], schema_cache, logger)
 
+        # Insert message_quoted record if present
+        if msg.get("quoted_info") and msg_row_id:
+            quoted_cols = get_table_columns(conn, "message_quoted", schema_cache)
+            if quoted_cols:
+                qi = msg["quoted_info"]
+                q_part = qi.get("participant", "")
+                if q_part:
+                    q_sender_id = resolve_or_create_jid(conn, q_part, logger, jid_cache)
+                else:
+                    q_sender_id = None if qi.get("from_me") == 1 else chat_jid_row_id
+                q_row_map = {
+                    "message_row_id": msg_row_id,
+                    "text_data": qi.get("quoted_text", ""),
+                    "from_me": qi.get("from_me", 0),
+                    "sender_jid_row_id": q_sender_id,
+                    "timestamp": 0,
+                }
+                valid_q_cols = [
+                    c
+                    for c in [
+                        "message_row_id",
+                        "text_data",
+                        "from_me",
+                        "sender_jid_row_id",
+                        "timestamp",
+                    ]
+                    if c in quoted_cols
+                ]
+                cur.execute(
+                    f"INSERT INTO message_quoted ({', '.join(valid_q_cols)}) VALUES ({', '.join('?' for _ in valid_q_cols)})",
+                    [q_row_map[c] for c in valid_q_cols],
+                )
+
+        # Insert user receipts if present
+        if msg.get("user_receipts") and msg_row_id:
+            ru_cols = get_table_columns(conn, "receipt_user", schema_cache)
+            if ru_cols:
+                for ur in msg["user_receipts"]:
+                    ur_jid = ur.get("user_jid", "")
+                    ur_jid_id = (
+                        resolve_or_create_jid(conn, ur_jid, logger, jid_cache)
+                        if ur_jid
+                        else chat_jid_row_id
+                    )
+                    cur.execute(
+                        "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            msg_row_id,
+                            ur_jid_id,
+                            ur.get("receipt_timestamp"),
+                            ur.get("read_timestamp"),
+                            ur.get("played_timestamp"),
+                        ),
+                    )
+
         # Apply reaction add-on if present
         if msg.get("reaction_info"):
             apply_reaction_record(
@@ -1574,6 +1837,23 @@ def apply_messages_bin(
                 logger,
             )
 
+    if max_ts_per_chat:
+        chat_cols = schema_cache.get("chat") if schema_cache is not None else None
+        if chat_cols is None:
+            chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+            if schema_cache is not None:
+                schema_cache["chat"] = chat_cols
+        if "sort_timestamp" in chat_cols:
+            cur.executemany(
+                "UPDATE chat SET sort_timestamp = MAX(COALESCE(sort_timestamp, 0), ?) WHERE _id = ?",
+                [(ts, cid) for cid, ts in max_ts_per_chat.items()],
+            )
+        if "display_message_row_id" in chat_cols and max_display_msg_per_chat:
+            cur.executemany(
+                "UPDATE chat SET display_message_row_id = ? WHERE _id = ?",
+                [(mid, cid) for cid, mid in max_display_msg_per_chat.items()],
+            )
+
     return inserted
 
 
@@ -1611,9 +1891,9 @@ def apply_increment_folder(
     conn: sqlite3.Connection,
     inc_dir: str,
     logger: logging.Logger,
-    jid_cache: dict[str, int] | None = None,
-    chat_cache: dict[int, int] | None = None,
-    schema_cache: dict[str, set[str]] | None = None,
+    jid_cache: dict[str, int] | None,
+    chat_cache: dict[int, int] | None,
+    schema_cache: dict[str, set[str]] | None,
 ) -> dict:
     """Apply an unpacked increment directory onto the active SQLite database."""
     header_path = os.path.join(inc_dir, "header.json")
@@ -1647,6 +1927,28 @@ def apply_increment_folder(
             table_name = df.split("_deleted_")[0]
             stats["entity_deleted"] += apply_entity_deletions(
                 conn, table_name, os.path.join(inc_dir, df), logger
+            )
+
+        # Sanitize display_message_row_id in chat to prevent referencing messages from another chat
+        chat_cols = get_table_columns(conn, "chat", schema_cache)
+        if "display_message_row_id" in chat_cols:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE chat
+                SET display_message_row_id = (
+                    SELECT _id FROM message
+                    WHERE chat_row_id = chat._id
+                      AND message_type NOT IN (25, 67, 74, 79)
+                    ORDER BY timestamp DESC, _id DESC LIMIT 1
+                )
+                WHERE display_message_row_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM message m
+                      WHERE m._id = chat.display_message_row_id
+                        AND m.chat_row_id = chat._id
+                  )
+                """
             )
 
         # Step 3: Message deletions
