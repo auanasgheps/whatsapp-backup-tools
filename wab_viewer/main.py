@@ -1793,7 +1793,10 @@ def _stream_fts_rows(
             row["message_type"] is not None
             and row["message_type"] != 0
             and row["message_type"] not in (46, 66)
-            and (row["media_file"] is not None or row["message_type"] in (4, 14))
+            and (
+                row["media_file"] is not None
+                or row["message_type"] in (1, 2, 3, 4, 5, 9, 13, 14, 16, 20, 28, 42, 43, 82)
+            )
         )
         if not text_body and not is_media:
             continue
@@ -1838,11 +1841,23 @@ def _fts_android_chat(
     chat_type: str,
     on_progress=None,
 ):
+    wa_conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
+    )
+    try:
+        wa_conn.execute("""
+            INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+            FROM jid_map GROUP BY lid_row_id
+        """)
+    except sqlite3.OperationalError:
+        pass
+
     if chat_type == "group":
         where = "WHERE CAST(m.chat_row_id AS TEXT) = ?"
         params = (chat_id,)
     else:
-        where = "WHERE c.subject IS NULL AND COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT)) = ?"
+        where = "WHERE c.subject IS NULL AND COALESCE(j_chat_real.user, j_chat.user, CAST(m.chat_row_id AS TEXT)) = ?"
         params = (chat_id,)
     has_poll_opt = wa_conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_poll_option'"
@@ -1858,7 +1873,7 @@ def _fts_android_chat(
             m._id                                                    AS rowid,
             CASE
                 WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
-                ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
+                ELSE COALESCE(j_chat_real.user, j_chat.user, CAST(m.chat_row_id AS TEXT))
             END                                                      AS chat_id,
             CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
             COALESCE(m.timestamp, 0)                                AS timestamp_ms,
@@ -1872,6 +1887,8 @@ def _fts_android_chat(
             mm.file_path                                            AS media_file
         FROM message m
         LEFT JOIN chat c ON c._id = m.chat_row_id
+        LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
+        LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
         LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
         LEFT JOIN message_media mm ON mm.message_row_id = m._id
         {where}
@@ -2149,7 +2166,7 @@ _ANDROID_JID_MAP = """
 _ANDROID_CHAT_ID = """
     CASE
         WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
-        ELSE COALESCE(j_chat.user, CAST(m.chat_row_id AS TEXT))
+        ELSE COALESCE(j_chat_real.user, j_chat.user, CAST(m.chat_row_id AS TEXT))
     END
 """
 
@@ -2186,8 +2203,8 @@ _SUPPORTED_ANDROID_SYSTEM_ACTIONS = (
 
 _ANDROID_FILTER = """
     AND (
-        (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
-        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
+        (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
+        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND (mm.file_path IS NOT NULL OR mm.message_row_id IS NOT NULL OR m.message_type IN (1, 2, 3, 5, 9, 13, 16, 20, 28)))
         OR (m.message_type IN (4, 14))
         OR (m.message_type IN (15, 64))
         OR (m.message_type IN (42, 43, 82))
@@ -2361,7 +2378,7 @@ _IOS_IS_DOCUMENT_UNDOWNLOADED = (
 def _android_chat_filter(chat_id: str, chat_type: str) -> tuple[str, list]:
     if chat_type == "group":
         return "m.chat_row_id = CAST(? AS INTEGER)", [chat_id]
-    return "j_chat.user = ?", [chat_id]
+    return "COALESCE(j_chat_real.user, j_chat.user) = ?", [chat_id]
 
 
 def _ios_chat_filter(chat_id: str) -> tuple[str, list]:
@@ -2709,6 +2726,7 @@ def create_app(output_root: Path, rescan: bool = False):
     app._bulk_index_state = _bulk_index_state
 
     schema_alert = None
+    source_is_changed = False
     if source_type in ("android", "ios") and wa_db_path:
         with contextlib.closing(sqlite3.connect(str(wa_db_path))) as chk_conn:
             schema_res = validate_viewer_schema(chk_conn.cursor(), source_type, _get_version())
@@ -2741,7 +2759,11 @@ def create_app(output_root: Path, rescan: bool = False):
         _ensure_writable(Path(wa_db_path))
         _ensure_wa_indexes(wa_db_path)
 
-        if rescan or _source_changed(cache_conn, wa_db_path):
+        has_prior_stamp = bool(
+            cache_conn.execute("SELECT 1 FROM sync_meta WHERE key = 'source_mtime'").fetchone()
+        )
+        source_is_changed = bool(rescan or _source_changed(cache_conn, wa_db_path))
+        if source_is_changed:
             _clear_fts_index(cache_conn)
             cache_conn.execute("VACUUM")
             _save_source_stamp(cache_conn, wa_db_path)
@@ -3159,6 +3181,12 @@ def create_app(output_root: Path, rescan: bool = False):
         )
     if _archive_conn.execute("PRAGMA user_version").fetchone()[0] < 3:
         _archive_conn.execute("PRAGMA user_version = 3")
+    if rescan or (source_is_changed and has_prior_stamp):
+        _archive_conn.execute("DELETE FROM recent_messages")
+        try:
+            _archive_conn.execute("DELETE FROM reactions_cache")
+        except sqlite3.OperationalError:
+            pass
     _archive_conn.commit()
 
     _run_db_maintenance(cache_conn, _archive_conn)
@@ -3433,8 +3461,8 @@ def create_app(output_root: Path, rescan: bool = False):
     )
     globals()["_ANDROID_FILTER"] = f"""
     AND (
-        (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0))
-        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND mm.file_path IS NOT NULL)
+        (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
+        OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND (mm.file_path IS NOT NULL OR mm.message_row_id IS NOT NULL OR m.message_type IN (1, 2, 3, 5, 9, 13, 16, 20, 28)))
         OR (m.message_type IN (4, 14))
         OR (m.message_type IN (15, 64))
         OR (m.message_type IN (42, 43, 82))
@@ -3568,6 +3596,11 @@ def create_app(output_root: Path, rescan: bool = False):
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
                            OR INSTR(LOWER(m.text_data), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
+            WHEN m.message_type IN (5, 16) THEN 'link'
+            WHEN mm.file_path IS NULL AND m.message_type = 1 THEN 'image'
+            WHEN mm.file_path IS NULL AND m.message_type = 2 THEN 'audio'
+            WHEN mm.file_path IS NULL AND m.message_type IN (3, 13, 28) THEN 'video'
+            WHEN mm.file_path IS NULL AND m.message_type = 9 THEN 'document'
             ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE(mm.file_path, mm.media_name)")}
         END                                                          AS media_type,
         COALESCE(mm.media_name, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
@@ -3605,6 +3638,8 @@ def create_app(output_root: Path, rescan: bool = False):
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
 {android_thumb_joins}    LEFT JOIN chat c ON c._id = m.chat_row_id
     LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+    LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
+    LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
     LEFT JOIN jid j ON j._id = m.sender_jid_row_id
     {_ANDROID_JID_MAP}
     LEFT JOIN message_quoted mq ON mq.message_row_id = m._id
@@ -3720,7 +3755,28 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
                 LEFT JOIN arch.contacts con ON con.number = COALESCE(j_chat_real.user, j_chat.user)
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(c._id AS TEXT)
-                LEFT JOIN message m ON m._id = c.display_message_row_id
+                LEFT JOIN message m ON m._id = COALESCE(
+                    (
+                        SELECT m_disp._id
+                        FROM message m_disp
+                        WHERE m_disp._id = c.display_message_row_id
+                          AND m_disp.chat_row_id = c._id
+                    ),
+                    (
+                        SELECT m_sub._id
+                        FROM message m_sub
+                        WHERE m_sub.chat_row_id = c._id
+                          AND m_sub.message_type NOT IN (25, 67, 74, 79)
+                          AND (
+                              (m_sub.text_data IS NOT NULL AND m_sub.text_data != '' AND (m_sub.message_type IS NULL OR m_sub.message_type = 0 OR m_sub.message_type IN (5, 16)))
+                              OR (m_sub.message_type IS NOT NULL AND m_sub.message_type != 0 AND m_sub.message_type != 7)
+                              OR (m_sub.message_type IN (4, 14, 15, 64, 42, 43, 82, 66))
+                              OR (m_sub.message_type = 7)
+                          )
+                        ORDER BY m_sub.timestamp DESC, m_sub._id DESC
+                        LIMIT 1
+                    )
+                )
                 LEFT JOIN message_media mm ON mm.message_row_id = m._id
                 LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
                 {ldn_s_join}
@@ -3730,6 +3786,15 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHERE c.hidden = 0
                 ORDER BY c.sort_timestamp DESC
             """).fetchall()
+            seen_ids = set()
+            deduped_rows = []
+            for r in rows:
+                cid = r["id"]
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                deduped_rows.append(r)
+            rows = deduped_rows
         else:
             group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
             ios_service_filter_last_real = (
@@ -4619,8 +4684,28 @@ def create_app(output_root: Path, rescan: bool = False):
             ).fetchone()
             if not table_exists:
                 return jsonify({"available": False})
-            rows = conn.execute(
+
+            has_jid_map = bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'"
+                ).fetchone()
+            )
+            jm_join = (
                 """
+                LEFT JOIN (
+                    SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                    FROM jid_map GROUP BY lid_row_id
+                ) jm ON jm.lid_row_id = ru.receipt_user_jid_row_id
+                LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+            """
+                if has_jid_map
+                else """
+                LEFT JOIN (SELECT NULL AS lid_row_id, NULL AS jid_row_id) jm ON 1=0
+                LEFT JOIN (SELECT NULL AS _id, NULL AS raw_string, NULL AS user) j_real ON 1=0
+            """
+            )
+            rows = conn.execute(
+                f"""
                 SELECT ru.receipt_timestamp, ru.read_timestamp, ru.played_timestamp,
                        COALESCE(j_real.raw_string, j.raw_string) AS jid,
                        COALESCE(j_real.user, j.user)             AS phone,
@@ -4632,11 +4717,7 @@ def create_app(output_root: Path, rescan: bool = False):
                                 COALESCE(j_real.raw_string, j.raw_string)) AS name
                 FROM receipt_user ru
                 LEFT JOIN jid j ON j._id = ru.receipt_user_jid_row_id
-                LEFT JOIN (
-                    SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                    FROM jid_map GROUP BY lid_row_id
-                ) jm ON jm.lid_row_id = ru.receipt_user_jid_row_id
-                LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+                {jm_join}
                 LEFT JOIN arch.contacts con  ON con.number  = j_real.user
                 LEFT JOIN arch.contacts con2 ON con2.number = j.user
                 WHERE ru.message_row_id = ?
@@ -4645,6 +4726,38 @@ def create_app(output_root: Path, rescan: bool = False):
             ).fetchall()
 
             if not rows:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info('message')").fetchall()}
+                status_expr = "status" if "status" in cols else "0"
+                msg_row = conn.execute(
+                    f"SELECT from_me, {status_expr} AS status, timestamp FROM message WHERE _id = ?",
+                    (message_id,),
+                ).fetchone()
+                if msg_row and msg_row["from_me"] == 1:
+                    st = msg_row["status"] or 0
+                    ts = msg_row["timestamp"]
+                    read_known = st == 13
+                    deliv_ts = ts if st in (5, 6, 13) else None
+                    read_ts = None
+                    played_ts = ts if st == 6 else None
+                    return jsonify(
+                        {
+                            "available": True,
+                            "members": [
+                                {
+                                    "name": "",
+                                    "jid": "",
+                                    "delivered_ts": deliv_ts,
+                                    "read_ts": read_ts,
+                                    "played_ts": played_ts,
+                                    "read_known": read_known,
+                                }
+                            ],
+                            "delivered_ts": deliv_ts,
+                            "read_ts": read_ts,
+                            "played_ts": played_ts,
+                            "read_known": read_known,
+                        }
+                    )
                 return jsonify({"available": True, "members": []})
 
             members = [
@@ -4661,6 +4774,8 @@ def create_app(output_root: Path, rescan: bool = False):
             if len(members) == 1:
                 result["delivered_ts"] = members[0]["delivered_ts"]
                 result["read_ts"] = members[0]["read_ts"]
+                result["played_ts"] = members[0]["played_ts"]
+                result["read_known"] = members[0]["read_ts"] is not None
             return jsonify(result)
 
         else:

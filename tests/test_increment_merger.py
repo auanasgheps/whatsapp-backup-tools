@@ -1182,3 +1182,425 @@ def test_cascading_message_deletions_auxiliary(tmp_path):
     )
 
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Integration & E2E Tests: Increment Merging, Quoted Messages, Receipts & Viewer
+# ---------------------------------------------------------------------------
+
+
+def _build_quoted_wmi(
+    remote_jid: str,
+    key_id: str,
+    text: str,
+    from_me: int,
+    timestamp: int,
+    quoted_stanza_id: str,
+    quoted_text: str,
+    quoted_participant: str,
+) -> bytes:
+    """Build a WebMessageInfo with an extendedTextMessage containing ContextInfo quoted message."""
+    # ContextInfo: field 1 = stanzaId, field 2 = participant, field 3 = quotedMessage (conversation = 1)
+    q_msg_bytes = _build_field(1, 2, quoted_text.encode("utf-8"))
+    ctx_bytes = (
+        _build_field(1, 2, quoted_stanza_id.encode("utf-8"))
+        + _build_field(2, 2, quoted_participant.encode("utf-8"))
+        + _build_field(3, 2, q_msg_bytes)
+    )
+    # extendedTextMessage: field 1 = text, field 17 = contextInfo
+    ext_bytes = _build_field(1, 2, text.encode("utf-8")) + _build_field(17, 2, ctx_bytes)
+    msg_bytes = _build_field(6, 2, ext_bytes)
+
+    key_bytes = (
+        _build_field(1, 2, remote_jid.encode("utf-8"))
+        + _build_field(2, 0, from_me)
+        + _build_field(3, 2, key_id.encode("utf-8"))
+    )
+    return (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, timestamp)
+    )
+
+
+def _build_wmi_with_receipts(
+    remote_jid: str,
+    key_id: str,
+    text: str,
+    from_me: int,
+    timestamp: int,
+    status: int,
+    user_receipts: list[dict],
+) -> bytes:
+    """Build a WebMessageInfo with status and repeated UserReceipt records."""
+    key_bytes = (
+        _build_field(1, 2, remote_jid.encode("utf-8"))
+        + _build_field(2, 0, from_me)
+        + _build_field(3, 2, key_id.encode("utf-8"))
+    )
+    msg_bytes = _build_field(1, 2, text.encode("utf-8"))
+
+    ur_bytes_list = []
+    for ur in user_receipts:
+        b = _build_field(1, 2, ur["user_jid"].encode("utf-8"))
+        if "receipt_timestamp" in ur and ur["receipt_timestamp"]:
+            b += _build_field(2, 0, ur["receipt_timestamp"])
+        if "read_timestamp" in ur and ur["read_timestamp"]:
+            b += _build_field(3, 0, ur["read_timestamp"])
+        if "played_timestamp" in ur and ur["played_timestamp"]:
+            b += _build_field(4, 0, ur["played_timestamp"])
+        ur_bytes_list.append(_build_field(39, 2, b))
+
+    wmi_data = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, timestamp)
+        + _build_field(4, 0, status)
+        + b"".join(ur_bytes_list)
+    )
+    return wmi_data
+
+
+def test_decode_wmi_with_context_info_quoted():
+    """Verify decode_wmi extracts quoted_info from extendedTextMessage contextInfo."""
+    wmi_bytes = _build_quoted_wmi(
+        "5550100@s.whatsapp.net",
+        "REPLY_MSG_1",
+        "I agree with that point",
+        1,
+        1729000500,
+        "ORIG_ST_123",
+        "Original question",
+        "5550200@s.whatsapp.net",
+    )
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "REPLY_MSG_1"
+    assert decoded["text_data"] == "I agree with that point"
+    assert decoded["quoted_info"] is not None
+    assert decoded["quoted_info"]["stanza_id"] == "ORIG_ST_123"
+    assert decoded["quoted_info"]["quoted_text"] == "Original question"
+    assert decoded["quoted_info"]["participant"] == "5550200@s.whatsapp.net"
+
+
+def test_decode_wmi_with_user_receipts():
+    """Verify decode_wmi extracts status and repeated user receipts."""
+    receipts_input = [
+        {
+            "user_jid": "5550101@s.whatsapp.net",
+            "receipt_timestamp": 1729000600,
+            "read_timestamp": 1729000620,
+        },
+        {
+            "user_jid": "5550102@s.whatsapp.net",
+            "receipt_timestamp": 1729000605,
+            "read_timestamp": 0,
+        },
+    ]
+    wmi_bytes = _build_wmi_with_receipts(
+        "12036302@g.us",
+        "GROUP_MSG_1",
+        "Meeting at 3pm",
+        1,
+        1729000590,
+        status=4,  # Protobuf Status READ -> mapped to 13 in Android
+        user_receipts=receipts_input,
+    )
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "GROUP_MSG_1"
+    assert decoded["status"] == 13  # mapped to Android READ
+    assert len(decoded["user_receipts"]) == 2
+    assert decoded["user_receipts"][0]["user_jid"] == "5550101@s.whatsapp.net"
+    assert decoded["user_receipts"][0]["receipt_timestamp"] == 1729000600000
+    assert decoded["user_receipts"][0]["read_timestamp"] == 1729000620000
+    assert decoded["user_receipts"][1]["user_jid"] == "5550102@s.whatsapp.net"
+    assert decoded["user_receipts"][1]["receipt_timestamp"] == 1729000605000
+    assert decoded["user_receipts"][1]["read_timestamp"] is None
+
+
+def test_apply_messages_bin_populates_quoted_and_receipts(mock_db, tmp_path):
+    """Verify apply_messages_bin inserts into message_quoted and receipt_user tables."""
+    conn = sqlite3.connect(mock_db)
+    # Ensure message_quoted and receipt_user tables exist in mock db
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_quoted (
+            message_row_id INTEGER PRIMARY KEY,
+            text_data TEXT,
+            from_me INTEGER DEFAULT 0,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS receipt_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            receipt_user_jid_row_id INTEGER NOT NULL,
+            receipt_timestamp INTEGER,
+            read_timestamp INTEGER,
+            played_timestamp INTEGER
+        );
+    """)
+
+    wmi_quoted = _build_quoted_wmi(
+        "5550100@s.whatsapp.net",
+        "REPLY_KEY_10",
+        "Replying here",
+        1,
+        1729000700,
+        "STANZA_99",
+        "Quoted question text",
+        "5550100@s.whatsapp.net",
+    )
+    wmi_receipted = _build_wmi_with_receipts(
+        "5550100@s.whatsapp.net",
+        "MSG_REC_11",
+        "Read message",
+        1,
+        1729000800,
+        status=4,
+        user_receipts=[
+            {
+                "user_jid": "5550100@s.whatsapp.net",
+                "receipt_timestamp": 1729000810,
+                "read_timestamp": 1729000820,
+            }
+        ],
+    )
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_quoted, wmi_receipted])
+    bin_file = tmp_path / "messages_quoted_rec.bin"
+    bin_file.write_bytes(frame)
+
+    inserted = increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
+    conn.commit()
+    assert inserted == 2
+
+    # Verify message_quoted
+    quoted_rows = conn.execute(
+        "SELECT message_row_id, text_data, from_me FROM message_quoted"
+    ).fetchall()
+    assert len(quoted_rows) == 1
+    assert quoted_rows[0][1] == "Quoted question text"
+    assert quoted_rows[0][2] == 0
+
+    # Verify receipt_user
+    rec_rows = conn.execute(
+        "SELECT message_row_id, receipt_timestamp, read_timestamp FROM receipt_user"
+    ).fetchall()
+    assert len(rec_rows) == 1
+    assert rec_rows[0][1] == 1729000810000
+    assert rec_rows[0][2] == 1729000820000
+
+    conn.close()
+
+
+def test_increment_merge_viewer_integration(tmp_path):
+    """
+    End-to-end integration test verifying that:
+    1. Base database is merged with staged incremental backups.
+    2. Invalid chat.display_message_row_id pointing to another chat is safely isolated.
+    3. Viewer /api/chats displays the correct preview for each chat.
+    4. Viewer /api/messages correctly returns merged messages and quoted text.
+    5. Viewer /api/message_receipts accurately returns receipt info for increment messages.
+    """
+    from wab_viewer import main as viewer
+
+    db_path = tmp_path / "msgstore.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE jid (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user TEXT NOT NULL,
+            server TEXT NOT NULL,
+            raw_string TEXT
+        );
+        CREATE TABLE chat (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            jid_row_id INTEGER NOT NULL,
+            subject TEXT,
+            hidden INTEGER DEFAULT 0,
+            sort_timestamp INTEGER,
+            display_message_row_id INTEGER
+        );
+        CREATE TABLE message (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL DEFAULT 0,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER NOT NULL,
+            message_type INTEGER NOT NULL DEFAULT 0,
+            text_data TEXT,
+            starred INTEGER DEFAULT 0,
+            status INTEGER DEFAULT 0
+        );
+        CREATE TABLE message_media (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            chat_row_id INTEGER NOT NULL,
+            file_path TEXT,
+            file_size INTEGER,
+            media_name TEXT,
+            message_url TEXT,
+            mime_type TEXT,
+            file_hash TEXT,
+            transferred INTEGER DEFAULT 1
+        );
+        CREATE TABLE message_quoted (
+            message_row_id INTEGER PRIMARY KEY,
+            text_data TEXT,
+            from_me INTEGER DEFAULT 0,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER DEFAULT 0
+        );
+        CREATE TABLE receipt_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            receipt_user_jid_row_id INTEGER NOT NULL,
+            receipt_timestamp INTEGER,
+            read_timestamp INTEGER,
+            played_timestamp INTEGER
+        );
+
+        INSERT INTO jid (user, server, raw_string) VALUES ('5550001', 's.whatsapp.net', '5550001@s.whatsapp.net');
+        INSERT INTO jid (user, server, raw_string) VALUES ('5550002', 's.whatsapp.net', '5550002@s.whatsapp.net');
+
+        -- Chat 1: Chat with 5550001
+        INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, display_message_row_id)
+        VALUES (1, 1, NULL, 1729000000000, 10);
+        INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data, status)
+        VALUES (10, 1, 0, 'MSG_CHAT1_OLD', 1, 1729000000000, 0, 'Old message in chat 1', 0);
+
+        -- Chat 2: Chat with 5550002
+        INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, display_message_row_id)
+        VALUES (2, 2, NULL, 1729000050000, 20);
+        INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data, status)
+        VALUES (20, 2, 0, 'MSG_CHAT2_OLD', 2, 1729000050000, 0, 'Old message in chat 2', 0);
+    """)
+    conn.commit()
+    conn.close()
+
+    # Create staging increment
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    inc_work = tmp_path / "inc_work"
+    inc_work.mkdir()
+
+    # Mismatched display_message_row_id: Phone sets chat 1's display_message_row_id to 20 (which belongs to chat 2!)
+    chat_mod = [{"_id": 1, "sort_timestamp": 1729000999000, "display_message_row_id": 20}]
+    (inc_work / "chat_modified_1.json").write_text(json.dumps(chat_mod))
+    (inc_work / "header.json").write_text(
+        json.dumps({"format": "protobuf", "deleted_message_ids_files": []})
+    )
+
+    # Add new messages in increment:
+    # 1. New message in chat 1 replying to old message with quoted text
+    wmi_c1 = _build_quoted_wmi(
+        "5550001@s.whatsapp.net",
+        "INC_KEY_C1_NEW",
+        "Fresh reply in chat 1",
+        1,
+        1729000999,
+        "MSG_CHAT1_OLD",
+        "Old message in chat 1",
+        "5550001@s.whatsapp.net",
+    )
+    # 2. Sent message in chat 2 with status READ (4 -> 13) and user receipt
+    wmi_c2 = _build_wmi_with_receipts(
+        "5550002@s.whatsapp.net",
+        "INC_KEY_C2_NEW",
+        "Fresh update in chat 2",
+        1,
+        1729000888,
+        status=4,
+        user_receipts=[
+            {
+                "user_jid": "5550002@s.whatsapp.net",
+                "receipt_timestamp": 1729000890,
+                "read_timestamp": 1729000895,
+            }
+        ],
+    )
+    frame_c1 = _build_history_sync_frame("5550001@s.whatsapp.net", [wmi_c1])
+    frame_c2 = _build_history_sync_frame("5550002@s.whatsapp.net", [wmi_c2])
+    (inc_work / "messages.bin").write_bytes(frame_c1 + frame_c2)
+
+    inc_zip = staging_dir / "msgstore-increment-1-2026-10-18.db.crypt15"
+    with zipfile.ZipFile(str(inc_zip), "w") as z:
+        for f in inc_work.iterdir():
+            z.write(str(f), arcname=f.name)
+
+    # Execute merge_increments
+    out_dir = tmp_path / "merged_output"
+    out_dir.mkdir()
+    merged_db = str(out_dir / "msgstore_merged.db")
+    total_ins = increment_merger.merge_increments(
+        str(db_path),
+        [str(inc_zip)],
+        None,
+        merged_db,
+        str(staging_dir / "temp_unpack"),
+        logger,
+    )
+    assert total_ins == 2
+    assert os.path.exists(merged_db)
+
+    # Initialize viewer with merged database in output directory
+    archive_root = tmp_path / "archive_output"
+    archive_root.mkdir()
+    # Move or copy merged msgstore.db as msgstore.db in archive_root
+    shutil.copy2(merged_db, str(archive_root / "msgstore.db"))
+
+    archive_db_path = archive_root / ".wa_media_archiver.db"
+    arch_conn = sqlite3.connect(str(archive_db_path))
+    arch_conn.executescript("""
+        CREATE TABLE contacts (
+            number TEXT PRIMARY KEY,
+            folder TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE groups (
+            chat_row_id TEXT PRIMARY KEY,
+            folder TEXT NOT NULL,
+            subject TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO contacts (number, folder, display_name) VALUES ('5550001', 'Bob (5550001)', 'Bob');
+        INSERT INTO contacts (number, folder, display_name) VALUES ('5550002', 'Charlie (5550002)', 'Charlie');
+    """)
+    arch_conn.commit()
+    arch_conn.close()
+
+    app = viewer.create_app(archive_root, rescan=False)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    # 1. Test /api/chats - Preview isolation
+    resp = client.get("/api/chats")
+    assert resp.status_code == 200
+    chats = resp.get_json()
+    assert len(chats) == 2
+
+    chat_map = {c["id"]: c for c in chats}
+    assert "5550001" in chat_map
+    assert "5550002" in chat_map
+
+    # Chat 1 preview MUST NOT be from Chat 2 even though display_message_row_id had mismatched id 20!
+    assert "Fresh reply in chat 1" in chat_map["5550001"]["last_msg_preview"]
+    assert "Fresh update in chat 2" in chat_map["5550002"]["last_msg_preview"]
+
+    # 2. Test /api/messages - Merged messages and quoted text
+    resp_msgs_c1 = client.get("/api/messages?chat_id=5550001&chat_type=contact&limit=10")
+    assert resp_msgs_c1.status_code == 200
+    msgs_c1 = resp_msgs_c1.get_json()
+    assert len(msgs_c1) == 2
+    new_c1_msg = [m for m in msgs_c1 if m["text_body"] == "Fresh reply in chat 1"][0]
+    assert new_c1_msg["quoted_text"] == "Old message in chat 1"
+
+    # 3. Test /api/message_receipts - Receipt information
+    resp_msgs_c2 = client.get("/api/messages?chat_id=5550002&chat_type=contact&limit=10")
+    assert resp_msgs_c2.status_code == 200
+    msgs_c2 = resp_msgs_c2.get_json()
+    new_c2_msg = [m for m in msgs_c2 if m["text_body"] == "Fresh update in chat 2"][0]
+
+    resp_receipt = client.get(f"/api/message_receipts/{new_c2_msg['msg_id']}")
+    assert resp_receipt.status_code == 200
+    receipt_data = resp_receipt.get_json()
+    assert receipt_data["read_known"] is True
+    assert receipt_data["read_ts"] is not None

@@ -8130,3 +8130,93 @@ class TestPollSupport:
 
         t2 = client.get("/api/thumbnail/2")
         assert t2.status_code == 404
+
+
+class TestIncrementViewerMessages:
+    """Verify viewer displays messages ingested from incremental backups."""
+
+    def test_increment_messages_display_with_lid_and_media(self, tmp_path):
+        """Messages added to msgstore with LID remote_jid and null file_path appear in /api/messages."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+
+        # Base contact and chat
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) VALUES (1, '5550100', '5550100@s.whatsapp.net')"
+        )
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) VALUES (2, '100200300', '100200300@lid')"
+        )
+        wa_conn.execute("INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (2, 1)")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (1, 1, NULL, 0, 1729000000000, 100)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (100, 1, 0, 1, 1729000000000, 'Base message', 0)"
+        )
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('5550100', '+5550100', 'Alice')"
+        )
+        wa_conn.commit()
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        # Step 1: Open viewer and fetch initial messages to populate recent_messages cache
+        app1 = viewer.create_app(tmp_path, rescan=False)
+        with app1.test_client() as client1:
+            resp1 = client1.get("/api/messages?chat_id=5550100&chat_type=contact")
+            assert resp1.status_code == 200
+            data1 = resp1.get_json()
+            assert len(data1) == 1
+            assert data1[0]["text_body"] == "Base message"
+
+        # Step 2: Incremental backup replay simulates new messages: text message & media message
+        wa_conn2 = sqlite3.connect(str(wa_path))
+        wa_conn2.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (101, 1, 0, 2, 1729000050000, 'Increment text via LID', 0)"
+        )
+        wa_conn2.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (102, 1, 0, 2, 1729000060000, 'Increment photo', 1)"
+        )
+        wa_conn2.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (102, NULL, 'Increment photo')"
+        )
+        wa_conn2.execute("UPDATE chat SET sort_timestamp = 1729000060000 WHERE _id = 1")
+        wa_conn2.commit()
+        wa_conn2.close()
+
+        # Ensure mtime is visibly newer than initial scan
+        st = os.stat(str(wa_path))
+        os.utime(str(wa_path), (st.st_atime, st.st_mtime + 5))
+
+        # Step 3: Viewer reopened on updated database. recent_messages cache is invalidated and all 3 messages appear.
+        app2 = viewer.create_app(tmp_path, rescan=False)
+        with app2.test_client() as client2:
+            chats_resp = client2.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = chats_resp.get_json()
+            assert len(chats) == 1
+            assert chats[0]["id"] == "5550100"
+            assert chats[0]["newest_ts"] == 1729000060000
+
+            msgs_resp = client2.get("/api/messages?chat_id=5550100&chat_type=contact")
+            assert msgs_resp.status_code == 200
+            msgs = msgs_resp.get_json()
+            assert len(msgs) == 3
+            msg_texts = [m["text_body"] for m in msgs]
+            assert "Increment photo" in msg_texts
+            assert "Increment text via LID" in msg_texts
+            assert "Base message" in msg_texts
+
+            # Check media message classification
+            photo_msg = next(m for m in msgs if m["msg_id"] == 102)
+            assert photo_msg["media_type"] == "image"
+            assert photo_msg["sender"] == "Alice"

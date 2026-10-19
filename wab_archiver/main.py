@@ -2007,6 +2007,17 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
             os.replace(incoming_db, decrypted_db)
             args.msgstore = decrypted_db
 
+        # Clear stale viewer caches in archive db if present
+        archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+        if os.path.exists(archive_db_path):
+            with contextlib.closing(sqlite3.connect(archive_db_path)) as arc_c:
+                try:
+                    arc_c.execute("DELETE FROM recent_messages")
+                    arc_c.execute("DELETE FROM reactions_cache")
+                    arc_c.commit()
+                except sqlite3.OperationalError:
+                    pass
+
         # Only after successful merge and rotation, clean up temporary staging diff files
         if os.path.exists(merge_staging_dir):
             shutil.rmtree(merge_staging_dir, ignore_errors=True)
