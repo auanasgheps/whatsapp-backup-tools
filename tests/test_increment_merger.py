@@ -901,9 +901,11 @@ def test_apply_messages_bin_auxiliary_entities(tmp_path):
         );
         CREATE TABLE message_add_on (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
-            parent_message_row_id INTEGER NOT NULL,
+            chat_row_id INTEGER,
             from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
             sender_jid_row_id INTEGER,
+            parent_message_row_id INTEGER NOT NULL,
             status INTEGER DEFAULT 0,
             message_add_on_type INTEGER NOT NULL,
             timestamp INTEGER NOT NULL
@@ -1113,6 +1115,8 @@ def test_cascading_message_deletions_auxiliary(tmp_path):
         CREATE TABLE message_poll_option (message_row_id INTEGER);
         CREATE TABLE message_location (message_row_id INTEGER);
         CREATE TABLE message_edit_info (message_row_id INTEGER);
+        CREATE TABLE message_quoted (message_row_id INTEGER);
+        CREATE TABLE receipt_user (message_row_id INTEGER);
 
         INSERT INTO message (_id, key_id) VALUES (42, 'DELETE_TARGET');
         INSERT INTO message_media (message_row_id) VALUES (42);
@@ -1124,6 +1128,8 @@ def test_cascading_message_deletions_auxiliary(tmp_path):
         INSERT INTO message_poll_option (message_row_id) VALUES (42);
         INSERT INTO message_location (message_row_id) VALUES (42);
         INSERT INTO message_edit_info (message_row_id) VALUES (42);
+        INSERT INTO message_quoted (message_row_id) VALUES (42);
+        INSERT INTO receipt_user (message_row_id) VALUES (42);
     """)
     conn.commit()
 
@@ -1178,6 +1184,14 @@ def test_cascading_message_deletions_auxiliary(tmp_path):
         conn.execute("SELECT COUNT(*) FROM message_edit_info WHERE message_row_id = 42").fetchone()[
             0
         ]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 42").fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 42").fetchone()[0]
         == 0
     )
 
@@ -1323,11 +1337,15 @@ def test_apply_messages_bin_populates_quoted_and_receipts(mock_db, tmp_path):
     # Ensure message_quoted and receipt_user tables exist in mock db
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS message_quoted (
-            message_row_id INTEGER PRIMARY KEY,
-            text_data TEXT,
-            from_me INTEGER DEFAULT 0,
+            message_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
             sender_jid_row_id INTEGER,
-            timestamp INTEGER DEFAULT 0
+            key_id TEXT NOT NULL,
+            timestamp INTEGER,
+            message_type INTEGER,
+            text_data TEXT
         );
         CREATE TABLE IF NOT EXISTS receipt_user (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1374,11 +1392,14 @@ def test_apply_messages_bin_populates_quoted_and_receipts(mock_db, tmp_path):
 
     # Verify message_quoted
     quoted_rows = conn.execute(
-        "SELECT message_row_id, text_data, from_me FROM message_quoted"
+        "SELECT message_row_id, chat_row_id, parent_message_chat_row_id, key_id, text_data, from_me FROM message_quoted"
     ).fetchall()
     assert len(quoted_rows) == 1
-    assert quoted_rows[0][1] == "Quoted question text"
-    assert quoted_rows[0][2] == 0
+    assert quoted_rows[0][1] == 1
+    assert quoted_rows[0][2] == 1
+    assert quoted_rows[0][3] == "STANZA_99"
+    assert quoted_rows[0][4] == "Quoted question text"
+    assert quoted_rows[0][5] == 0
 
     # Verify receipt_user
     rec_rows = conn.execute(
@@ -1444,11 +1465,15 @@ def test_increment_merge_viewer_integration(tmp_path):
             transferred INTEGER DEFAULT 1
         );
         CREATE TABLE message_quoted (
-            message_row_id INTEGER PRIMARY KEY,
-            text_data TEXT,
-            from_me INTEGER DEFAULT 0,
+            message_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
             sender_jid_row_id INTEGER,
-            timestamp INTEGER DEFAULT 0
+            key_id TEXT NOT NULL,
+            timestamp INTEGER,
+            message_type INTEGER,
+            text_data TEXT
         );
         CREATE TABLE receipt_user (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,

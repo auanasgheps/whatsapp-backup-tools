@@ -1150,6 +1150,8 @@ def apply_reaction_record(
     key_cache: dict[str, int],
     schema_cache: dict[str, set[str]] | None,
     logger: logging.Logger,
+    key_id: str,
+    chat_row_id: int | None,
 ) -> None:
     """Apply a reaction message add-on to the database."""
     target_key_id = reaction_info.get("target_key_id", "")
@@ -1189,10 +1191,20 @@ def apply_reaction_record(
         (parent_row_id, sender_jid_row_id),
     )
 
+    row_map = {
+        "parent_message_row_id": parent_row_id,
+        "from_me": from_me,
+        "sender_jid_row_id": sender_jid_row_id,
+        "status": 0,
+        "message_add_on_type": 1,
+        "timestamp": timestamp,
+        "key_id": key_id or "",
+        "chat_row_id": chat_row_id,
+    }
+    valid_cols = [c for c in row_map if c in add_on_cols]
     cur.execute(
-        "INSERT INTO message_add_on (parent_message_row_id, from_me, sender_jid_row_id, status, message_add_on_type, timestamp) "
-        "VALUES (?, ?, ?, 0, 1, ?)",
-        (parent_row_id, from_me, sender_jid_row_id, timestamp),
+        f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
+        [row_map[c] for c in valid_cols],
     )
     add_on_id = cur.lastrowid
     if reaction_cols and add_on_id:
@@ -1238,6 +1250,8 @@ def apply_pin_in_chat(
     key_cache: dict[str, int],
     schema_cache: dict[str, set[str]] | None,
     logger: logging.Logger,
+    key_id: str,
+    chat_row_id: int | None,
 ) -> None:
     """Record a pin-in-chat add-on for a message."""
     target_key_id = pin_info.get("target_key_id", "")
@@ -1269,10 +1283,20 @@ def apply_pin_in_chat(
         (parent_row_id,),
     )
 
+    row_map = {
+        "parent_message_row_id": parent_row_id,
+        "from_me": from_me,
+        "sender_jid_row_id": sender_jid_row_id,
+        "status": 0,
+        "message_add_on_type": 79,
+        "timestamp": timestamp,
+        "key_id": key_id or "",
+        "chat_row_id": chat_row_id,
+    }
+    valid_cols = [c for c in row_map if c in add_on_cols]
     cur.execute(
-        "INSERT INTO message_add_on (parent_message_row_id, from_me, sender_jid_row_id, status, message_add_on_type, timestamp) "
-        "VALUES (?, ?, ?, 0, 79, ?)",
-        (parent_row_id, from_me, sender_jid_row_id, timestamp),
+        f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
+        [row_map[c] for c in valid_cols],
     )
     add_on_id = cur.lastrowid
     if pin_cols and add_on_id:
@@ -1318,6 +1342,7 @@ def apply_protocol_record(
     key_cache: dict[str, int],
     schema_cache: dict[str, set[str]] | None,
     logger: logging.Logger,
+    chat_row_id: int | None,
 ) -> None:
     """Apply protocol revoke or edit updates to an existing message."""
     cur = conn.cursor()
@@ -1352,10 +1377,20 @@ def apply_protocol_record(
                     )
                 add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
                 if add_on_cols:
+                    row_map = {
+                        "parent_message_row_id": target_id,
+                        "from_me": from_me,
+                        "sender_jid_row_id": sender_jid_row_id,
+                        "status": 0,
+                        "message_add_on_type": 74,
+                        "timestamp": edited_ts,
+                        "key_id": target_key or "",
+                        "chat_row_id": chat_row_id,
+                    }
+                    valid_cols = [c for c in row_map if c in add_on_cols]
                     cur.execute(
-                        "INSERT INTO message_add_on (parent_message_row_id, from_me, sender_jid_row_id, status, message_add_on_type, timestamp) "
-                        "VALUES (?, ?, ?, 0, 74, ?)",
-                        (target_id, from_me, sender_jid_row_id, edited_ts),
+                        f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
+                        [row_map[c] for c in valid_cols],
                     )
 
 
@@ -1386,6 +1421,8 @@ def apply_message_deletions(
     has_vcard = bool(get_table_columns(conn, "message_vcard", schema_cache))
     has_edit = bool(get_table_columns(conn, "message_edit_info", schema_cache))
     has_media = bool(get_table_columns(conn, "message_media", schema_cache))
+    has_quoted = bool(get_table_columns(conn, "message_quoted", schema_cache))
+    has_receipt_user = bool(get_table_columns(conn, "receipt_user", schema_cache))
 
     for i in range(0, len(ids), chunk_size):
         chunk = ids[i : i + chunk_size]
@@ -1436,6 +1473,16 @@ def apply_message_deletions(
         if has_media:
             cur.execute(
                 f"DELETE FROM message_media WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_quoted:
+            cur.execute(
+                f"DELETE FROM message_quoted WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_receipt_user:
+            cur.execute(
+                f"DELETE FROM receipt_user WHERE message_row_id IN ({placeholders})",
                 chunk,
             )
 
@@ -1754,22 +1801,16 @@ def apply_messages_bin(
                     q_sender_id = None if qi.get("from_me") == 1 else chat_jid_row_id
                 q_row_map = {
                     "message_row_id": msg_row_id,
+                    "chat_row_id": chat_row_id,
+                    "parent_message_chat_row_id": chat_row_id,
                     "text_data": qi.get("quoted_text", ""),
                     "from_me": qi.get("from_me", 0),
                     "sender_jid_row_id": q_sender_id,
+                    "key_id": qi.get("stanza_id") or msg.get("key_id", "") or "",
                     "timestamp": 0,
+                    "message_type": 0,
                 }
-                valid_q_cols = [
-                    c
-                    for c in [
-                        "message_row_id",
-                        "text_data",
-                        "from_me",
-                        "sender_jid_row_id",
-                        "timestamp",
-                    ]
-                    if c in quoted_cols
-                ]
+                valid_q_cols = [c for c in q_row_map if c in quoted_cols]
                 cur.execute(
                     f"INSERT INTO message_quoted ({', '.join(valid_q_cols)}) VALUES ({', '.join('?' for _ in valid_q_cols)})",
                     [q_row_map[c] for c in valid_q_cols],
@@ -1809,6 +1850,8 @@ def apply_messages_bin(
                 key_cache,
                 schema_cache,
                 logger,
+                msg.get("key_id", ""),
+                chat_row_id,
             )
 
         # Apply pin-in-chat add-on if present
@@ -1822,6 +1865,8 @@ def apply_messages_bin(
                 key_cache,
                 schema_cache,
                 logger,
+                msg.get("key_id", ""),
+                chat_row_id,
             )
 
         # Apply protocol revoke or edit updates if present
@@ -1835,6 +1880,7 @@ def apply_messages_bin(
                 key_cache,
                 schema_cache,
                 logger,
+                chat_row_id,
             )
 
     if max_ts_per_chat:
