@@ -19,6 +19,8 @@ When asked, create the end-to-end encrypted backup.
 
 > If this step is skipped, the `.crypt15` backup file cannot be decrypted and the archiver will not work on a non-rooted device.
 
+> 💡 **Automatic Incremental Backups Replay**: In E2E encrypted backups, WhatsApp generates daily delta snapshots (`msgstore-increment-*.db.crypt15`) between full backups (`msgstore.db.crypt15`). When running `--from-adb` or placing increments in your `Databases/` folder, the archiver automatically discovers, decrypts, and replays all daily message deltas, reactions, polls, pins, locations, and edits into a consolidated database.
+
 ---
 
 ## Your WhatsApp Media Folder
