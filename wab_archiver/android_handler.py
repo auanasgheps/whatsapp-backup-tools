@@ -36,6 +36,9 @@ _MEDIA_SUBFOLDERS = {
     "WhatsApp Stickers",
 }
 
+ASSOCIATION_TYPE_HD_PHOTO = 12
+ASSOCIATION_TYPE_HD_VIDEO = 7
+
 
 def _check_hd_association(cursor: sqlite3.Cursor, logger: logging.Logger) -> bool:
     """Return True if message_association exists and supports HD dedup (types 12 and 7)."""
@@ -183,12 +186,12 @@ def build_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> str:
     block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
     since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
     hd_dedup_clause = (
-        """
+        f"""
         AND NOT EXISTS (
             SELECT 1 FROM message_association ma
             JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
             WHERE ma.parent_message_row_id = message_media.message_row_id
-              AND ma.association_type IN (12, 7)
+              AND ma.association_type IN ({ASSOCIATION_TYPE_HD_PHOTO}, {ASSOCIATION_TYPE_HD_VIDEO})
               AND mm_hd.file_path IS NOT NULL
         )"""
         if hd_dedup

@@ -22,6 +22,10 @@ _IOS_REQUIRED_TABLES = _IOS_REQUIRED_TABLES
 _IOS_REQUIRED_COLUMNS = _IOS_REQUIRED_COLUMNS
 
 
+ASSOCIATION_TYPE_IOS_HD_PHOTO = 10
+ASSOCIATION_TYPE_IOS_HD_VIDEO = 5
+
+
 def validate_ios_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
     """Abort with a clear error if any required iOS table or column is missing."""
     tool_version = get_app_version()
@@ -107,7 +111,7 @@ def check_ios_hd_association(
             return False
 
         has_hd = cursor.execute(
-            "SELECT 1 FROM ext.message_parent_association WHERE type IN (10, 5) LIMIT 1"
+            f"SELECT 1 FROM ext.message_parent_association WHERE type IN ({ASSOCIATION_TYPE_IOS_HD_PHOTO}, {ASSOCIATION_TYPE_IOS_HD_VIDEO}) LIMIT 1"
         ).fetchone()
         if has_hd:
             logger.info(
@@ -147,13 +151,13 @@ def build_ios_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> 
         since_clause = ""
 
     hd_dedup_clause = (
-        """
+        f"""
         AND NOT EXISTS (
             SELECT 1 FROM ext.message_parent_association mpa
             JOIN ZWAMESSAGE m_hd ON m_hd.ZSTANZAID = mpa.stanza_id
             JOIN ZWAMEDIAITEM mi_hd ON mi_hd.Z_PK = m_hd.ZMEDIAITEM
             WHERE mpa.parent_stanza_id = m.ZSTANZAID
-              AND mpa.type IN (10, 5)
+              AND mpa.type IN ({ASSOCIATION_TYPE_IOS_HD_PHOTO}, {ASSOCIATION_TYPE_IOS_HD_VIDEO})
               AND mi_hd.ZMEDIALOCALPATH IS NOT NULL
         )"""
         if hd_dedup
