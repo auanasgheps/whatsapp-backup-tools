@@ -528,8 +528,13 @@ def test_main_decrypt_with_increments_cleanup_on_success(mock_db, tmp_path, monk
     assert msg_exists == 1
     conn.close()
 
-    # 2. Staged increment was cleaned up upon successful merge
+    # 2. Staged increment was cleaned up upon successful merge and attribute cleared
     assert not inc_file.exists()
+    assert args._staged_increments == []
+
+    # 3. Subsequent invocation is an idempotent no-op and does not raise FileNotFoundError
+    main._decrypt_msgstore_if_needed(args, logger)
+    assert args.msgstore == str(final_db)
 
 
 def test_main_decrypt_with_increments_retained_on_failure(mock_db, tmp_path, monkeypatch):
