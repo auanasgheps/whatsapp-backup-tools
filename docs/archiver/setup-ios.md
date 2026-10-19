@@ -2,55 +2,60 @@
 
 # iOS Setup
 
-WhatsApp on iOS stores its database and media inside an iPhone backup. The archiver reads the backup directly via `--ios-backup`.
+WhatsApp on iOS stores its database and media inside an iPhone backup. The archiver reads the backup directly via `--ios-backup`, resolving all chats, media files, and auxiliary databases automatically.
 
 ---
 
-## WhatsApp E2E Encrypted Backup
+## Important: WhatsApp In-App E2E Encrypted Backup
 
-**WhatsApp E2E encrypted backup** (a separate WhatsApp setting) must be **disabled** before creating the iPhone backup. If it is enabled, the database inside the iPhone backup is encrypted in a way that cannot be read by the archiver.
+**WhatsApp in-app E2E encrypted backup** must be **disabled** before creating the iPhone backup:
 
-Disable it in WhatsApp: `Settings → Chats → Chat Backup → End-to-end Encrypted Backup → Turn Off`
+```
+WhatsApp Settings → Chats → Chat Backup → End-to-end Encrypted Backup → Turn Off
+```
 
-> This is separate from iPhone backup encryption (which the archiver **does** support).
+> ⚠️ **Why this is required:** WhatsApp's in-app E2E encryption encrypts the internal SQLite database (`ChatStorage.sqlite`) with a separate client-side key before writing it to disk. This is separate from iPhone backup encryption. If enabled, the database inside the iPhone backup cannot be read.
+>
+> **iPhone backup encryption is fully supported** — you can safely encrypt your entire iPhone backup in Finder or the Apple Devices app.
 
 ---
 
 ## Step 1 — Create a Device Backup
 
-**macOS** — Connect your iPhone or iPad and open Finder. Select your device and click "Back Up Now". You may choose encrypted or unencrypted.
+Connect your iPhone or iPad to your computer via USB cable.
 
-**Windows** — Install [Apple Devices](https://apps.microsoft.com/detail/9NP83LWLPZ9K) from the Microsoft Store. Connect your device and create a backup.
+### macOS (Finder)
+1. Open **Finder** and select your device in the sidebar.
+2. Under the **General** tab, select **"Back up all of the data on your iPhone to this Mac"**.
+3. Choose whether to encrypt the backup:
+   - **Unencrypted**: Faster, but excludes saved passwords and health data.
+   - **Encrypted**: Recommended. Set a memorable password (needed for `--ios-password`).
+4. Click **Back Up Now** and wait for completion.
+
+### Windows (Apple Devices App or iTunes)
+- **Modern Windows (Recommended)**: Install [Apple Devices](https://apps.microsoft.com/detail/9NP83LWLPZ9K) from the Microsoft Store. Connect your device, select it, choose backup destination (**This computer**), and click **Back Up Now**.
+- **Classic Windows (iTunes)**: Open iTunes, click the phone icon in the top toolbar, select **This computer**, and click **Back Up Now**.
 
 ---
 
 ## Step 2 — Locate the Backup Directory
 
-**macOS:**
+The backup directory is the folder containing `Manifest.db`. Look for your device's Unique Device Identifier (UDID):
 
-```
-~/Library/Application Support/MobileSync/Backup/<UDID>/
-```
+| Operating System | Tool Used | Backup Directory Path |
+| :--- | :--- | :--- |
+| **macOS** | Finder | `~/Library/Application Support/MobileSync/Backup/<UDID>/` |
+| **Windows** | Apple Devices App | `C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>\` |
+| **Windows** | iTunes (Desktop) | `%AppData%\Apple Computer\MobileSync\Backup\<UDID>\` |
+| **Windows** | iTunes (Store) | `%UserProfile%\Apple\MobileSync\Backup\<UDID>\` |
 
-**Windows (iTunes):**
-
-```
-%AppData%\Apple\MobileSync\Backup\<UDID>\
-```
-
-**Windows (Apple Devices app):**
-
-```
-C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>\
-```
-
-The backup directory is the folder that contains `Manifest.db`. Pass it to `--ios-backup`.
+> 💡 **Tip for finding the folder quickly on Windows:** Press `Win + R`, paste `%AppData%\Apple Computer\MobileSync\Backup` or `%UserProfile%\Apple\MobileSync\Backup`, and press Enter.
 
 ---
 
 ## Step 3 — Run the Archiver
 
-Unencrypted backup:
+### Unencrypted Backup
 
 ```bash
 wab-archiver archive \
@@ -59,7 +64,9 @@ wab-archiver archive \
   --dry-run
 ```
 
-Encrypted iPhone backup (use the password you set in Finder/Apple Devices):
+### Encrypted iPhone Backup
+
+If your iPhone backup is password-protected, provide `--ios-password`:
 
 ```bash
 wab-archiver archive \
@@ -70,26 +77,48 @@ wab-archiver archive \
 ```
 
 > 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).  
-> 💡 **Paths with spaces:** iOS backup paths (such as `C:\Users\<Username>\Apple\MobileSync\Backup\<UDID>`) often contain spaces — always wrap paths in quotes.
-
-Contacts and auxiliary databases (`ChatStorage.sqlite`, `ContactsV2.sqlite`, `ExtChatDatabase.sqlite`, `MessagingInfraDatabase.sqlite`, `LID.sqlite`, `Labels.sqlite`, `CallHistory.sqlite`) are automatically extracted from the backup and saved to the `Whatsapp Databases` subfolder in the output folder for re-runs and viewer use.
+> 💡 **Paths with spaces:** Windows backup paths often contain spaces (e.g. `C:\Users\John Doe\Apple\...`) — always wrap paths in double quotes.
 
 ---
 
-## Encrypted vs. Unencrypted Backups
+## How iOS Backup Extraction Works
 
-Both encrypted and unencrypted iPhone backups are supported:
+1. **Manifest Parsing (`Manifest.db`)**: The archiver opens the backup's SQLite manifest to locate WhatsApp's AppGroup container:
+   - Standard WhatsApp: `AppDomainGroup-group.net.whatsapp.WhatsApp.shared`
+   - WhatsApp Business: `AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared`
+2. **Encrypted Backups**: When `--ios-password` is provided, the archiver unlocks the backup keybag using PBKDF2 + AES-GCM/CBC, decrypting files transparently on the fly without writing unencrypted intermediate backups to disk.
+3. **Differential Storage**: Apple's backup engine is differential — files that have not changed since the last backup are retained, and only modified files are updated. You can re-run the archiver on the same backup folder over time.
+4. **Auxiliary Databases Extraction**: During archiving, all essential databases are extracted and preserved into `<output>/Whatsapp Databases/`:
+   - `ChatStorage.sqlite` (Primary message store)
+   - `ContactsV2.sqlite` (Address book contacts & LIDs)
+   - `ExtChatDatabase.sqlite` (HD media associations & parent/child links)
+   - `MessagingInfraDatabase.sqlite` (Read/delivery receipts ledger)
+   - `LID.sqlite` (LID account phone mappings)
+   - `Labels.sqlite` (WhatsApp Business labels)
+   - `CallHistory.sqlite` (Call event logs)
 
-- **Unencrypted backup** — no extra password argument needed.
-- **Encrypted backup** — pass `--ios-password <password>`. (The required `iphone-backup-decrypt` package is installed automatically with `whatsapp-backup-tools`).
+---
+
+## Troubleshooting
+
+### "Manifest.db not found"
+- Verify the path passed to `--ios-backup` points directly to the `<UDID>` directory containing `Manifest.db`, not to the parent `Backup/` folder.
+- If you backed up with macOS Finder, ensure Terminal has **Full Disk Access** in `System Settings → Privacy & Security → Full Disk Access` to access `~/Library/Application Support/MobileSync/`.
+
+### "Decryption failed / Incorrect password"
+- The password is the **iPhone backup encryption password** set in Finder or Apple Devices, NOT your Apple ID password or device lockscreen PIN.
+- If you forgot your backup password, Apple allows resetting it on the device: `Settings → General → Transfer or Reset iPhone → Reset → Reset All Settings` (this resets backup password without deleting device data, allowing you to create a new backup with a new password).
+
+### "No WhatsApp data found in backup"
+- Ensure WhatsApp was installed and active on the device during the backup.
+- If you use WhatsApp Business, the archiver automatically detects `WhatsAppSMB.shared`. Ensure the app had chats present when the backup ran.
 
 ---
 
 ## Next Steps
 
-Now that your iOS backup is located and configured:
+Now that your iOS backup is configured:
 
-1. 📖 Review the **[Command Reference & Config File](command-reference.md)** for advanced flags and configuration options.
-2. 🧪 Run your command with `--dry-run` to test decryption and preview archive results.
-3. 🌐 Once archived, launch the **[WhatsApp Backup Viewer](../viewer/index.md)** to browse your conversations offline.
-
+1. 📖 Review the **[Command Reference & Config File](command-reference.md)** for advanced options (filtering by date, deduplication, deleted messages preservation).
+2. 🧪 Run your command with `--dry-run` to preview the media organization and message count.
+3. 🌐 Launch the **[WhatsApp Backup Viewer](../viewer/index.md)** to browse your conversations with full iOS receipts, reactions, and polls.
