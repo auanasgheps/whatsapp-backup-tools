@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sqlite3
+import struct
 import zipfile
 import zlib
 
@@ -80,6 +81,77 @@ def parse_wire_fields(data: bytes) -> dict[int, list[tuple[int, bytes | int]]]:
     return fields
 
 
+def parse_message_key(key_bytes: bytes) -> dict:
+    """Parse a serialized MessageKey protobuf into a dictionary."""
+    kf = parse_wire_fields(key_bytes)
+    remote_jid = kf.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 1 in kf else ""
+    from_me = 1 if (2 in kf and kf[2][0][1]) else 0
+    key_id = kf.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 3 in kf else ""
+    participant = kf.get(4, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 4 in kf else ""
+    return {
+        "remote_jid": remote_jid,
+        "from_me": from_me,
+        "key_id": key_id,
+        "participant": participant,
+    }
+
+
+def unwrap_message_container(msg_fields: dict, max_depth: int) -> tuple[dict, dict]:
+    """
+    Recursively unwrap container messages (ephemeral, view-once, captioned document).
+    Returns (unwrapped_fields, flags) where flags tracks is_view_once and is_ephemeral.
+    """
+    flags = {"is_view_once": 0, "is_ephemeral": 0}
+    current_fields = msg_fields
+    for _ in range(max_depth):
+        # 40: ephemeralMessage -> field 1: message
+        if 40 in current_fields and current_fields[40]:
+            flags["is_ephemeral"] = 1
+            payload = current_fields[40][0][1]
+            if isinstance(payload, bytes):
+                inner = parse_wire_fields(payload)
+                if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
+                    current_fields = parse_wire_fields(inner[1][0][1])
+                    continue
+        # 37: viewOnceMessage -> field 1: message
+        if 37 in current_fields and current_fields[37]:
+            flags["is_view_once"] = 1
+            payload = current_fields[37][0][1]
+            if isinstance(payload, bytes):
+                inner = parse_wire_fields(payload)
+                if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
+                    current_fields = parse_wire_fields(inner[1][0][1])
+                    continue
+        # 55: viewOnceMessageV2 -> field 1: message
+        if 55 in current_fields and current_fields[55]:
+            flags["is_view_once"] = 1
+            payload = current_fields[55][0][1]
+            if isinstance(payload, bytes):
+                inner = parse_wire_fields(payload)
+                if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
+                    current_fields = parse_wire_fields(inner[1][0][1])
+                    continue
+        # 59: viewOnceMessageV2Extension -> field 1: message
+        if 59 in current_fields and current_fields[59]:
+            flags["is_view_once"] = 1
+            payload = current_fields[59][0][1]
+            if isinstance(payload, bytes):
+                inner = parse_wire_fields(payload)
+                if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
+                    current_fields = parse_wire_fields(inner[1][0][1])
+                    continue
+        # 53: documentWithCaptionMessage -> field 1: message
+        if 53 in current_fields and current_fields[53]:
+            payload = current_fields[53][0][1]
+            if isinstance(payload, bytes):
+                inner = parse_wire_fields(payload)
+                if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
+                    current_fields = parse_wire_fields(inner[1][0][1])
+                    continue
+        break
+    return current_fields, flags
+
+
 def decode_wmi(wmi_bytes: bytes) -> dict:
     """Decode a serialized WebMessageInfo (WMI) protobuf into a normalized message dictionary."""
     fields = parse_wire_fields(wmi_bytes)
@@ -91,15 +163,11 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
 
     # Field 1: MessageKey (remoteJid=1, fromMe=2, id=3, participant=4)
     if 1 in fields:
-        key_fields = parse_wire_fields(fields[1][0][1])
-        if 1 in key_fields:
-            remote_jid = key_fields[1][0][1].decode("utf-8", errors="replace")
-        if 2 in key_fields:
-            from_me = 1 if key_fields[2][0][1] else 0
-        if 3 in key_fields:
-            key_id = key_fields[3][0][1].decode("utf-8", errors="replace")
-        if 4 in key_fields:
-            participant = key_fields[4][0][1].decode("utf-8", errors="replace")
+        parsed_key = parse_message_key(fields[1][0][1])
+        remote_jid = parsed_key["remote_jid"]
+        from_me = parsed_key["from_me"]
+        key_id = parsed_key["key_id"]
+        participant = parsed_key["participant"]
 
     # Field 3: messageTimestamp
     timestamp_raw = 0
@@ -118,10 +186,22 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     text_data = None
     media_info = None
     vcard = None
+    reaction_info = None
+    poll_info = None
+    poll_vote_info = None
+    pin_info = None
+    location_info = None
+    revoke_info = None
+    edit_info = None
+    is_view_once = 0
+    is_ephemeral = 0
 
     # Field 2: Message payload
     if 2 in fields:
-        msg_fields = parse_wire_fields(fields[2][0][1])
+        raw_msg_fields = parse_wire_fields(fields[2][0][1])
+        msg_fields, container_flags = unwrap_message_container(raw_msg_fields, 4)
+        is_view_once = container_flags["is_view_once"]
+        is_ephemeral = container_flags["is_ephemeral"]
 
         # 1: conversation (plain text)
         if 1 in msg_fields:
@@ -130,7 +210,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
 
         # 3: imageMessage
         elif 3 in msg_fields:
-            message_type = 1
+            message_type = 42 if is_view_once else 1
             img_fields = parse_wire_fields(msg_fields[3][0][1])
             caption = (
                 img_fields.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace")
@@ -175,6 +255,49 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
             )
             text_data = display_name
             vcard = vcard_text
+
+        # 5: locationMessage
+        elif 5 in msg_fields:
+            message_type = 5
+            loc_fields = parse_wire_fields(msg_fields[5][0][1])
+            lat = (
+                struct.unpack("<d", loc_fields[1][0][1])[0]
+                if 1 in loc_fields and len(loc_fields[1][0][1]) == 8
+                else 0.0
+            )
+            lng = (
+                struct.unpack("<d", loc_fields[2][0][1])[0]
+                if 2 in loc_fields and len(loc_fields[2][0][1]) == 8
+                else 0.0
+            )
+            name = (
+                loc_fields.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 3 in loc_fields
+                else None
+            )
+            address = (
+                loc_fields.get(4, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 4 in loc_fields
+                else None
+            )
+            url = (
+                loc_fields.get(5, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 5 in loc_fields
+                else None
+            )
+            comment = (
+                loc_fields.get(7, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 7 in loc_fields
+                else None
+            )
+            text_data = name or address or comment or f"{lat}, {lng}"
+            location_info = {
+                "latitude": lat,
+                "longitude": lng,
+                "place_name": name,
+                "place_address": address,
+                "url": url,
+            }
 
         # 6: extendedTextMessage
         elif 6 in msg_fields:
@@ -226,7 +349,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
 
         # 8: audioMessage
         elif 8 in msg_fields:
-            message_type = 2
+            message_type = 82 if is_view_once else 2
             aud_fields = parse_wire_fields(msg_fields[8][0][1])
             mimetype = (
                 aud_fields.get(2, [(2, b"audio/ogg")])[0][1].decode("utf-8", errors="replace")
@@ -253,7 +376,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
 
         # 9: videoMessage
         elif 9 in msg_fields:
-            message_type = 3
+            message_type = 43 if is_view_once else 3
             vid_fields = parse_wire_fields(msg_fields[9][0][1])
             caption = (
                 vid_fields.get(7, [(2, b"")])[0][1].decode("utf-8", errors="replace")
@@ -282,6 +405,43 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "media_type": "video",
             }
 
+        # 12: protocolMessage (Revoke / Message Edit)
+        elif 12 in msg_fields:
+            proto_fields = parse_wire_fields(msg_fields[12][0][1])
+            target_key = (
+                parse_message_key(proto_fields[1][0][1])
+                if 1 in proto_fields and isinstance(proto_fields[1][0][1], bytes)
+                else {}
+            )
+            proto_type = proto_fields.get(2, [(0, 0)])[0][1] if 2 in proto_fields else 0
+            if proto_type == 0:  # REVOKE
+                message_type = 15
+                revoke_info = {"target_key_id": target_key.get("key_id", "")}
+            elif proto_type == 14:  # MESSAGE_EDIT
+                edited_ts = (
+                    proto_fields.get(10, [(0, 0)])[0][1] if 10 in proto_fields else timestamp_ms
+                )
+                new_text = None
+                if 14 in proto_fields and isinstance(proto_fields[14][0][1], bytes):
+                    edit_msg_fields = parse_wire_fields(proto_fields[14][0][1])
+                    unwrapped_edit, _ = unwrap_message_container(edit_msg_fields, 4)
+                    if 1 in unwrapped_edit:
+                        new_text = unwrapped_edit[1][0][1].decode("utf-8", errors="replace")
+                    elif 6 in unwrapped_edit:
+                        ext = parse_wire_fields(unwrapped_edit[6][0][1])
+                        new_text = (
+                            ext.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 1 in ext
+                            else None
+                        )
+                message_type = 0
+                text_data = new_text
+                edit_info = {
+                    "target_key_id": target_key.get("key_id", ""),
+                    "new_text": new_text,
+                    "edited_ts": edited_ts,
+                }
+
         # 13: contactsArrayMessage
         elif 13 in msg_fields:
             message_type = 14
@@ -292,10 +452,43 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 else None
             )
 
-        # 26: stickerMessage
-        elif 26 in msg_fields:
+        # 18: liveLocationMessage
+        elif 18 in msg_fields:
+            message_type = 16
+            ll_fields = parse_wire_fields(msg_fields[18][0][1])
+            lat = (
+                struct.unpack("<d", ll_fields[1][0][1])[0]
+                if 1 in ll_fields and len(ll_fields[1][0][1]) == 8
+                else 0.0
+            )
+            lng = (
+                struct.unpack("<d", ll_fields[2][0][1])[0]
+                if 2 in ll_fields and len(ll_fields[2][0][1]) == 8
+                else 0.0
+            )
+            caption = (
+                ll_fields.get(6, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 6 in ll_fields
+                else None
+            )
+            duration = ll_fields.get(8, [(0, 0)])[0][1] if 8 in ll_fields else 0
+            seq_num = ll_fields.get(7, [(0, 0)])[0][1] if 7 in ll_fields else 0
+            text_data = caption or f"Live Location: {lat}, {lng}"
+            location_info = {
+                "latitude": lat,
+                "longitude": lng,
+                "place_name": None,
+                "place_address": None,
+                "url": None,
+                "duration": duration,
+                "sequence_number": seq_num,
+            }
+
+        # 20 or 26: stickerMessage
+        elif 20 in msg_fields or 26 in msg_fields:
             message_type = 20
-            stk_fields = parse_wire_fields(msg_fields[26][0][1])
+            stk_payload = msg_fields[20][0][1] if 20 in msg_fields else msg_fields[26][0][1]
+            stk_fields = parse_wire_fields(stk_payload)
             mimetype = (
                 stk_fields.get(5, [(2, b"image/webp")])[0][1].decode("utf-8", errors="replace")
                 if 5 in stk_fields
@@ -317,15 +510,137 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "media_type": "sticker",
             }
 
-        # 48: reactionMessage
-        elif 48 in msg_fields:
+        # 42: buttonsMessage
+        elif 42 in msg_fields:
+            message_type = 0
+            btn_fields = parse_wire_fields(msg_fields[42][0][1])
+            text_data = (
+                btn_fields.get(6, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 6 in btn_fields
+                else None
+            )
+
+        # 45: interactiveMessage
+        elif 45 in msg_fields:
+            message_type = 0
+            im_fields = parse_wire_fields(msg_fields[45][0][1])
+            if 1 in im_fields and isinstance(im_fields[1][0][1], bytes):
+                body_fields = parse_wire_fields(im_fields[1][0][1])
+                text_data = (
+                    body_fields.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                    if 1 in body_fields
+                    else None
+                )
+
+        # 46 or 48: reactionMessage (Tag 46 official, 48 backwards-compat)
+        elif 46 in msg_fields or 48 in msg_fields:
             message_type = 25
-            react_fields = parse_wire_fields(msg_fields[48][0][1])
+            react_payload = msg_fields[46][0][1] if 46 in msg_fields else msg_fields[48][0][1]
+            react_fields = parse_wire_fields(react_payload)
+            target_key = (
+                parse_message_key(react_fields[1][0][1])
+                if 1 in react_fields and isinstance(react_fields[1][0][1], bytes)
+                else {}
+            )
             text_data = (
                 react_fields.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
                 if 2 in react_fields
-                else None
+                else ""
             )
+            sender_ts = react_fields.get(4, [(0, 0)])[0][1] if 4 in react_fields else timestamp_ms
+            reaction_info = {
+                "target_key_id": target_key.get("key_id", ""),
+                "target_remote_jid": target_key.get("remote_jid", ""),
+                "target_from_me": target_key.get("from_me", 0),
+                "emoji": text_data,
+                "sender_ts": sender_ts,
+            }
+
+        # 49, 60, 64: pollCreationMessage (v1, v2, v3)
+        elif 49 in msg_fields or 60 in msg_fields or 64 in msg_fields:
+            message_type = 66
+            poll_tag = 49 if 49 in msg_fields else (60 if 60 in msg_fields else 64)
+            poll_fields = parse_wire_fields(msg_fields[poll_tag][0][1])
+            name = (
+                poll_fields.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 2 in poll_fields
+                else ""
+            )
+            options = []
+            for opt_tuple in poll_fields.get(3, []):
+                if isinstance(opt_tuple[1], bytes):
+                    opt_f = parse_wire_fields(opt_tuple[1])
+                    opt_name = (
+                        opt_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                        if 1 in opt_f
+                        else ""
+                    )
+                    if opt_name:
+                        options.append(opt_name)
+            selectable_count = poll_fields.get(4, [(0, 0)])[0][1] if 4 in poll_fields else 0
+            text_data = name
+            poll_info = {
+                "question": name,
+                "options": options,
+                "selectable_count": selectable_count,
+            }
+
+        # 50: pollUpdateMessage (poll vote)
+        elif 50 in msg_fields:
+            message_type = 67
+            pu_fields = parse_wire_fields(msg_fields[50][0][1])
+            poll_key = (
+                parse_message_key(pu_fields[1][0][1])
+                if 1 in pu_fields and isinstance(pu_fields[1][0][1], bytes)
+                else {}
+            )
+            sender_ts = pu_fields.get(3, [(0, 0)])[0][1] if 3 in pu_fields else timestamp_ms
+            poll_vote_info = {
+                "poll_key_id": poll_key.get("key_id", ""),
+                "sender_ts": sender_ts,
+            }
+
+        # 63: pinInChatMessage
+        elif 63 in msg_fields:
+            message_type = 79
+            pin_fields = parse_wire_fields(msg_fields[63][0][1])
+            target_key = (
+                parse_message_key(pin_fields[1][0][1])
+                if 1 in pin_fields and isinstance(pin_fields[1][0][1], bytes)
+                else {}
+            )
+            pin_type = pin_fields.get(2, [(0, 1)])[0][1] if 2 in pin_fields else 1
+            sender_ts = pin_fields.get(3, [(0, 0)])[0][1] if 3 in pin_fields else timestamp_ms
+            pin_info = {
+                "target_key_id": target_key.get("key_id", ""),
+                "pin_state": 1 if pin_type == 1 else 0,
+                "sender_ts": sender_ts,
+            }
+
+        # 66: ptvMessage (Push-To-Video / Video Note)
+        elif 66 in msg_fields:
+            message_type = 28
+            ptv_fields = parse_wire_fields(msg_fields[66][0][1])
+            mimetype = (
+                ptv_fields.get(2, [(2, b"video/mp4")])[0][1].decode("utf-8", errors="replace")
+                if 2 in ptv_fields
+                else "video/mp4"
+            )
+            url = (
+                ptv_fields.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 1 in ptv_fields
+                else ""
+            )
+            file_sha256 = ptv_fields.get(3, [(2, b"")])[0][1] if 3 in ptv_fields else b""
+            file_length = ptv_fields.get(4, [(0, 0)])[0][1] if 4 in ptv_fields else 0
+            media_info = {
+                "mime_type": mimetype,
+                "file_size": file_length,
+                "file_sha256": file_sha256,
+                "media_name": None,
+                "message_url": url,
+                "media_type": "video",
+            }
 
     return {
         "key_id": key_id,
@@ -339,6 +654,15 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         "text_data": text_data,
         "media_info": media_info,
         "vcard": vcard,
+        "reaction_info": reaction_info,
+        "poll_info": poll_info,
+        "poll_vote_info": poll_vote_info,
+        "pin_info": pin_info,
+        "location_info": location_info,
+        "revoke_info": revoke_info,
+        "edit_info": edit_info,
+        "is_view_once": is_view_once,
+        "is_ephemeral": is_ephemeral,
     }
 
 
@@ -375,7 +699,8 @@ def extract_messages_from_proto_frame(data: bytes) -> list[dict]:
                         if not msg["remote_jid"] and conv_id:
                             msg["remote_jid"] = conv_id
                         results.append(msg)
-        return results
+        if results:
+            return results
 
     # Direct WebMessageInfo: field 1 contains MessageKey
     if 1 in fields:
@@ -636,10 +961,266 @@ def apply_entity_deletions(
     return deleted_count
 
 
+def get_table_columns(
+    conn: sqlite3.Connection,
+    table_name: str,
+    schema_cache: dict[str, set[str]] | None,
+) -> set[str]:
+    """Retrieve column set for a table, using schema_cache when available."""
+    if schema_cache is not None and table_name in schema_cache:
+        return schema_cache[table_name]
+    cur = conn.cursor()
+    cols = {r[1] for r in cur.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if schema_cache is not None:
+        schema_cache[table_name] = cols
+    return cols
+
+
+def find_message_row_id(
+    conn: sqlite3.Connection,
+    key_id: str,
+    key_cache: dict[str, int],
+) -> int | None:
+    """Find message._id by key_id, using key_cache for O(1) repeated lookups."""
+    if not key_id:
+        return None
+    if key_id in key_cache:
+        return key_cache[key_id]
+    cur = conn.cursor()
+    cur.execute("SELECT _id FROM message WHERE key_id = ?", (key_id,))
+    row = cur.fetchone()
+    if row is not None:
+        row_id = int(row[0])
+        key_cache[key_id] = row_id
+        return row_id
+    return None
+
+
+def apply_reaction_record(
+    conn: sqlite3.Connection,
+    reaction_info: dict,
+    sender_jid_row_id: int | None,
+    from_me: int,
+    timestamp: int,
+    key_cache: dict[str, int],
+    schema_cache: dict[str, set[str]] | None,
+    logger: logging.Logger,
+) -> None:
+    """Apply a reaction message add-on to the database."""
+    target_key_id = reaction_info.get("target_key_id", "")
+    if not target_key_id:
+        return
+    parent_row_id = find_message_row_id(conn, target_key_id, key_cache)
+    if parent_row_id is None:
+        logger.debug(f"Target message '{target_key_id}' for reaction not found; skipping add-on.")
+        return
+
+    add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
+    if not add_on_cols:
+        return
+
+    cur = conn.cursor()
+    emoji = reaction_info.get("emoji", "")
+    sender_ts = reaction_info.get("sender_ts", timestamp)
+
+    # If reaction is empty string, reaction was revoked/cleared
+    if not emoji:
+        cur.execute(
+            "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 1",
+            (parent_row_id, sender_jid_row_id),
+        )
+        return
+
+    # Delete any prior reaction by this sender on this message
+    reaction_cols = get_table_columns(conn, "message_add_on_reaction", schema_cache)
+    if reaction_cols:
+        cur.execute(
+            "DELETE FROM message_add_on_reaction WHERE message_add_on_row_id IN ("
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 1)",
+            (parent_row_id, sender_jid_row_id),
+        )
+    cur.execute(
+        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 1",
+        (parent_row_id, sender_jid_row_id),
+    )
+
+    cur.execute(
+        "INSERT INTO message_add_on (parent_message_row_id, from_me, sender_jid_row_id, status, message_add_on_type, timestamp) "
+        "VALUES (?, ?, ?, 0, 1, ?)",
+        (parent_row_id, from_me, sender_jid_row_id, timestamp),
+    )
+    add_on_id = cur.lastrowid
+    if reaction_cols and add_on_id:
+        cur.execute(
+            "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) VALUES (?, ?, ?)",
+            (add_on_id, emoji, sender_ts),
+        )
+
+
+def apply_poll_creation(
+    conn: sqlite3.Connection,
+    msg_row_id: int,
+    poll_info: dict,
+    schema_cache: dict[str, set[str]] | None,
+    logger: logging.Logger,
+) -> None:
+    """Insert message_poll and message_poll_option records for a poll message."""
+    poll_cols = get_table_columns(conn, "message_poll", schema_cache)
+    poll_opt_cols = get_table_columns(conn, "message_poll_option", schema_cache)
+    cur = conn.cursor()
+
+    if poll_cols:
+        selectable = poll_info.get("selectable_count", 0)
+        cur.execute(
+            "INSERT INTO message_poll (message_row_id, selectable_options_count) VALUES (?, ?)",
+            (msg_row_id, selectable),
+        )
+
+    if poll_opt_cols:
+        for opt_name in poll_info.get("options", []):
+            cur.execute(
+                "INSERT INTO message_poll_option (message_row_id, option_name, vote_total) VALUES (?, ?, 0)",
+                (msg_row_id, opt_name),
+            )
+
+
+def apply_pin_in_chat(
+    conn: sqlite3.Connection,
+    pin_info: dict,
+    sender_jid_row_id: int | None,
+    from_me: int,
+    timestamp: int,
+    key_cache: dict[str, int],
+    schema_cache: dict[str, set[str]] | None,
+    logger: logging.Logger,
+) -> None:
+    """Record a pin-in-chat add-on for a message."""
+    target_key_id = pin_info.get("target_key_id", "")
+    if not target_key_id:
+        return
+    parent_row_id = find_message_row_id(conn, target_key_id, key_cache)
+    if parent_row_id is None:
+        logger.debug(f"Target message '{target_key_id}' for pin not found; skipping add-on.")
+        return
+
+    add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
+    pin_cols = get_table_columns(conn, "message_add_on_pin_in_chat", schema_cache)
+    if not add_on_cols:
+        return
+
+    cur = conn.cursor()
+    pin_state = pin_info.get("pin_state", 1)
+    sender_ts = pin_info.get("sender_ts", timestamp)
+
+    # Remove existing pin add-on if any
+    if pin_cols:
+        cur.execute(
+            "DELETE FROM message_add_on_pin_in_chat WHERE message_add_on_row_id IN ("
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND message_add_on_type = 79)",
+            (parent_row_id,),
+        )
+    cur.execute(
+        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND message_add_on_type = 79",
+        (parent_row_id,),
+    )
+
+    cur.execute(
+        "INSERT INTO message_add_on (parent_message_row_id, from_me, sender_jid_row_id, status, message_add_on_type, timestamp) "
+        "VALUES (?, ?, ?, 0, 79, ?)",
+        (parent_row_id, from_me, sender_jid_row_id, timestamp),
+    )
+    add_on_id = cur.lastrowid
+    if pin_cols and add_on_id:
+        cur.execute(
+            "INSERT INTO message_add_on_pin_in_chat (message_add_on_row_id, pin_in_chat_state, sender_timestamp) VALUES (?, ?, ?)",
+            (add_on_id, pin_state, sender_ts),
+        )
+
+
+def apply_location_record(
+    conn: sqlite3.Connection,
+    msg_row_id: int,
+    location_info: dict,
+    schema_cache: dict[str, set[str]] | None,
+    logger: logging.Logger,
+) -> None:
+    """Insert location metadata into message_location."""
+    loc_cols = get_table_columns(conn, "message_location", schema_cache)
+    if not loc_cols:
+        return
+
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message_location (message_row_id, latitude, longitude, place_name, place_address, url) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            msg_row_id,
+            location_info.get("latitude", 0.0),
+            location_info.get("longitude", 0.0),
+            location_info.get("place_name"),
+            location_info.get("place_address"),
+            location_info.get("url"),
+        ),
+    )
+
+
+def apply_protocol_record(
+    conn: sqlite3.Connection,
+    msg: dict,
+    sender_jid_row_id: int | None,
+    from_me: int,
+    timestamp: int,
+    key_cache: dict[str, int],
+    schema_cache: dict[str, set[str]] | None,
+    logger: logging.Logger,
+) -> None:
+    """Apply protocol revoke or edit updates to an existing message."""
+    cur = conn.cursor()
+    if msg.get("revoke_info"):
+        target_key = msg["revoke_info"].get("target_key_id", "")
+        if target_key:
+            target_id = find_message_row_id(conn, target_key, key_cache)
+            if target_id is not None:
+                cur.execute(
+                    "UPDATE message SET message_type = 15, text_data = NULL WHERE _id = ?",
+                    (target_id,),
+                )
+                cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (target_id,))
+
+    if msg.get("edit_info"):
+        target_key = msg["edit_info"].get("target_key_id", "")
+        new_text = msg["edit_info"].get("new_text")
+        edited_ts = msg["edit_info"].get("edited_ts", timestamp)
+        if target_key:
+            target_id = find_message_row_id(conn, target_key, key_cache)
+            if target_id is not None and new_text is not None:
+                cur.execute(
+                    "UPDATE message SET text_data = ? WHERE _id = ?",
+                    (new_text, target_id),
+                )
+                edit_cols = get_table_columns(conn, "message_edit_info", schema_cache)
+                if edit_cols:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp) "
+                        "VALUES (?, ?, ?, ?)",
+                        (target_id, target_key, edited_ts, edited_ts),
+                    )
+                add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
+                if add_on_cols:
+                    cur.execute(
+                        "INSERT INTO message_add_on (parent_message_row_id, from_me, sender_jid_row_id, status, message_add_on_type, timestamp) "
+                        "VALUES (?, ?, ?, 0, 74, ?)",
+                        (target_id, from_me, sender_jid_row_id, edited_ts),
+                    )
+
+
 def apply_message_deletions(
-    conn: sqlite3.Connection, deleted_json_path: str, logger: logging.Logger
+    conn: sqlite3.Connection,
+    deleted_json_path: str,
+    logger: logging.Logger,
+    schema_cache: dict[str, set[str]] | None,
 ) -> int:
-    """Delete messages and their associated media records listed in deletedMessages_*.json."""
+    """Delete messages and their associated auxiliary records listed in deletedMessages_*.json."""
     with open(deleted_json_path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -650,13 +1231,69 @@ def apply_message_deletions(
     cur = conn.cursor()
     total_deleted = 0
     chunk_size = 500
+
+    has_add_on_reaction = bool(get_table_columns(conn, "message_add_on_reaction", schema_cache))
+    has_add_on_pin = bool(get_table_columns(conn, "message_add_on_pin_in_chat", schema_cache))
+    has_add_on = bool(get_table_columns(conn, "message_add_on", schema_cache))
+    has_poll_opt = bool(get_table_columns(conn, "message_poll_option", schema_cache))
+    has_poll = bool(get_table_columns(conn, "message_poll", schema_cache))
+    has_loc = bool(get_table_columns(conn, "message_location", schema_cache))
+    has_vcard = bool(get_table_columns(conn, "message_vcard", schema_cache))
+    has_edit = bool(get_table_columns(conn, "message_edit_info", schema_cache))
+    has_media = bool(get_table_columns(conn, "message_media", schema_cache))
+
     for i in range(0, len(ids), chunk_size):
         chunk = ids[i : i + chunk_size]
         placeholders = ", ".join("?" for _ in chunk)
-        cur.execute(
-            f"DELETE FROM message_media WHERE message_row_id IN ({placeholders})",
-            chunk,
-        )
+
+        if has_add_on_reaction and has_add_on:
+            cur.execute(
+                f"DELETE FROM message_add_on_reaction WHERE message_add_on_row_id IN ("
+                f"SELECT _id FROM message_add_on WHERE parent_message_row_id IN ({placeholders}))",
+                chunk,
+            )
+        if has_add_on_pin and has_add_on:
+            cur.execute(
+                f"DELETE FROM message_add_on_pin_in_chat WHERE message_add_on_row_id IN ("
+                f"SELECT _id FROM message_add_on WHERE parent_message_row_id IN ({placeholders}))",
+                chunk,
+            )
+        if has_add_on:
+            cur.execute(
+                f"DELETE FROM message_add_on WHERE parent_message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_poll_opt:
+            cur.execute(
+                f"DELETE FROM message_poll_option WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_poll:
+            cur.execute(
+                f"DELETE FROM message_poll WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_loc:
+            cur.execute(
+                f"DELETE FROM message_location WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_vcard:
+            cur.execute(
+                f"DELETE FROM message_vcard WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_edit:
+            cur.execute(
+                f"DELETE FROM message_edit_info WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_media:
+            cur.execute(
+                f"DELETE FROM message_media WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+
         cur.execute(f"DELETE FROM message WHERE _id IN ({placeholders})", chunk)
         total_deleted += cur.rowcount
     return total_deleted
@@ -814,6 +1451,7 @@ def apply_messages_bin(
         )
 
     inserted = 0
+    key_cache: dict[str, int] = {}
     for msg in messages:
         remote_jid = msg["remote_jid"]
         if not remote_jid:
@@ -852,6 +1490,9 @@ def apply_messages_bin(
         msg_row_id = cur.lastrowid
         inserted += 1
 
+        if msg.get("key_id") and msg_row_id:
+            key_cache[msg["key_id"]] = msg_row_id
+
         # Insert media record if present
         if msg["media_info"] and sql_insert_media:
             media = msg["media_info"]
@@ -884,6 +1525,53 @@ def apply_messages_bin(
             cur.execute(
                 "INSERT INTO message_vcard (message_row_id, vcard) VALUES (?, ?)",
                 (msg_row_id, msg["vcard"]),
+            )
+
+        # Apply location metadata if present
+        if msg.get("location_info") and msg_row_id:
+            apply_location_record(conn, msg_row_id, msg["location_info"], schema_cache, logger)
+
+        # Apply poll creation metadata if present
+        if msg.get("poll_info") and msg_row_id:
+            apply_poll_creation(conn, msg_row_id, msg["poll_info"], schema_cache, logger)
+
+        # Apply reaction add-on if present
+        if msg.get("reaction_info"):
+            apply_reaction_record(
+                conn,
+                msg["reaction_info"],
+                sender_jid_row_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
+            )
+
+        # Apply pin-in-chat add-on if present
+        if msg.get("pin_info"):
+            apply_pin_in_chat(
+                conn,
+                msg["pin_info"],
+                sender_jid_row_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
+            )
+
+        # Apply protocol revoke or edit updates if present
+        if msg.get("revoke_info") or msg.get("edit_info"):
+            apply_protocol_record(
+                conn,
+                msg,
+                sender_jid_row_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
             )
 
     return inserted
@@ -974,7 +1662,9 @@ def apply_increment_folder(
         for df in sorted(del_msg_files):
             df_path = os.path.join(inc_dir, df)
             if os.path.isfile(df_path):
-                stats["messages_deleted"] += apply_message_deletions(conn, df_path, logger)
+                stats["messages_deleted"] += apply_message_deletions(
+                    conn, df_path, logger, schema_cache
+                )
 
         # Step 4: Protobuf message replay
         messages_bin_path = os.path.join(inc_dir, "messages.bin")

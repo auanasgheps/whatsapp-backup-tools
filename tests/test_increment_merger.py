@@ -36,8 +36,12 @@ def _build_field(field_num: int, wire_type: int, payload: bytes | int) -> bytes:
     tag_bytes = _encode_varint(tag)
     if wire_type == 0:
         return tag_bytes + _encode_varint(payload)
+    elif wire_type == 1:
+        return tag_bytes + payload
     elif wire_type == 2:
         return tag_bytes + _encode_varint(len(payload)) + payload
+    elif wire_type == 5:
+        return tag_bytes + payload
     raise ValueError(f"Unsupported wire type {wire_type}")
 
 
@@ -161,6 +165,251 @@ def test_decode_wmi_image():
     assert decoded["media_info"]["file_size"] == 54321
     assert decoded["media_info"]["file_sha256"] == sha
     assert decoded["media_info"]["mime_type"] == "image/jpeg"
+
+
+def test_decode_wmi_view_once_container():
+    sha = b"\xaa" * 32
+    img_bytes = (
+        _build_field(1, 2, b"https://example.com/vo.enc")
+        + _build_field(2, 2, b"image/jpeg")
+        + _build_field(3, 2, b"Secret View Once Photo")
+        + _build_field(4, 2, sha)
+        + _build_field(5, 0, 12345)
+    )
+    inner_msg = _build_field(3, 2, img_bytes)
+    vo_payload = _build_field(1, 2, inner_msg)
+    msg_bytes = _build_field(37, 2, vo_payload)  # tag 37: viewOnceMessage
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"VO_KEY_1")
+    )
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000100)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "VO_KEY_1"
+    assert decoded["is_view_once"] == 1
+    assert decoded["message_type"] == 42  # view once image
+    assert decoded["text_data"] == "Secret View Once Photo"
+    assert decoded["media_info"]["file_size"] == 12345
+
+
+def test_decode_wmi_ephemeral_container():
+    ext_bytes = _build_field(1, 2, b"Disappearing text message")
+    inner_msg = _build_field(6, 2, ext_bytes)
+    eph_payload = _build_field(1, 2, inner_msg)
+    msg_bytes = _build_field(40, 2, eph_payload)  # tag 40: ephemeralMessage
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"EPH_KEY_1")
+    )
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000200)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "EPH_KEY_1"
+    assert decoded["is_ephemeral"] == 1
+    assert decoded["text_data"] == "Disappearing text message"
+
+
+def test_decode_wmi_reaction_tag46():
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"PARENT_MSG_KEY_123")
+    )
+    reaction_bytes = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 2, "🔥".encode())
+        + _build_field(4, 0, 1729000300000)
+    )
+    msg_bytes = _build_field(46, 2, reaction_bytes)  # tag 46: reactionMessage
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"REACT_KEY_1")
+    )
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000300)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "REACT_KEY_1"
+    assert decoded["message_type"] == 25
+    assert decoded["text_data"] == "🔥"
+    assert decoded["reaction_info"] is not None
+    assert decoded["reaction_info"]["target_key_id"] == "PARENT_MSG_KEY_123"
+    assert decoded["reaction_info"]["emoji"] == "🔥"
+    assert decoded["reaction_info"]["sender_ts"] == 1729000300000
+
+
+def test_decode_wmi_location():
+    loc_bytes = (
+        _build_field(1, 1, struct.pack("<d", 37.7749))
+        + _build_field(2, 1, struct.pack("<d", -122.4194))
+        + _build_field(3, 2, b"Market Street")
+        + _build_field(4, 2, b"San Francisco, CA")
+    )
+    msg_bytes = _build_field(5, 2, loc_bytes)  # tag 5: locationMessage
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"LOC_KEY_1")
+    )
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000400)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "LOC_KEY_1"
+    assert decoded["message_type"] == 5
+    assert decoded["text_data"] == "Market Street"
+    assert decoded["location_info"] is not None
+    assert round(decoded["location_info"]["latitude"], 4) == 37.7749
+    assert round(decoded["location_info"]["longitude"], 4) == -122.4194
+    assert decoded["location_info"]["place_address"] == "San Francisco, CA"
+
+
+def test_decode_wmi_poll_creation():
+    opt1 = _build_field(1, 2, b"Option A")
+    opt2 = _build_field(1, 2, b"Option B")
+    poll_bytes = (
+        _build_field(2, 2, b"What is your choice?")
+        + _build_field(3, 2, opt1)
+        + _build_field(3, 2, opt2)
+        + _build_field(4, 0, 1)  # single choice
+    )
+    msg_bytes = _build_field(49, 2, poll_bytes)  # tag 49: pollCreationMessage
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"POLL_KEY_1")
+    )
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000500)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "POLL_KEY_1"
+    assert decoded["message_type"] == 66
+    assert decoded["text_data"] == "What is your choice?"
+    assert decoded["poll_info"] is not None
+    assert decoded["poll_info"]["question"] == "What is your choice?"
+    assert decoded["poll_info"]["options"] == ["Option A", "Option B"]
+    assert decoded["poll_info"]["selectable_count"] == 1
+
+
+def test_decode_wmi_pin_in_chat():
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"TARGET_PIN_KEY")
+    )
+    pin_bytes = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 1)  # pin
+        + _build_field(3, 0, 1729000600000)
+    )
+    msg_bytes = _build_field(63, 2, pin_bytes)  # tag 63: pinInChatMessage
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"PIN_KEY_1")
+    )
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000600)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "PIN_KEY_1"
+    assert decoded["pin_info"] is not None
+    assert decoded["pin_info"]["target_key_id"] == "TARGET_PIN_KEY"
+    assert decoded["pin_info"]["pin_state"] == 1
+
+
+def test_decode_wmi_ptv_video_note():
+    sha = b"\xbb" * 32
+    ptv_bytes = (
+        _build_field(1, 2, b"https://example.com/ptv.enc")
+        + _build_field(2, 2, b"video/mp4")
+        + _build_field(3, 2, sha)
+        + _build_field(4, 0, 88888)
+    )
+    msg_bytes = _build_field(66, 2, ptv_bytes)  # tag 66: ptvMessage
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"PTV_KEY_1")
+    )
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000700)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "PTV_KEY_1"
+    assert decoded["message_type"] == 28
+    assert decoded["media_info"] is not None
+    assert decoded["media_info"]["file_size"] == 88888
+
+
+def test_decode_wmi_protocol_revoke_and_edit():
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"TARGET_TO_REVOKE")
+    )
+    revoke_proto = _build_field(1, 2, target_key) + _build_field(2, 0, 0)
+    wmi_revoke = (
+        _build_field(1, 2, _build_field(3, 2, b"PROTO_REVOKE"))
+        + _build_field(2, 2, _build_field(12, 2, revoke_proto))
+        + _build_field(3, 0, 1729000800)
+    )
+    decoded_rev = increment_merger.decode_wmi(wmi_revoke)
+    assert decoded_rev["message_type"] == 15
+    assert decoded_rev["revoke_info"]["target_key_id"] == "TARGET_TO_REVOKE"
+
+    edit_inner = _build_field(1, 2, b"Updated Edited Text")
+    edit_proto = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)  # edit
+        + _build_field(10, 0, 1729000850000)
+        + _build_field(14, 2, edit_inner)
+    )
+    wmi_edit = (
+        _build_field(1, 2, _build_field(3, 2, b"PROTO_EDIT"))
+        + _build_field(2, 2, _build_field(12, 2, edit_proto))
+        + _build_field(3, 0, 1729000850)
+    )
+    decoded_edit = increment_merger.decode_wmi(wmi_edit)
+    assert decoded_edit["text_data"] == "Updated Edited Text"
+    assert decoded_edit["edit_info"]["target_key_id"] == "TARGET_TO_REVOKE"
+    assert decoded_edit["edit_info"]["new_text"] == "Updated Edited Text"
+    assert decoded_edit["edit_info"]["edited_ts"] == 1729000850000
 
 
 def test_read_delimited_messages_bin(tmp_path):
@@ -307,7 +556,7 @@ def test_apply_message_deletions(mock_db, tmp_path):
     del_json.write_text(json.dumps({"deleted_ids": [100]}))
 
     conn = sqlite3.connect(mock_db)
-    count = increment_merger.apply_message_deletions(conn, str(del_json), logger)
+    count = increment_merger.apply_message_deletions(conn, str(del_json), logger, None)
     conn.commit()
     assert count == 1
 
@@ -618,3 +867,318 @@ other_file.txt
     assert len(local_incs) == 2
     assert os.path.basename(local_incs[0]) == "msgstore-increment-1-2026-10-14.db.crypt15"
     assert os.path.basename(local_incs[1]) == "msgstore-increment-2-2026-10-15.db.crypt15"
+
+
+def test_apply_messages_bin_auxiliary_entities(tmp_path):
+    db_path = tmp_path / "test_aux.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT, server TEXT, raw_string TEXT);
+        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER);
+        CREATE TABLE message (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER NOT NULL,
+            message_type INTEGER NOT NULL,
+            text_data TEXT,
+            starred INTEGER DEFAULT 0,
+            status INTEGER DEFAULT 0
+        );
+        CREATE TABLE message_media (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            chat_row_id INTEGER NOT NULL,
+            file_path TEXT,
+            file_size INTEGER,
+            media_name TEXT,
+            message_url TEXT,
+            mime_type TEXT,
+            file_hash TEXT,
+            transferred INTEGER DEFAULT 1
+        );
+        CREATE TABLE message_add_on (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_message_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            sender_jid_row_id INTEGER,
+            status INTEGER DEFAULT 0,
+            message_add_on_type INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE message_add_on_reaction (
+            message_add_on_row_id INTEGER PRIMARY KEY,
+            reaction TEXT NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE message_add_on_pin_in_chat (
+            message_add_on_row_id INTEGER PRIMARY KEY,
+            pin_in_chat_state INTEGER NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE message_poll (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            selectable_options_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE message_poll_option (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            option_name TEXT NOT NULL,
+            vote_total INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE message_location (
+            message_row_id INTEGER PRIMARY KEY,
+            latitude REAL,
+            longitude REAL,
+            place_name TEXT,
+            place_address TEXT,
+            url TEXT,
+            live_location_share_duration INTEGER DEFAULT 0,
+            live_location_sequence_number INTEGER DEFAULT 0
+        );
+        CREATE TABLE message_edit_info (
+            message_row_id INTEGER PRIMARY KEY,
+            original_key_id TEXT NOT NULL,
+            edited_timestamp INTEGER NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+
+        INSERT INTO jid (user, server, raw_string) VALUES ('5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
+        INSERT INTO chat (jid_row_id) VALUES (1);
+        INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data)
+        VALUES (1, 1, 0, 'PARENT_KEY_1', 1, 1729000000000, 0, 'Original text before edit');
+    """)
+    conn.commit()
+
+    # 1. Build a reaction message targeting PARENT_KEY_1
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"PARENT_KEY_1")
+    )
+    reaction_bytes = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 2, "🚀".encode())
+        + _build_field(4, 0, 1729000100000)
+    )
+    wmi_react = (
+        _build_field(
+            1, 2, _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(3, 2, b"REACT_1")
+        )
+        + _build_field(2, 2, _build_field(46, 2, reaction_bytes))
+        + _build_field(3, 0, 1729000100)
+    )
+
+    # 2. Build a poll message
+    poll_bytes = (
+        _build_field(2, 2, b"Which framework?")
+        + _build_field(3, 2, _build_field(1, 2, b"React"))
+        + _build_field(3, 2, _build_field(1, 2, b"Vue"))
+        + _build_field(4, 0, 1)
+    )
+    wmi_poll = (
+        _build_field(
+            1, 2, _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(3, 2, b"POLL_1")
+        )
+        + _build_field(2, 2, _build_field(49, 2, poll_bytes))
+        + _build_field(3, 0, 1729000200)
+    )
+
+    # 3. Build a pin message targeting PARENT_KEY_1
+    pin_bytes = (
+        _build_field(1, 2, target_key) + _build_field(2, 0, 1) + _build_field(3, 0, 1729000300000)
+    )
+    wmi_pin = (
+        _build_field(
+            1, 2, _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(3, 2, b"PIN_1")
+        )
+        + _build_field(2, 2, _build_field(63, 2, pin_bytes))
+        + _build_field(3, 0, 1729000300)
+    )
+
+    # 4. Build a location message
+    loc_bytes = (
+        _build_field(1, 1, struct.pack("<d", 48.8584))
+        + _build_field(2, 1, struct.pack("<d", 2.2945))
+        + _build_field(3, 2, b"Eiffel Tower")
+        + _build_field(4, 2, b"Champ de Mars, Paris")
+    )
+    wmi_loc = (
+        _build_field(
+            1, 2, _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(3, 2, b"LOC_1")
+        )
+        + _build_field(2, 2, _build_field(5, 2, loc_bytes))
+        + _build_field(3, 0, 1729000400)
+    )
+
+    # 5. Build an edit message updating PARENT_KEY_1
+    edit_proto = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(10, 0, 1729000500000)
+        + _build_field(14, 2, _build_field(1, 2, b"Updated text via edit"))
+    )
+    wmi_edit = (
+        _build_field(
+            1, 2, _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(3, 2, b"EDIT_1")
+        )
+        + _build_field(2, 2, _build_field(12, 2, edit_proto))
+        + _build_field(3, 0, 1729000500)
+    )
+
+    # Write all to messages.bin
+    bin_path = str(tmp_path / "messages.bin")
+    frames = [wmi_react, wmi_poll, wmi_pin, wmi_loc, wmi_edit]
+    with open(bin_path, "wb") as f:
+        for wmi in frames:
+            f.write(_encode_varint(len(wmi)) + wmi)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 5
+
+    # Verify reaction in message_add_on & message_add_on_reaction
+    react_row = conn.execute(
+        "SELECT a.parent_message_row_id, r.reaction FROM message_add_on a "
+        "JOIN message_add_on_reaction r ON a._id = r.message_add_on_row_id "
+        "WHERE a.message_add_on_type = 1"
+    ).fetchone()
+    assert react_row is not None
+    assert react_row[0] == 1
+    assert react_row[1] == "🚀"
+
+    # Verify poll creation
+    poll_row = conn.execute(
+        "SELECT m.text_data, p.selectable_options_count FROM message m "
+        "JOIN message_poll p ON m._id = p.message_row_id WHERE m.key_id = 'POLL_1'"
+    ).fetchone()
+    assert poll_row is not None
+    assert poll_row[0] == "Which framework?"
+    assert poll_row[1] == 1
+
+    options = [
+        r[0]
+        for r in conn.execute(
+            "SELECT option_name FROM message_poll_option WHERE message_row_id = (SELECT _id FROM message WHERE key_id = 'POLL_1') ORDER BY _id"
+        ).fetchall()
+    ]
+    assert options == ["React", "Vue"]
+
+    # Verify pin
+    pin_row = conn.execute(
+        "SELECT a.parent_message_row_id, p.pin_in_chat_state FROM message_add_on a "
+        "JOIN message_add_on_pin_in_chat p ON a._id = p.message_add_on_row_id "
+        "WHERE a.message_add_on_type = 79"
+    ).fetchone()
+    assert pin_row is not None
+    assert pin_row[0] == 1
+    assert pin_row[1] == 1
+
+    # Verify location
+    loc_row = conn.execute(
+        "SELECT l.place_name, l.place_address FROM message_location l "
+        "JOIN message m ON l.message_row_id = m._id WHERE m.key_id = 'LOC_1'"
+    ).fetchone()
+    assert loc_row is not None
+    assert loc_row[0] == "Eiffel Tower"
+    assert loc_row[1] == "Champ de Mars, Paris"
+
+    # Verify edited message
+    edited_msg = conn.execute("SELECT text_data FROM message WHERE _id = 1").fetchone()
+    assert edited_msg[0] == "Updated text via edit"
+    edit_info_row = conn.execute(
+        "SELECT original_key_id FROM message_edit_info WHERE message_row_id = 1"
+    ).fetchone()
+    assert edit_info_row is not None
+    assert edit_info_row[0] == "PARENT_KEY_1"
+
+    conn.close()
+
+
+def test_cascading_message_deletions_auxiliary(tmp_path):
+    db_path = tmp_path / "test_cascade.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE message (_id INTEGER PRIMARY KEY, key_id TEXT);
+        CREATE TABLE message_media (message_row_id INTEGER);
+        CREATE TABLE message_add_on (_id INTEGER PRIMARY KEY, parent_message_row_id INTEGER);
+        CREATE TABLE message_add_on_reaction (message_add_on_row_id INTEGER);
+        CREATE TABLE message_add_on_pin_in_chat (message_add_on_row_id INTEGER);
+        CREATE TABLE message_poll (message_row_id INTEGER);
+        CREATE TABLE message_poll_option (message_row_id INTEGER);
+        CREATE TABLE message_location (message_row_id INTEGER);
+        CREATE TABLE message_edit_info (message_row_id INTEGER);
+
+        INSERT INTO message (_id, key_id) VALUES (42, 'DELETE_TARGET');
+        INSERT INTO message_media (message_row_id) VALUES (42);
+        INSERT INTO message_add_on (_id, parent_message_row_id) VALUES (10, 42);
+        INSERT INTO message_add_on_reaction (message_add_on_row_id) VALUES (10);
+        INSERT INTO message_add_on (_id, parent_message_row_id) VALUES (11, 42);
+        INSERT INTO message_add_on_pin_in_chat (message_add_on_row_id) VALUES (11);
+        INSERT INTO message_poll (message_row_id) VALUES (42);
+        INSERT INTO message_poll_option (message_row_id) VALUES (42);
+        INSERT INTO message_location (message_row_id) VALUES (42);
+        INSERT INTO message_edit_info (message_row_id) VALUES (42);
+    """)
+    conn.commit()
+
+    del_json = tmp_path / "deletedMessages_cascade.json"
+    del_json.write_text(json.dumps({"deleted_ids": [42]}))
+
+    schema_cache = {}
+    deleted = increment_merger.apply_message_deletions(conn, str(del_json), logger, schema_cache)
+    conn.commit()
+
+    assert deleted == 1
+    assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 42").fetchone()[0] == 0
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 42").fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_add_on WHERE parent_message_row_id = 42"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_add_on_reaction WHERE message_add_on_row_id = 10"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_add_on_pin_in_chat WHERE message_add_on_row_id = 11"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_poll WHERE message_row_id = 42").fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_poll_option WHERE message_row_id = 42"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_location WHERE message_row_id = 42").fetchone()[
+            0
+        ]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_edit_info WHERE message_row_id = 42").fetchone()[
+            0
+        ]
+        == 0
+    )
+
+    conn.close()
