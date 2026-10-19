@@ -237,6 +237,9 @@ def diff_and_extract_android(
 
     with contextlib.closing(sqlite3.connect(new_db_path)) as conn:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA cache_size = -64000")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA mmap_size = 268435456")
         conn.execute("ATTACH DATABASE ? AS old_db", (old_db_path,))
         conn.execute("ATTACH DATABASE ? AS arch", (archive_db_path,))
         _ensure_android_diff_indexes(conn)
@@ -336,7 +339,26 @@ def diff_and_extract_android(
             return []
 
         # 1. Identify missing messages (deleted on device)
-        sql_deleted = f"""
+        sql_check_deleted = """
+            SELECT m._id
+            FROM old_db.message m
+            WHERE m._id >= ? AND m._id < ? AND (
+                (
+                    m.key_id IS NOT NULL AND m.key_id != ''
+                    AND NOT EXISTS (SELECT 1 FROM message cur WHERE cur.key_id = m.key_id)
+                ) OR (
+                    (m.key_id IS NULL OR m.key_id = '')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM message cur
+                        WHERE cur.chat_row_id = m.chat_row_id
+                          AND cur.timestamp = m.timestamp
+                          AND cur.from_me = m.from_me
+                    )
+                )
+            )
+        """
+
+        sql_deleted_template = f"""
             SELECT
                 m._id AS msg_id,
                 COALESCE(NULLIF(m.key_id, ''), 'msg_' || m._id) AS stanza_id,
@@ -424,20 +446,7 @@ def diff_and_extract_android(
             {con_s_join}
             {con_sq_join}
             {ac_join}
-            WHERE m._id >= ? AND m._id < ? AND (
-                (
-                    m.key_id IS NOT NULL AND m.key_id != ''
-                    AND NOT EXISTS (SELECT 1 FROM message cur WHERE cur.key_id = m.key_id)
-                ) OR (
-                    (m.key_id IS NULL OR m.key_id = '')
-                    AND NOT EXISTS (
-                        SELECT 1 FROM message cur
-                        WHERE cur.chat_row_id = m.chat_row_id
-                          AND cur.timestamp = m.timestamp
-                          AND cur.from_me = m.from_me
-                    )
-                )
-            )
+            WHERE m._id IN ({{placeholders}})
         """
 
         # 2. Identify revoked messages ("Delete for everyone")
@@ -505,13 +514,22 @@ def diff_and_extract_android(
         try:
             for start_id in range(min_id, max_id + 1, chunk_size):
                 end_id = start_id + chunk_size
-                for r in conn.execute(sql_deleted, (start_id, end_id)):
-                    row_dict = dict(r)
-                    row_dict["preserved_at"] = now_iso
-                    row_dict["source_platform"] = "android"
-                    row_dict["reactions"] = None
-                    row_dict["participant_name"] = ""
-                    extracted_rows.append(row_dict)
+                chunk_deleted_ids = [
+                    r[0] for r in conn.execute(sql_check_deleted, (start_id, end_id)).fetchall()
+                ]
+                if chunk_deleted_ids:
+                    sub_chunk_size = 500
+                    for sc_idx in range(0, len(chunk_deleted_ids), sub_chunk_size):
+                        sub_ids = chunk_deleted_ids[sc_idx : sc_idx + sub_chunk_size]
+                        ph = ", ".join("?" for _ in sub_ids)
+                        hydrate_query = sql_deleted_template.format(placeholders=ph)
+                        for r in conn.execute(hydrate_query, sub_ids):
+                            row_dict = dict(r)
+                            row_dict["preserved_at"] = now_iso
+                            row_dict["source_platform"] = "android"
+                            row_dict["reactions"] = None
+                            row_dict["participant_name"] = ""
+                            extracted_rows.append(row_dict)
 
                 curr_progress = min(
                     old_count, int((min(end_id, max_id + 1) - min_id) / span * old_count)
@@ -573,6 +591,9 @@ def diff_and_extract_ios(
 
     with contextlib.closing(sqlite3.connect(new_db_path)) as conn:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA cache_size = -64000")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA mmap_size = 268435456")
         conn.execute("ATTACH DATABASE ? AS old_db", (old_db_path,))
         conn.execute("ATTACH DATABASE ? AS arch", (archive_db_path,))
         _ensure_ios_diff_indexes(conn)

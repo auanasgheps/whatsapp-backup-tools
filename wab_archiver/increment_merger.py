@@ -584,6 +584,7 @@ def apply_entity_modifications(
         )
         return 0
 
+    by_cols: dict[tuple[str, ...], list[list]] = {}
     count = 0
     for row_dict in rows:
         if not isinstance(row_dict, dict):
@@ -591,11 +592,17 @@ def apply_entity_modifications(
         filtered = {k: v for k, v in row_dict.items() if k in table_cols}
         if not filtered:
             continue
-        cols = list(filtered.keys())
-        placeholders = ", ".join("?" for _ in cols)
-        sql = f"INSERT OR REPLACE INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})"
-        cur.execute(sql, [filtered[c] for c in cols])
+        cols_tuple = tuple(sorted(filtered.keys()))
+        by_cols.setdefault(cols_tuple, []).append([filtered[c] for c in cols_tuple])
         count += 1
+
+    for cols_tuple, rows_values in by_cols.items():
+        placeholders = ", ".join("?" for _ in cols_tuple)
+        sql = (
+            f"INSERT OR REPLACE INTO {table_name} ({', '.join(cols_tuple)}) VALUES ({placeholders})"
+        )
+        cur.executemany(sql, rows_values)
+
     return count
 
 
@@ -758,6 +765,54 @@ def apply_messages_bin(
         if schema_cache is not None:
             schema_cache["message_vcard"] = {"exists"} if has_vcard_table else set()
 
+    # Fast batch deletion of conflicting messages by key_id
+    if "key_id" in msg_cols:
+        key_ids_to_delete = [msg["key_id"] for msg in messages if msg.get("key_id")]
+        chunk_size = 500
+        for i in range(0, len(key_ids_to_delete), chunk_size):
+            chunk = key_ids_to_delete[i : i + chunk_size]
+            placeholders = ", ".join("?" for _ in chunk)
+            cur.execute(f"DELETE FROM message WHERE key_id IN ({placeholders})", chunk)
+
+    # Pre-compute static message insert statement
+    static_msg_keys = [
+        "chat_row_id",
+        "from_me",
+        "key_id",
+        "sender_jid_row_id",
+        "timestamp",
+        "message_type",
+        "text_data",
+        "starred",
+        "status",
+    ]
+    target_msg_cols = [c for c in static_msg_keys if c in msg_cols]
+    msg_placeholders = ", ".join("?" for _ in target_msg_cols)
+    sql_insert_msg = (
+        f"INSERT INTO message ({', '.join(target_msg_cols)}) VALUES ({msg_placeholders})"
+    )
+
+    # Pre-compute static media insert statement if media table exists
+    sql_insert_media = None
+    target_media_cols: list[str] = []
+    if media_cols:
+        static_media_keys = [
+            "message_row_id",
+            "chat_row_id",
+            "file_path",
+            "file_size",
+            "media_name",
+            "message_url",
+            "mime_type",
+            "file_hash",
+            "transferred",
+        ]
+        target_media_cols = [c for c in static_media_keys if c in media_cols]
+        m_placeholders = ", ".join("?" for _ in target_media_cols)
+        sql_insert_media = (
+            f"INSERT INTO message_media ({', '.join(target_media_cols)}) VALUES ({m_placeholders})"
+        )
+
     inserted = 0
     for msg in messages:
         remote_jid = msg["remote_jid"]
@@ -775,14 +830,13 @@ def apply_messages_bin(
         else:
             sender_jid_row_id = chat_jid_row_id
 
-        # Delete conflicting previous message with same (chat_row_id, key_id, from_me)
-        if "chat_row_id" in msg_cols and "key_id" in msg_cols:
+        # Fallback delete for messages without key_id
+        if not msg.get("key_id") and "chat_row_id" in msg_cols:
             cur.execute(
-                "DELETE FROM message WHERE chat_row_id = ? AND key_id = ? AND from_me = ?",
-                (chat_row_id, msg["key_id"], msg["from_me"]),
+                "DELETE FROM message WHERE chat_row_id = ? AND timestamp = ? AND from_me = ?",
+                (chat_row_id, msg["timestamp"], msg["from_me"]),
             )
 
-        # Build column mapping for message insertion
         row_map = {
             "chat_row_id": chat_row_id,
             "from_me": msg["from_me"],
@@ -794,18 +848,12 @@ def apply_messages_bin(
             "starred": msg["starred"],
             "status": msg["status"],
         }
-        filtered_msg = {k: v for k, v in row_map.items() if k in msg_cols}
-        cols = list(filtered_msg.keys())
-        placeholders = ", ".join("?" for _ in cols)
-        cur.execute(
-            f"INSERT INTO message ({', '.join(cols)}) VALUES ({placeholders})",
-            [filtered_msg[c] for c in cols],
-        )
+        cur.execute(sql_insert_msg, [row_map[c] for c in target_msg_cols])
         msg_row_id = cur.lastrowid
         inserted += 1
 
         # Insert media record if present
-        if msg["media_info"] and media_cols:
+        if msg["media_info"] and sql_insert_media:
             media = msg["media_info"]
             file_hash_str = (
                 base64.b64encode(media["file_sha256"]).decode("ascii")
@@ -829,13 +877,7 @@ def apply_messages_bin(
                 "file_hash": file_hash_str,
                 "transferred": 1,
             }
-            filtered_media = {k: v for k, v in media_row_map.items() if k in media_cols}
-            m_cols = list(filtered_media.keys())
-            m_placeholders = ", ".join("?" for _ in m_cols)
-            cur.execute(
-                f"INSERT INTO message_media ({', '.join(m_cols)}) VALUES ({m_placeholders})",
-                [filtered_media[c] for c in m_cols],
-            )
+            cur.execute(sql_insert_media, [media_row_map[c] for c in target_media_cols])
 
         # Insert vcard record if present
         if msg["vcard"] and has_vcard_table:
@@ -982,9 +1024,31 @@ def merge_increments(
     schema_cache: dict[str, set[str]] = {}
 
     with contextlib.closing(sqlite3.connect(output_db_path)) as conn:
-        conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = OFF")
         conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA cache_size = -64000")
+        conn.execute("PRAGMA mmap_size = 268435456")
+
+        # Pre-warm JID and chat caches upfront to avoid N+1 queries during delta folding
+        cur = conn.cursor()
+        jid_cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+        has_raw_string = "raw_string" in jid_cols
+        jid_sql = (
+            "SELECT user, server, _id, raw_string FROM jid"
+            if has_raw_string
+            else "SELECT user, server, _id FROM jid"
+        )
+        for r in cur.execute(jid_sql).fetchall():
+            jid_cache[f"{r[0]}@{r[1]}"] = r[2]
+            jid_cache[r[0]] = r[2]
+            if has_raw_string and r[3]:
+                jid_cache[r[3]] = r[2]
+
+        chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+        if "jid_row_id" in chat_cols:
+            for r in cur.execute("SELECT jid_row_id, _id FROM chat").fetchall():
+                chat_cache[r[0]] = r[1]
 
         for idx, inc_path in enumerate(increment_paths):
             logger.info(
@@ -1005,8 +1069,9 @@ def merge_increments(
                 f"{stats['entity_modified']} entities modified."
             )
 
-        # Verification
-        integrity = conn.execute("PRAGMA integrity_check").fetchone()
+        # Restore synchronous mode and execute quick integrity check
+        conn.execute("PRAGMA synchronous = NORMAL")
+        integrity = conn.execute("PRAGMA quick_check").fetchone()
         if integrity is None or integrity[0] != "ok":
             raise RuntimeError(
                 f"Database integrity check failed after merging increments: {integrity}"
