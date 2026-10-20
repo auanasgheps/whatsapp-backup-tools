@@ -291,6 +291,13 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 }
             )
 
+    # Field 19: pushName
+    push_name = ""
+    if 19 in fields and fields[19]:
+        val = fields[19][0][1]
+        if isinstance(val, bytes):
+            push_name = val.decode("utf-8", errors="replace").strip()
+
     message_type = 0
     text_data = None
     media_info = None
@@ -791,7 +798,45 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         "is_ephemeral": is_ephemeral,
         "user_receipts": user_receipts,
         "quoted_info": quoted_info,
+        "push_name": push_name,
     }
+
+
+_VALID_JID_SERVERS = (
+    "s.whatsapp.net",
+    "g.us",
+    "lid",
+    "broadcast",
+    "newsletter",
+    "bot",
+    "temp",
+    "hosted",
+    "hosted.lid",
+    "status_me",
+    "lid_me",
+)
+
+
+def is_valid_jid_string(s: str) -> bool:
+    """Validate that a string conforms to a WhatsApp JID structure."""
+    if not isinstance(s, str) or not s or len(s) > 150:
+        return False
+    if any(ord(c) < 32 or ord(c) > 126 for c in s):
+        return False
+    if "@" in s:
+        user_part, server_part = s.split("@", 1)
+        if ":" in user_part:
+            user_part = user_part.split(":", 1)[0]
+        if not user_part:
+            return False
+        if server_part not in _VALID_JID_SERVERS and not server_part.endswith(
+            (".whatsapp.net", ".g.us")
+        ):
+            return False
+        if not re.match(r"^[a-zA-Z0-9_\-\.]+$", user_part):
+            return False
+        return True
+    return s == "0"
 
 
 def extract_messages_from_proto_frame(data: bytes) -> list[dict]:
@@ -799,7 +844,10 @@ def extract_messages_from_proto_frame(data: bytes) -> list[dict]:
     Extract a list of normalized message dicts from a single protobuf frame.
     Supports both HistorySync payloads and direct WebMessageInfo records.
     """
-    fields = parse_wire_fields(data)
+    try:
+        fields = parse_wire_fields(data)
+    except (ValueError, Exception):
+        return []
 
     # HistorySync: field 2 contains repeated conversations
     if 2 in fields:
@@ -808,7 +856,10 @@ def extract_messages_from_proto_frame(data: bytes) -> list[dict]:
             conv_bytes = conv_tuple[1]
             if not isinstance(conv_bytes, bytes):
                 continue
-            conv_fields = parse_wire_fields(conv_bytes)
+            try:
+                conv_fields = parse_wire_fields(conv_bytes)
+            except (ValueError, Exception):
+                continue
             conv_id = ""
             if 1 in conv_fields:
                 conv_id = conv_fields[1][0][1].decode("utf-8", errors="replace")
@@ -818,21 +869,33 @@ def extract_messages_from_proto_frame(data: bytes) -> list[dict]:
                 hsm_bytes = hsm_tuple[1]
                 if not isinstance(hsm_bytes, bytes):
                     continue
-                hsm_fields = parse_wire_fields(hsm_bytes)
+                try:
+                    hsm_fields = parse_wire_fields(hsm_bytes)
+                except (ValueError, Exception):
+                    continue
                 # WebMessageInfo is field 1 of HistorySyncMsg
                 for wmi_tuple in hsm_fields.get(1, []):
                     wmi_bytes = wmi_tuple[1]
                     if isinstance(wmi_bytes, bytes):
-                        msg = decode_wmi(wmi_bytes)
-                        if not msg["remote_jid"] and conv_id:
+                        try:
+                            msg = decode_wmi(wmi_bytes)
+                        except (ValueError, Exception):
+                            continue
+                        if not msg.get("remote_jid") and conv_id:
                             msg["remote_jid"] = conv_id
-                        results.append(msg)
+                        if is_valid_jid_string(msg.get("remote_jid", "")):
+                            results.append(msg)
         if results:
             return results
 
     # Direct WebMessageInfo: field 1 contains MessageKey
     if 1 in fields:
-        return [decode_wmi(data)]
+        try:
+            msg = decode_wmi(data)
+        except (ValueError, Exception):
+            return []
+        if msg and is_valid_jid_string(msg.get("remote_jid", "")):
+            return [msg]
 
     return []
 
@@ -1056,8 +1119,28 @@ def find_increment_files(search_dir: str, base_filename: str | None = None) -> l
     return filter_active_increments(entries, base_filename)
 
 
+_ENTITY_TABLE_PRIORITY: dict[str, int] = {
+    "props": 10,
+    "jid": 20,
+    "jid_map": 30,
+    "lid_display_name": 40,
+    "chat": 50,
+    "group_participant_user": 60,
+    "group_participants": 61,
+}
+
+
+def _entity_file_sort_key(filename: str) -> tuple[int, str]:
+    table = filename.split("_modified_")[0].split("_deleted_")[0]
+    return (_ENTITY_TABLE_PRIORITY.get(table, 100), filename)
+
+
 def apply_entity_modifications(
-    conn: sqlite3.Connection, table_name: str, modified_json_path: str, logger: logging.Logger
+    conn: sqlite3.Connection,
+    table_name: str,
+    modified_json_path: str,
+    logger: logging.Logger,
+    jid_id_map: dict[int, int] | None = None,
 ) -> int:
     """Upsert modified rows from an entity JSON file into SQLite table."""
     with open(modified_json_path, encoding="utf-8") as f:
@@ -1140,6 +1223,8 @@ def apply_entity_modifications(
                     set_clause = ", ".join(f"{c} = ?" for c in update_cols)
                     params = [filtered[c] for c in update_cols] + [jid_pk]
                     cur.execute(f"UPDATE jid SET {set_clause} WHERE _id = ?", params)
+                if jid_id_map is not None and "_id" in filtered:
+                    jid_id_map[filtered["_id"]] = jid_pk
             else:
                 id_used = (
                     cur.execute(
@@ -1156,20 +1241,34 @@ def apply_entity_modifications(
                 filtered_copy["user"] = u
                 sql = f"INSERT INTO jid ({', '.join(insert_cols)}) VALUES ({', '.join('?' for _ in insert_cols)})"
                 cur.execute(sql, [filtered_copy[c] for c in insert_cols])
+                new_id = cur.lastrowid
+                if jid_id_map is not None and "_id" in filtered:
+                    jid_id_map[filtered["_id"]] = new_id
             count += 1
             continue
 
         if table_name == "chat" and "jid_row_id" in filtered:
             # Chat is uniquely 1:1 with jid_row_id.
-            # Match by 'jid_row_id' or 'account_jid_row_id' to prevent foreign auto-increment _id collision.
+            # Map foreign jid_row_id through jid_id_map if phone IDs diverged.
+            raw_jid_id = filtered["jid_row_id"]
+            mapped_jid_id = jid_id_map.get(raw_jid_id, raw_jid_id) if jid_id_map else raw_jid_id
+
             existing_chat = cur.execute(
-                "SELECT _id FROM chat WHERE jid_row_id = ?", (filtered["jid_row_id"],)
+                "SELECT _id FROM chat WHERE jid_row_id = ?", (mapped_jid_id,)
             ).fetchone()
             if existing_chat is None and "account_jid_row_id" in table_cols:
-                existing_chat = cur.execute(
-                    "SELECT _id FROM chat WHERE account_jid_row_id = ?",
-                    (filtered["jid_row_id"],),
-                ).fetchone()
+                raw_acct_id = filtered.get("account_jid_row_id")
+                mapped_acct_id = (
+                    jid_id_map.get(raw_acct_id, raw_acct_id)
+                    if (jid_id_map and raw_acct_id)
+                    else raw_acct_id
+                )
+                if mapped_acct_id:
+                    existing_chat = cur.execute(
+                        "SELECT _id FROM chat WHERE account_jid_row_id = ? OR jid_row_id = ?",
+                        (mapped_acct_id, mapped_acct_id),
+                    ).fetchone()
+
             if existing_chat is not None:
                 chat_id = existing_chat[0]
                 update_cols = [c for c in filtered if c not in ("_id", "jid_row_id")]
@@ -1189,8 +1288,66 @@ def apply_entity_modifications(
                 insert_cols = (
                     [c for c in filtered if c != "_id"] if id_used else sorted(filtered.keys())
                 )
+                filtered_copy = dict(filtered)
+                filtered_copy["jid_row_id"] = mapped_jid_id
+                if "account_jid_row_id" in filtered_copy and jid_id_map:
+                    raw_a = filtered_copy["account_jid_row_id"]
+                    if raw_a in jid_id_map:
+                        filtered_copy["account_jid_row_id"] = jid_id_map[raw_a]
                 sql = f"INSERT INTO chat ({', '.join(insert_cols)}) VALUES ({', '.join('?' for _ in insert_cols)})"
-                cur.execute(sql, [filtered[c] for c in insert_cols])
+                cur.execute(sql, [filtered_copy[c] for c in insert_cols])
+            count += 1
+            continue
+
+        if table_name == "jid_map" and "lid_row_id" in filtered and "jid_row_id" in filtered:
+            raw_lid = filtered["lid_row_id"]
+            raw_jid = filtered["jid_row_id"]
+            mapped_lid = jid_id_map.get(raw_lid, raw_lid) if jid_id_map else raw_lid
+            mapped_jid = jid_id_map.get(raw_jid, raw_jid) if jid_id_map else raw_jid
+            filtered_copy = dict(filtered)
+            filtered_copy["lid_row_id"] = mapped_lid
+            filtered_copy["jid_row_id"] = mapped_jid
+            cols_tuple = tuple(sorted(filtered_copy.keys()))
+            placeholders = ", ".join("?" for _ in cols_tuple)
+            cur.execute(
+                f"INSERT OR IGNORE INTO jid_map ({', '.join(cols_tuple)}) VALUES ({placeholders})",
+                [filtered_copy[c] for c in cols_tuple],
+            )
+            count += 1
+            continue
+
+        if table_name == "lid_display_name" and "lid_row_id" in filtered:
+            raw_lid = filtered["lid_row_id"]
+            mapped_lid = jid_id_map.get(raw_lid, raw_lid) if jid_id_map else raw_lid
+            filtered_copy = dict(filtered)
+            filtered_copy["lid_row_id"] = mapped_lid
+            cols_tuple = tuple(sorted(filtered_copy.keys()))
+            placeholders = ", ".join("?" for _ in cols_tuple)
+            cur.execute(
+                f"INSERT OR REPLACE INTO lid_display_name ({', '.join(cols_tuple)}) VALUES ({placeholders})",
+                [filtered_copy[c] for c in cols_tuple],
+            )
+            count += 1
+            continue
+
+        if (
+            table_name == "group_participant_user"
+            and "group_jid_row_id" in filtered
+            and "user_jid_row_id" in filtered
+        ):
+            raw_g = filtered["group_jid_row_id"]
+            raw_u = filtered["user_jid_row_id"]
+            mapped_g = jid_id_map.get(raw_g, raw_g) if jid_id_map else raw_g
+            mapped_u = jid_id_map.get(raw_u, raw_u) if jid_id_map else raw_u
+            filtered_copy = dict(filtered)
+            filtered_copy["group_jid_row_id"] = mapped_g
+            filtered_copy["user_jid_row_id"] = mapped_u
+            cols_tuple = tuple(sorted(filtered_copy.keys()))
+            placeholders = ", ".join("?" for _ in cols_tuple)
+            cur.execute(
+                f"INSERT OR REPLACE INTO group_participant_user ({', '.join(cols_tuple)}) VALUES ({placeholders})",
+                [filtered_copy[c] for c in cols_tuple],
+            )
             count += 1
             continue
 
@@ -1667,6 +1824,10 @@ def resolve_or_create_jid(
     jid_cache: dict[str, int] | None,
 ) -> int:
     """Resolve a JID string to its jid._id primary key, creating it if absent."""
+    if not is_valid_jid_string(jid_str) and jid_str != "0":
+        logger.warning(f"Rejected invalid WhatsApp JID: {repr(jid_str)[:50]}")
+        raise ValueError(f"Invalid WhatsApp JID: {repr(jid_str)[:50]}")
+
     if jid_cache is not None and jid_str in jid_cache:
         return jid_cache[jid_str]
 
@@ -2217,19 +2378,20 @@ def apply_increment_folder(
     }
 
     with conn:
-        # Step 1: Auxiliary entity modifications
+        # Step 1: Auxiliary entity modifications sorted by foreign key dependency (DAG)
         mod_files = [
             fn for fn in os.listdir(inc_dir) if "_modified_" in fn and fn.endswith(".json")
         ]
-        for mf in sorted(mod_files):
+        jid_id_map: dict[int, int] = {}
+        for mf in sorted(mod_files, key=_entity_file_sort_key):
             table_name = mf.split("_modified_")[0]
             stats["entity_modified"] += apply_entity_modifications(
-                conn, table_name, os.path.join(inc_dir, mf), logger
+                conn, table_name, os.path.join(inc_dir, mf), logger, jid_id_map
             )
 
-        # Step 2: Auxiliary entity deletions
+        # Step 2: Auxiliary entity deletions sorted by foreign key dependency
         del_files = [fn for fn in os.listdir(inc_dir) if "_deleted_" in fn and fn.endswith(".json")]
-        for df in sorted(del_files):
+        for df in sorted(del_files, key=_entity_file_sort_key):
             table_name = df.split("_deleted_")[0]
             stats["entity_deleted"] += apply_entity_deletions(
                 conn, table_name, os.path.join(inc_dir, df), logger
