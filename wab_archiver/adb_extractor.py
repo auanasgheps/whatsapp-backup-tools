@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 
+from .increment_merger import filter_active_increments
 from .progress import ProgressReporter
 
 _MSGSTORE_PATH = (
@@ -253,8 +254,12 @@ def enumerate_remote_backup_files(
 
     lines = result.stdout.decode(errors="replace").splitlines()
     base_file = None
-    increments = []
+    rotated_base_candidates = []
+    remote_inc_candidates = []
     inc_pattern = re.compile(r"msgstore-increment-(\d+)")
+    rotated_base_pattern = re.compile(
+        r"^msgstore-(\d{4}-\d{2}-\d{2}(?:\.\d+)?)\.db\.crypt(?:14|15)$"
+    )
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -262,20 +267,29 @@ def enumerate_remote_backup_files(
             continue
         if line in ("msgstore.db.crypt15", "msgstore.db.crypt14"):
             base_file = f"{remote_dir}/{line}"
-        else:
-            m = inc_pattern.search(line)
-            if m and (line.endswith(".crypt15") or line.endswith(".crypt14")):
-                increments.append((int(m.group(1)), f"{remote_dir}/{line}"))
+        elif rotated_base_pattern.match(line):
+            rotated_base_candidates.append(f"{remote_dir}/{line}")
+        elif inc_pattern.search(line) and (line.endswith(".crypt15") or line.endswith(".crypt14")):
+            remote_inc_candidates.append(f"{remote_dir}/{line}")
 
-    increments.sort(key=lambda item: item[0])
-    sorted_inc_paths = [path for _, path in increments]
+    if base_file is None and rotated_base_candidates:
+        rotated_base_candidates.sort()
+        base_file = rotated_base_candidates[-1]
+
+    sorted_inc_paths = filter_active_increments(remote_inc_candidates, base_file)
+
+    if len(remote_inc_candidates) > len(sorted_inc_paths):
+        logger.info(
+            f"Filtered {len(remote_inc_candidates)} remote increments down to "
+            f"{len(sorted_inc_paths)} active generation increment(s)."
+        )
 
     if base_file is None:
         logger.warning(f"Base msgstore backup not found in {remote_dir}.")
     else:
         logger.info(
             f"Found base backup '{posixpath.basename(base_file)}' and "
-            f"{len(sorted_inc_paths)} incremental backup(s)."
+            f"{len(sorted_inc_paths)} active incremental backup(s)."
         )
 
     return base_file, sorted_inc_paths

@@ -1629,3 +1629,182 @@ def test_increment_merge_viewer_integration(tmp_path):
     receipt_data = resp_receipt.get_json()
     assert receipt_data["read_known"] is True
     assert receipt_data["read_ts"] is not None
+
+
+def test_filter_active_increments_multi_generation():
+    paths = [
+        "msgstore-increment-1-2026-10-09.1.db.crypt15",
+        "msgstore-increment-2-2026-10-09.1.db.crypt15",
+        "msgstore-increment-1-2026-10-16.1.db.crypt15",
+        "msgstore-increment-2-2026-10-16.1.db.crypt15",
+        "msgstore-increment-3-2026-10-16.1.db.crypt15",
+        "msgstore-increment-1.db.crypt15",
+    ]
+    filtered = increment_merger.filter_active_increments(paths, None)
+    assert filtered == [
+        "msgstore-increment-1-2026-10-16.1.db.crypt15",
+        "msgstore-increment-2-2026-10-16.1.db.crypt15",
+        "msgstore-increment-3-2026-10-16.1.db.crypt15",
+    ]
+
+
+def test_filter_active_increments_with_base_tag():
+    paths = [
+        "/remote/msgstore-increment-1-2026-10-09.1.db.crypt15",
+        "/remote/msgstore-increment-2-2026-10-09.1.db.crypt15",
+        "/remote/msgstore-increment-1-2026-10-16.1.db.crypt15",
+    ]
+    filtered = increment_merger.filter_active_increments(paths, "msgstore-2026-10-09.1.db.crypt15")
+    assert filtered == [
+        "/remote/msgstore-increment-1-2026-10-09.1.db.crypt15",
+        "/remote/msgstore-increment-2-2026-10-09.1.db.crypt15",
+    ]
+
+
+def test_apply_entity_modifications_props_unique_collision(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO props (_id, key, value) VALUES (1, 'k1', 'v1')")
+    cur.execute("INSERT INTO props (_id, key, value) VALUES (2, 'k2', 'v2')")
+    conn.commit()
+
+    # Modify k2 where the increment carries _id=1 (matching k1's _id on the base DB)
+    mod_json = tmp_path / "props_modified_collision.json"
+    mod_json.write_text(json.dumps([{"_id": 1, "key": "k2", "value": "updated_v2"}]))
+
+    count = increment_merger.apply_entity_modifications(conn, "props", str(mod_json), logger)
+    conn.commit()
+    assert count == 1
+
+    # Verify k2 was updated and k1 was preserved without UNIQUE constraint failure
+    rows = cur.execute("SELECT _id, key, value FROM props ORDER BY _id").fetchall()
+    assert rows == [(1, "k1", "v1"), (2, "k2", "updated_v2")]
+
+    # Insert a new key that carries an already-used _id
+    mod_json_new = tmp_path / "props_modified_new.json"
+    mod_json_new.write_text(json.dumps([{"_id": 1, "key": "k3", "value": "new_v3"}]))
+    count = increment_merger.apply_entity_modifications(conn, "props", str(mod_json_new), logger)
+    conn.commit()
+    assert count == 1
+
+    val = cur.execute("SELECT value FROM props WHERE key = 'k3'").fetchone()[0]
+    assert val == "new_v3"
+    conn.close()
+
+
+def test_apply_entity_deletions_props_by_key_string(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    conn.execute("INSERT INTO props (key, value) VALUES ('str_prop', 'temp')")
+    conn.commit()
+
+    del_json = tmp_path / "props_deleted_str.json"
+    del_json.write_text(json.dumps({"deleted_ids": ["str_prop"]}))
+
+    count = increment_merger.apply_entity_deletions(conn, "props", str(del_json), logger)
+    conn.commit()
+    assert count == 1
+    assert conn.execute("SELECT 1 FROM props WHERE key = 'str_prop'").fetchone() is None
+    conn.close()
+
+
+def test_apply_entity_modifications_chat_unique_jid(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (10, 100, 'Subject 10')")
+    cur.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (20, 200, 'Subject 20')")
+    conn.commit()
+
+    # Modify chat for jid_row_id=200 where incoming JSON carries _id=10
+    mod_json = tmp_path / "chat_modified_collision.json"
+    mod_json.write_text(
+        json.dumps([{"_id": 10, "jid_row_id": 200, "subject": "Subject 20 Updated"}])
+    )
+
+    count = increment_merger.apply_entity_modifications(conn, "chat", str(mod_json), logger)
+    conn.commit()
+    assert count == 1
+
+    chat_20 = cur.execute("SELECT _id, subject FROM chat WHERE jid_row_id = 200").fetchone()
+    assert chat_20 == (20, "Subject 20 Updated")
+    chat_10 = cur.execute("SELECT _id, subject FROM chat WHERE jid_row_id = 100").fetchone()
+    assert chat_10 == (10, "Subject 10")
+
+    # Now insert a new chat with jid_row_id=300 where incoming JSON carries conflicting _id=10
+    mod_json_new = tmp_path / "chat_modified_new.json"
+    mod_json_new.write_text(
+        json.dumps([{"_id": 10, "jid_row_id": 300, "subject": "Subject 30 New"}])
+    )
+    count_new = increment_merger.apply_entity_modifications(conn, "chat", str(mod_json_new), logger)
+    conn.commit()
+    assert count_new == 1
+
+    chat_30 = cur.execute("SELECT subject FROM chat WHERE jid_row_id = 300").fetchone()
+    assert chat_30 == ("Subject 30 New",)
+    conn.close()
+
+
+def test_adb_enumerate_multi_generation(monkeypatch):
+    from wab_archiver import adb_extractor
+
+    remote_ls_output = """
+msgstore-increment-1-2026-10-09.1.db.crypt15
+msgstore-increment-2-2026-10-09.1.db.crypt15
+msgstore-increment-1-2026-10-16.1.db.crypt15
+msgstore-increment-2-2026-10-16.1.db.crypt15
+msgstore-increment-3-2026-10-16.1.db.crypt15
+msgstore-increment-1.db.crypt15
+msgstore.db.crypt15
+msgstore-2026-10-09.1.db.crypt15
+msgstore-2026-10-16.1.db.crypt15
+"""
+
+    class MockCompletedProcess:
+        def __init__(self, stdout):
+            self.stdout = stdout.encode("utf-8")
+            self.returncode = 0
+
+    def mock_run_adb(cmd, log):
+        return MockCompletedProcess(remote_ls_output)
+
+    monkeypatch.setattr(adb_extractor, "_run_adb", mock_run_adb)
+
+    base_remote, inc_remotes = adb_extractor.enumerate_remote_backup_files(False, logger)
+    assert base_remote is not None
+    assert base_remote.endswith("msgstore.db.crypt15")
+    # Must only contain the 3 active increments from 2026-10-16.1
+    assert len(inc_remotes) == 3
+    assert [os.path.basename(p) for p in inc_remotes] == [
+        "msgstore-increment-1-2026-10-16.1.db.crypt15",
+        "msgstore-increment-2-2026-10-16.1.db.crypt15",
+        "msgstore-increment-3-2026-10-16.1.db.crypt15",
+    ]
+
+
+def test_adb_enumerate_rotated_base_fallback(monkeypatch):
+    from wab_archiver import adb_extractor
+
+    remote_ls_output = """
+msgstore-increment-1-2026-10-09.1.db.crypt15
+msgstore-increment-2-2026-10-09.1.db.crypt15
+msgstore-increment-1-2026-10-16.1.db.crypt15
+msgstore-2026-10-09.1.db.crypt15
+"""
+
+    class MockCompletedProcess:
+        def __init__(self, stdout):
+            self.stdout = stdout.encode("utf-8")
+            self.returncode = 0
+
+    def mock_run_adb(cmd, log):
+        return MockCompletedProcess(remote_ls_output)
+
+    monkeypatch.setattr(adb_extractor, "_run_adb", mock_run_adb)
+
+    base_remote, inc_remotes = adb_extractor.enumerate_remote_backup_files(False, logger)
+    assert base_remote is not None
+    assert base_remote.endswith("msgstore-2026-10-09.1.db.crypt15")
+    assert len(inc_remotes) == 2
+    assert [os.path.basename(p) for p in inc_remotes] == [
+        "msgstore-increment-1-2026-10-09.1.db.crypt15",
+        "msgstore-increment-2-2026-10-09.1.db.crypt15",
+    ]
