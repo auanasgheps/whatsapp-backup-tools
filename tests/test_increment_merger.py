@@ -1869,3 +1869,99 @@ def test_apply_messages_bin_unhides_chat(mock_db, tmp_path):
     hidden_val = conn.execute("SELECT hidden FROM chat WHERE _id = ?", (chat_id,)).fetchone()[0]
     assert hidden_val == 0
     conn.close()
+
+
+def test_resolve_or_create_jid_strips_device_suffix_and_reuses_primary(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    jid_cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    if "device" not in jid_cols:
+        conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
+        conn.commit()
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string, device) VALUES ('5551234', 's.whatsapp.net', '5551234@s.whatsapp.net', 0)"
+    )
+    primary_id = cur.lastrowid
+    conn.commit()
+
+    # Resolving wire JID with device suffix :0 should reuse canonical primary row
+    res_id = increment_merger.resolve_or_create_jid(conn, "5551234:0@s.whatsapp.net", logger, None)
+    assert res_id == primary_id
+
+    # Resolving new contact with device suffix :2 should insert canonical row with device = 0
+    res_new_id = increment_merger.resolve_or_create_jid(
+        conn, "5559876:2@s.whatsapp.net", logger, None
+    )
+    row = conn.execute(
+        "SELECT user, server, device, raw_string FROM jid WHERE _id = ?", (res_new_id,)
+    ).fetchone()
+    assert row[0] == "5559876"
+    assert row[1] == "s.whatsapp.net"
+    assert row[2] == 0
+    assert row[3] == "5559876@s.whatsapp.net"
+    conn.close()
+
+
+def test_apply_entity_modifications_jid_strips_device_suffix_and_deduplicates(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    jid_cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    if "device" not in jid_cols:
+        conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
+        conn.commit()
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string, device) VALUES ('5551234', 's.whatsapp.net', '5551234@s.whatsapp.net', 0)"
+    )
+    canonical_id = cur.lastrowid
+    conn.commit()
+
+    delta_file = tmp_path / "jid_modified_1.json"
+    delta_file.write_text(
+        json.dumps([{"_id": 999, "user": "5551234:0", "server": "s.whatsapp.net", "device": 0}]),
+        encoding="utf-8",
+    )
+
+    increment_merger.apply_entity_modifications(conn, "jid", str(delta_file), logger)
+    conn.commit()
+
+    # Row 999 should not have been inserted; canonical row should be preserved
+    rows = conn.execute("SELECT _id, user FROM jid WHERE user = '5551234'").fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == canonical_id
+    assert conn.execute("SELECT 1 FROM jid WHERE _id = 999").fetchone() is None
+    conn.close()
+
+
+def test_resolve_or_create_chat_reuses_active_phone_chat_from_jid_map(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+        conn.commit()
+    jid_cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    if "device" not in jid_cols:
+        conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
+        conn.commit()
+
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string, device) VALUES ('5551111', 's.whatsapp.net', '5551111@s.whatsapp.net', 0)"
+    )
+    phone_jid_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string, device) VALUES ('100200300', 'lid', '100200300@lid', 0)"
+    )
+    lid_jid_id = cur.lastrowid
+    conn.execute("CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER, jid_row_id INTEGER)")
+    conn.commit()
+    cur.execute(
+        "INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (?, ?)", (lid_jid_id, phone_jid_id)
+    )
+    cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 0)", (phone_jid_id,))
+    existing_chat_id = cur.lastrowid
+    conn.commit()
+
+    # Resolving chat for LID should reuse the active phone chat from jid_map
+    resolved_chat_id = increment_merger.resolve_or_create_chat(conn, lid_jid_id, logger, None)
+    assert resolved_chat_id == existing_chat_id
+    conn.close()

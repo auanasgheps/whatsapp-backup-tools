@@ -1834,6 +1834,15 @@ def _clear_fts_index(cache_conn: sqlite3.Connection):
     cache_conn.commit()
 
 
+def _clean_user_sql(col_expr: str) -> str:
+    """Return SQL expression stripping multi-device ':device' suffixes from a JID user string."""
+    return (
+        f"CASE WHEN INSTR({col_expr}, ':') > 0 "
+        f"THEN SUBSTR({col_expr}, 1, INSTR({col_expr}, ':') - 1) "
+        f"ELSE {col_expr} END"
+    )
+
+
 def _fts_android_chat(
     wa_conn: sqlite3.Connection,
     cache_conn: sqlite3.Connection,
@@ -1850,6 +1859,14 @@ def _fts_android_chat(
             SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
             FROM jid_map GROUP BY lid_row_id
         """)
+        chat_cols = {r["name"] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+        if "account_jid_row_id" in chat_cols:
+            wa_conn.execute("""
+                INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                SELECT jid_row_id, account_jid_row_id
+                FROM chat
+                WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
+            """)
     except sqlite3.OperationalError:
         pass
 
@@ -1857,8 +1874,18 @@ def _fts_android_chat(
         where = "WHERE CAST(m.chat_row_id AS TEXT) = ?"
         params = (chat_id,)
     else:
-        where = "WHERE c.subject IS NULL AND COALESCE(j_chat_real.user, j_chat.user, CAST(m.chat_row_id AS TEXT)) = ?"
-        params = (chat_id,)
+        clean_id = chat_id.split(":")[0] if ":" in chat_id else chat_id
+        where = (
+            "WHERE m.chat_row_id IN ("
+            "SELECT c._id FROM chat c "
+            "LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id "
+            "LEFT JOIN jid j_real ON j_real._id = jm_c.jid_row_id "
+            "LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id "
+            "WHERE ? IN ("
+            f"j_real.user, j_chat.user, {_clean_user_sql('j_real.user')}, {_clean_user_sql('j_chat.user')}, CAST(c._id AS TEXT)"
+            "))"
+        )
+        params = (clean_id,)
     has_poll_opt = wa_conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_poll_option'"
     ).fetchone()
@@ -1873,7 +1900,11 @@ def _fts_android_chat(
             m._id                                                    AS rowid,
             CASE
                 WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
-                ELSE COALESCE(j_chat_real.user, j_chat.user, CAST(m.chat_row_id AS TEXT))
+                ELSE COALESCE(
+                    {_clean_user_sql("j_chat_real.user")},
+                    {_clean_user_sql("j_chat.user")},
+                    CAST(m.chat_row_id AS TEXT)
+                )
             END                                                      AS chat_id,
             CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
             COALESCE(m.timestamp, 0)                                AS timestamp_ms,
@@ -2163,10 +2194,14 @@ _ANDROID_JID_MAP = """
     LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
 """
 
-_ANDROID_CHAT_ID = """
+_ANDROID_CHAT_ID = f"""
     CASE
         WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
-        ELSE COALESCE(j_chat_real.user, j_chat.user, CAST(m.chat_row_id AS TEXT))
+        ELSE COALESCE(
+            {_clean_user_sql("j_chat_real.user")},
+            {_clean_user_sql("j_chat.user")},
+            CAST(m.chat_row_id AS TEXT)
+        )
     END
 """
 
@@ -2378,7 +2413,18 @@ _IOS_IS_DOCUMENT_UNDOWNLOADED = (
 def _android_chat_filter(chat_id: str, chat_type: str) -> tuple[str, list]:
     if chat_type == "group":
         return "m.chat_row_id = CAST(? AS INTEGER)", [chat_id]
-    return "COALESCE(j_chat_real.user, j_chat.user) = ?", [chat_id]
+    clean_id = chat_id.split(":")[0] if ":" in chat_id else chat_id
+    pred = (
+        "m.chat_row_id IN ("
+        "SELECT c._id FROM chat c "
+        "LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id "
+        "LEFT JOIN jid j_real ON j_real._id = jm_c.jid_row_id "
+        "LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id "
+        "WHERE ? IN ("
+        f"j_real.user, j_chat.user, {_clean_user_sql('j_real.user')}, {_clean_user_sql('j_chat.user')}, CAST(c._id AS TEXT)"
+        "))"
+    )
+    return pred, [clean_id]
 
 
 def _ios_chat_filter(chat_id: str) -> tuple[str, list]:
@@ -2817,6 +2863,22 @@ def create_app(output_root: Path, rescan: bool = False):
                         SELECT jid_row_id, MIN(lid_row_id) AS lid_row_id
                         FROM jid_map GROUP BY jid_row_id
                     """)
+                    chat_cols = {
+                        r["name"] for r in conn.execute("PRAGMA table_info(chat)").fetchall()
+                    }
+                    if "account_jid_row_id" in chat_cols:
+                        conn.execute("""
+                            INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                            SELECT jid_row_id, account_jid_row_id
+                            FROM chat
+                            WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
+                        """)
+                        conn.execute("""
+                            INSERT OR IGNORE INTO _lid_map_resolved (jid_row_id, lid_row_id)
+                            SELECT account_jid_row_id, jid_row_id
+                            FROM chat
+                            WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
+                        """)
                 except sqlite3.OperationalError:
                     pass
             if source_type == "ios":
@@ -3575,9 +3637,9 @@ def create_app(output_root: Path, rescan: bool = False):
         COALESCE(
             NULLIF(con_s.display_name, ''),
             CASE WHEN COALESCE(j2.user, CASE WHEN NOT ({j_is_lid}) THEN j.user END) = '0' THEN 'WhatsApp' END,
-            CASE WHEN j2.user IS NOT NULL THEN '+' || j2.user END,
+            CASE WHEN j2.user IS NOT NULL THEN '+' || {_clean_user_sql("j2.user")} END,
             {ldn_sender_arm}
-            CASE WHEN NOT ({j_is_lid}) AND j.user IS NOT NULL THEN '+' || j.user END,
+            CASE WHEN NOT ({j_is_lid}) AND j.user IS NOT NULL THEN '+' || {_clean_user_sql("j.user")} END,
             ''
         )                                                            AS sender,
         m.from_me,
@@ -3618,9 +3680,9 @@ def create_app(output_root: Path, rescan: bool = False):
         CASE WHEN mq.from_me = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
-                 CASE WHEN jq2.user IS NOT NULL THEN '+' || jq2.user END,
+                 CASE WHEN jq2.user IS NOT NULL THEN '+' || {_clean_user_sql("jq2.user")} END,
                  {ldn_quoted_sender_arm}
-                 CASE WHEN NOT ({jq_is_lid}) AND jq.user IS NOT NULL THEN '+' || jq.user END,
+                 CASE WHEN NOT ({jq_is_lid}) AND jq.user IS NOT NULL THEN '+' || {_clean_user_sql("jq.user")} END,
                  '') END                                             AS quoted_sender,
         COALESCE(mq.timestamp, 0)                                    AS quoted_ts,
         {edit_is_edited_col}                                         AS is_edited,
@@ -3649,8 +3711,8 @@ def create_app(output_root: Path, rescan: bool = False):
     {ldn_select_joins}
     {ms_join}
     {edit_join}
-    LEFT JOIN arch.contacts con_s  ON con_s.number  = COALESCE(j2.user, j.user)
-    LEFT JOIN arch.contacts con_sq ON con_sq.number = COALESCE(jq2.user, jq.user)
+    LEFT JOIN arch.contacts con_s  ON con_s.number  = {_clean_user_sql("COALESCE(j2.user, j.user)")}
+    LEFT JOIN arch.contacts con_sq ON con_sq.number = {_clean_user_sql("COALESCE(jq2.user, jq.user)")}
     LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE(mm.file_path, 'vcard:' || m._id)
 """
 
@@ -3720,7 +3782,11 @@ def create_app(output_root: Path, rescan: bool = False):
             rows = conn.execute(f"""
                 SELECT
                     CASE WHEN c.subject IS NOT NULL THEN CAST(c._id AS TEXT)
-                         ELSE COALESCE(j_chat_real.user, j_chat.user, CAST(c._id AS TEXT))
+                         ELSE COALESCE(
+                             {_clean_user_sql("j_chat_real.user")},
+                             {_clean_user_sql("j_chat.user")},
+                             CAST(c._id AS TEXT)
+                         )
                     END                                                 AS id,
                     CASE WHEN c.subject IS NOT NULL THEN 'group'
                          ELSE 'contact' END                            AS type,
@@ -3730,7 +3796,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         con.folder,
                         grp.subject,
                         CASE WHEN COALESCE(j_chat_real.user, j_chat.user) IS NOT NULL
-                             THEN '+' || COALESCE(j_chat_real.user, j_chat.user)
+                             THEN '+' || {_clean_user_sql("COALESCE(j_chat_real.user, j_chat.user)")}
                              ELSE CAST(c._id AS TEXT) END
                     )                                                   AS display_name,
                     COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) AS newest_ts,
@@ -3744,16 +3810,16 @@ def create_app(output_root: Path, rescan: bool = False):
                     COALESCE(
                         NULLIF(con_s.display_name, ''),
                         CASE WHEN COALESCE(j_s_real.user, CASE WHEN NOT ({j_s_is_lid}) THEN j_s.user END) = '0' THEN 'WhatsApp' END,
-                        CASE WHEN j_s_real.user IS NOT NULL THEN '+' || j_s_real.user END,
+                        CASE WHEN j_s_real.user IS NOT NULL THEN '+' || {_clean_user_sql("j_s_real.user")} END,
                         {ldn_s_arm}
-                        CASE WHEN NOT ({j_s_is_lid}) AND j_s.user IS NOT NULL THEN '+' || j_s.user END,
+                        CASE WHEN NOT ({j_s_is_lid}) AND j_s.user IS NOT NULL THEN '+' || {_clean_user_sql("j_s.user")} END,
                         ''
                     )                                                   AS last_msg_sender
                 FROM chat c
                 LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
                 LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
                 LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
-                LEFT JOIN arch.contacts con ON con.number = COALESCE(j_chat_real.user, j_chat.user)
+                LEFT JOIN arch.contacts con ON con.number = {_clean_user_sql("COALESCE(j_chat_real.user, j_chat.user)")}
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(c._id AS TEXT)
                 LEFT JOIN message m ON m._id = COALESCE(
                     (
@@ -3781,7 +3847,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
                 {ldn_s_join}
                 LEFT JOIN jid j_s_real ON j_s_real._id = jm_s.jid_row_id
-                LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j_s_real.user, j_s.user)
+                LEFT JOIN arch.contacts con_s ON con_s.number = {_clean_user_sql("COALESCE(j_s_real.user, j_s.user)")}
                 {ms_chat_join}
                 WHERE (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90)))
                 ORDER BY COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) DESC
@@ -4905,7 +4971,7 @@ def create_app(output_root: Path, rescan: bool = False):
                            NULLIF(con_s.display_name, ''),
                            CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
                            CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
-                                THEN '+' || COALESCE(j2.user, j.user) END,
+                                THEN '+' || {_clean_user_sql("COALESCE(j2.user, j.user)")} END,
                            {ldn_rx_arm}
                            ''
                        ) AS name
@@ -4915,7 +4981,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = ao.sender_jid_row_id
                 LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
                 {ldn_rx_join}
-                LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)
+                LEFT JOIN arch.contacts con_s ON con_s.number = {_clean_user_sql("COALESCE(j2.user, j.user)")}
                 WHERE ao.parent_message_row_id = ?
             """,
                 (message_id,),
@@ -5122,7 +5188,7 @@ def create_app(output_root: Path, rescan: bool = False):
                                 NULLIF(con_s.display_name, ''),
                                 CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
                                 CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
-                                     THEN '+' || COALESCE(j2.user, j.user) END,
+                                     THEN '+' || {_clean_user_sql("COALESCE(j2.user, j.user)")} END,
                                 {ldn_rx_arm}
                                 ''
                             ) AS sender_name
@@ -5133,7 +5199,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = mao.sender_jid_row_id
                         LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
                         {ldn_rx_join}
-                        LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j2.user, j.user)
+                        LEFT JOIN arch.contacts con_s ON con_s.number = {_clean_user_sql("COALESCE(j2.user, j.user)")}
                         WHERE mao.parent_message_row_id = ? AND mao.message_add_on_type = 67
                         ORDER BY {order_expr}
                         """,
@@ -6115,15 +6181,15 @@ def create_app(output_root: Path, rescan: bool = False):
                                     prefix = f"{parts[0]}/{parts[1]}/"
                     else:
                         row = conn.execute(
-                            """
+                            f"""
                             SELECT con.folder
                             FROM chat c
                             LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
                             LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
                             LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
                             LEFT JOIN arch.contacts con ON (
-                                con.number = j_chat_real.user
-                                OR con.number = j_chat.user
+                                con.number = {_clean_user_sql("j_chat_real.user")}
+                                OR con.number = {_clean_user_sql("j_chat.user")}
                                 OR con.number = ?
                                 OR con.number = ?
                             )
@@ -6133,35 +6199,54 @@ def create_app(output_root: Path, rescan: bool = False):
                                   OR COALESCE(j_chat_real.user, j_chat.user) = ?
                                   OR j_chat.user = ?
                                   OR j_chat_real.user = ?
+                                  OR {_clean_user_sql("COALESCE(j_chat_real.user, j_chat.user)")} = ?
                               )
                             LIMIT 1
                             """,
-                            (chat_id, chat_id.lstrip("+"), chat_id, chat_id, chat_id, chat_id),
+                            (
+                                chat_id,
+                                chat_id.lstrip("+"),
+                                chat_id,
+                                chat_id,
+                                chat_id,
+                                chat_id,
+                                chat_id.split(":")[0],
+                            ),
                         ).fetchone()
                         if row and row["folder"]:
                             prefix = f"Contacts/{row['folder']}/"
                         else:
+                            clean_cid = chat_id.split(":")[0]
                             sample = conn.execute(
-                                """
+                                f"""
                                 SELECT ac.archive_path
                                 FROM message m
                                 JOIN message_media mm ON mm.message_row_id = m._id
-                                LEFT JOIN chat c ON c._id = m.chat_row_id
-                                LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
-                                LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
-                                LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
                                 JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
-                                WHERE c.subject IS NULL
-                                  AND (
-                                      c._id = CAST(? AS INTEGER)
-                                      OR COALESCE(j_chat_real.user, j_chat.user) = ?
-                                      OR j_chat.user = ?
-                                      OR j_chat_real.user = ?
-                                  )
-                                  AND ac.archive_path IS NOT NULL
+                                WHERE m.chat_row_id IN (
+                                    SELECT c._id FROM chat c
+                                    LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                                    LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
+                                    LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
+                                    WHERE c.subject IS NULL
+                                      AND (
+                                          c._id = CAST(? AS INTEGER)
+                                          OR ? IN (
+                                              j_chat_real.user, j_chat.user,
+                                              {_clean_user_sql("j_chat_real.user")},
+                                              {_clean_user_sql("j_chat.user")}
+                                          )
+                                          OR ? IN (
+                                              j_chat_real.user, j_chat.user,
+                                              {_clean_user_sql("j_chat_real.user")},
+                                              {_clean_user_sql("j_chat.user")}
+                                          )
+                                      )
+                                )
+                                AND ac.archive_path IS NOT NULL
                                 LIMIT 1
                                 """,
-                                (chat_id, chat_id, chat_id, chat_id),
+                                (chat_id, chat_id, clean_cid),
                             ).fetchone()
                             if sample and sample["archive_path"]:
                                 parts = sample["archive_path"].replace("\\", "/").split("/")
