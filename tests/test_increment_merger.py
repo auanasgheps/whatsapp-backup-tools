@@ -1640,8 +1640,26 @@ def test_filter_active_increments_multi_generation():
         "msgstore-increment-3-2026-10-16.1.db.crypt15",
         "msgstore-increment-1.db.crypt15",
     ]
+    # Undated active generation supersedes historical rotated dates
     filtered = increment_merger.filter_active_increments(paths, None)
     assert filtered == [
+        "msgstore-increment-1.db.crypt15",
+    ]
+
+    # Explicit base date tag matches its own historical generation
+    filtered_rotated = increment_merger.filter_active_increments(
+        paths, "msgstore-2026-10-16.1.db.crypt15"
+    )
+    assert filtered_rotated == [
+        "msgstore-increment-1-2026-10-16.1.db.crypt15",
+        "msgstore-increment-2-2026-10-16.1.db.crypt15",
+        "msgstore-increment-3-2026-10-16.1.db.crypt15",
+    ]
+
+    # Multiple dated generations without untagged files selects latest dated tag
+    dated_only = [p for p in paths if p != "msgstore-increment-1.db.crypt15"]
+    filtered_dated = increment_merger.filter_active_increments(dated_only, None)
+    assert filtered_dated == [
         "msgstore-increment-1-2026-10-16.1.db.crypt15",
         "msgstore-increment-2-2026-10-16.1.db.crypt15",
         "msgstore-increment-3-2026-10-16.1.db.crypt15",
@@ -1771,12 +1789,10 @@ msgstore-2026-10-16.1.db.crypt15
     base_remote, inc_remotes = adb_extractor.enumerate_remote_backup_files(False, logger)
     assert base_remote is not None
     assert base_remote.endswith("msgstore.db.crypt15")
-    # Must only contain the 3 active increments from 2026-10-16.1
-    assert len(inc_remotes) == 3
+    # Undated msgstore.db.crypt15 matches active untagged increment
+    assert len(inc_remotes) == 1
     assert [os.path.basename(p) for p in inc_remotes] == [
-        "msgstore-increment-1-2026-10-16.1.db.crypt15",
-        "msgstore-increment-2-2026-10-16.1.db.crypt15",
-        "msgstore-increment-3-2026-10-16.1.db.crypt15",
+        "msgstore-increment-1.db.crypt15",
     ]
 
 
@@ -1808,3 +1824,48 @@ msgstore-2026-10-09.1.db.crypt15
         "msgstore-increment-1-2026-10-09.1.db.crypt15",
         "msgstore-increment-2-2026-10-09.1.db.crypt15",
     ]
+
+
+def test_resolve_or_create_chat_populates_hidden_zero(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+        conn.commit()
+
+    chat_id = increment_merger.resolve_or_create_chat(conn, 999, logger, None)
+    conn.commit()
+    row = conn.execute("SELECT _id, hidden FROM chat WHERE _id = ?", (chat_id,)).fetchone()
+    assert row[1] == 0
+    conn.close()
+
+
+def test_apply_messages_bin_unhides_chat(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+        conn.commit()
+
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('5559999', 's.whatsapp.net', '5559999@s.whatsapp.net')"
+    )
+    jid_id = cur.lastrowid
+    cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 1)", (jid_id,))
+    chat_id = cur.lastrowid
+    conn.commit()
+
+    wmi = _build_text_wmi("5559999@s.whatsapp.net", "UNHIDE_MSG_1", "Hello there", 0, 1729001000)
+    frame = _build_history_sync_frame("5559999@s.whatsapp.net", [wmi])
+    bin_file = tmp_path / "unhide_msg.bin"
+    bin_file.write_bytes(frame)
+
+    inserted = increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
+    conn.commit()
+    assert inserted == 1
+
+    hidden_val = conn.execute("SELECT hidden FROM chat WHERE _id = ?", (chat_id,)).fetchone()[0]
+    assert hidden_val == 0
+    conn.close()

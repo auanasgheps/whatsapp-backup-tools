@@ -1007,17 +1007,24 @@ def filter_active_increments(paths: list[str], base_filename: str | None) -> lis
             candidate_base_tag = base_match.group(1)
             if candidate_base_tag in by_tag:
                 matched_base_tag = candidate_base_tag
+        else:
+            # Base filename has no date tag (e.g. msgstore.db.crypt15, msgstore.db)
+            # In WhatsApp's lifecycle, untagged increments ('') belong to the active untagged base.
+            if "" in by_tag:
+                matched_base_tag = ""
 
     if matched_base_tag is not None:
         selected = by_tag[matched_base_tag]
     elif has_duplicate_ids:
-        # Multiple generations detected.
-        # Prefer non-empty tags (e.g. '2026-10-16.1' over older '2026-10-09.1' or untagged '')
-        tagged_keys = [k for k in by_tag.keys() if k]
-        if tagged_keys:
-            latest_tag = max(tagged_keys)
-        else:
+        # Multiple generations detected without a matched base tag.
+        # In WhatsApp's lifecycle, undated files ('') represent the active live generation
+        # and supersede historical rotated dates.
+        # If no undated files exist, select the latest dated generation tag.
+        if "" in by_tag:
             latest_tag = ""
+        else:
+            tagged_keys = [k for k in by_tag.keys() if k]
+            latest_tag = max(tagged_keys) if tagged_keys else ""
         selected = by_tag[latest_tag]
     else:
         selected = [(inc_id, path) for inc_id, _, path in candidates]
@@ -1029,18 +1036,24 @@ def filter_active_increments(paths: list[str], base_filename: str | None) -> lis
     return [seen[inc_id] for inc_id in sorted(seen.keys())]
 
 
-def find_increment_files(search_dir: str) -> list[str]:
+def find_increment_files(search_dir: str, base_filename: str | None = None) -> list[str]:
     """Search a directory for files matching 'msgstore-increment-(\\d+)',
 
     excluding temporary swap artifacts, sorted by sequential integer index.
     If multiple backup generations exist (duplicate increment IDs across tags),
-    selects the latest active generation.
+    selects the generation that matches base_filename or the latest active generation.
     """
     if not os.path.isdir(search_dir):
         return []
 
     entries = [os.path.join(search_dir, e) for e in os.listdir(search_dir)]
-    return filter_active_increments(entries, None)
+    if base_filename is None:
+        for candidate in ("msgstore.db.crypt15", "msgstore.db.crypt14", "msgstore.db"):
+            candidate_path = os.path.join(search_dir, candidate)
+            if os.path.isfile(candidate_path):
+                base_filename = candidate_path
+                break
+    return filter_active_increments(entries, base_filename)
 
 
 def apply_entity_modifications(
@@ -1682,7 +1695,11 @@ def resolve_or_create_chat(
     except sqlite3.OperationalError:
         pass
 
-    cur.execute("INSERT INTO chat (jid_row_id) VALUES (?)", (jid_row_id,))
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" in cols:
+        cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 0)", (jid_row_id,))
+    else:
+        cur.execute("INSERT INTO chat (jid_row_id) VALUES (?)", (jid_row_id,))
     chat_id = int(cur.lastrowid)
     if chat_cache is not None:
         chat_cache[jid_row_id] = chat_id
@@ -1980,6 +1997,11 @@ def apply_messages_bin(
             cur.executemany(
                 "UPDATE chat SET sort_timestamp = MAX(COALESCE(sort_timestamp, 0), ?) WHERE _id = ?",
                 [(ts, cid) for cid, ts in max_ts_per_chat.items()],
+            )
+        if "hidden" in chat_cols:
+            cur.executemany(
+                "UPDATE chat SET hidden = 0 WHERE _id = ? AND (hidden IS NULL OR hidden = 1)",
+                [(cid,) for cid in max_ts_per_chat.keys()],
             )
         if "display_message_row_id" in chat_cols and max_display_msg_per_chat:
             cur.executemany(

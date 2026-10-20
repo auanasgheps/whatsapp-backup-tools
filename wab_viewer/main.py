@@ -3733,7 +3733,7 @@ def create_app(output_root: Path, rescan: bool = False):
                              THEN '+' || COALESCE(j_chat_real.user, j_chat.user)
                              ELSE CAST(c._id AS TEXT) END
                     )                                                   AS display_name,
-                    c.sort_timestamp                                    AS newest_ts,
+                    COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) AS newest_ts,
                     COALESCE(m.text_data, '')                          AS last_msg_preview,
                     COALESCE(m.message_type, 0)                        AS last_msg_type,
                     COALESCE(m.from_me, 0)                             AS last_msg_from_me,
@@ -3783,8 +3783,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j_s_real ON j_s_real._id = jm_s.jid_row_id
                 LEFT JOIN arch.contacts con_s ON con_s.number = COALESCE(j_s_real.user, j_s.user)
                 {ms_chat_join}
-                WHERE c.hidden = 0
-                ORDER BY c.sort_timestamp DESC
+                WHERE (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90)))
+                ORDER BY COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) DESC
             """).fetchall()
             seen_ids = set()
             deduped_rows = []
@@ -6282,7 +6282,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS type
                     FROM chat c
                     LEFT JOIN jid j ON j._id = c.jid_row_id
-                    WHERE c.hidden = 0
+                    WHERE (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90)))
                 """).fetchall()
                 total = wa_conn_bulk.execute("SELECT COUNT(*) FROM message").fetchone()[0]
             else:
