@@ -1161,10 +1161,15 @@ def apply_entity_modifications(
 
         if table_name == "chat" and "jid_row_id" in filtered:
             # Chat is uniquely 1:1 with jid_row_id.
-            # Match by 'jid_row_id' to prevent foreign auto-increment _id collision.
+            # Match by 'jid_row_id' or 'account_jid_row_id' to prevent foreign auto-increment _id collision.
             existing_chat = cur.execute(
                 "SELECT _id FROM chat WHERE jid_row_id = ?", (filtered["jid_row_id"],)
             ).fetchone()
+            if existing_chat is None and "account_jid_row_id" in table_cols:
+                existing_chat = cur.execute(
+                    "SELECT _id FROM chat WHERE account_jid_row_id = ?",
+                    (filtered["jid_row_id"],),
+                ).fetchone()
             if existing_chat is not None:
                 chat_id = existing_chat[0]
                 update_cols = [c for c in filtered if c not in ("_id", "jid_row_id")]
@@ -1732,41 +1737,37 @@ def resolve_or_create_chat(
         return chat_cache[jid_row_id]
 
     cur = conn.cursor()
-    # Check if this jid_row_id is mapped in jid_map to an existing active chat
-    try:
-        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'")
-        if cur.fetchone() is not None:
-            cur.execute(
-                """
-                SELECT c._id FROM chat c
-                JOIN jid_map jm ON jm.jid_row_id = c.jid_row_id
-                WHERE jm.lid_row_id = ? AND (c.hidden = 0 OR c.hidden IS NULL)
-                UNION
-                SELECT c._id FROM chat c
-                JOIN jid_map jm ON jm.lid_row_id = c.jid_row_id
-                WHERE jm.jid_row_id = ? AND (c.hidden = 0 OR c.hidden IS NULL)
-                LIMIT 1
-                """,
-                (jid_row_id, jid_row_id),
-            )
-            row = cur.fetchone()
-            if row is not None:
-                chat_id = int(row[0])
-                if chat_cache is not None:
-                    chat_cache[jid_row_id] = chat_id
-                return chat_id
-    except sqlite3.OperationalError:
-        pass
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    has_account_jid = "account_jid_row_id" in cols
+    has_hidden = "hidden" in cols
 
+    # 1. Direct match on chat.jid_row_id
     cur.execute("SELECT _id FROM chat WHERE jid_row_id = ?", (jid_row_id,))
     row = cur.fetchone()
     if row is not None:
         chat_id = int(row[0])
+        if has_hidden:
+            cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
         if chat_cache is not None:
             chat_cache[jid_row_id] = chat_id
         return chat_id
 
-    # Check fallback mapping to any existing chat row regardless of hidden
+    # 2. Match on chat.account_jid_row_id if available
+    if has_account_jid:
+        cur.execute(
+            "SELECT _id FROM chat WHERE account_jid_row_id = ? LIMIT 1",
+            (jid_row_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            chat_id = int(row[0])
+            if has_hidden:
+                cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
+            if chat_cache is not None:
+                chat_cache[jid_row_id] = chat_id
+            return chat_id
+
+    # 3. Check bidirectional mapping in jid_map
     try:
         cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'")
         if cur.fetchone() is not None:
@@ -1786,14 +1787,54 @@ def resolve_or_create_chat(
             row = cur.fetchone()
             if row is not None:
                 chat_id = int(row[0])
+                if has_hidden:
+                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
+                if has_account_jid:
+                    cur.execute(
+                        "UPDATE chat SET account_jid_row_id = ? WHERE _id = ? AND (account_jid_row_id IS NULL OR account_jid_row_id = 0)",
+                        (jid_row_id, chat_id),
+                    )
                 if chat_cache is not None:
                     chat_cache[jid_row_id] = chat_id
                 return chat_id
     except sqlite3.OperationalError:
         pass
 
-    cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
-    if "hidden" in cols:
+    # 4. Check lid_display_name matching to an existing chat with phone JID
+    try:
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'")
+        if cur.fetchone() is not None:
+            cur.execute(
+                "SELECT display_name FROM lid_display_name WHERE lid_row_id = ? AND display_name IS NOT NULL",
+                (jid_row_id,),
+            )
+            ldn_row = cur.fetchone()
+            if ldn_row and ldn_row[0]:
+                clean_digits = re.sub(r"\D", "", ldn_row[0])
+                if clean_digits and len(clean_digits) >= 8:
+                    cur.execute(
+                        "SELECT c._id FROM chat c JOIN jid j ON j._id = c.jid_row_id "
+                        "WHERE (j.user = ? OR j.user LIKE ?) LIMIT 1",
+                        (clean_digits, f"%{clean_digits}"),
+                    )
+                    chat_match = cur.fetchone()
+                    if chat_match is not None:
+                        chat_id = int(chat_match[0])
+                        if has_hidden:
+                            cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
+                        if has_account_jid:
+                            cur.execute(
+                                "UPDATE chat SET account_jid_row_id = ? WHERE _id = ? AND (account_jid_row_id IS NULL OR account_jid_row_id = 0)",
+                                (jid_row_id, chat_id),
+                            )
+                        if chat_cache is not None:
+                            chat_cache[jid_row_id] = chat_id
+                        return chat_id
+    except sqlite3.OperationalError:
+        pass
+
+    # 5. Insert new chat row
+    if has_hidden:
         cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 0)", (jid_row_id,))
     else:
         cur.execute("INSERT INTO chat (jid_row_id) VALUES (?)", (jid_row_id,))
