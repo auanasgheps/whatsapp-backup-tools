@@ -1116,6 +1116,49 @@ def apply_entity_modifications(
             count += 1
             continue
 
+        if table_name == "jid" and "user" in filtered and "server" in filtered:
+            raw_u = filtered["user"]
+            u = raw_u.split(":", 1)[0] if ":" in raw_u else raw_u
+            s = filtered["server"]
+            has_device = "device" in table_cols
+            if has_device:
+                existing_jid = cur.execute(
+                    "SELECT _id FROM jid WHERE user = ? AND server = ? "
+                    "ORDER BY CASE WHEN device IS NULL OR device = 0 THEN 0 ELSE 1 END, _id ASC LIMIT 1",
+                    (u, s),
+                ).fetchone()
+            else:
+                existing_jid = cur.execute(
+                    "SELECT _id FROM jid WHERE user = ? AND server = ? ORDER BY _id ASC LIMIT 1",
+                    (u, s),
+                ).fetchone()
+
+            if existing_jid is not None:
+                jid_pk = existing_jid[0]
+                update_cols = [c for c in filtered if c not in ("_id", "user", "server")]
+                if update_cols:
+                    set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+                    params = [filtered[c] for c in update_cols] + [jid_pk]
+                    cur.execute(f"UPDATE jid SET {set_clause} WHERE _id = ?", params)
+            else:
+                id_used = (
+                    cur.execute(
+                        "SELECT 1 FROM jid WHERE _id = ?", (filtered.get("_id"),)
+                    ).fetchone()
+                    is not None
+                    if "_id" in filtered
+                    else False
+                )
+                insert_cols = (
+                    [c for c in filtered if c != "_id"] if id_used else sorted(filtered.keys())
+                )
+                filtered_copy = dict(filtered)
+                filtered_copy["user"] = u
+                sql = f"INSERT INTO jid ({', '.join(insert_cols)}) VALUES ({', '.join('?' for _ in insert_cols)})"
+                cur.execute(sql, [filtered_copy[c] for c in insert_cols])
+            count += 1
+            continue
+
         if table_name == "chat" and "jid_row_id" in filtered:
             # Chat is uniquely 1:1 with jid_row_id.
             # Match by 'jid_row_id' to prevent foreign auto-increment _id collision.
@@ -1627,25 +1670,53 @@ def resolve_or_create_jid(
     else:
         user, server = jid_str, "s.whatsapp.net"
 
+    if ":" in user:
+        user = user.split(":", 1)[0]
+
+    canonical_jid = f"{user}@{server}"
+    if jid_cache is not None and canonical_jid in jid_cache:
+        cached_id = jid_cache[canonical_jid]
+        jid_cache[jid_str] = cached_id
+        return cached_id
+
     cur = conn.cursor()
-    cur.execute("SELECT _id FROM jid WHERE user = ? AND server = ?", (user, server))
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    has_device = "device" in cols
+    if has_device:
+        cur.execute(
+            "SELECT _id FROM jid WHERE user = ? AND server = ? "
+            "ORDER BY CASE WHEN device IS NULL OR device = 0 THEN 0 ELSE 1 END, _id ASC LIMIT 1",
+            (user, server),
+        )
+    else:
+        cur.execute(
+            "SELECT _id FROM jid WHERE user = ? AND server = ? ORDER BY _id ASC LIMIT 1",
+            (user, server),
+        )
     row = cur.fetchone()
     if row is not None:
         jid_id = int(row[0])
         if jid_cache is not None:
+            jid_cache[canonical_jid] = jid_id
             jid_cache[jid_str] = jid_id
         return jid_id
 
-    cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    insert_cols = ["user", "server"]
+    vals = [user, server]
     if "raw_string" in cols:
-        cur.execute(
-            "INSERT INTO jid (user, server, raw_string) VALUES (?, ?, ?)",
-            (user, server, jid_str),
-        )
-    else:
-        cur.execute("INSERT INTO jid (user, server) VALUES (?, ?)", (user, server))
+        insert_cols.append("raw_string")
+        vals.append(canonical_jid)
+    if "device" in cols:
+        insert_cols.append("device")
+        vals.append(0)
+
+    sql = (
+        f"INSERT INTO jid ({', '.join(insert_cols)}) VALUES ({', '.join('?' for _ in insert_cols)})"
+    )
+    cur.execute(sql, vals)
     jid_id = int(cur.lastrowid)
     if jid_cache is not None:
+        jid_cache[canonical_jid] = jid_id
         jid_cache[jid_str] = jid_id
     return jid_id
 
@@ -1661,6 +1732,32 @@ def resolve_or_create_chat(
         return chat_cache[jid_row_id]
 
     cur = conn.cursor()
+    # Check if this jid_row_id is mapped in jid_map to an existing active chat
+    try:
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'")
+        if cur.fetchone() is not None:
+            cur.execute(
+                """
+                SELECT c._id FROM chat c
+                JOIN jid_map jm ON jm.jid_row_id = c.jid_row_id
+                WHERE jm.lid_row_id = ? AND (c.hidden = 0 OR c.hidden IS NULL)
+                UNION
+                SELECT c._id FROM chat c
+                JOIN jid_map jm ON jm.lid_row_id = c.jid_row_id
+                WHERE jm.jid_row_id = ? AND (c.hidden = 0 OR c.hidden IS NULL)
+                LIMIT 1
+                """,
+                (jid_row_id, jid_row_id),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                chat_id = int(row[0])
+                if chat_cache is not None:
+                    chat_cache[jid_row_id] = chat_id
+                return chat_id
+    except sqlite3.OperationalError:
+        pass
+
     cur.execute("SELECT _id FROM chat WHERE jid_row_id = ?", (jid_row_id,))
     row = cur.fetchone()
     if row is not None:
@@ -1669,7 +1766,7 @@ def resolve_or_create_chat(
             chat_cache[jid_row_id] = chat_id
         return chat_id
 
-    # Check if this jid_row_id is mapped in jid_map to an existing chat
+    # Check fallback mapping to any existing chat row regardless of hidden
     try:
         cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'")
         if cur.fetchone() is not None:

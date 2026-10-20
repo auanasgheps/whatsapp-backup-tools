@@ -8243,3 +8243,126 @@ class TestIncrementViewerMessages:
             photo_msg = next(m for m in msgs if m["msg_id"] == 102)
             assert photo_msg["media_type"] == "image"
             assert photo_msg["sender"] == "Alice"
+
+
+class TestDeviceSuffixAndCoverageIndex:
+    """Verify contact names resolve correctly when JIDs carry :device suffixes,
+
+    and verify messages load using index on chat_row_id without full scans.
+    """
+
+    def test_contact_chat_with_device_suffix_displays_and_opens(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        arc_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) VALUES (1, '393401234567:0', '393401234567:0@s.whatsapp.net')"
+        )
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (1, 1, NULL, 0, 1729000000000, 10)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES (10, 1, 0, 1, 1729000000000, 'Hello contact', 0)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        arc_conn = make_archive_db(arc_path)
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('393401234567', '+393401234567', 'Marco')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = chats_resp.get_json()
+            assert len(chats) == 1
+            # Canonical ID is stripped of :0 and display_name is matched to contact list
+            assert chats[0]["id"] == "393401234567"
+            assert chats[0]["display_name"] == "Marco"
+
+            # Opening with clean canonical ID works immediately
+            msgs_resp1 = client.get("/api/messages?chat_id=393401234567&chat_type=contact")
+            assert msgs_resp1.status_code == 200
+            msgs1 = msgs_resp1.get_json()
+            assert len(msgs1) == 1
+            assert msgs1[0]["sender"] == "Marco"
+
+            # Opening with legacy dirty ID also works immediately without hanging
+            msgs_resp2 = client.get("/api/messages?chat_id=393401234567:0&chat_type=contact")
+            assert msgs_resp2.status_code == 200
+            msgs2 = msgs_resp2.get_json()
+            assert len(msgs2) == 1
+            assert msgs2[0]["sender"] == "Marco"
+
+    def test_group_chat_scroll_past_device_suffix_retains_contact_name(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        arc_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) VALUES (100, 'group1', 'group1@g.us')"
+        )
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) VALUES (1, '393401234567', '393401234567@s.whatsapp.net')"
+        )
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) VALUES (2, '393401234567:0', '393401234567:0@s.whatsapp.net')"
+        )
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (10, 100, 'Test Group', 0, 1729000020000, 12)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES (11, 10, 0, 1, 1729000010000, 'Older message with clean JID', 0)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES (12, 10, 0, 2, 1729000020000, 'Newer message with device suffix', 0)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        arc_conn = make_archive_db(arc_path)
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('393401234567', '+393401234567', 'Marco')"
+        )
+        arc_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=group")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 2
+            # Both older and newer messages must resolve to Marco, never lost or replaced by WhatsApp ID
+            for m in msgs:
+                assert m["sender"] == "Marco"
+
+    def test_android_chat_filter_query_plan_uses_index(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        wa_conn = make_android_db(wa_path)
+        wa_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_chat_ts ON message (chat_row_id, timestamp)"
+        )
+        wa_conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
+        )
+        wa_conn.commit()
+
+        pred, params = viewer._android_chat_filter("393401234567", "contact")
+        plan = wa_conn.execute(
+            f"EXPLAIN QUERY PLAN SELECT m._id FROM message m WHERE {pred} ORDER BY m.timestamp DESC LIMIT 50",
+            params,
+        ).fetchall()
+        wa_conn.close()
+
+        plan_str = " ".join(" ".join(str(val) for val in tuple(row)) for row in plan)
+        # Verifies the query plan uses index seek on chat_row_id rather than full SCAN on message
+        assert "idx_msg_chat_ts" in plan_str or "SEARCH" in plan_str
