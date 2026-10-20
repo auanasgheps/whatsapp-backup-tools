@@ -1900,7 +1900,7 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
         local_incs = []
         if os.path.isfile(args.msgstore):
             msgstore_dir = os.path.dirname(os.path.abspath(args.msgstore))
-            local_incs = increment_merger.find_increment_files(msgstore_dir)
+            local_incs = increment_merger.find_increment_files(msgstore_dir, args.msgstore)
             local_incs = [
                 f for f in local_incs if os.path.abspath(f) != os.path.abspath(args.msgstore)
             ]
