@@ -1153,7 +1153,7 @@ def apply_reaction_record(
     key_id: str,
     chat_row_id: int | None,
 ) -> None:
-    """Apply a reaction message add-on to the database."""
+    """Apply a reaction message add-on to the database, ensuring key_id satisfies NOT NULL constraints."""
     target_key_id = reaction_info.get("target_key_id", "")
     if not target_key_id:
         return
@@ -1253,7 +1253,7 @@ def apply_pin_in_chat(
     key_id: str,
     chat_row_id: int | None,
 ) -> None:
-    """Record a pin-in-chat add-on for a message."""
+    """Record a pin-in-chat add-on for a message, satisfying message_add_on NOT NULL constraints."""
     target_key_id = pin_info.get("target_key_id", "")
     if not target_key_id:
         return
@@ -1344,7 +1344,7 @@ def apply_protocol_record(
     logger: logging.Logger,
     chat_row_id: int | None,
 ) -> None:
-    """Apply protocol revoke or edit updates to an existing message."""
+    """Apply protocol revoke or edit updates to an existing message, recording edit add-ons."""
     cur = conn.cursor()
     if msg.get("revoke_info"):
         target_key = msg["revoke_info"].get("target_key_id", "")
@@ -1400,7 +1400,7 @@ def apply_message_deletions(
     logger: logging.Logger,
     schema_cache: dict[str, set[str]] | None,
 ) -> int:
-    """Delete messages and their associated auxiliary records listed in deletedMessages_*.json."""
+    """Delete messages and auxiliary records (media, add-ons, polls, quoted, receipts) in deletedMessages_*.json."""
     with open(deleted_json_path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -1610,7 +1610,7 @@ def apply_messages_bin(
     chat_cache: dict[int, int] | None,
     schema_cache: dict[str, set[str]] | None,
 ) -> int:
-    """Parse messages.bin and replay records into SQLite message and message_media."""
+    """Parse messages.bin and replay records into SQLite message, message_media, message_quoted, and add-ons."""
     messages = read_delimited_messages_bin(messages_bin_path)
     if not messages:
         return 0
