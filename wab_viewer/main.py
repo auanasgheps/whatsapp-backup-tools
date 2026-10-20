@@ -1907,33 +1907,28 @@ def _ensure_jid_map_resolved(
                 elif digits.startswith("0") and len(digits) > 8:
                     contacts_to_insert.append((digits[1:], disp, folder))
 
-        try:
-            jid_users = {
-                str(row[0]).split(":")[0].split(".")[0]
-                for row in conn.execute(
-                    "SELECT user FROM jid WHERE user IS NOT NULL AND user != ''"
-                ).fetchall()
-            }
-            for digits, disp, folder in list(contacts_to_insert):
-                if len(digits) >= 8:
-                    for ju in jid_users:
-                        if ju.isdigit() and len(ju) > len(digits) and ju.endswith(digits):
-                            contacts_to_insert.append((ju, disp, folder))
-                        elif (
-                            ju.isdigit()
-                            and len(digits) > len(ju)
-                            and len(ju) >= 8
-                            and digits.endswith(ju)
-                        ):
-                            contacts_to_insert.append((ju, disp, folder))
-        except sqlite3.OperationalError:
-            pass
-
         if contacts_to_insert:
             conn.executemany(
                 "INSERT OR IGNORE INTO _contacts_resolved (clean_number, display_name, folder) VALUES (?, ?, ?)",
                 contacts_to_insert,
             )
+
+        try:
+            # Suffix bridging: match international E.164 JIDs to national contact numbers
+            conn.execute("""
+                INSERT OR IGNORE INTO _contacts_resolved (clean_number, display_name, folder)
+                SELECT j.user, con.display_name, con.folder
+                FROM jid j
+                JOIN _contacts_resolved con ON (
+                    LENGTH(con.clean_number) >= 8
+                    AND LENGTH(j.user) > LENGTH(con.clean_number)
+                    AND j.user LIKE '%' || con.clean_number
+                )
+                WHERE (j.server = 's.whatsapp.net' OR j.server IS NULL)
+                  AND j.user IS NOT NULL
+            """)
+        except sqlite3.OperationalError:
+            pass
 
     # 2. Inspect available schema tables in conn
     try:
@@ -2137,19 +2132,31 @@ def _fts_android_chat(
         if has_poll_opt
         else ""
     )
+    jid_cols = {r["name"] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+    has_j_server = "server" in jid_cols
+    has_j_raw = "raw_string" in jid_cols
+    fts_group_parts = ["c.subject IS NOT NULL"]
+    if has_j_server:
+        fts_group_parts.append("j_chat.server = 'g.us'")
+    if has_j_raw:
+        fts_group_parts.append(
+            "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us')"
+        )
+    fts_is_group = " OR ".join(fts_group_parts)
+
     cursor = wa_conn.execute(
         f"""
         SELECT
             m._id                                                    AS rowid,
             CASE
-                WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
+                WHEN ({fts_is_group}) THEN CAST(m.chat_row_id AS TEXT)
                 ELSE COALESCE(
                     {_clean_user_sql("j_chat_real.user")},
                     {_clean_user_sql("j_chat.user")},
                     CAST(m.chat_row_id AS TEXT)
                 )
             END                                                      AS chat_id,
-            CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
+            CASE WHEN ({fts_is_group}) THEN 'group' ELSE 'contact' END AS chat_type,
             COALESCE(m.timestamp, 0)                                AS timestamp_ms,
             COALESCE(
                 CASE WHEN m.message_type = 66 THEN m.text_data {poll_opt_sql}
@@ -2468,7 +2475,7 @@ _ANDROID_JID_MAP = """
 
 _ANDROID_CHAT_ID = f"""
     CASE
-        WHEN c.subject IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
+        WHEN (j_chat.server = 'g.us' OR (j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us') OR c.subject IS NOT NULL) THEN CAST(m.chat_row_id AS TEXT)
         ELSE COALESCE(
             {_clean_user_sql("j_chat_real.user")},
             {_clean_user_sql("j_chat.user")},
@@ -2477,7 +2484,7 @@ _ANDROID_CHAT_ID = f"""
     END
 """
 
-_ANDROID_CHAT_TYPE = "CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END"
+_ANDROID_CHAT_TYPE = "CASE WHEN (j_chat.server = 'g.us' OR (j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us') OR c.subject IS NOT NULL) THEN 'group' ELSE 'contact' END"
 
 _ANDROID_SELECT = None
 
@@ -3882,12 +3889,32 @@ def create_app(output_root: Path, rescan: bool = False):
         else "0"
     )
 
+    group_cond_parts = ["c.subject IS NOT NULL"]
+    if has_jid_server:
+        group_cond_parts.append("j_chat.server = 'g.us'")
+    if has_jid_raw_string:
+        group_cond_parts.append(
+            "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us')"
+        )
+    is_group_chat_select = " OR ".join(group_cond_parts)
+    android_chat_id = f"""
+        CASE
+            WHEN ({is_group_chat_select}) THEN CAST(m.chat_row_id AS TEXT)
+            ELSE COALESCE(
+                {_clean_user_sql("j_chat_real.user")},
+                {_clean_user_sql("j_chat.user")},
+                CAST(m.chat_row_id AS TEXT)
+            )
+        END
+    """
+    android_chat_type = f"CASE WHEN ({is_group_chat_select}) THEN 'group' ELSE 'contact' END"
+
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
         {stanza_col_android}                                         AS stanza_id,
-        {_ANDROID_CHAT_ID}                                           AS chat_id,
-        {_ANDROID_CHAT_TYPE}                                         AS chat_type,
+        {android_chat_id}                                           AS chat_id,
+        {android_chat_type}                                         AS chat_type,
         COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
         COALESCE(
             NULLIF(con_s.display_name, ''),
@@ -4023,6 +4050,23 @@ def create_app(output_root: Path, rescan: bool = False):
 
         if source_type == "android":
             j_s_is_lid = "j_s.server = 'lid'" if has_jid_server else "0"
+            lid_c_parts = []
+            if has_jid_server:
+                lid_c_parts.append("j_chat.server = 'lid'")
+            if has_jid_raw_string:
+                lid_c_parts.append(
+                    "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@lid')"
+                )
+            j_c_is_lid = " OR ".join(lid_c_parts) if lid_c_parts else "0"
+
+            group_c_parts = ["c.subject IS NOT NULL"]
+            if has_jid_server:
+                group_c_parts.append("j_chat.server = 'g.us'")
+            if has_jid_raw_string:
+                group_c_parts.append(
+                    "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us')"
+                )
+            is_group_chat = " OR ".join(group_c_parts)
             ms_chat_col = "ms.action_type" if has_message_system else "NULL"
             ms_chat_join = (
                 "LEFT JOIN message_system ms ON ms.message_row_id = m._id"
@@ -4062,27 +4106,29 @@ def create_app(output_root: Path, rescan: bool = False):
             ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if has_lid_dn else ""
             rows = conn.execute(f"""
                 SELECT
-                    CASE WHEN c.subject IS NOT NULL THEN CAST(c._id AS TEXT)
+                    CASE WHEN {is_group_chat} THEN CAST(c._id AS TEXT)
                          ELSE COALESCE(
                              {_clean_user_sql("j_chat_real.user")},
                              {_clean_user_sql("j_chat.user")},
                              CAST(c._id AS TEXT)
                          )
                     END                                                 AS id,
-                    CASE WHEN c.subject IS NOT NULL THEN 'group'
+                    CASE WHEN {is_group_chat} THEN 'group'
                          ELSE 'contact' END                            AS type,
                     COALESCE(
+                        NULLIF(c.subject, ''),
+                        NULLIF(grp.subject, ''),
                         NULLIF(con.display_name, ''),
                         {con_ldn_arm}
                         CASE WHEN COALESCE(j_chat_real.user, j_chat.user) = '0' THEN 'WhatsApp' END,
                         con.folder,
                         {con_ldn_folder_arm}
-                        grp.subject,
                         {ldn_chat_name_arm}
                         {ldn_chat_user_arm}
-                        CASE WHEN COALESCE(j_chat_real.user, j_chat.user) IS NOT NULL
-                             THEN '+' || {_clean_user_sql("COALESCE(j_chat_real.user, j_chat.user)")}
-                             ELSE CAST(c._id AS TEXT) END
+                        CASE WHEN {is_group_chat} THEN 'Unknown Group (' || c._id || ')' END,
+                        CASE WHEN j_chat_real.user IS NOT NULL THEN '+' || {_clean_user_sql("j_chat_real.user")} END,
+                        CASE WHEN NOT ({j_c_is_lid}) AND j_chat.user IS NOT NULL THEN '+' || {_clean_user_sql("j_chat.user")} END,
+                        'Unknown Contact (' || c._id || ')'
                     )                                                   AS display_name,
                     COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) AS newest_ts,
                     COALESCE(m.text_data, '')                          AS last_msg_preview,
@@ -6715,12 +6761,23 @@ def create_app(output_root: Path, rescan: bool = False):
             wa_conn_bulk = sqlite3.connect(wa_db_path)
             wa_conn_bulk.row_factory = sqlite3.Row
             if source_type == "android":
-                chat_rows = wa_conn_bulk.execute("""
+                bulk_jid_cols = {
+                    r["name"] for r in wa_conn_bulk.execute("PRAGMA table_info(jid)").fetchall()
+                }
+                has_b_server = "server" in bulk_jid_cols
+                has_b_raw = "raw_string" in bulk_jid_cols
+                bulk_g_parts = ["c.subject IS NOT NULL"]
+                if has_b_server:
+                    bulk_g_parts.append("j.server = 'g.us'")
+                if has_b_raw:
+                    bulk_g_parts.append("(j.raw_string IS NOT NULL AND j.raw_string LIKE '%@g.us')")
+                bulk_is_group = " OR ".join(bulk_g_parts)
+                chat_rows = wa_conn_bulk.execute(f"""
                     SELECT
-                        CASE WHEN c.subject IS NOT NULL THEN CAST(c._id AS TEXT)
+                        CASE WHEN ({bulk_is_group}) THEN CAST(c._id AS TEXT)
                              ELSE COALESCE(j.user, CAST(c._id AS TEXT))
                         END AS id,
-                        CASE WHEN c.subject IS NOT NULL THEN 'group' ELSE 'contact' END AS type
+                        CASE WHEN ({bulk_is_group}) THEN 'group' ELSE 'contact' END AS type
                     FROM chat c
                     LEFT JOIN jid j ON j._id = c.jid_row_id
                     WHERE (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90)))

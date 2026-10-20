@@ -2113,3 +2113,125 @@ def test_apply_messages_bin_preserves_existing_media_file_path(mock_db, tmp_path
     # Local file_path must be preserved from the deleted old row
     assert msg_row[3] == "WhatsApp/Media/WhatsApp Images/IMG_001.jpg"
     conn.close()
+
+
+def test_is_valid_jid_string():
+    # Valid JIDs
+    assert increment_merger.is_valid_jid_string("5550100@s.whatsapp.net")
+    assert increment_merger.is_valid_jid_string("120363028374928192@g.us")
+    assert increment_merger.is_valid_jid_string("108394829384729@lid")
+    assert increment_merger.is_valid_jid_string("status@broadcast")
+    assert increment_merger.is_valid_jid_string("0@s.whatsapp.net")
+    assert increment_merger.is_valid_jid_string("12345:1@s.whatsapp.net")
+
+    # Invalid JIDs
+    assert not increment_merger.is_valid_jid_string(None)
+    assert not increment_merger.is_valid_jid_string("")
+    assert not increment_merger.is_valid_jid_string("not_a_jid")
+    assert not increment_merger.is_valid_jid_string("@s.whatsapp.net")
+    assert not increment_merger.is_valid_jid_string("5550100@")
+    assert not increment_merger.is_valid_jid_string("5550100@evil.com")
+    assert not increment_merger.is_valid_jid_string("555\x000100@s.whatsapp.net")
+    assert not increment_merger.is_valid_jid_string("\xff\xd8\xff\xe0@s.whatsapp.net")
+    assert not increment_merger.is_valid_jid_string("JFIF\x00\x01@s.whatsapp.net")
+
+
+def test_extract_messages_from_proto_frame_rejects_binary_junk():
+    # JPEG header starts with \xff\xd8\xff\xe0 and contains 0x0A (wire type 2, field 1)
+    fake_jpeg_header = (
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\x0a\x14Photoshop 3.0"
+    )
+    messages = increment_merger.extract_messages_from_proto_frame(fake_jpeg_header)
+    assert len(messages) == 0
+
+    # Arbitrary random noise
+    random_noise = b"\x0a\x05hello\x12\x05world\x00\xff\xee"
+    messages = increment_merger.extract_messages_from_proto_frame(random_noise)
+    assert len(messages) == 0
+
+
+def test_decode_wmi_extracts_push_name():
+    # Build WMI payload with field 19 (push_name)
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"KEY_WMI_PUSHNAME")
+    )
+    msg_bytes = _build_field(1, 2, b"Hello from push contact")
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000500)
+        + _build_field(19, 2, b"Alice Wonderland")
+    )
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded is not None
+    assert decoded["key_id"] == "KEY_WMI_PUSHNAME"
+    assert decoded["push_name"] == "Alice Wonderland"
+    assert decoded["text_data"] == "Hello from push contact"
+
+
+def test_apply_increment_folder_dag_order(mock_db, tmp_path):
+    # Test that apply_increment_folder processes jid before chat and resolves jid_id_map
+    inc_dir = tmp_path / "increment_1"
+    inc_dir.mkdir()
+
+    # jid_modified_1 introduces JID _id=50 (phone 5550200)
+    jid_data = [
+        {
+            "_id": 50,
+            "user": "5550200",
+            "server": "s.whatsapp.net",
+            "raw_string": "5550200@s.whatsapp.net",
+        }
+    ]
+    (inc_dir / "jid_modified_1.json").write_text(json.dumps(jid_data), encoding="utf-8")
+
+    # chat_modified_1 introduces chat with foreign jid_row_id=50
+    chat_data = [{"_id": 200, "jid_row_id": 50, "subject": "Test DAG Chat"}]
+    (inc_dir / "chat_modified_1.json").write_text(json.dumps(chat_data), encoding="utf-8")
+
+    conn = sqlite3.connect(mock_db)
+    inserted_msgs, receipts, reactions, pins, mod_counts = increment_merger.apply_increment_folder(
+        conn, str(inc_dir), logger, None, None, None
+    )
+    conn.commit()
+
+    cur = conn.cursor()
+    # Check that jid was inserted
+    jid_row = cur.execute("SELECT _id, user FROM jid WHERE user = '5550200'").fetchone()
+    assert jid_row is not None
+    local_jid_id = jid_row[0]
+
+    # Check that chat references the local jid _id, NOT foreign 50
+    chat_row = cur.execute(
+        "SELECT _id, jid_row_id, subject FROM chat WHERE subject = 'Test DAG Chat'"
+    ).fetchone()
+    assert chat_row is not None
+    assert chat_row[1] == local_jid_id
+    conn.close()
+
+
+def test_apply_entity_modifications_remaps_jid_row_id(mock_db, tmp_path):
+    # chat_modified with foreign jid_row_id=999
+    mod_json = tmp_path / "chat_modified_1.json"
+    mod_json.write_text(
+        json.dumps([{"_id": 300, "jid_row_id": 999, "subject": "Remapped Chat"}]),
+        encoding="utf-8",
+    )
+
+    jid_id_map = {999: 1}  # Map foreign 999 to existing mock_db JID 1
+    conn = sqlite3.connect(mock_db)
+    count = increment_merger.apply_entity_modifications(
+        conn, "chat", str(mod_json), logger, jid_id_map=jid_id_map
+    )
+    conn.commit()
+    assert count == 1
+
+    cur = conn.cursor()
+    chat_row = cur.execute(
+        "SELECT jid_row_id, subject FROM chat WHERE subject = 'Remapped Chat'"
+    ).fetchone()
+    assert chat_row is not None
+    assert chat_row[0] == 1  # Successfully remapped
+    conn.close()

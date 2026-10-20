@@ -8533,6 +8533,156 @@ class TestLidAndContactResolution:
             # Suffix bridging should match Marco National
             assert chats[0]["display_name"] == "Marco National"
 
+    def test_api_chats_group_resolves_chat_subject_from_msgstore(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            INSERT INTO jid VALUES (1, '120363028374928192', 'g.us', '120363028374928192@g.us');
+            INSERT INTO chat VALUES (10, 1, 'Project Team Alpha', 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, 'Welcome to the team', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        # Archive DB has NO entry in groups table for this group
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 1
+            chat = chats[0]
+            assert chat["type"] == "group"
+            assert chat["id"] == "10"
+            assert chat["display_name"] == "Project Team Alpha"
+
+    def test_api_chats_unmapped_lid_fallback_no_fake_phone(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            -- Unmapped LID: no entry in jid_map, no account_jid_row_id, no lid_display_name
+            INSERT INTO jid VALUES (1, '108394829384729', 'lid', '108394829384729@lid');
+            INSERT INTO chat VALUES (5, 1, NULL, 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 5, 0, 1, 1700000000000, 'Hey there', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 1
+            chat = chats[0]
+            assert chat["type"] == "contact"
+            # Must NOT be formatted as fake phone "+108394829384729"
+            assert not chat["display_name"].startswith("+108394829384729")
+            assert "Unknown Contact (5)" in chat["display_name"]
+
+    def test_api_chats_group_with_null_subject_retains_group_type(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            -- Group without subject
+            INSERT INTO jid VALUES (1, '120363999999999999', 'g.us', '120363999999999999@g.us');
+            INSERT INTO chat VALUES (20, 1, NULL, 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 20, 0, 1, 1700000000000, 'Group message', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 1
+            chat = chats[0]
+            assert chat["type"] == "group"
+            assert chat["id"] == "20"
+
 
 class TestAndroidHdAndMediaMatching:
     def test_android_hd_media_dedup_and_clean_sender(self, tmp_path):
