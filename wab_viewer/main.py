@@ -1843,6 +1843,261 @@ def _clean_user_sql(col_expr: str) -> str:
     )
 
 
+def _ensure_jid_map_resolved(
+    conn: sqlite3.Connection,
+    archive_conn: sqlite3.Connection | None,
+) -> None:
+    """Populate temporary lookup tables for resolved JIDs, LIDs, and contacts."""
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
+    )
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _lid_map_resolved (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
+    )
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _contacts_resolved (clean_number TEXT PRIMARY KEY, display_name TEXT, folder TEXT)"
+    )
+
+    # 1. Populate _contacts_resolved from attached arch.contacts or archive_conn
+    has_arch_contacts = False
+    try:
+        conn.execute("SELECT 1 FROM arch.contacts LIMIT 1")
+        has_arch_contacts = True
+    except sqlite3.OperationalError:
+        pass
+
+    if has_arch_contacts:
+        contacts_query_conn = conn
+        contacts_sql = "SELECT number, folder, display_name FROM arch.contacts"
+    elif archive_conn is not None:
+        contacts_query_conn = archive_conn
+        contacts_sql = "SELECT number, folder, display_name FROM contacts"
+    else:
+        contacts_query_conn = None
+        contacts_sql = ""
+
+    contact_rows = []
+    if contacts_query_conn is not None:
+        try:
+            contact_rows = contacts_query_conn.execute(contacts_sql).fetchall()
+        except sqlite3.OperationalError:
+            contact_rows = []
+
+    contacts_to_insert = []
+    if contact_rows:
+        for r in contact_rows:
+            raw_num = str(r[0] or "").strip()
+            folder = str(r[1] or "")
+            disp = str(r[2] or "")
+            if not raw_num:
+                continue
+            digits = re.sub(r"\D", "", raw_num)
+            if digits:
+                contacts_to_insert.append((digits, disp, folder))
+                clean_stripped = raw_num.lstrip("+").split(":")[0]
+                if clean_stripped != digits:
+                    contacts_to_insert.append((clean_stripped, disp, folder))
+                if digits.startswith("00"):
+                    contacts_to_insert.append((digits[2:], disp, folder))
+                elif digits.startswith("0") and len(digits) > 8:
+                    contacts_to_insert.append((digits[1:], disp, folder))
+
+        try:
+            jid_users = {
+                str(row[0]).split(":")[0]
+                for row in conn.execute(
+                    "SELECT user FROM jid WHERE user IS NOT NULL AND user != ''"
+                ).fetchall()
+            }
+            for digits, disp, folder in list(contacts_to_insert):
+                if len(digits) >= 8:
+                    for ju in jid_users:
+                        if ju.isdigit() and len(ju) > len(digits) and ju.endswith(digits):
+                            contacts_to_insert.append((ju, disp, folder))
+                        elif (
+                            ju.isdigit()
+                            and len(digits) > len(ju)
+                            and len(ju) >= 8
+                            and digits.endswith(ju)
+                        ):
+                            contacts_to_insert.append((ju, disp, folder))
+        except sqlite3.OperationalError:
+            pass
+
+        if contacts_to_insert:
+            conn.executemany(
+                "INSERT OR IGNORE INTO _contacts_resolved (clean_number, display_name, folder) VALUES (?, ?, ?)",
+                contacts_to_insert,
+            )
+
+    # 2. Inspect available schema tables in conn
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    except sqlite3.OperationalError:
+        return
+
+    jid_cols = (
+        {r["name"] for r in conn.execute("PRAGMA table_info(jid)").fetchall()}
+        if "jid" in tables
+        else set()
+    )
+    has_jid_server = "server" in jid_cols
+    has_jid_raw_string = "raw_string" in jid_cols
+    has_jid_map = "jid_map" in tables
+    has_chat = "chat" in tables
+    has_ldn = "lid_display_name" in tables
+    has_message = "message" in tables
+
+    # 3. Populate from jid_map
+    if has_jid_map:
+        try:
+            if has_jid_server:
+                conn.execute("""
+                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                    SELECT j_lid._id, j_phone._id
+                    FROM jid_map jm
+                    JOIN jid j1 ON j1._id = jm.lid_row_id
+                    JOIN jid j2 ON j2._id = jm.jid_row_id
+                    JOIN jid j_lid ON j_lid._id IN (j1._id, j2._id) AND j_lid.server = 'lid'
+                    JOIN jid j_phone ON j_phone._id IN (j1._id, j2._id) AND j_phone.server = 's.whatsapp.net'
+                """)
+            elif has_jid_raw_string:
+                conn.execute("""
+                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                    SELECT j_lid._id, j_phone._id
+                    FROM jid_map jm
+                    JOIN jid j1 ON j1._id = jm.lid_row_id
+                    JOIN jid j2 ON j2._id = jm.jid_row_id
+                    JOIN jid j_lid ON j_lid._id IN (j1._id, j2._id) AND j_lid.raw_string LIKE '%@lid'
+                    JOIN jid j_phone ON j_phone._id IN (j1._id, j2._id) AND j_phone.raw_string LIKE '%@s.whatsapp.net'
+                """)
+            conn.execute("""
+                INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                FROM jid_map GROUP BY lid_row_id
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+    # 4. Populate from chat.account_jid_row_id
+    if has_chat:
+        try:
+            chat_cols = {r["name"] for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
+            if "account_jid_row_id" in chat_cols:
+                if has_jid_server:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                        SELECT j_lid._id, j_phone._id
+                        FROM chat c
+                        JOIN jid j1 ON j1._id = c.jid_row_id
+                        JOIN jid j2 ON j2._id = c.account_jid_row_id
+                        JOIN jid j_lid ON j_lid._id IN (j1._id, j2._id) AND j_lid.server = 'lid'
+                        JOIN jid j_phone ON j_phone._id IN (j1._id, j2._id) AND j_phone.server = 's.whatsapp.net'
+                        WHERE c.account_jid_row_id IS NOT NULL AND c.account_jid_row_id != 0
+                    """)
+                elif has_jid_raw_string:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                        SELECT j_lid._id, j_phone._id
+                        FROM chat c
+                        JOIN jid j1 ON j1._id = c.jid_row_id
+                        JOIN jid j2 ON j2._id = c.account_jid_row_id
+                        JOIN jid j_lid ON j_lid._id IN (j1._id, j2._id) AND j_lid.raw_string LIKE '%@lid'
+                        JOIN jid j_phone ON j_phone._id IN (j1._id, j2._id) AND j_phone.raw_string LIKE '%@s.whatsapp.net'
+                        WHERE c.account_jid_row_id IS NOT NULL AND c.account_jid_row_id != 0
+                    """)
+                conn.execute("""
+                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                    SELECT jid_row_id, account_jid_row_id
+                    FROM chat
+                    WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
+                """)
+        except sqlite3.OperationalError:
+            pass
+
+    # 5. Populate from lid_display_name matching phone numbers or contacts
+    if has_ldn and "jid" in tables:
+        try:
+            phone_filter = (
+                "WHERE server = 's.whatsapp.net'"
+                if has_jid_server
+                else ("WHERE raw_string LIKE '%@s.whatsapp.net'" if has_jid_raw_string else "")
+            )
+            phone_jids = {
+                str(r[0]).split(":")[0]: r[1]
+                for r in conn.execute(
+                    f"SELECT user, _id FROM jid {phone_filter} WHERE user IS NOT NULL AND user != ''"
+                ).fetchall()
+            }
+            ldn_rows = conn.execute(
+                "SELECT lid_row_id, display_name FROM lid_display_name WHERE display_name IS NOT NULL AND display_name != ''"
+            ).fetchall()
+            ldn_mappings = []
+            for lid_id, d_name in ldn_rows:
+                d_digits = re.sub(r"\D", "", d_name)
+                if not d_digits:
+                    continue
+                if d_digits in phone_jids:
+                    ldn_mappings.append((lid_id, phone_jids[d_digits]))
+                elif len(d_digits) >= 8:
+                    for pu, p_id in phone_jids.items():
+                        if pu == d_digits or (
+                            len(pu) >= 8 and (pu.endswith(d_digits) or d_digits.endswith(pu))
+                        ):
+                            ldn_mappings.append((lid_id, p_id))
+                            break
+            if ldn_mappings:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id) VALUES (?, ?)",
+                    ldn_mappings,
+                )
+        except sqlite3.OperationalError:
+            pass
+
+    # 6. Populate from 1-to-1 message history
+    if has_message and has_chat and "jid" in tables:
+        try:
+            if has_jid_server:
+                conn.execute("""
+                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                    SELECT j_lid._id, j_phone._id
+                    FROM message m
+                    JOIN chat c ON c._id = m.chat_row_id AND c.subject IS NULL
+                    JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                    JOIN jid j_sender ON j_sender._id = m.sender_jid_row_id
+                    JOIN jid j_lid ON j_lid._id IN (j_chat._id, j_sender._id) AND j_lid.server = 'lid'
+                    JOIN jid j_phone ON j_phone._id IN (j_chat._id, j_sender._id) AND j_phone.server = 's.whatsapp.net'
+                    WHERE m.from_me = 0
+                """)
+            elif has_jid_raw_string:
+                conn.execute("""
+                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                    SELECT j_lid._id, j_phone._id
+                    FROM message m
+                    JOIN chat c ON c._id = m.chat_row_id AND c.subject IS NULL
+                    JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                    JOIN jid j_sender ON j_sender._id = m.sender_jid_row_id
+                    JOIN jid j_lid ON j_lid._id IN (j_chat._id, j_sender._id) AND j_lid.raw_string LIKE '%@lid'
+                    JOIN jid j_phone ON j_phone._id IN (j_chat._id, j_sender._id) AND j_phone.raw_string LIKE '%@s.whatsapp.net'
+                    WHERE m.from_me = 0
+                """)
+        except sqlite3.OperationalError:
+            pass
+
+    # 7. Mirror into _lid_map_resolved
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO _lid_map_resolved (jid_row_id, lid_row_id)
+            SELECT jid_row_id, lid_row_id
+            FROM _jid_map_resolved
+        """)
+    except sqlite3.OperationalError:
+        pass
+
+
 def _fts_android_chat(
     wa_conn: sqlite3.Connection,
     cache_conn: sqlite3.Connection,
@@ -1850,25 +2105,7 @@ def _fts_android_chat(
     chat_type: str,
     on_progress=None,
 ):
-    wa_conn.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
-    )
-    try:
-        wa_conn.execute("""
-            INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
-            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-            FROM jid_map GROUP BY lid_row_id
-        """)
-        chat_cols = {r["name"] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
-        if "account_jid_row_id" in chat_cols:
-            wa_conn.execute("""
-                INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
-                SELECT jid_row_id, account_jid_row_id
-                FROM chat
-                WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
-            """)
-    except sqlite3.OperationalError:
-        pass
+    _ensure_jid_map_resolved(wa_conn, None)
 
     if chat_type == "group":
         where = "WHERE CAST(m.chat_row_id AS TEXT) = ?"
@@ -2846,41 +3083,7 @@ def create_app(output_root: Path, rescan: bool = False):
             conn.execute("PRAGMA temp_store = MEMORY")
             conn.execute("ATTACH DATABASE ? AS arch", (str(archive_db_path),))
             if source_type == "android":
-                conn.execute(
-                    "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
-                )
-                conn.execute(
-                    "CREATE TEMP TABLE IF NOT EXISTS _lid_map_resolved (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
-                )
-                try:
-                    conn.execute("""
-                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
-                        SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                        FROM jid_map GROUP BY lid_row_id
-                    """)
-                    conn.execute("""
-                        INSERT OR IGNORE INTO _lid_map_resolved (jid_row_id, lid_row_id)
-                        SELECT jid_row_id, MIN(lid_row_id) AS lid_row_id
-                        FROM jid_map GROUP BY jid_row_id
-                    """)
-                    chat_cols = {
-                        r["name"] for r in conn.execute("PRAGMA table_info(chat)").fetchall()
-                    }
-                    if "account_jid_row_id" in chat_cols:
-                        conn.execute("""
-                            INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
-                            SELECT jid_row_id, account_jid_row_id
-                            FROM chat
-                            WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
-                        """)
-                        conn.execute("""
-                            INSERT OR IGNORE INTO _lid_map_resolved (jid_row_id, lid_row_id)
-                            SELECT account_jid_row_id, jid_row_id
-                            FROM chat
-                            WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
-                        """)
-                except sqlite3.OperationalError:
-                    pass
+                _ensure_jid_map_resolved(conn, _archive_conn)
             if source_type == "ios":
                 conn.execute(
                     "CREATE TEMP TABLE IF NOT EXISTS _ios_contacts (jid TEXT PRIMARY KEY, full_name TEXT, phone_number TEXT)"
@@ -3711,8 +3914,8 @@ def create_app(output_root: Path, rescan: bool = False):
     {ldn_select_joins}
     {ms_join}
     {edit_join}
-    LEFT JOIN arch.contacts con_s  ON con_s.number  = {_clean_user_sql("COALESCE(j2.user, j.user)")}
-    LEFT JOIN arch.contacts con_sq ON con_sq.number = {_clean_user_sql("COALESCE(jq2.user, jq.user)")}
+    LEFT JOIN _contacts_resolved con_s  ON con_s.clean_number  = {_clean_user_sql("COALESCE(j2.user, j.user)")}
+    LEFT JOIN _contacts_resolved con_sq ON con_sq.clean_number = {_clean_user_sql("COALESCE(jq2.user, jq.user)")}
     LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE(mm.file_path, 'vcard:' || m._id)
 """
 
@@ -3779,6 +3982,20 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_lid_dn
                 else ""
             )
+            ldn_c_join = (
+                "LEFT JOIN lid_display_name ldn_c ON ldn_c.lid_row_id = c.jid_row_id"
+                if has_lid_dn
+                else ""
+            )
+            con_ldn_join = (
+                f"LEFT JOIN _contacts_resolved con_ldn ON con_ldn.clean_number = {_clean_user_sql('ldn_c.display_name')}"
+                if has_lid_dn
+                else ""
+            )
+            con_ldn_arm = "NULLIF(con_ldn.display_name, '')," if has_lid_dn else ""
+            con_ldn_folder_arm = "con_ldn.folder," if has_lid_dn else ""
+            ldn_chat_name_arm = "NULLIF(ldn_c.display_name, '')," if has_lid_dn else ""
+            ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if has_lid_dn else ""
             rows = conn.execute(f"""
                 SELECT
                     CASE WHEN c.subject IS NOT NULL THEN CAST(c._id AS TEXT)
@@ -3792,9 +4009,13 @@ def create_app(output_root: Path, rescan: bool = False):
                          ELSE 'contact' END                            AS type,
                     COALESCE(
                         NULLIF(con.display_name, ''),
+                        {con_ldn_arm}
                         CASE WHEN COALESCE(j_chat_real.user, j_chat.user) = '0' THEN 'WhatsApp' END,
                         con.folder,
+                        {con_ldn_folder_arm}
                         grp.subject,
+                        {ldn_chat_name_arm}
+                        {ldn_chat_user_arm}
                         CASE WHEN COALESCE(j_chat_real.user, j_chat.user) IS NOT NULL
                              THEN '+' || {_clean_user_sql("COALESCE(j_chat_real.user, j_chat.user)")}
                              ELSE CAST(c._id AS TEXT) END
@@ -3819,7 +4040,9 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
                 LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
                 LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
-                LEFT JOIN arch.contacts con ON con.number = {_clean_user_sql("COALESCE(j_chat_real.user, j_chat.user)")}
+                {ldn_c_join}
+                LEFT JOIN _contacts_resolved con ON con.clean_number = {_clean_user_sql("COALESCE(j_chat_real.user, j_chat.user)")}
+                {con_ldn_join}
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(c._id AS TEXT)
                 LEFT JOIN message m ON m._id = COALESCE(
                     (
@@ -3847,7 +4070,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
                 {ldn_s_join}
                 LEFT JOIN jid j_s_real ON j_s_real._id = jm_s.jid_row_id
-                LEFT JOIN arch.contacts con_s ON con_s.number = {_clean_user_sql("COALESCE(j_s_real.user, j_s.user)")}
+                LEFT JOIN _contacts_resolved con_s ON con_s.clean_number = {_clean_user_sql("COALESCE(j_s_real.user, j_s.user)")}
                 {ms_chat_join}
                 WHERE (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90)))
                 ORDER BY COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) DESC

@@ -8366,3 +8366,169 @@ class TestDeviceSuffixAndCoverageIndex:
         plan_str = " ".join(" ".join(str(val) for val in tuple(row)) for row in plan)
         # Verifies the query plan uses index seek on chat_row_id rather than full SCAN on message
         assert "idx_msg_chat_ts" in plan_str or "SEARCH" in plan_str
+
+
+class TestLidAndContactResolution:
+    def test_api_chats_lid_resolves_contact_name_without_jid_map(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                account_jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            INSERT INTO jid VALUES (1, '103624838274932', 'lid', '103624838274932@lid');
+            INSERT INTO jid VALUES (2, '393401234567', 's.whatsapp.net', '393401234567@s.whatsapp.net');
+
+            -- Chat uses LID as jid_row_id, but account_jid_row_id links to phone JID. jid_map is EMPTY.
+            INSERT INTO chat VALUES (10, 1, 2, NULL, 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, 'Ciao!', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('393401234567', 'Marco Folder', 'Marco Rossi')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 1
+            assert chats[0]["id"] == "393401234567"
+            assert chats[0]["display_name"] == "Marco Rossi"
+
+    def test_api_chats_deduplicates_phone_and_lid_chats(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                account_jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            INSERT INTO jid VALUES (1, '103624838274932', 'lid', '103624838274932@lid');
+            INSERT INTO jid VALUES (2, '393401234567', 's.whatsapp.net', '393401234567@s.whatsapp.net');
+
+            -- Legacy phone chat (Chat 5) and newer LID chat (Chat 10)
+            INSERT INTO chat VALUES (5, 2, NULL, NULL, 0, 1600000000000, 1);
+            INSERT INTO message VALUES (1, 5, 0, 2, 1600000000000, 'Old message', 0);
+
+            INSERT INTO chat VALUES (10, 1, 2, NULL, 0, 1700000000000, 2);
+            INSERT INTO message VALUES (2, 10, 0, 1, 1700000000000, 'New message', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('393401234567', 'Marco Folder', 'Marco Rossi')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            # Must deduplicate into exactly 1 chat
+            assert len(chats) == 1
+            assert chats[0]["id"] == "393401234567"
+            assert chats[0]["display_name"] == "Marco Rossi"
+
+    def test_contacts_resolved_bridges_national_and_international(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            -- WhatsApp has international E.164: 393401234567
+            INSERT INTO jid VALUES (1, '393401234567', 's.whatsapp.net', '393401234567@s.whatsapp.net');
+            INSERT INTO chat VALUES (1, 1, NULL, 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 1, 0, 1, 1700000000000, 'Test', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        # Address book saved contact without international country code: '3401234567'
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('3401234567', 'Marco Folder', 'Marco National')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 1
+            # Suffix bridging should match Marco National
+            assert chats[0]["display_name"] == "Marco National"

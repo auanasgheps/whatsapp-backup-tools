@@ -1965,3 +1965,101 @@ def test_resolve_or_create_chat_reuses_active_phone_chat_from_jid_map(mock_db):
     resolved_chat_id = increment_merger.resolve_or_create_chat(conn, lid_jid_id, logger, None)
     assert resolved_chat_id == existing_chat_id
     conn.close()
+
+
+def test_resolve_or_create_chat_reuses_hidden_phone_chat_and_unhides(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+        conn.commit()
+
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('5552222', 's.whatsapp.net', '5552222@s.whatsapp.net')"
+    )
+    phone_jid_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('100200400', 'lid', '100200400@lid')"
+    )
+    lid_jid_id = cur.lastrowid
+    conn.execute("CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER, jid_row_id INTEGER)")
+    conn.commit()
+    cur.execute(
+        "INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (?, ?)", (lid_jid_id, phone_jid_id)
+    )
+    # Legacy phone chat marked hidden = 1 by WhatsApp
+    cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 1)", (phone_jid_id,))
+    existing_chat_id = cur.lastrowid
+    conn.commit()
+
+    resolved_chat_id = increment_merger.resolve_or_create_chat(conn, lid_jid_id, logger, None)
+    assert resolved_chat_id == existing_chat_id
+    # Chat must have been unhidden
+    hidden_val = conn.execute(
+        "SELECT hidden FROM chat WHERE _id = ?", (existing_chat_id,)
+    ).fetchone()[0]
+    assert hidden_val == 0
+    conn.close()
+
+
+def test_resolve_or_create_chat_reuses_via_account_jid_row_id(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "account_jid_row_id" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN account_jid_row_id INTEGER")
+        conn.commit()
+
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('5553333', 's.whatsapp.net', '5553333@s.whatsapp.net')"
+    )
+    phone_jid_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('100200500', 'lid', '100200500@lid')"
+    )
+    lid_jid_id = cur.lastrowid
+
+    # Existing chat has phone_jid_id as jid_row_id and lid_jid_id as account_jid_row_id
+    cur.execute(
+        "INSERT INTO chat (jid_row_id, account_jid_row_id) VALUES (?, ?)",
+        (phone_jid_id, lid_jid_id),
+    )
+    existing_chat_id = cur.lastrowid
+    conn.commit()
+
+    # Empty jid_map: resolution must succeed via account_jid_row_id
+    resolved_chat_id = increment_merger.resolve_or_create_chat(conn, lid_jid_id, logger, None)
+    assert resolved_chat_id == existing_chat_id
+    conn.close()
+
+
+def test_resolve_or_create_chat_reuses_via_lid_display_name(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS lid_display_name (lid_row_id INTEGER PRIMARY KEY, display_name TEXT, username TEXT)"
+    )
+    conn.commit()
+
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('393401234567', 's.whatsapp.net', '393401234567@s.whatsapp.net')"
+    )
+    phone_jid_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('100200600', 'lid', '100200600@lid')"
+    )
+    lid_jid_id = cur.lastrowid
+
+    cur.execute(
+        "INSERT INTO lid_display_name (lid_row_id, display_name) VALUES (?, '+39 340 123 4567')",
+        (lid_jid_id,),
+    )
+    cur.execute("INSERT INTO chat (jid_row_id) VALUES (?)", (phone_jid_id,))
+    existing_chat_id = cur.lastrowid
+    conn.commit()
+
+    # No jid_map entry: resolution must match phone JID via lid_display_name phone string
+    resolved_chat_id = increment_merger.resolve_or_create_chat(conn, lid_jid_id, logger, None)
+    assert resolved_chat_id == existing_chat_id
+    conn.close()
