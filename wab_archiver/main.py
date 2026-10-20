@@ -1906,6 +1906,10 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
             ]
 
         all_increments = staged_incs if staged_incs else local_incs
+        if all_increments:
+            all_increments = increment_merger.filter_active_increments(
+                all_increments, getattr(args, "msgstore", None)
+            )
 
         if not is_encrypted and not all_increments:
             return

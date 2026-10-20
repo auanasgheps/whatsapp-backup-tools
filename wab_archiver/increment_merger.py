@@ -961,34 +961,32 @@ def unpack_increment_archive(
 _INCREMENT_REGEX = re.compile(r"msgstore-increment-(\d+)(?:-([\d\.\-]+))?")
 
 
-def find_increment_files(search_dir: str) -> list[str]:
-    """
-    Search a directory for files matching 'msgstore-increment-(\\d+)',
-    excluding temporary swap artifacts, sorted by sequential integer index.
-    If multiple backup generations exist (duplicate increment IDs across tags),
-    selects the latest active generation.
-    """
-    if not os.path.isdir(search_dir):
-        return []
+def filter_active_increments(paths: list[str], base_filename: str | None) -> list[str]:
+    """Filter and sort increment paths belonging to the active backup generation.
 
+    If multiple backup cycles exist (e.g. duplicate increment IDs across different tags),
+    selects the generation that matches the base database or the latest active generation.
+    """
     pattern = re.compile(r"msgstore-increment-(\d+)(?:-([a-zA-Z0-9_\-\.]+?))?(?:\.db)?\.crypt\d+$")
     fallback_pattern = re.compile(r"msgstore-increment-(\d+)")
 
     candidates: list[tuple[int, str, str]] = []
-    for entry in os.listdir(search_dir):
+    for path in paths:
+        entry = os.path.basename(path.replace("\\", "/"))
         if entry.endswith(".old") or entry.endswith(".tmp") or entry.endswith(".incoming"):
             continue
         m = pattern.search(entry)
         if m:
-            candidates.append((int(m.group(1)), m.group(2) or "", os.path.join(search_dir, entry)))
+            candidates.append((int(m.group(1)), m.group(2) or "", path))
         else:
             m_fb = fallback_pattern.search(entry)
             if m_fb:
-                candidates.append((int(m_fb.group(1)), "", os.path.join(search_dir, entry)))
+                candidates.append((int(m_fb.group(1)), "", path))
 
     if not candidates:
         return []
 
+    # Check for duplicate IDs across candidates
     seen_ids: set[int] = set()
     has_duplicate_ids = False
     for inc_id, _, _ in candidates:
@@ -997,17 +995,52 @@ def find_increment_files(search_dir: str) -> list[str]:
             break
         seen_ids.add(inc_id)
 
-    if has_duplicate_ids:
-        by_tag: dict[str, list[tuple[int, str]]] = {}
-        for inc_id, tag, path in candidates:
-            by_tag.setdefault(tag, []).append((inc_id, path))
-        latest_tag = max(by_tag.keys())
+    by_tag: dict[str, list[tuple[int, str]]] = {}
+    for inc_id, tag, path in candidates:
+        by_tag.setdefault(tag, []).append((inc_id, path))
+
+    matched_base_tag: str | None = None
+    if base_filename:
+        base_entry = os.path.basename(base_filename.replace("\\", "/"))
+        base_match = re.search(r"msgstore-([a-zA-Z0-9_\-\.]+?)(?:\.db)?\.crypt\d+$", base_entry)
+        if base_match:
+            candidate_base_tag = base_match.group(1)
+            if candidate_base_tag in by_tag:
+                matched_base_tag = candidate_base_tag
+
+    if matched_base_tag is not None:
+        selected = by_tag[matched_base_tag]
+    elif has_duplicate_ids:
+        # Multiple generations detected.
+        # Prefer non-empty tags (e.g. '2026-10-16.1' over older '2026-10-09.1' or untagged '')
+        tagged_keys = [k for k in by_tag.keys() if k]
+        if tagged_keys:
+            latest_tag = max(tagged_keys)
+        else:
+            latest_tag = ""
         selected = by_tag[latest_tag]
     else:
         selected = [(inc_id, path) for inc_id, _, path in candidates]
 
-    selected.sort(key=lambda item: item[0])
-    return [path for _, path in selected]
+    # Deduplicate by inc_id if any duplicates remain in selected
+    seen: dict[int, str] = {}
+    for inc_id, path in selected:
+        seen[inc_id] = path
+    return [seen[inc_id] for inc_id in sorted(seen.keys())]
+
+
+def find_increment_files(search_dir: str) -> list[str]:
+    """Search a directory for files matching 'msgstore-increment-(\\d+)',
+
+    excluding temporary swap artifacts, sorted by sequential integer index.
+    If multiple backup generations exist (duplicate increment IDs across tags),
+    selects the latest active generation.
+    """
+    if not os.path.isdir(search_dir):
+        return []
+
+    entries = [os.path.join(search_dir, e) for e in os.listdir(search_dir)]
+    return filter_active_increments(entries, None)
 
 
 def apply_entity_modifications(
@@ -1047,6 +1080,57 @@ def apply_entity_modifications(
             continue
         filtered = {k: v for k, v in row_dict.items() if k in table_cols}
         if not filtered:
+            continue
+
+        if table_name == "props" and "key" in filtered:
+            # Props is a key-value entity whose natural identifier is 'key'.
+            # Match by 'key' rather than autoincrement '_id' to avoid UNIQUE constraint
+            # collisions when phone-local _id sequence numbers diverge from target DB.
+            val_cols = [c for c in filtered if c not in ("_id", "key")]
+            prop_exists = bool(
+                cur.execute("SELECT 1 FROM props WHERE key = ?", (filtered["key"],)).fetchone()
+            )
+            if prop_exists:
+                if val_cols:
+                    set_clause = ", ".join(f"{c} = ?" for c in val_cols)
+                    params = [filtered[c] for c in val_cols] + [filtered["key"]]
+                    cur.execute(f"UPDATE props SET {set_clause} WHERE key = ?", params)
+            else:
+                insert_cols = ["key"] + val_cols
+                placeholders = ", ".join("?" for _ in insert_cols)
+                sql = f"INSERT INTO props ({', '.join(insert_cols)}) VALUES ({placeholders})"
+                cur.execute(sql, [filtered[c] for c in insert_cols])
+            count += 1
+            continue
+
+        if table_name == "chat" and "jid_row_id" in filtered:
+            # Chat is uniquely 1:1 with jid_row_id.
+            # Match by 'jid_row_id' to prevent foreign auto-increment _id collision.
+            existing_chat = cur.execute(
+                "SELECT _id FROM chat WHERE jid_row_id = ?", (filtered["jid_row_id"],)
+            ).fetchone()
+            if existing_chat is not None:
+                chat_id = existing_chat[0]
+                update_cols = [c for c in filtered if c not in ("_id", "jid_row_id")]
+                if update_cols:
+                    set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+                    params = [filtered[c] for c in update_cols] + [chat_id]
+                    cur.execute(f"UPDATE chat SET {set_clause} WHERE _id = ?", params)
+            else:
+                id_used = (
+                    cur.execute(
+                        "SELECT 1 FROM chat WHERE _id = ?", (filtered.get("_id"),)
+                    ).fetchone()
+                    is not None
+                    if "_id" in filtered
+                    else False
+                )
+                insert_cols = (
+                    [c for c in filtered if c != "_id"] if id_used else sorted(filtered.keys())
+                )
+                sql = f"INSERT INTO chat ({', '.join(insert_cols)}) VALUES ({', '.join('?' for _ in insert_cols)})"
+                cur.execute(sql, [filtered[c] for c in insert_cols])
+            count += 1
             continue
 
         # Check if row has a single primary key and already exists in table
@@ -1096,6 +1180,9 @@ def apply_entity_deletions(
         return 0
 
     pk_col = next((r[1] for r in col_info if r[5] > 0), "_id")
+    if table_name == "props" and any(isinstance(x, str) for x in ids):
+        pk_col = "key"
+
     deleted_count = 0
     chunk_size = 500
     for i in range(0, len(ids), chunk_size):
@@ -2106,6 +2193,10 @@ def merge_increments(
                 f"-{stats['messages_deleted']} deleted, "
                 f"{stats['entity_modified']} entities modified."
             )
+
+        # Step 6: Rebuild database indexes after all increments are applied, matching vendor MessageStoreBackupUtils/reindex
+        logger.info("Rebuilding database indexes (REINDEX)...")
+        conn.execute("REINDEX")
 
         # Restore synchronous mode and execute quick integrity check
         conn.execute("PRAGMA synchronous = NORMAL")
