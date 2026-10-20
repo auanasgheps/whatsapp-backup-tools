@@ -1645,8 +1645,9 @@
   let archiveViewActive = false;
   let currentGalleryItems = [];
   let activeTypes = new Set();   // empty = show all; populated = show only those types
-  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
-  const SECONDARY_TYPES = new Set(['link', 'document']);  // hidden by default, toggle exclusive
+  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type or sticker
+  const SECONDARY_TYPES = new Set(['link', 'document']);  // non-media types, fetched separately
+  const DEFAULT_DESELECTED_TYPES = new Set(['sticker', 'link', 'document']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
   let galleryLoadingMore = false;
   let galleryBackfillGen = 0;
@@ -2240,10 +2241,11 @@
         if (!d) continue;
         stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
       }
-      // secondary types (links, documents) are hidden by default
-      const hasSecondary = typeOrder.some(t => SECONDARY_TYPES.has(t) && counts.by_type[t]);
-      if (hasSecondary) {
-        typeOrder.filter(t => !SECONDARY_TYPES.has(t) && counts.by_type[t]).forEach(t => activeTypes.add(t));
+      // secondary types (links, documents) and stickers are hidden by default
+      const hasDeselected = typeOrder.some(t => DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
+      const defaultTypes = typeOrder.filter(t => !DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
+      if (hasDeselected && defaultTypes.length > 0) {
+        defaultTypes.forEach(t => activeTypes.add(t));
         defaultActiveTypes = new Set(activeTypes);
       } else {
         defaultActiveTypes = new Set();
@@ -2380,8 +2382,8 @@
       } else {
         activeTypes.clear();
       }
-    } else if (SECONDARY_TYPES.has(type) && defaultActiveTypes.size > 0) {
-      // Secondary type (link, document): toggle exclusive ↔ default state
+    } else if (DEFAULT_DESELECTED_TYPES.has(type) && defaultActiveTypes.size > 0) {
+      // Default-deselected type (link, document, sticker): toggle exclusive ↔ default state
       if (activeTypes.has(type)) {
         activeTypes = new Set(defaultActiveTypes);
       } else {

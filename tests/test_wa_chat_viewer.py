@@ -7231,6 +7231,25 @@ class TestStickerSupport:
             assert counts["by_type"]["sticker"]["count"] == 1
             assert counts["by_type"]["sticker"]["missing"] == 0
 
+    def test_sticker_deselected_from_default_media_view_frontend(self):
+        """Stickers, links, and documents must be in DEFAULT_DESELECTED_TYPES in app.js
+        so stickers are deselected by default when opening the media gallery."""
+        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "DEFAULT_DESELECTED_TYPES" in js
+        match = re.search(r"DEFAULT_DESELECTED_TYPES\s*=\s*new\s+Set\(\[([^\]]+)\]\)", js)
+        assert match, "DEFAULT_DESELECTED_TYPES Set definition missing in app.js"
+        types = [t.strip().strip("'\"") for t in match.group(1).split(",")]
+        assert "sticker" in types
+        assert "link" in types
+        assert "document" in types
+
+        # Verify openMediaGallery filters out DEFAULT_DESELECTED_TYPES
+        assert "!DEFAULT_DESELECTED_TYPES.has(t)" in js
+
+        # Verify _toggleTypeFilter toggles DEFAULT_DESELECTED_TYPES exclusively
+        assert "DEFAULT_DESELECTED_TYPES.has(type)" in js
+
     def test_android_deleted_messages(self, tmp_path):
         """Android deleted messages (type 15 and 64) are returned as media_type='deleted' with synthesized text."""
         wa_path = tmp_path / "msgstore.db"
@@ -7873,7 +7892,11 @@ class TestPollSupport:
 
         # Trigger indexing
         client.get("/api/messages?chat_id=1&chat_type=group")
-        time.sleep(0.5)
+        for _ in range(25):
+            time.sleep(0.1)
+            q_res = client.get("/api/search?q=Boardgames")
+            if q_res.status_code == 200 and len(q_res.get_json()["results"]) == 1:
+                break
 
         # Match question
         q_res = client.get("/api/search?q=Boardgames")
