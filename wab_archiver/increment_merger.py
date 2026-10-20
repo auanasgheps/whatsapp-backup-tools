@@ -1884,12 +1884,25 @@ def apply_messages_bin(
             schema_cache["message_vcard"] = {"exists"} if has_vcard_table else set()
 
     # Fast batch deletion of conflicting messages by key_id
+    existing_media_paths: dict[str, str] = {}
     if "key_id" in msg_cols:
         key_ids_to_delete = [msg["key_id"] for msg in messages if msg.get("key_id")]
         chunk_size = 500
         for i in range(0, len(key_ids_to_delete), chunk_size):
             chunk = key_ids_to_delete[i : i + chunk_size]
             placeholders = ", ".join("?" for _ in chunk)
+            if media_cols:
+                try:
+                    for k_id, f_path in cur.execute(
+                        f"SELECT m.key_id, mm.file_path FROM message m "
+                        f"JOIN message_media mm ON mm.message_row_id = m._id "
+                        f"WHERE m.key_id IN ({placeholders}) AND mm.file_path IS NOT NULL",
+                        chunk,
+                    ).fetchall():
+                        if f_path:
+                            existing_media_paths[k_id] = f_path
+                except sqlite3.OperationalError:
+                    pass
             cur.execute(f"DELETE FROM message WHERE key_id IN ({placeholders})", chunk)
 
     # Pre-compute static message insert statement
@@ -1998,9 +2011,9 @@ def apply_messages_bin(
                 else None
             )
 
-            # Reconstruct default expected file_path if document
-            file_path = None
-            if media["media_type"] == "document" and media["media_name"]:
+            # Reconstruct default expected file_path if document or preserve existing
+            file_path = existing_media_paths.get(msg.get("key_id", ""))
+            if not file_path and media["media_type"] == "document" and media["media_name"]:
                 file_path = f"Media/WhatsApp Documents/{media['media_name']}"
 
             media_row_map = {
