@@ -1835,10 +1835,15 @@ def _clear_fts_index(cache_conn: sqlite3.Connection):
 
 
 def _clean_user_sql(col_expr: str) -> str:
-    """Return SQL expression stripping multi-device ':device' suffixes from a JID user string."""
+    """Return SQL expression stripping multi-device ':device' and '.agent' suffixes from a JID user string."""
     return (
-        f"CASE WHEN INSTR({col_expr}, ':') > 0 "
+        f"CASE "
+        f"WHEN INSTR({col_expr}, ':') > 0 AND INSTR(SUBSTR({col_expr}, 1, INSTR({col_expr}, ':') - 1), '.') > 0 "
+        f"THEN SUBSTR({col_expr}, 1, INSTR(SUBSTR({col_expr}, 1, INSTR({col_expr}, ':') - 1), '.') - 1) "
+        f"WHEN INSTR({col_expr}, ':') > 0 "
         f"THEN SUBSTR({col_expr}, 1, INSTR({col_expr}, ':') - 1) "
+        f"WHEN INSTR({col_expr}, '.') > 0 "
+        f"THEN SUBSTR({col_expr}, 1, INSTR({col_expr}, '.') - 1) "
         f"ELSE {col_expr} END"
     )
 
@@ -1904,7 +1909,7 @@ def _ensure_jid_map_resolved(
 
         try:
             jid_users = {
-                str(row[0]).split(":")[0]
+                str(row[0]).split(":")[0].split(".")[0]
                 for row in conn.execute(
                     "SELECT user FROM jid WHERE user IS NOT NULL AND user != ''"
                 ).fetchall()
@@ -2103,7 +2108,8 @@ def _fts_android_chat(
     cache_conn: sqlite3.Connection,
     chat_id: str,
     chat_type: str,
-    on_progress=None,
+    on_progress,
+    hd_clause: str,
 ):
     _ensure_jid_map_resolved(wa_conn, None)
 
@@ -2160,11 +2166,38 @@ def _fts_android_chat(
         LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
         LEFT JOIN message_media mm ON mm.message_row_id = m._id
         {where}
+        {hd_clause}
         ORDER BY m.timestamp ASC
     """,
         params,
     )
     _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
+
+
+_ANDROID_HD_DEDUP_CLAUSE = """
+    AND NOT EXISTS (
+        SELECT 1 FROM message_association ma
+        JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
+        WHERE ma.parent_message_row_id = m._id
+          AND ma.association_type IN (12, 7)
+          AND mm_hd.file_path IS NOT NULL
+    )
+"""
+
+
+def _check_android_hd_association(wa_conn: sqlite3.Connection) -> bool:
+    try:
+        has_table = wa_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_association'"
+        ).fetchone()
+        if not has_table:
+            return False
+        has_hd = wa_conn.execute(
+            "SELECT 1 FROM message_association WHERE association_type IN (12, 7) LIMIT 1"
+        ).fetchone()
+        return bool(has_hd)
+    except sqlite3.OperationalError:
+        return False
 
 
 _IOS_HD_DEDUP_CLAUSE = """
@@ -2278,7 +2311,9 @@ def _build_fts_chat(
         wa_conn = sqlite3.connect(wa_db_path)
         wa_conn.row_factory = sqlite3.Row
         if source_type == "android":
-            _fts_android_chat(wa_conn, cache_conn, chat_id, chat_type, on_progress=on_progress)
+            has_android_hd = _check_android_hd_association(wa_conn)
+            hd_clause = _ANDROID_HD_DEDUP_CLAUSE if has_android_hd else ""
+            _fts_android_chat(wa_conn, cache_conn, chat_id, chat_type, on_progress, hd_clause)
         else:
             ext_db = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", None)
             if not ext_db:
@@ -3024,6 +3059,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 source_type = None
 
     app.config["SCHEMA_ALERT"] = schema_alert
+    has_android_hd = False
+    has_ios_hd = False
 
     if source_type is None:
         if schema_alert:
@@ -3055,7 +3092,13 @@ def create_app(output_root: Path, rescan: bool = False):
             count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             print(f"[wab_viewer] {count} chat(s) already indexed")
 
-        has_ios_hd = False
+        if source_type == "android" and wa_db_path is not None:
+            try:
+                tmp_chk = sqlite3.connect(wa_db_path)
+                has_android_hd = _check_android_hd_association(tmp_chk)
+                tmp_chk.close()
+            except sqlite3.OperationalError:
+                has_android_hd = False
         if source_type == "ios" and wa_db_path is not None:
             ext_db_init = _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", output_root)
             if not ext_db_init:
@@ -3457,6 +3500,13 @@ def create_app(output_root: Path, rescan: bool = False):
     _run_db_maintenance(cache_conn, _archive_conn)
 
     # Build _ANDROID_SELECT and _IOS_SELECT based on available tables
+    if not has_android_hd and source_type == "android" and wa_db_path is not None:
+        try:
+            tmp_chk = sqlite3.connect(wa_db_path)
+            has_android_hd = _check_android_hd_association(tmp_chk)
+            tmp_chk.close()
+        except sqlite3.OperationalError:
+            has_android_hd = False
     has_reactions = False
     has_ios_reactions = False
     has_lid_dn = False
@@ -3724,6 +3774,7 @@ def create_app(output_root: Path, rescan: bool = False):
         if has_message_system
         else "(m.text_data IS NOT NULL AND m.text_data != '')"
     )
+    android_hd_clause = _ANDROID_HD_DEDUP_CLAUSE if has_android_hd else ""
     globals()["_ANDROID_FILTER"] = f"""
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
@@ -3734,6 +3785,7 @@ def create_app(output_root: Path, rescan: bool = False):
         OR (m.message_type = 7 AND {ms_action_clause})
         OR (m.message_type = 66)
     )
+    {android_hd_clause}
     """
     globals()["_ANDROID_FILTER_TS"] = globals()["_ANDROID_FILTER"]
 
@@ -3916,7 +3968,19 @@ def create_app(output_root: Path, rescan: bool = False):
     {edit_join}
     LEFT JOIN _contacts_resolved con_s  ON con_s.clean_number  = {_clean_user_sql("COALESCE(j2.user, j.user)")}
     LEFT JOIN _contacts_resolved con_sq ON con_sq.clean_number = {_clean_user_sql("COALESCE(jq2.user, jq.user)")}
-    LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE(mm.file_path, 'vcard:' || m._id)
+    LEFT JOIN arch.archive_copies ac ON ac.original_path IN (
+        COALESCE(mm.file_path, 'vcard:' || m._id),
+        REPLACE(COALESCE(mm.file_path, ''), '\\', '/'),
+        REPLACE(COALESCE(mm.file_path, ''), '/', '\\'),
+        CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
+             THEN SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10) END,
+        CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
+             THEN REPLACE(SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10), '/', '\\') END,
+        CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
+             THEN 'WhatsApp/' || REPLACE(mm.file_path, '\\', '/') END,
+        CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
+             THEN 'WhatsApp\\' || REPLACE(mm.file_path, '/', '\\') END
+    )
 """
 
     def get_archive():
@@ -4427,6 +4491,70 @@ def create_app(output_root: Path, rescan: bool = False):
                 )
                 if source_type == "android" and rows:
                     rows = [dict(r) for r in rows]
+                    if has_android_hd and get_wa() is not None:
+                        mids = [r["msg_id"] for r in rows]
+                        placeholders = ",".join("?" * len(mids))
+                        try:
+                            hd_parents = {
+                                r[0]
+                                for r in get_wa()
+                                .execute(
+                                    f"""SELECT ma.parent_message_row_id FROM message_association ma
+                                       JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
+                                       WHERE ma.parent_message_row_id IN ({placeholders})
+                                         AND ma.association_type IN (12, 7)
+                                         AND mm_hd.file_path IS NOT NULL""",
+                                    mids,
+                                )
+                                .fetchall()
+                            }
+                            if hd_parents:
+                                rows = [r for r in rows if r["msg_id"] not in hd_parents]
+                        except sqlite3.OperationalError:
+                            pass
+                    unresolved_media = [
+                        r
+                        for r in rows
+                        if r.get("media_type") not in ("text", "link", "deleted", "service")
+                        and not r.get("archive_path")
+                    ]
+                    if unresolved_media and get_wa() is not None:
+                        wa = get_wa()
+                        mids = [r["msg_id"] for r in unresolved_media]
+                        placeholders = ",".join("?" * len(mids))
+                        try:
+                            found_copies = wa.execute(
+                                f"""SELECT m._id, ac.archive_path
+                                   FROM message m
+                                   JOIN message_media mm ON mm.message_row_id = m._id
+                                   JOIN arch.archive_copies ac ON ac.original_path IN (
+                                       COALESCE(mm.file_path, 'vcard:' || m._id),
+                                       REPLACE(COALESCE(mm.file_path, ''), '\\', '/'),
+                                       REPLACE(COALESCE(mm.file_path, ''), '/', '\\'),
+                                       CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
+                                            THEN SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10) END,
+                                       CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
+                                            THEN REPLACE(SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10), '/', '\\') END,
+                                       CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
+                                            THEN 'WhatsApp/' || REPLACE(mm.file_path, '\\', '/') END,
+                                       CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
+                                            THEN 'WhatsApp\\' || REPLACE(mm.file_path, '/', '\\') END
+                                   )
+                                   WHERE m._id IN ({placeholders}) AND ac.archive_path IS NOT NULL""",
+                                mids,
+                            ).fetchall()
+                            if found_copies:
+                                copy_map = {r[0]: r[1] for r in found_copies}
+                                for r in rows:
+                                    if r["msg_id"] in copy_map:
+                                        r["archive_path"] = copy_map[r["msg_id"]]
+                                        get_archive().execute(
+                                            "UPDATE recent_messages SET archive_path = ? WHERE msg_id = ?",
+                                            (copy_map[r["msg_id"]], r["msg_id"]),
+                                        )
+                                get_archive().commit()
+                        except sqlite3.OperationalError:
+                            pass
                     missing_rx = [r["msg_id"] for r in rows if r.get("reactions") is None]
                     if missing_rx:
                         rx_cache = (
@@ -4762,7 +4890,12 @@ def create_app(output_root: Path, rescan: bool = False):
             type_filter = f"media_type IN ({placeholders})"
             type_params = list(types_set)
 
-        hd_dedup_clause = _IOS_HD_DEDUP_CLAUSE if (source_type == "ios" and has_ios_hd) else ""
+        if source_type == "android" and has_android_hd:
+            hd_dedup_clause = _ANDROID_HD_DEDUP_CLAUSE
+        elif source_type == "ios" and has_ios_hd:
+            hd_dedup_clause = _IOS_HD_DEDUP_CLAUSE
+        else:
+            hd_dedup_clause = ""
 
         sql = f"""
             SELECT * FROM (

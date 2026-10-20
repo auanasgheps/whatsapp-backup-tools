@@ -2063,3 +2063,53 @@ def test_resolve_or_create_chat_reuses_via_lid_display_name(mock_db):
     resolved_chat_id = increment_merger.resolve_or_create_chat(conn, lid_jid_id, logger, None)
     assert resolved_chat_id == existing_chat_id
     conn.close()
+
+
+def test_apply_messages_bin_preserves_existing_media_file_path(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+        "VALUES (1, 0, 'EXISTING_IMG_1', 1, 1729000100, 'Old text', 1)"
+    )
+    old_msg_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO message_media (message_row_id, chat_row_id, file_path, file_size, mime_type) "
+        "VALUES (?, 1, 'WhatsApp/Media/WhatsApp Images/IMG_001.jpg', 12345, 'image/jpeg')",
+        (old_msg_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    # Replay messages.bin with updated WMI record for EXISTING_IMG_1
+    wmi_img = _build_image_wmi(
+        "5550100@s.whatsapp.net",
+        "EXISTING_IMG_1",
+        "Updated caption",
+        "image/jpeg",
+        b"\xbb" * 32,
+        12345,
+        0,
+        1729000200,
+    )
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_img])
+    bin_path = tmp_path / "messages.bin"
+    bin_path.write_bytes(frame)
+
+    conn = sqlite3.connect(mock_db)
+    inserted = increment_merger.apply_messages_bin(conn, str(bin_path), logger, None, None, None)
+    conn.commit()
+    assert inserted == 1
+
+    cur = conn.cursor()
+    msg_row = cur.execute(
+        "SELECT m._id, m.key_id, m.text_data, mm.file_path, mm.file_size "
+        "FROM message m JOIN message_media mm ON mm.message_row_id = m._id "
+        "WHERE m.key_id = 'EXISTING_IMG_1'"
+    ).fetchone()
+    assert msg_row is not None
+    assert msg_row[1] == "EXISTING_IMG_1"
+    assert msg_row[2] == "Updated caption"
+    # Local file_path must be preserved from the deleted old row
+    assert msg_row[3] == "WhatsApp/Media/WhatsApp Images/IMG_001.jpg"
+    conn.close()

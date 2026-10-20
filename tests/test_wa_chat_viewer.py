@@ -8532,3 +8532,148 @@ class TestLidAndContactResolution:
             assert len(chats) == 1
             # Suffix bridging should match Marco National
             assert chats[0]["display_name"] == "Marco National"
+
+
+class TestAndroidHdAndMediaMatching:
+    def test_android_hd_media_dedup_and_clean_sender(self, tmp_path):
+        def seed(wa, arch, root):
+            wa.execute("INSERT INTO jid (_id, user) VALUES (2, 'group123')")
+            wa.execute("INSERT INTO jid (_id, user) VALUES (3, '5551234.0:1')")
+            wa.execute(
+                "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+                "VALUES (20, 2, 'Family Group', 0, 1700000002000, 102)"
+            )
+            arch.execute(
+                "INSERT INTO contacts (number, folder, display_name) VALUES ('5551234', 'Alice Folder', 'Alice')"
+            )
+
+            # Message 101: LQ parent message (no archived copy)
+            wa.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+                "VALUES (101, 20, 0, 3, 1700000001000, '', 1)"
+            )
+            wa.execute(
+                "INSERT INTO message_media (message_row_id, file_path) VALUES (101, 'Media/WhatsApp Images/lq.jpg')"
+            )
+
+            # Message 102: HD child message (archived copy exists)
+            wa.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+                "VALUES (102, 20, 0, 3, 1700000002000, 'HD Photo', 1)"
+            )
+            wa.execute(
+                "INSERT INTO message_media (message_row_id, file_path) VALUES (102, 'Media/WhatsApp Images/hd.jpg')"
+            )
+
+            # Association table linking 101 -> 102 (type 12 for HD photo)
+            wa.execute(
+                "CREATE TABLE message_association (parent_message_row_id INTEGER, child_message_row_id INTEGER, association_type INTEGER)"
+            )
+            wa.execute("INSERT INTO message_association VALUES (101, 102, 12)")
+
+            # Archive DB has copy for HD child only
+            arch.execute(
+                "INSERT INTO files (original_path, md5) VALUES ('Media/WhatsApp Images/hd.jpg', x'1234')"
+            )
+            arch.execute(
+                "INSERT INTO archive_copies (original_path, archive_path) "
+                "VALUES ('Media/WhatsApp Images/hd.jpg', 'Family/2026/hd.jpg')"
+            )
+            wa.commit()
+            arch.commit()
+
+        app = _make_android_app(tmp_path, seed_fn=seed)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=20&chat_type=group")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            msg_ids = [m["msg_id"] for m in data]
+            # Parent 101 must be deduplicated; only child 102 returned
+            assert 101 not in msg_ids
+            assert 102 in msg_ids
+            child_msg = next(m for m in data if m["msg_id"] == 102)
+            assert child_msg["archive_path"] == "Family/2026/hd.jpg"
+            # Multi-device/agent suffix .0:1 stripped cleanly and matched to contact display_name
+            assert child_msg["sender"] == "Alice"
+
+            # Check /api/media deduplication
+            resp_media = client.get("/api/media?chat_id=20&chat_type=group&types=image")
+            assert resp_media.status_code == 200
+            media_data = resp_media.get_json()
+            media_ids = [m["msg_id"] for m in media_data]
+            assert 101 not in media_ids
+            assert 102 in media_ids
+
+    def test_android_media_path_resilient_matching_and_recent_refresh(self, tmp_path):
+        def seed(wa, arch, root):
+            # Message 201: file_path has 'WhatsApp/Media/WhatsApp Images/photo1.jpg'
+            # archive_copies has 'Media/WhatsApp Images/photo1.jpg'
+            wa.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+                "VALUES (201, 10, 0, 1, 1700000003000, '', 1)"
+            )
+            wa.execute(
+                "INSERT INTO message_media (message_row_id, file_path) VALUES (201, 'WhatsApp/Media/WhatsApp Images/photo1.jpg')"
+            )
+
+            # Message 202: file_path has 'Media/WhatsApp Images/photo2.jpg'
+            # archive_copies has Windows backslashes 'WhatsApp\\Media\\WhatsApp Images\\photo2.jpg'
+            wa.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+                "VALUES (202, 10, 0, 1, 1700000004000, '', 1)"
+            )
+            wa.execute(
+                "INSERT INTO message_media (message_row_id, file_path) VALUES (202, 'Media/WhatsApp Images/photo2.jpg')"
+            )
+
+            arch.execute(
+                "INSERT INTO files (original_path, md5) VALUES ('Media/WhatsApp Images/photo1.jpg', x'1111')"
+            )
+            arch.execute(
+                "INSERT INTO archive_copies (original_path, archive_path) "
+                "VALUES ('Media/WhatsApp Images/photo1.jpg', 'Contacts/123456789/photo1.jpg')"
+            )
+
+            arch.execute(
+                "INSERT INTO files (original_path, md5) VALUES (?, x'2222')",
+                (r"WhatsApp\Media\WhatsApp Images\photo2.jpg",),
+            )
+            arch.execute(
+                "INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
+                (r"WhatsApp\Media\WhatsApp Images\photo2.jpg", "Contacts/123456789/photo2.jpg"),
+            )
+
+            # Pre-seed recent_messages cache with archive_path = None for msg 201 & 202 to test live refresh
+            arch.execute(
+                "INSERT INTO recent_messages (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body, quoted_text, quoted_sender, quoted_ts) "
+                "VALUES ('123456789', 'contact', 201, 1700000003000, '123456789', 0, NULL, 'image', 'photo1.jpg', '', '', '', 0)"
+            )
+            arch.execute(
+                "INSERT INTO recent_messages (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body, quoted_text, quoted_sender, quoted_ts) "
+                "VALUES ('123456789', 'contact', 202, 1700000004000, '123456789', 0, NULL, 'image', 'photo2.jpg', '', '', '', 0)"
+            )
+            wa.commit()
+            arch.commit()
+
+        app = _make_android_app(tmp_path, seed_fn=seed)
+        with app.test_client() as client:
+            # 1. Test recent_messages cache refresh when archive_path is NULL
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            m201 = next(m for m in data if m["msg_id"] == 201)
+            m202 = next(m for m in data if m["msg_id"] == 202)
+            # Both should resolve archive_path despite prefix/backslash variations and stale cache
+            assert m201["archive_path"] == "Contacts/123456789/photo1.jpg"
+            assert m202["archive_path"] == "Contacts/123456789/photo2.jpg"
+
+            # 2. Test live _ANDROID_SELECT query (before=...)
+            resp_live = client.get(
+                "/api/messages?chat_id=123456789&chat_type=contact&before=1700000005000"
+            )
+            assert resp_live.status_code == 200
+            data_live = resp_live.get_json()
+            m201_live = next(m for m in data_live if m["msg_id"] == 201)
+            m202_live = next(m for m in data_live if m["msg_id"] == 202)
+            assert m201_live["archive_path"] == "Contacts/123456789/photo1.jpg"
+            assert m202_live["archive_path"] == "Contacts/123456789/photo2.jpg"
