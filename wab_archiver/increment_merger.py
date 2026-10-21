@@ -1163,6 +1163,8 @@ _ENTITY_TABLE_PRIORITY: dict[str, int] = {
     "chat": 50,
     "group_participant_user": 60,
     "group_participants": 61,
+    "group_past_participant_user": 62,
+    "call_log": 70,
 }
 
 _SUPPORTED_ENTITY_TABLES: frozenset[str] = frozenset(
@@ -1174,6 +1176,8 @@ _SUPPORTED_ENTITY_TABLES: frozenset[str] = frozenset(
         "lid_display_name",
         "group_participant_user",
         "group_participants",
+        "group_past_participant_user",
+        "call_log",
     }
 )
 
@@ -1192,7 +1196,7 @@ def apply_entity_modifications(
 ) -> int:
     """Upsert modified rows from an entity JSON file into SQLite table."""
     if table_name not in _SUPPORTED_ENTITY_TABLES:
-        logger.info(
+        logger.debug(
             f"EntityTableProcessor: skipping import for unknown/unsupported table '{table_name}'"
         )
         return 0
@@ -1412,10 +1416,108 @@ def apply_entity_modifications(
                         [filtered_copy[c] for c in update_cols] + [part_id],
                     )
             else:
+                if (
+                    "_id" in filtered_copy
+                    and cur.execute(
+                        "SELECT 1 FROM group_participant_user WHERE _id = ?",
+                        (filtered_copy["_id"],),
+                    ).fetchone()
+                ):
+                    del filtered_copy["_id"]
                 cols_tuple = tuple(sorted(filtered_copy.keys()))
                 placeholders = ", ".join("?" for _ in cols_tuple)
                 cur.execute(
                     f"INSERT INTO group_participant_user ({', '.join(cols_tuple)}) VALUES ({placeholders})",
+                    [filtered_copy[c] for c in cols_tuple],
+                )
+            count += 1
+            continue
+
+        if (
+            table_name == "group_past_participant_user"
+            and "group_jid_row_id" in filtered
+            and "user_jid_row_id" in filtered
+        ):
+            raw_g = filtered["group_jid_row_id"]
+            raw_u = filtered["user_jid_row_id"]
+            mapped_g = jid_id_map.get(raw_g, raw_g) if jid_id_map else raw_g
+            mapped_u = jid_id_map.get(raw_u, raw_u) if jid_id_map else raw_u
+            filtered_copy = dict(filtered)
+            filtered_copy["group_jid_row_id"] = mapped_g
+            filtered_copy["user_jid_row_id"] = mapped_u
+
+            existing_past = cur.execute(
+                "SELECT _id FROM group_past_participant_user WHERE group_jid_row_id = ? AND user_jid_row_id = ?",
+                (mapped_g, mapped_u),
+            ).fetchone()
+
+            if existing_past:
+                past_id = existing_past[0]
+                update_cols = [c for c in filtered_copy if c != "_id"]
+                if update_cols:
+                    set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+                    cur.execute(
+                        f"UPDATE group_past_participant_user SET {set_clause} WHERE _id = ?",
+                        [filtered_copy[c] for c in update_cols] + [past_id],
+                    )
+            else:
+                if (
+                    "_id" in filtered_copy
+                    and cur.execute(
+                        "SELECT 1 FROM group_past_participant_user WHERE _id = ?",
+                        (filtered_copy["_id"],),
+                    ).fetchone()
+                ):
+                    del filtered_copy["_id"]
+                cols_tuple = tuple(sorted(filtered_copy.keys()))
+                placeholders = ", ".join("?" for _ in cols_tuple)
+                cur.execute(
+                    f"INSERT INTO group_past_participant_user ({', '.join(cols_tuple)}) VALUES ({placeholders})",
+                    [filtered_copy[c] for c in cols_tuple],
+                )
+            count += 1
+            continue
+
+        if table_name == "call_log" and "call_id" in filtered:
+            filtered_copy = dict(filtered)
+            if "jid_row_id" in filtered_copy and jid_id_map:
+                raw_j = filtered_copy["jid_row_id"]
+                filtered_copy["jid_row_id"] = jid_id_map.get(raw_j, raw_j)
+            if "group_jid_row_id" in filtered_copy and jid_id_map:
+                raw_g = filtered_copy["group_jid_row_id"]
+                if raw_g and raw_g > 0:
+                    filtered_copy["group_jid_row_id"] = jid_id_map.get(raw_g, raw_g)
+            if "call_creator_device_jid_row_id" in filtered_copy and jid_id_map:
+                raw_d = filtered_copy["call_creator_device_jid_row_id"]
+                if raw_d and raw_d > 0:
+                    filtered_copy["call_creator_device_jid_row_id"] = jid_id_map.get(raw_d, raw_d)
+
+            existing_call = cur.execute(
+                "SELECT _id FROM call_log WHERE call_id = ?",
+                (filtered_copy["call_id"],),
+            ).fetchone()
+
+            if existing_call:
+                call_row_id = existing_call[0]
+                update_cols = [c for c in filtered_copy if c != "_id"]
+                if update_cols:
+                    set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+                    cur.execute(
+                        f"UPDATE call_log SET {set_clause} WHERE _id = ?",
+                        [filtered_copy[c] for c in update_cols] + [call_row_id],
+                    )
+            else:
+                if (
+                    "_id" in filtered_copy
+                    and cur.execute(
+                        "SELECT 1 FROM call_log WHERE _id = ?", (filtered_copy["_id"],)
+                    ).fetchone()
+                ):
+                    del filtered_copy["_id"]
+                cols_tuple = tuple(sorted(filtered_copy.keys()))
+                placeholders = ", ".join("?" for _ in cols_tuple)
+                cur.execute(
+                    f"INSERT INTO call_log ({', '.join(cols_tuple)}) VALUES ({placeholders})",
                     [filtered_copy[c] for c in cols_tuple],
                 )
             count += 1
@@ -1453,7 +1555,7 @@ def apply_entity_deletions(
 ) -> int:
     """Delete entity records listed in an entity deleted JSON file."""
     if table_name not in _SUPPORTED_ENTITY_TABLES:
-        logger.info(
+        logger.debug(
             f"EntityTableProcessor: skipping deletions for unknown/unsupported table '{table_name}'"
         )
         return 0
@@ -1468,15 +1570,17 @@ def apply_entity_deletions(
     cur = conn.cursor()
     col_info = cur.execute(f"PRAGMA table_info({table_name})").fetchall()
     if not col_info:
-        logger.warning(
-            f"Table '{table_name}' does not exist in target database; skipping deletions."
-        )
+        logger.debug(f"Table '{table_name}' does not exist in target database; skipping deletions.")
         return 0
 
     col_names = {r[1] for r in col_info}
     pk_col = next((r[1] for r in col_info if r[5] > 0), "_id")
     if table_name == "props" and any(isinstance(x, str) for x in raw_items):
         pk_col = "key"
+    if table_name == "call_log" and any(
+        isinstance(x, str) and str(x).startswith("call:") for x in raw_items
+    ):
+        pk_col = "call_id"
 
     deleted_count = 0
     scalar_ids: list[object] = []
