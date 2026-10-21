@@ -1343,12 +1343,28 @@ def apply_entity_modifications(
             filtered_copy = dict(filtered)
             filtered_copy["group_jid_row_id"] = mapped_g
             filtered_copy["user_jid_row_id"] = mapped_u
-            cols_tuple = tuple(sorted(filtered_copy.keys()))
-            placeholders = ", ".join("?" for _ in cols_tuple)
-            cur.execute(
-                f"INSERT OR REPLACE INTO group_participant_user ({', '.join(cols_tuple)}) VALUES ({placeholders})",
-                [filtered_copy[c] for c in cols_tuple],
-            )
+
+            existing_part = cur.execute(
+                "SELECT _id FROM group_participant_user WHERE group_jid_row_id = ? AND user_jid_row_id = ?",
+                (mapped_g, mapped_u),
+            ).fetchone()
+
+            if existing_part:
+                part_id = existing_part[0]
+                update_cols = [c for c in filtered_copy if c != "_id"]
+                if update_cols:
+                    set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+                    cur.execute(
+                        f"UPDATE group_participant_user SET {set_clause} WHERE _id = ?",
+                        [filtered_copy[c] for c in update_cols] + [part_id],
+                    )
+            else:
+                cols_tuple = tuple(sorted(filtered_copy.keys()))
+                placeholders = ", ".join("?" for _ in cols_tuple)
+                cur.execute(
+                    f"INSERT INTO group_participant_user ({', '.join(cols_tuple)}) VALUES ({placeholders})",
+                    [filtered_copy[c] for c in cols_tuple],
+                )
             count += 1
             continue
 
@@ -1386,8 +1402,8 @@ def apply_entity_deletions(
     with open(deleted_json_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    ids = data.get("deleted_ids", data) if isinstance(data, dict) else data
-    if not isinstance(ids, list) or not ids:
+    raw_items = data.get("deleted_ids", data) if isinstance(data, dict) else data
+    if not isinstance(raw_items, list) or not raw_items:
         return 0
 
     cur = conn.cursor()
@@ -1398,17 +1414,41 @@ def apply_entity_deletions(
         )
         return 0
 
+    col_names = {r[1] for r in col_info}
     pk_col = next((r[1] for r in col_info if r[5] > 0), "_id")
-    if table_name == "props" and any(isinstance(x, str) for x in ids):
+    if table_name == "props" and any(isinstance(x, str) for x in raw_items):
         pk_col = "key"
 
     deleted_count = 0
+    scalar_ids: list[object] = []
+    dict_items: list[dict] = []
+
+    for item in raw_items:
+        if isinstance(item, dict):
+            if pk_col in item and item[pk_col] is not None:
+                scalar_ids.append(item[pk_col])
+            else:
+                dict_items.append(item)
+        elif isinstance(item, (int, str)):
+            scalar_ids.append(item)
+
     chunk_size = 500
-    for i in range(0, len(ids), chunk_size):
-        chunk = ids[i : i + chunk_size]
+    for i in range(0, len(scalar_ids), chunk_size):
+        chunk = scalar_ids[i : i + chunk_size]
         placeholders = ", ".join("?" for _ in chunk)
         cur.execute(f"DELETE FROM {table_name} WHERE {pk_col} IN ({placeholders})", chunk)
         deleted_count += cur.rowcount
+
+    for d_item in dict_items:
+        valid_cols = [c for c in d_item if c in col_names]
+        if not valid_cols:
+            continue
+        where_clause = " AND ".join(f"{c} = ?" for c in valid_cols)
+        cur.execute(
+            f"DELETE FROM {table_name} WHERE {where_clause}", [d_item[c] for c in valid_cols]
+        )
+        deleted_count += cur.rowcount
+
     return deleted_count
 
 
