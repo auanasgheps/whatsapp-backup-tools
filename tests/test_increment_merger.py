@@ -3113,6 +3113,228 @@ def test_apply_increment_folder_safely_skips_vendor_ancillary_tables(mock_db, tm
     conn.close()
 
 
+def test_apply_entity_modifications_group_past_participant_user(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_past_participant_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_jid_row_id INTEGER NOT NULL,
+            user_jid_row_id INTEGER NOT NULL,
+            is_leave INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+    jid_id_map = {9001: 10, 9002: 20}
+    mod_json = tmp_path / "group_past_participant_user_modified_1.json"
+    mod_json.write_text(
+        json.dumps(
+            [
+                {
+                    "_id": 999,
+                    "group_jid_row_id": 9001,
+                    "user_jid_row_id": 9002,
+                    "is_leave": 1,
+                    "timestamp": 1791238958000,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    count = increment_merger.apply_entity_modifications(
+        conn, "group_past_participant_user", str(mod_json), logger, jid_id_map
+    )
+    assert count == 1
+
+    row = conn.execute(
+        "SELECT group_jid_row_id, user_jid_row_id, is_leave, timestamp FROM group_past_participant_user"
+    ).fetchone()
+    assert row == (10, 20, 1, 1791238958000)
+
+    # Re-apply update with modified status for same natural composite key
+    mod_json2 = tmp_path / "group_past_participant_user_modified_2.json"
+    mod_json2.write_text(
+        json.dumps(
+            [
+                {
+                    "_id": 9999,
+                    "group_jid_row_id": 9001,
+                    "user_jid_row_id": 9002,
+                    "is_leave": 0,
+                    "timestamp": 1791239999000,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    count2 = increment_merger.apply_entity_modifications(
+        conn, "group_past_participant_user", str(mod_json2), logger, jid_id_map
+    )
+    assert count2 == 1
+
+    # Verify updated in place without duplicate row
+    rows = conn.execute(
+        "SELECT group_jid_row_id, user_jid_row_id, is_leave, timestamp FROM group_past_participant_user"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0] == (10, 20, 0, 1791239999000)
+    conn.close()
+
+
+def test_apply_entity_modifications_call_log(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS call_log (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_id TEXT UNIQUE NOT NULL,
+            jid_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            video_call INTEGER NOT NULL,
+            duration INTEGER NOT NULL,
+            call_result INTEGER NOT NULL,
+            bytes_transferred INTEGER NOT NULL,
+            group_jid_row_id INTEGER,
+            call_creator_device_jid_row_id INTEGER
+        )
+        """
+    )
+    conn.commit()
+
+    jid_id_map = {8888: 15, 9999: 25}
+    mod_json = tmp_path / "call_log_modified_1.json"
+    mod_json.write_text(
+        json.dumps(
+            [
+                {
+                    "_id": 500,
+                    "call_id": "call:TEST_CALL_1",
+                    "jid_row_id": 8888,
+                    "group_jid_row_id": 9999,
+                    "from_me": 0,
+                    "timestamp": 1791708599000,
+                    "video_call": 1,
+                    "duration": 120,
+                    "call_result": 5,
+                    "bytes_transferred": 50000,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    count = increment_merger.apply_entity_modifications(
+        conn, "call_log", str(mod_json), logger, jid_id_map
+    )
+    assert count == 1
+
+    row = conn.execute(
+        "SELECT call_id, jid_row_id, group_jid_row_id, video_call, duration FROM call_log"
+    ).fetchone()
+    assert row == ("call:TEST_CALL_1", 15, 25, 1, 120)
+
+    # Re-apply modification with updated duration matching same call_id
+    mod_json2 = tmp_path / "call_log_modified_2.json"
+    mod_json2.write_text(
+        json.dumps(
+            [
+                {
+                    "_id": 501,
+                    "call_id": "call:TEST_CALL_1",
+                    "jid_row_id": 8888,
+                    "group_jid_row_id": 9999,
+                    "from_me": 0,
+                    "timestamp": 1791708599000,
+                    "video_call": 1,
+                    "duration": 185,
+                    "call_result": 5,
+                    "bytes_transferred": 75000,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    count2 = increment_merger.apply_entity_modifications(
+        conn, "call_log", str(mod_json2), logger, jid_id_map
+    )
+    assert count2 == 1
+
+    rows = conn.execute(
+        "SELECT call_id, jid_row_id, duration, bytes_transferred FROM call_log"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0] == ("call:TEST_CALL_1", 15, 185, 75000)
+    conn.close()
+
+
+def test_apply_entity_deletions_call_log_by_call_id(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS call_log (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_id TEXT UNIQUE NOT NULL,
+            jid_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            video_call INTEGER NOT NULL,
+            duration INTEGER NOT NULL,
+            call_result INTEGER NOT NULL,
+            bytes_transferred INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO call_log (call_id, jid_row_id, from_me, timestamp, video_call, duration, call_result, bytes_transferred) VALUES ('call:DELETE_ME', 1, 0, 1000, 0, 10, 5, 0)"
+    )
+    conn.commit()
+
+    del_json = tmp_path / "call_log_deleted_1.json"
+    del_json.write_text(json.dumps({"deleted_ids": ["call:DELETE_ME"]}), encoding="utf-8")
+
+    count = increment_merger.apply_entity_deletions(conn, "call_log", str(del_json), logger)
+    assert count == 1
+    assert conn.execute("SELECT COUNT(*) FROM call_log").fetchone()[0] == 0
+    conn.close()
+
+
+def test_apply_entity_deletions_group_past_participant_user_by_composite(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_past_participant_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_jid_row_id INTEGER NOT NULL,
+            user_jid_row_id INTEGER NOT NULL,
+            is_leave INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO group_past_participant_user (group_jid_row_id, user_jid_row_id, is_leave, timestamp) VALUES (10, 20, 1, 1000)"
+    )
+    conn.commit()
+
+    del_json = tmp_path / "group_past_participant_user_deleted_1.json"
+    del_json.write_text(
+        json.dumps({"deleted_ids": [{"group_jid_row_id": 10, "user_jid_row_id": 20}]}),
+        encoding="utf-8",
+    )
+
+    count = increment_merger.apply_entity_deletions(
+        conn, "group_past_participant_user", str(del_json), logger
+    )
+    assert count == 1
+    assert conn.execute("SELECT COUNT(*) FROM group_past_participant_user").fetchone()[0] == 0
+    conn.close()
+
+
 def test_apply_poll_vote_in_order(tmp_path):
     conn = _make_two_pass_test_db(tmp_path / "test_poll_in_order.db")
     bin_path = str(tmp_path / "messages.bin")
