@@ -8395,6 +8395,7 @@ class TestLidAndContactResolution:
                 message_type INTEGER DEFAULT 0
             );
             CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             INSERT INTO jid VALUES (1, '103624838274932', 'lid', '103624838274932@lid');
@@ -8449,6 +8450,7 @@ class TestLidAndContactResolution:
                 message_type INTEGER DEFAULT 0
             );
             CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             INSERT INTO jid VALUES (1, '103624838274932', 'lid', '103624838274932@lid');
@@ -8506,6 +8508,7 @@ class TestLidAndContactResolution:
                 message_type INTEGER DEFAULT 0
             );
             CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             -- WhatsApp has international E.164: 393401234567
@@ -8558,6 +8561,7 @@ class TestLidAndContactResolution:
                 message_type INTEGER DEFAULT 0
             );
             CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             INSERT INTO jid VALUES (1, '120363028374928192', 'g.us', '120363028374928192@g.us');
@@ -8608,6 +8612,7 @@ class TestLidAndContactResolution:
                 message_type INTEGER DEFAULT 0
             );
             CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             -- Unmapped LID: no entry in jid_map, no account_jid_row_id, no lid_display_name
@@ -8659,6 +8664,7 @@ class TestLidAndContactResolution:
                 message_type INTEGER DEFAULT 0
             );
             CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             -- Group without subject
@@ -8827,3 +8833,121 @@ class TestAndroidHdAndMediaMatching:
             m202_live = next(m for m in data_live if m["msg_id"] == 202)
             assert m201_live["archive_path"] == "Contacts/123456789/photo1.jpg"
             assert m202_live["archive_path"] == "Contacts/123456789/photo2.jpg"
+
+    def test_contacts_resolved_extracts_name_from_folder_when_display_name_null(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            INSERT INTO jid VALUES (1, '393806446839', 's.whatsapp.net', '393806446839@s.whatsapp.net');
+            INSERT INTO chat VALUES (1, 1, NULL, 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 1, 0, 1, 1700000000000, 'Ciao', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        # display_name is empty; name is embedded in folder
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('393806446839', 'Martina Castorina (00393806446839)', '')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            assert len(chats) == 1
+            # Clean contact name extracted from folder
+            assert chats[0]["display_name"] == "Martina Castorina"
+
+            # Check messages sender inside the chat
+            m_resp = client.get("/api/messages?chat_id=393806446839&chat_type=contact")
+            assert m_resp.status_code == 200
+            msgs = m_resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["sender"] == "Martina Castorina"
+
+    def test_ensure_jid_map_resolved_prevents_inverted_phone_to_lid_mapping(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                account_jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            -- LID: id 10, Phone: id 20
+            INSERT INTO jid VALUES (10, '187123453968504', 'lid', '187123453968504@lid');
+            INSERT INTO jid VALUES (20, '393454408875', 's.whatsapp.net', '393454408875@s.whatsapp.net');
+
+            -- Chat where jid_row_id is the phone (20) and account_jid_row_id is the LID (10)
+            INSERT INTO chat VALUES (100, 20, 10, NULL, 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 100, 0, 20, 1700000000000, 'Test message', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('393454408875', 'Agata Folder', 'Agata')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            assert len(chats) == 1
+            # Must resolve to phone number and contact display name, NOT the raw LID
+            assert chats[0]["id"] == "393454408875"
+            assert chats[0]["display_name"] == "Agata"

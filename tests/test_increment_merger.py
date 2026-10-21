@@ -3510,3 +3510,397 @@ def test_apply_message_deletions_cascades_poll_votes(tmp_path):
     )
     assert cur.execute("SELECT COUNT(*) FROM message_add_on_poll_vote").fetchone()[0] == 0
     conn.close()
+
+
+def test_sanitize_jid_string():
+    # Companion device and agent token stripping
+    assert (
+        increment_merger.sanitize_jid_string("5550100.0:40@s.whatsapp.net")
+        == "5550100@s.whatsapp.net"
+    )
+    assert (
+        increment_merger.sanitize_jid_string("5550100:40@s.whatsapp.net")
+        == "5550100@s.whatsapp.net"
+    )
+    assert increment_merger.sanitize_jid_string("100200300.1:4@lid") == "100200300@lid"
+    # Groups and broadcasts preserved
+    assert (
+        increment_merger.sanitize_jid_string("5550100-1600000000@g.us") == "5550100-1600000000@g.us"
+    )
+    assert increment_merger.sanitize_jid_string("status@broadcast") == "status@broadcast"
+    # Bare string
+    assert increment_merger.sanitize_jid_string("5550100.0:40") == "5550100"
+
+
+def test_resolve_or_create_jid_strips_devices_and_prefers_primary(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    if "device" not in cols:
+        conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
+
+    # Insert primary JID (device=0) and companion device (device=40) for 5550888
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('5550888', 's.whatsapp.net', 0, '5550888@s.whatsapp.net')"
+    )
+    primary_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('5550888', 's.whatsapp.net', 40, '5550888.0:40@s.whatsapp.net')"
+    )
+    _companion_id = cur.lastrowid
+    conn.commit()
+
+    cache = {}
+    # Resolving companion wire string must resolve to primary JID
+    resolved = increment_merger.resolve_or_create_jid(
+        conn, "5550888.0:40@s.whatsapp.net", logger, cache
+    )
+    assert resolved == primary_id
+    # Resolving clean string must resolve to primary JID
+    resolved_clean = increment_merger.resolve_or_create_jid(
+        conn, "5550888@s.whatsapp.net", logger, cache
+    )
+    assert resolved_clean == primary_id
+    conn.close()
+
+
+def test_apply_messages_bin_sender_invariants_1on1_and_group(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    schema_cache = {}
+
+    # 1-on-1 incoming message
+    wmi_1on1_in = _build_text_wmi(
+        "5550100@s.whatsapp.net",
+        "KEY_1ON1_IN",
+        "Hello from peer",
+        from_me=0,
+        timestamp=1729000100,
+    )
+    # 1-on-1 outgoing message
+    wmi_1on1_out = _build_text_wmi(
+        "5550100@s.whatsapp.net",
+        "KEY_1ON1_OUT",
+        "Hello back",
+        from_me=1,
+        timestamp=1729000200,
+    )
+    # Group incoming message with participant Wire Tag 5
+    key_grp = (
+        _build_field(1, 2, b"5550000-123456@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"KEY_GRP_IN")
+    )
+    wmi_grp_in = (
+        _build_field(1, 2, key_grp)
+        + _build_field(2, 2, _build_field(1, 2, b"Group message"))
+        + _build_field(3, 0, 1729000300)
+        + _build_field(5, 2, b"5550200@s.whatsapp.net")
+    )
+    # Group outgoing message
+    wmi_grp_out = _build_text_wmi(
+        "5550000-123456@g.us",
+        "KEY_GRP_OUT",
+        "My group reply",
+        from_me=1,
+        timestamp=1729000400,
+    )
+
+    frame = _build_history_sync_frame(
+        "5550100@s.whatsapp.net",
+        [wmi_1on1_in, wmi_1on1_out, wmi_grp_in, wmi_grp_out],
+    )
+    bin_path = str(tmp_path / "messages.bin")
+    (tmp_path / "messages.bin").write_bytes(frame)
+
+    jid_cache = {}
+    chat_cache = {}
+    increment_merger.apply_messages_bin(conn, bin_path, logger, jid_cache, chat_cache, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    # Check 1-on-1 invariant: sender_jid_row_id == 0 for both in and out
+    r_1on1_in = cur.execute(
+        "SELECT sender_jid_row_id, from_me FROM message WHERE key_id = 'KEY_1ON1_IN'"
+    ).fetchone()
+    assert r_1on1_in[0] == 0
+
+    r_1on1_out = cur.execute(
+        "SELECT sender_jid_row_id, from_me FROM message WHERE key_id = 'KEY_1ON1_OUT'"
+    ).fetchone()
+    assert r_1on1_out[0] == 0
+
+    # Check Group invariant: sender_jid_row_id == participant_jid_id for incoming, 0 for outgoing
+    part_jid_id = cur.execute("SELECT _id FROM jid WHERE user = '5550200'").fetchone()[0]
+    r_grp_in = cur.execute(
+        "SELECT sender_jid_row_id, from_me FROM message WHERE key_id = 'KEY_GRP_IN'"
+    ).fetchone()
+    assert r_grp_in[0] == part_jid_id
+
+    r_grp_out = cur.execute(
+        "SELECT sender_jid_row_id, from_me FROM message WHERE key_id = 'KEY_GRP_OUT'"
+    ).fetchone()
+    assert r_grp_out[0] == 0
+    conn.close()
+
+
+def test_migrate_restored_backup_to_lid_consolidates_split_chats(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+    if "account_jid_row_id" not in cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN account_jid_row_id INTEGER")
+    if "sort_timestamp" not in cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN sort_timestamp INTEGER")
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS jid_map (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
+    )
+
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('5550999', 's.whatsapp.net', '5550999@s.whatsapp.net')"
+    )
+    phone_jid_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('999000111', 'lid', '999000111@lid')"
+    )
+    lid_jid_id = cur.lastrowid
+
+    cur.execute(
+        "INSERT INTO jid_map (jid_row_id, lid_row_id) VALUES (?, ?)",
+        (phone_jid_id, lid_jid_id),
+    )
+
+    cur.execute(
+        "INSERT INTO chat (jid_row_id, hidden, sort_timestamp) VALUES (?, 0, 1000)",
+        (phone_jid_id,),
+    )
+    phone_chat_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO chat (jid_row_id, hidden, sort_timestamp) VALUES (?, 0, 2000)",
+        (lid_jid_id,),
+    )
+    lid_chat_id = cur.lastrowid
+
+    for i in range(5):
+        cur.execute(
+            "INSERT INTO message (chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (?, 0, ?, 0, ?, 'msg', 0)",
+            (phone_chat_id, f"PHONE_MSG_{i}", 1000 + i),
+        )
+    for i in range(2):
+        cur.execute(
+            "INSERT INTO message (chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (?, 0, ?, 0, ?, 'msg', 0)",
+            (lid_chat_id, f"LID_MSG_{i}", 2000 + i),
+        )
+    conn.commit()
+
+    increment_merger.migrate_restored_backup_to_lid(conn, logger)
+
+    phone_chat_row = cur.execute(
+        "SELECT hidden, account_jid_row_id, sort_timestamp FROM chat WHERE _id = ?",
+        (phone_chat_id,),
+    ).fetchone()
+    assert phone_chat_row[0] == 0
+    assert phone_chat_row[1] == lid_jid_id
+    assert phone_chat_row[2] >= 2000
+
+    lid_chat_row = cur.execute("SELECT hidden FROM chat WHERE _id = ?", (lid_chat_id,)).fetchone()
+    assert lid_chat_row[0] == 1
+
+    phone_msg_count = cur.execute(
+        "SELECT COUNT(*) FROM message WHERE chat_row_id = ?", (phone_chat_id,)
+    ).fetchone()[0]
+    assert phone_msg_count == 7
+
+    lid_msg_count = cur.execute(
+        "SELECT COUNT(*) FROM message WHERE chat_row_id = ?", (lid_chat_id,)
+    ).fetchone()[0]
+    assert lid_msg_count == 0
+
+    conn.close()
+
+
+def test_resolve_or_create_chat_deduplicates_by_natural_identity(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    if "device" not in cols:
+        conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('5550777', 's.whatsapp.net', 0, '5550777@s.whatsapp.net')"
+    )
+    primary_jid_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('5550777', 's.whatsapp.net', 40, '5550777.0:40@s.whatsapp.net')"
+    )
+    companion_jid_id = cur.lastrowid
+
+    cur.execute(
+        "INSERT INTO chat (jid_row_id, hidden) VALUES (?, 0)",
+        (primary_jid_id,),
+    )
+    existing_chat_id = cur.lastrowid
+    conn.commit()
+
+    cache = {}
+    resolved_chat_id = increment_merger.resolve_or_create_chat(
+        conn, companion_jid_id, logger, cache
+    )
+    assert resolved_chat_id == existing_chat_id
+
+    # Verify no new duplicate chat was inserted for user 5550777
+    user_chats = cur.execute(
+        "SELECT COUNT(*) FROM chat WHERE jid_row_id IN (?, ?)",
+        (primary_jid_id, companion_jid_id),
+    ).fetchone()[0]
+    assert user_chats == 1
+    conn.close()
+
+
+def test_migrate_restored_backup_to_lid_consolidates_natural_duplicate_chats(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+    if "sort_timestamp" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN sort_timestamp INTEGER")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS jid_map (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
+    )
+
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('5550333', 's.whatsapp.net', '5550333@s.whatsapp.net')"
+    )
+    primary_jid = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('5550333', 's.whatsapp.net', '5550333.0:0@s.whatsapp.net')"
+    )
+    companion_jid = cur.lastrowid
+
+    cur.execute(
+        "INSERT INTO chat (jid_row_id, hidden, sort_timestamp) VALUES (?, 0, 1000)",
+        (primary_jid,),
+    )
+    chat_primary = cur.lastrowid
+    cur.execute(
+        "INSERT INTO chat (jid_row_id, hidden, sort_timestamp) VALUES (?, 0, 2000)",
+        (companion_jid,),
+    )
+    chat_dup = cur.lastrowid
+
+    for i in range(3):
+        cur.execute(
+            "INSERT INTO message (chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (?, 0, ?, 0, ?, 'base', 0)",
+            (chat_primary, f"BASE_{i}", 1000 + i),
+        )
+    for i in range(2):
+        cur.execute(
+            "INSERT INTO message (chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (?, 0, ?, 0, ?, 'inc', 0)",
+            (chat_dup, f"INC_{i}", 2000 + i),
+        )
+    conn.commit()
+
+    increment_merger.migrate_restored_backup_to_lid(conn, logger)
+
+    c1_count = cur.execute(
+        "SELECT COUNT(*) FROM message WHERE chat_row_id = ?", (chat_primary,)
+    ).fetchone()[0]
+    assert c1_count == 5
+
+    c2_count = cur.execute(
+        "SELECT COUNT(*) FROM message WHERE chat_row_id = ?", (chat_dup,)
+    ).fetchone()[0]
+    assert c2_count == 0
+
+    c2_hidden = cur.execute("SELECT hidden FROM chat WHERE _id = ?", (chat_dup,)).fetchone()[0]
+    assert c2_hidden == 1
+    conn.close()
+
+
+def test_migrate_restored_backup_to_lid_repoints_companion_senders(mock_db):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS jid_map (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
+    )
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    if "device" not in cols:
+        conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
+
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('999000333', 'lid', 0, '999000333@lid')"
+    )
+    primary_lid = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('999000333', 'lid', 0, '999000333.1:0@lid')"
+    )
+    companion_lid = cur.lastrowid
+
+    cur.execute("INSERT INTO chat (jid_row_id) VALUES (1)")
+    c_id = cur.lastrowid
+
+    cur.execute(
+        "INSERT INTO message (chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+        "VALUES (?, 0, 'MSG_COMP_SENDER', ?, 1700000000, 'test', 0)",
+        (c_id, companion_lid),
+    )
+    conn.commit()
+
+    increment_merger.migrate_restored_backup_to_lid(conn, logger)
+
+    repointed_sender = cur.execute(
+        "SELECT sender_jid_row_id FROM message WHERE key_id = 'MSG_COMP_SENDER'"
+    ).fetchone()[0]
+    assert repointed_sender == primary_lid
+    conn.close()
+
+
+def test_ensure_jid_map_resolved_bridges_companion_lids(mock_db):
+    from wab_viewer.main import _ensure_jid_map_resolved
+
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS jid_map (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
+    )
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    if "device" not in cols:
+        conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
+
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('5550555', 's.whatsapp.net', 0, '5550555@s.whatsapp.net')"
+    )
+    phone_jid = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('999000555', 'lid', 0, '999000555@lid')"
+    )
+    primary_lid = cur.lastrowid
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('999000555', 'lid', 0, '999000555.1:0@lid')"
+    )
+    companion_lid = cur.lastrowid
+
+    cur.execute(
+        "INSERT INTO jid_map (jid_row_id, lid_row_id) VALUES (?, ?)", (phone_jid, primary_lid)
+    )
+    conn.commit()
+
+    _ensure_jid_map_resolved(conn, None)
+
+    # Companion LID must bridge to the phone JID of its primary LID
+    row = cur.execute(
+        "SELECT jid_row_id FROM _jid_map_resolved WHERE lid_row_id = ?", (companion_lid,)
+    ).fetchone()
+    assert row is not None
+    assert row[0] == phone_jid
+    conn.close()

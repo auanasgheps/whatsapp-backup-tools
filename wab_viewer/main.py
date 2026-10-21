@@ -376,7 +376,10 @@ def get_cache_db_path(output_root: Path) -> Path:
 
 
 def get_archive_db_path(output_root: Path) -> Path:
-    return output_root / ".wa_media_archiver.db"
+    target = output_root / ".wa_media_archiver.db"
+    if not target.exists() and (output_root / ".wa_archiver.db").exists():
+        return output_root / ".wa_archiver.db"
+    return target
 
 
 def _ensure_writable(path: Path) -> None:
@@ -1893,7 +1896,9 @@ def _ensure_jid_map_resolved(
         for r in contact_rows:
             raw_num = str(r[0] or "").strip()
             folder = str(r[1] or "")
-            disp = str(r[2] or "")
+            disp = str(r[2] or "").strip()
+            if not disp and folder:
+                disp = re.sub(r"\s*\(\+?\d+\)$", "", folder).strip()
             if not raw_num:
                 continue
             digits = re.sub(r"\D", "", raw_num)
@@ -1907,28 +1912,57 @@ def _ensure_jid_map_resolved(
                 elif digits.startswith("0") and len(digits) > 8:
                     contacts_to_insert.append((digits[1:], disp, folder))
 
-        if contacts_to_insert:
-            conn.executemany(
-                "INSERT OR IGNORE INTO _contacts_resolved (clean_number, display_name, folder) VALUES (?, ?, ?)",
-                contacts_to_insert,
-            )
-
         try:
-            # Suffix bridging: match international E.164 JIDs to national contact numbers
-            conn.execute("""
-                INSERT OR IGNORE INTO _contacts_resolved (clean_number, display_name, folder)
-                SELECT j.user, con.display_name, con.folder
-                FROM jid j
-                JOIN _contacts_resolved con ON (
-                    LENGTH(con.clean_number) >= 8
-                    AND LENGTH(j.user) > LENGTH(con.clean_number)
-                    AND j.user LIKE '%' || con.clean_number
+            # Fast in-memory suffix bridging: match international E.164 JIDs to national contact numbers and vice-versa
+            jid_table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid'"
+            ).fetchone()
+            if jid_table_exists:
+                jid_cols = {
+                    r["name"] if isinstance(r, sqlite3.Row) else r[1]
+                    for r in conn.execute("PRAGMA table_info(jid)").fetchall()
+                }
+                phone_filter = (
+                    "WHERE (server = 's.whatsapp.net' OR server IS NULL)"
+                    if "server" in jid_cols
+                    else "WHERE 1=1"
                 )
-                WHERE (j.server = 's.whatsapp.net' OR j.server IS NULL)
-                  AND j.user IS NOT NULL
-            """)
+                jid_users = {
+                    str(row[0]).split(":")[0].split(".")[0]
+                    for row in conn.execute(
+                        f"SELECT user FROM jid {phone_filter} AND user IS NOT NULL AND user != ''"
+                    ).fetchall()
+                }
+                # Index JID users by suffixes (lengths 8..15) for O(1) matching
+                jid_by_suffix = {}
+                for ju in jid_users:
+                    if ju.isdigit() and len(ju) >= 8:
+                        for length in range(8, len(ju) + 1):
+                            suf = ju[-length:]
+                            jid_by_suffix.setdefault(suf, []).append(ju)
+
+                bridged = []
+                for digits, d_name, fld in list(contacts_to_insert):
+                    if len(digits) >= 8:
+                        if digits in jid_by_suffix:
+                            for ju in jid_by_suffix[digits]:
+                                if ju != digits:
+                                    bridged.append((ju, d_name, fld))
+                        if digits.isdigit():
+                            for length in range(8, len(digits)):
+                                suf = digits[-length:]
+                                if suf in jid_users:
+                                    bridged.append((suf, d_name, fld))
+                if bridged:
+                    contacts_to_insert.extend(bridged)
         except sqlite3.OperationalError:
             pass
+
+        if contacts_to_insert:
+            conn.executemany(
+                "INSERT OR REPLACE INTO _contacts_resolved (clean_number, display_name, folder) VALUES (?, ?, ?)",
+                contacts_to_insert,
+            )
 
     # 2. Inspect available schema tables in conn
     try:
@@ -1940,7 +1974,10 @@ def _ensure_jid_map_resolved(
         return
 
     jid_cols = (
-        {r["name"] for r in conn.execute("PRAGMA table_info(jid)").fetchall()}
+        {
+            r["name"] if isinstance(r, sqlite3.Row) else r[1]
+            for r in conn.execute("PRAGMA table_info(jid)").fetchall()
+        }
         if "jid" in tables
         else set()
     )
@@ -1974,18 +2011,22 @@ def _ensure_jid_map_resolved(
                     JOIN jid j_lid ON j_lid._id IN (j1._id, j2._id) AND j_lid.raw_string LIKE '%@lid'
                     JOIN jid j_phone ON j_phone._id IN (j1._id, j2._id) AND j_phone.raw_string LIKE '%@s.whatsapp.net'
                 """)
-            conn.execute("""
-                INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
-                SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                FROM jid_map GROUP BY lid_row_id
-            """)
+            else:
+                conn.execute("""
+                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                    SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+                    FROM jid_map GROUP BY lid_row_id
+                """)
         except sqlite3.OperationalError:
             pass
 
     # 4. Populate from chat.account_jid_row_id
     if has_chat:
         try:
-            chat_cols = {r["name"] for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
+            chat_cols = {
+                r["name"] if isinstance(r, sqlite3.Row) else r[1]
+                for r in conn.execute("PRAGMA table_info(chat)").fetchall()
+            }
             if "account_jid_row_id" in chat_cols:
                 if has_jid_server:
                     conn.execute("""
@@ -2009,12 +2050,13 @@ def _ensure_jid_map_resolved(
                         JOIN jid j_phone ON j_phone._id IN (j1._id, j2._id) AND j_phone.raw_string LIKE '%@s.whatsapp.net'
                         WHERE c.account_jid_row_id IS NOT NULL AND c.account_jid_row_id != 0
                     """)
-                conn.execute("""
-                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
-                    SELECT jid_row_id, account_jid_row_id
-                    FROM chat
-                    WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
-                """)
+                else:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                        SELECT jid_row_id, account_jid_row_id
+                        FROM chat
+                        WHERE account_jid_row_id IS NOT NULL AND account_jid_row_id != 0
+                    """)
         except sqlite3.OperationalError:
             pass
 
@@ -2087,7 +2129,21 @@ def _ensure_jid_map_resolved(
         except sqlite3.OperationalError:
             pass
 
-    # 7. Mirror into _lid_map_resolved
+    # 7. Bridge any companion device LIDs sharing user identity with resolved primary LIDs
+    if "jid" in tables and has_jid_server:
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                SELECT j_comp._id, jm.jid_row_id
+                FROM _jid_map_resolved jm
+                JOIN jid j_pri ON j_pri._id = jm.lid_row_id
+                JOIN jid j_comp ON j_comp.user = j_pri.user AND j_comp.server = 'lid'
+                WHERE j_comp._id != jm.lid_row_id
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+    # 8. Mirror into _lid_map_resolved
     try:
         conn.execute("""
             INSERT OR IGNORE INTO _lid_map_resolved (jid_row_id, lid_row_id)
@@ -2132,7 +2188,10 @@ def _fts_android_chat(
         if has_poll_opt
         else ""
     )
-    jid_cols = {r["name"] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+    jid_cols = {
+        r["name"] if isinstance(r, sqlite3.Row) else r[1]
+        for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()
+    }
     has_j_server = "server" in jid_cols
     has_j_raw = "raw_string" in jid_cols
     fts_group_parts = ["c.subject IS NOT NULL"]
@@ -3918,6 +3977,7 @@ def create_app(output_root: Path, rescan: bool = False):
         COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
         COALESCE(
             NULLIF(con_s.display_name, ''),
+            NULLIF(con_s.folder, ''),
             CASE WHEN COALESCE(j2.user, CASE WHEN NOT ({j_is_lid}) THEN j.user END) = '0' THEN 'WhatsApp' END,
             CASE WHEN j2.user IS NOT NULL THEN '+' || {_clean_user_sql("j2.user")} END,
             {ldn_sender_arm}
@@ -3962,6 +4022,7 @@ def create_app(output_root: Path, rescan: bool = False):
         CASE WHEN mq.from_me = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
+                 NULLIF(con_sq.folder, ''),
                  CASE WHEN jq2.user IS NOT NULL THEN '+' || {_clean_user_sql("jq2.user")} END,
                  {ldn_quoted_sender_arm}
                  CASE WHEN NOT ({jq_is_lid}) AND jq.user IS NOT NULL THEN '+' || {_clean_user_sql("jq.user")} END,
@@ -6762,7 +6823,8 @@ def create_app(output_root: Path, rescan: bool = False):
             wa_conn_bulk.row_factory = sqlite3.Row
             if source_type == "android":
                 bulk_jid_cols = {
-                    r["name"] for r in wa_conn_bulk.execute("PRAGMA table_info(jid)").fetchall()
+                    r["name"] if isinstance(r, sqlite3.Row) else r[1]
+                    for r in wa_conn_bulk.execute("PRAGMA table_info(jid)").fetchall()
                 }
                 has_b_server = "server" in bulk_jid_cols
                 has_b_raw = "raw_string" in bulk_jid_cols

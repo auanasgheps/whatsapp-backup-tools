@@ -247,6 +247,18 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         key_id = parsed_key["key_id"]
         participant = parsed_key["participant"]
 
+    # Field 5: participant (optional string participant = 5 in modern WebMessageInfo)
+    if not participant and 5 in fields and fields[5]:
+        val = fields[5][0][1]
+        if isinstance(val, bytes):
+            participant = val.decode("utf-8", errors="replace").strip()
+
+    # Field 21: fallback participant
+    if not participant and 21 in fields and fields[21]:
+        val = fields[21][0][1]
+        if isinstance(val, bytes):
+            participant = val.decode("utf-8", errors="replace").strip()
+
     # Field 3: messageTimestamp
     timestamp_raw = 0
     if 3 in fields:
@@ -853,6 +865,27 @@ _VALID_JID_SERVERS = (
 )
 
 
+def sanitize_jid_string(jid_str: str) -> str:
+    """Strip companion device and agent tokens from a JID string."""
+    if not isinstance(jid_str, str) or not jid_str:
+        return ""
+    if "@" in jid_str:
+        user, server = jid_str.split("@", 1)
+        if server in ("s.whatsapp.net", "lid"):
+            if ":" in user:
+                user = user.split(":", 1)[0]
+            if "." in user:
+                user = user.split(".", 1)[0]
+        elif ":" in user:
+            user = user.split(":", 1)[0]
+        return f"{user}@{server}"
+    if ":" in jid_str:
+        jid_str = jid_str.split(":", 1)[0]
+    if "." in jid_str:
+        jid_str = jid_str.split(".", 1)[0]
+    return jid_str
+
+
 def is_valid_jid_string(s: str) -> bool:
     """Validate that a string conforms to a WhatsApp JID structure."""
     if not isinstance(s, str) or not s or len(s) > 150:
@@ -1261,6 +1294,8 @@ def apply_entity_modifications(
             raw_u = filtered["user"]
             u = raw_u.split(":", 1)[0] if ":" in raw_u else raw_u
             s = filtered["server"]
+            if s in ("s.whatsapp.net", "lid") and "." in u:
+                u = u.split(".", 1)[0]
             has_device = "device" in table_cols
             if has_device:
                 existing_jid = cur.execute(
@@ -1311,9 +1346,36 @@ def apply_entity_modifications(
             raw_jid_id = filtered["jid_row_id"]
             mapped_jid_id = jid_id_map.get(raw_jid_id, raw_jid_id) if jid_id_map else raw_jid_id
 
-            existing_chat = cur.execute(
-                "SELECT _id FROM chat WHERE jid_row_id = ?", (mapped_jid_id,)
-            ).fetchone()
+            # Priority 1: If mapped_jid_id is a LID, check if jid_map maps to an existing phone chat
+            existing_chat = None
+            has_hidden_col = "hidden" in table_cols
+            c_order = (
+                "ORDER BY CASE WHEN c.hidden = 0 THEN 0 ELSE 1 END, c._id ASC"
+                if has_hidden_col
+                else "ORDER BY c._id ASC"
+            )
+            try:
+                cur.execute(
+                    f"""
+                    SELECT c._id FROM chat c
+                    JOIN jid_map jm ON c.jid_row_id = jm.jid_row_id
+                    WHERE jm.lid_row_id = ?
+                    {c_order}
+                    LIMIT 1
+                    """,
+                    (mapped_jid_id,),
+                )
+                existing_chat = cur.fetchone()
+            except sqlite3.OperationalError:
+                pass
+
+            # Priority 2: Direct match on jid_row_id
+            if existing_chat is None:
+                existing_chat = cur.execute(
+                    "SELECT _id FROM chat WHERE jid_row_id = ?", (mapped_jid_id,)
+                ).fetchone()
+
+            # Priority 3: Match on account_jid_row_id
             if existing_chat is None and "account_jid_row_id" in table_cols:
                 raw_acct_id = filtered.get("account_jid_row_id")
                 mapped_acct_id = (
@@ -1327,6 +1389,20 @@ def apply_entity_modifications(
                         (mapped_acct_id, mapped_acct_id),
                     ).fetchone()
 
+            # Priority 4: Match on natural key (user, server)
+            if existing_chat is None:
+                existing_chat = cur.execute(
+                    f"""
+                    SELECT c._id FROM chat c
+                    JOIN jid j_target ON j_target._id = ?
+                    JOIN jid j_exist ON c.jid_row_id = j_exist._id
+                    WHERE j_exist.user = j_target.user AND j_exist.server = j_target.server
+                    {c_order}
+                    LIMIT 1
+                    """,
+                    (mapped_jid_id,),
+                ).fetchone()
+
             if existing_chat is not None:
                 chat_id = existing_chat[0]
                 update_cols = [c for c in filtered if c not in ("_id", "jid_row_id")]
@@ -1334,6 +1410,12 @@ def apply_entity_modifications(
                     set_clause = ", ".join(f"{c} = ?" for c in update_cols)
                     params = [filtered[c] for c in update_cols] + [chat_id]
                     cur.execute(f"UPDATE chat SET {set_clause} WHERE _id = ?", params)
+                # Ensure account_jid_row_id is linked if mapped_jid_id was a LID
+                if "account_jid_row_id" in table_cols:
+                    cur.execute(
+                        "UPDATE chat SET account_jid_row_id = ? WHERE _id = ? AND (account_jid_row_id IS NULL OR account_jid_row_id = 0)",
+                        (mapped_jid_id, chat_id),
+                    )
             else:
                 id_used = (
                     cur.execute(
@@ -2309,27 +2391,33 @@ def resolve_or_create_jid(
         logger.warning(f"Rejected invalid WhatsApp JID: {repr(jid_str)[:50]}")
         raise ValueError(f"Invalid WhatsApp JID: {repr(jid_str)[:50]}")
 
-    if jid_cache is not None and jid_str in jid_cache:
-        return jid_cache[jid_str]
+    canonical_jid = sanitize_jid_string(jid_str)
+    if jid_cache is not None:
+        if canonical_jid in jid_cache:
+            return jid_cache[canonical_jid]
+        if jid_str in jid_cache:
+            return jid_cache[jid_str]
 
-    if "@" in jid_str:
-        user, server = jid_str.split("@", 1)
+    if "@" in canonical_jid:
+        user, server = canonical_jid.split("@", 1)
     else:
-        user, server = jid_str, "s.whatsapp.net"
-
-    if ":" in user:
-        user = user.split(":", 1)[0]
-
-    canonical_jid = f"{user}@{server}"
-    if jid_cache is not None and canonical_jid in jid_cache:
-        cached_id = jid_cache[canonical_jid]
-        jid_cache[jid_str] = cached_id
-        return cached_id
+        user, server = canonical_jid, "s.whatsapp.net"
+        canonical_jid = f"{user}@{server}"
 
     cur = conn.cursor()
     cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
     has_device = "device" in cols
-    if has_device:
+    has_raw_string = "raw_string" in cols
+    if has_device and has_raw_string:
+        cur.execute(
+            "SELECT _id FROM jid WHERE user = ? AND server = ? "
+            "ORDER BY "
+            "CASE WHEN (raw_string = user || '@' || server OR raw_string IS NULL OR raw_string = '') AND (device IS NULL OR device = 0) THEN 0 "
+            "     WHEN device IS NULL OR device = 0 THEN 1 ELSE 2 END, "
+            "_id ASC LIMIT 1",
+            (user, server),
+        )
+    elif has_device:
         cur.execute(
             "SELECT _id FROM jid WHERE user = ? AND server = ? "
             "ORDER BY CASE WHEN device IS NULL OR device = 0 THEN 0 ELSE 1 END, _id ASC LIMIT 1",
@@ -2346,6 +2434,7 @@ def resolve_or_create_jid(
         if jid_cache is not None:
             jid_cache[canonical_jid] = jid_id
             jid_cache[jid_str] = jid_id
+            jid_cache[user] = jid_id
         return jid_id
 
     insert_cols = ["user", "server"]
@@ -2365,6 +2454,7 @@ def resolve_or_create_jid(
     if jid_cache is not None:
         jid_cache[canonical_jid] = jid_id
         jid_cache[jid_str] = jid_id
+        jid_cache[user] = jid_id
     return jid_id
 
 
@@ -2374,7 +2464,7 @@ def resolve_or_create_chat(
     logger: logging.Logger,
     chat_cache: dict[int, int] | None,
 ) -> int:
-    """Resolve a chat row for a jid_row_id, creating a placeholder row if absent."""
+    """Resolve a chat row for a jid_row_id, preferring primary phone chats over shadow LID chats."""
     if chat_cache is not None and jid_row_id in chat_cache:
         return chat_cache[jid_row_id]
 
@@ -2383,52 +2473,46 @@ def resolve_or_create_chat(
     has_account_jid = "account_jid_row_id" in cols
     has_hidden = "hidden" in cols
 
-    # 1. Direct match on chat.jid_row_id
-    cur.execute("SELECT _id FROM chat WHERE jid_row_id = ?", (jid_row_id,))
-    row = cur.fetchone()
-    if row is not None:
-        chat_id = int(row[0])
-        if has_hidden:
-            cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
-        if chat_cache is not None:
-            chat_cache[jid_row_id] = chat_id
-        return chat_id
+    cur.execute("SELECT user, server FROM jid WHERE _id = ?", (jid_row_id,))
+    jid_row = cur.fetchone()
+    jid_user, jid_server = (jid_row[0], jid_row[1]) if jid_row else ("", "")
 
-    # 2. Match on chat.account_jid_row_id if available
-    if has_account_jid:
-        cur.execute(
-            "SELECT _id FROM chat WHERE account_jid_row_id = ? LIMIT 1",
-            (jid_row_id,),
-        )
-        row = cur.fetchone()
-        if row is not None:
-            chat_id = int(row[0])
-            if has_hidden:
-                cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
-            if chat_cache is not None:
-                chat_cache[jid_row_id] = chat_id
-            return chat_id
-
-    # 3. Check bidirectional mapping in jid_map
+    has_jid_map = False
     try:
         cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'")
-        if cur.fetchone() is not None:
+        has_jid_map = cur.fetchone() is not None
+    except sqlite3.OperationalError:
+        pass
+
+    c_order = (
+        "ORDER BY CASE WHEN c.hidden = 0 THEN 0 ELSE 1 END, c._id ASC"
+        if has_hidden
+        else "ORDER BY c._id ASC"
+    )
+    chat_order = (
+        "ORDER BY CASE WHEN hidden = 0 THEN 0 ELSE 1 END, _id ASC"
+        if has_hidden
+        else "ORDER BY _id ASC"
+    )
+
+    chat_id = None
+
+    if jid_server == "lid":
+        # 1. Incoming JID is a LID. Check if jid_map maps this LID to an existing phone chat.
+        if has_jid_map:
             cur.execute(
-                """
+                f"""
                 SELECT c._id FROM chat c
-                JOIN jid_map jm ON jm.jid_row_id = c.jid_row_id
+                JOIN jid_map jm ON c.jid_row_id = jm.jid_row_id
                 WHERE jm.lid_row_id = ?
-                UNION
-                SELECT c._id FROM chat c
-                JOIN jid_map jm ON jm.lid_row_id = c.jid_row_id
-                WHERE jm.jid_row_id = ?
+                {c_order}
                 LIMIT 1
                 """,
-                (jid_row_id, jid_row_id),
+                (jid_row_id,),
             )
-            row = cur.fetchone()
-            if row is not None:
-                chat_id = int(row[0])
+            match = cur.fetchone()
+            if match is not None:
+                chat_id = int(match[0])
                 if has_hidden:
                     cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
                 if has_account_jid:
@@ -2436,51 +2520,126 @@ def resolve_or_create_chat(
                         "UPDATE chat SET account_jid_row_id = ? WHERE _id = ? AND (account_jid_row_id IS NULL OR account_jid_row_id = 0)",
                         (jid_row_id, chat_id),
                     )
-                if chat_cache is not None:
-                    chat_cache[jid_row_id] = chat_id
-                return chat_id
-    except sqlite3.OperationalError:
-        pass
 
-    # 4. Check lid_display_name matching to an existing chat with phone JID
-    try:
-        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'")
-        if cur.fetchone() is not None:
+        # 2. Check if a chat already has account_jid_row_id pointing to this LID
+        if chat_id is None and has_account_jid:
             cur.execute(
-                "SELECT display_name FROM lid_display_name WHERE lid_row_id = ? AND display_name IS NOT NULL",
+                f"SELECT _id FROM chat WHERE account_jid_row_id = ? {chat_order} LIMIT 1",
                 (jid_row_id,),
             )
-            ldn_row = cur.fetchone()
-            if ldn_row and ldn_row[0]:
-                clean_digits = re.sub(r"\D", "", ldn_row[0])
-                if clean_digits and len(clean_digits) >= 8:
-                    cur.execute(
-                        "SELECT c._id FROM chat c JOIN jid j ON j._id = c.jid_row_id "
-                        "WHERE (j.user = ? OR j.user LIKE ?) LIMIT 1",
-                        (clean_digits, f"%{clean_digits}"),
-                    )
-                    chat_match = cur.fetchone()
-                    if chat_match is not None:
-                        chat_id = int(chat_match[0])
-                        if has_hidden:
-                            cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
-                        if has_account_jid:
-                            cur.execute(
-                                "UPDATE chat SET account_jid_row_id = ? WHERE _id = ? AND (account_jid_row_id IS NULL OR account_jid_row_id = 0)",
-                                (jid_row_id, chat_id),
-                            )
-                        if chat_cache is not None:
-                            chat_cache[jid_row_id] = chat_id
-                        return chat_id
-    except sqlite3.OperationalError:
-        pass
+            match = cur.fetchone()
+            if match is not None:
+                chat_id = int(match[0])
+                if has_hidden:
+                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
 
-    # 5. Insert new chat row
-    if has_hidden:
-        cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 0)", (jid_row_id,))
+        # 3. Check lid_display_name matching to an existing chat with phone JID
+        if chat_id is None:
+            try:
+                cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'"
+                )
+                if cur.fetchone() is not None:
+                    cur.execute(
+                        "SELECT display_name FROM lid_display_name WHERE lid_row_id = ? AND display_name IS NOT NULL",
+                        (jid_row_id,),
+                    )
+                    ldn_row = cur.fetchone()
+                    if ldn_row and ldn_row[0]:
+                        clean_digits = re.sub(r"\D", "", ldn_row[0])
+                        if clean_digits and len(clean_digits) >= 8:
+                            cur.execute(
+                                f"SELECT c._id FROM chat c JOIN jid j ON j._id = c.jid_row_id "
+                                f"WHERE (j.user = ? OR j.user LIKE ?) "
+                                f"{c_order} LIMIT 1",
+                                (clean_digits, f"%{clean_digits}"),
+                            )
+                            match = cur.fetchone()
+                            if match is not None:
+                                chat_id = int(match[0])
+                                if has_hidden:
+                                    cur.execute(
+                                        "UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,)
+                                    )
+                                if has_account_jid:
+                                    cur.execute(
+                                        "UPDATE chat SET account_jid_row_id = ? WHERE _id = ? AND (account_jid_row_id IS NULL OR account_jid_row_id = 0)",
+                                        (jid_row_id, chat_id),
+                                    )
+            except sqlite3.OperationalError:
+                pass
+
+        # 4. If no phone chat found, check direct match on chat.jid_row_id = LID or same natural LID user
+        if chat_id is None:
+            cur.execute(
+                f"""
+                SELECT c._id FROM chat c
+                JOIN jid j ON c.jid_row_id = j._id
+                WHERE (c.jid_row_id = ? OR (j.user = ? AND j.server = 'lid'))
+                {c_order} LIMIT 1
+                """,
+                (jid_row_id, jid_user),
+            )
+            match = cur.fetchone()
+            if match is not None:
+                chat_id = int(match[0])
+                if has_hidden:
+                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
+
     else:
-        cur.execute("INSERT INTO chat (jid_row_id) VALUES (?)", (jid_row_id,))
-    chat_id = int(cur.lastrowid)
+        # Incoming JID is phone JID or group JID or other
+        # 1. Direct match on chat.jid_row_id
+        cur.execute("SELECT _id FROM chat WHERE jid_row_id = ? LIMIT 1", (jid_row_id,))
+        match = cur.fetchone()
+        if match is not None:
+            chat_id = int(match[0])
+            if has_hidden:
+                cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
+
+        # 2. Natural identity match: check if chat exists for (user, server)
+        if chat_id is None and jid_user and jid_server:
+            cur.execute(
+                f"""
+                SELECT c._id FROM chat c
+                JOIN jid j ON c.jid_row_id = j._id
+                WHERE j.user = ? AND j.server = ?
+                {c_order}
+                LIMIT 1
+                """,
+                (jid_user, jid_server),
+            )
+            match = cur.fetchone()
+            if match is not None:
+                chat_id = int(match[0])
+                if has_hidden:
+                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
+
+        # 3. If phone JID, check if chat exists mapped via jid_map to account_jid_row_id or shadow chat
+        if chat_id is None and jid_server == "s.whatsapp.net" and has_jid_map:
+            cur.execute(
+                f"""
+                SELECT c._id FROM chat c
+                JOIN jid_map jm ON (c.account_jid_row_id = jm.lid_row_id OR c.jid_row_id = jm.lid_row_id)
+                WHERE jm.jid_row_id = ?
+                {c_order}
+                LIMIT 1
+                """,
+                (jid_row_id,),
+            )
+            match = cur.fetchone()
+            if match is not None:
+                chat_id = int(match[0])
+                if has_hidden:
+                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
+
+    # 5. If still no chat found, insert a new chat row
+    if chat_id is None:
+        if has_hidden:
+            cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 0)", (jid_row_id,))
+        else:
+            cur.execute("INSERT INTO chat (jid_row_id) VALUES (?)", (jid_row_id,))
+        chat_id = int(cur.lastrowid)
+
     if chat_cache is not None:
         chat_cache[jid_row_id] = chat_id
     return chat_id
@@ -2599,13 +2758,28 @@ def apply_messages_bin(
         chat_jid_row_id = resolve_or_create_jid(conn, remote_jid, logger, jid_cache)
         chat_row_id = resolve_or_create_chat(conn, chat_jid_row_id, logger, chat_cache)
 
-        # Resolve sender
-        if msg["from_me"] == 1:
-            sender_jid_row_id = None
-        elif msg["participant"]:
+        is_group = bool(
+            remote_jid.endswith("@g.us")
+            or remote_jid.endswith("@temp")
+            or ("@" in remote_jid and remote_jid.split("@", 1)[1] == "g.us")
+        )
+
+        # Resolve sender: In Android WhatsApp, 1-on-1 messages always have sender_jid_row_id = 0
+        if not is_group or msg["from_me"] == 1:
+            sender_jid_row_id = 0
+        elif msg.get("participant"):
             sender_jid_row_id = resolve_or_create_jid(conn, msg["participant"], logger, jid_cache)
         else:
-            sender_jid_row_id = chat_jid_row_id
+            sender_jid_row_id = 0
+
+        # For add-ons (reactions, pins, poll votes, edits, revokes):
+        # 1-on-1 and outgoing messages have sender_jid_row_id = -1
+        if not is_group or msg["from_me"] == 1:
+            add_on_sender_id = -1
+        elif msg.get("participant"):
+            add_on_sender_id = resolve_or_create_jid(conn, msg["participant"], logger, jid_cache)
+        else:
+            add_on_sender_id = -1
 
         # Fallback delete for messages without key_id
         if not msg.get("key_id") and "chat_row_id" in msg_cols:
@@ -2695,10 +2869,10 @@ def apply_messages_bin(
             if quoted_cols:
                 qi = msg["quoted_info"]
                 q_part = qi.get("participant", "")
-                if q_part:
+                if is_group and q_part and qi.get("from_me") != 1:
                     q_sender_id = resolve_or_create_jid(conn, q_part, logger, jid_cache)
                 else:
-                    q_sender_id = None if qi.get("from_me") == 1 else chat_jid_row_id
+                    q_sender_id = 0
                 q_row_map = {
                     "message_row_id": msg_row_id,
                     "chat_row_id": chat_row_id,
@@ -2749,7 +2923,7 @@ def apply_messages_bin(
             applied = apply_reaction_record(
                 conn,
                 msg["reaction_info"],
-                sender_jid_row_id,
+                add_on_sender_id,
                 msg["from_me"],
                 msg["timestamp"],
                 key_cache,
@@ -2764,7 +2938,7 @@ def apply_messages_bin(
                         add_on_type="reaction",
                         target_key_id=msg["reaction_info"]["target_key_id"],
                         msg=msg,
-                        sender_jid_row_id=sender_jid_row_id,
+                        sender_jid_row_id=add_on_sender_id,
                         from_me=msg["from_me"],
                         timestamp=msg["timestamp"],
                         key_id=msg.get("key_id", ""),
@@ -2777,7 +2951,7 @@ def apply_messages_bin(
             applied = apply_pin_in_chat(
                 conn,
                 msg["pin_info"],
-                sender_jid_row_id,
+                add_on_sender_id,
                 msg["from_me"],
                 msg["timestamp"],
                 key_cache,
@@ -2792,7 +2966,7 @@ def apply_messages_bin(
                         add_on_type="pin",
                         target_key_id=msg["pin_info"]["target_key_id"],
                         msg=msg,
-                        sender_jid_row_id=sender_jid_row_id,
+                        sender_jid_row_id=add_on_sender_id,
                         from_me=msg["from_me"],
                         timestamp=msg["timestamp"],
                         key_id=msg.get("key_id", ""),
@@ -2805,7 +2979,7 @@ def apply_messages_bin(
             applied = apply_poll_vote(
                 conn,
                 msg["poll_vote_info"],
-                sender_jid_row_id,
+                add_on_sender_id,
                 msg["from_me"],
                 msg["timestamp"],
                 key_cache,
@@ -2820,7 +2994,7 @@ def apply_messages_bin(
                         add_on_type="poll_vote",
                         target_key_id=msg["poll_vote_info"]["poll_key_id"],
                         msg=msg,
-                        sender_jid_row_id=sender_jid_row_id,
+                        sender_jid_row_id=add_on_sender_id,
                         from_me=msg["from_me"],
                         timestamp=msg["timestamp"],
                         key_id=msg.get("key_id", ""),
@@ -2833,7 +3007,7 @@ def apply_messages_bin(
             applied = apply_protocol_record(
                 conn,
                 msg,
-                sender_jid_row_id,
+                add_on_sender_id,
                 msg["from_me"],
                 msg["timestamp"],
                 key_cache,
@@ -2851,7 +3025,7 @@ def apply_messages_bin(
                             add_on_type="revoke" if msg.get("revoke_info") else "edit",
                             target_key_id=target_k,
                             msg=msg,
-                            sender_jid_row_id=sender_jid_row_id,
+                            sender_jid_row_id=add_on_sender_id,
                             from_me=msg["from_me"],
                             timestamp=msg["timestamp"],
                             key_id=msg.get("key_id", ""),
@@ -3129,6 +3303,257 @@ def apply_increment_folder(
     return stats
 
 
+def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Logger) -> None:
+    """
+    Vendor-aligned post-restore LID migration (RestoredBackupLidMigrationHelper).
+    Links phone chats with account_jid_row_id from jid_map and consolidates
+    any duplicate split shadow LID chats back into primary phone chats.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'")
+    if not cur.fetchone():
+        return
+    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat'")
+    if not cur.fetchone():
+        return
+
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    has_account_jid = "account_jid_row_id" in chat_cols
+    has_hidden = "hidden" in chat_cols
+
+    # Step A: Link phone chats to their LID in account_jid_row_id
+    if has_account_jid:
+        cur.execute(
+            """
+            UPDATE chat
+            SET account_jid_row_id = (
+                SELECT jm.lid_row_id
+                FROM jid_map jm
+                WHERE jm.jid_row_id = chat.jid_row_id
+            )
+            WHERE (account_jid_row_id IS NULL OR account_jid_row_id = 0)
+              AND EXISTS (
+                  SELECT 1 FROM jid_map jm WHERE jm.jid_row_id = chat.jid_row_id
+              )
+            """
+        )
+        if cur.rowcount > 0:
+            logger.info(f"Updated account_jid_row_id for {cur.rowcount} chat(s) from jid_map")
+
+    # Step B: Identify and consolidate duplicate split chats (phone chat + LID chat)
+    query = """
+        SELECT c_phone._id, c_lid._id, jm.lid_row_id
+        FROM chat c_phone
+        JOIN jid_map jm ON c_phone.jid_row_id = jm.jid_row_id
+        JOIN chat c_lid ON c_lid.jid_row_id = jm.lid_row_id
+        WHERE c_phone._id != c_lid._id
+    """
+    dup_pairs = cur.execute(query).fetchall()
+    if dup_pairs:
+        logger.info(f"Consolidating {len(dup_pairs)} split phone/LID chat pairs...")
+        for phone_chat_id, lid_chat_id, lid_row_id in dup_pairs:
+            cur.execute(
+                "UPDATE message SET chat_row_id = ? WHERE chat_row_id = ?",
+                (phone_chat_id, lid_chat_id),
+            )
+            msgs_moved = cur.rowcount
+
+            try:
+                cur.execute(
+                    "UPDATE message_media SET chat_row_id = ? WHERE chat_row_id = ?",
+                    (phone_chat_id, lid_chat_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cur.execute(
+                    "UPDATE message_quoted SET chat_row_id = ?, parent_message_chat_row_id = ? WHERE chat_row_id = ?",
+                    (phone_chat_id, phone_chat_id, lid_chat_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            if has_hidden:
+                cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (phone_chat_id,))
+                cur.execute("UPDATE chat SET hidden = 1 WHERE _id = ?", (lid_chat_id,))
+            if has_account_jid:
+                cur.execute(
+                    "UPDATE chat SET account_jid_row_id = ? WHERE _id = ?",
+                    (lid_row_id, phone_chat_id),
+                )
+
+            if "sort_timestamp" in chat_cols:
+                cur.execute(
+                    """
+                    UPDATE chat
+                    SET sort_timestamp = MAX(
+                        COALESCE(sort_timestamp, 0),
+                        COALESCE((SELECT sort_timestamp FROM chat WHERE _id = ?), 0),
+                        COALESCE((SELECT MAX(timestamp) FROM message WHERE chat_row_id = ?), 0)
+                    )
+                    WHERE _id = ?
+                    """,
+                    (lid_chat_id, phone_chat_id, phone_chat_id),
+                )
+
+            if "display_message_row_id" in chat_cols:
+                cur.execute(
+                    """
+                    UPDATE chat
+                    SET display_message_row_id = (
+                        SELECT _id FROM message
+                        WHERE chat_row_id = ? AND message_type NOT IN (25, 67, 74, 79)
+                        ORDER BY timestamp DESC, _id DESC LIMIT 1
+                    )
+                    WHERE _id = ?
+                    """,
+                    (phone_chat_id, phone_chat_id),
+                )
+            if "last_message_row_id" in chat_cols:
+                cur.execute(
+                    """
+                    UPDATE chat
+                    SET last_message_row_id = (
+                        SELECT _id FROM message
+                        WHERE chat_row_id = ?
+                        ORDER BY timestamp DESC, _id DESC LIMIT 1
+                    )
+                    WHERE _id = ?
+                    """,
+                    (phone_chat_id, phone_chat_id),
+                )
+
+            if msgs_moved > 0:
+                logger.info(
+                    f"Consolidated chat pair (phone_chat={phone_chat_id}, lid_chat={lid_chat_id}): moved {msgs_moved} messages."
+                )
+
+    # Step C: Consolidate any duplicate chats sharing the same natural user and server
+    dup_query = """
+        SELECT c1._id, c2._id, c1.jid_row_id, c2.jid_row_id
+        FROM chat c1
+        JOIN jid j1 ON c1.jid_row_id = j1._id
+        JOIN chat c2 ON c1._id < c2._id
+        JOIN jid j2 ON c2.jid_row_id = j2._id
+        WHERE j1.user = j2.user AND j1.server = j2.server
+        ORDER BY c1._id ASC, c2._id ASC
+    """
+    dup_chats = cur.execute(dup_query).fetchall()
+    if dup_chats:
+        logger.info(f"Consolidating {len(dup_chats)} duplicate natural chat pairs...")
+        for c1_id, c2_id, _j1, _j2 in dup_chats:
+            cur.execute(
+                "UPDATE message SET chat_row_id = ? WHERE chat_row_id = ?",
+                (c1_id, c2_id),
+            )
+            msgs_moved = cur.rowcount
+
+            try:
+                cur.execute(
+                    "UPDATE message_media SET chat_row_id = ? WHERE chat_row_id = ?",
+                    (c1_id, c2_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cur.execute(
+                    "UPDATE message_quoted SET chat_row_id = ?, parent_message_chat_row_id = ? WHERE chat_row_id = ?",
+                    (c1_id, c1_id, c2_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            if has_hidden:
+                cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (c1_id,))
+                cur.execute("UPDATE chat SET hidden = 1 WHERE _id = ?", (c2_id,))
+
+            if "sort_timestamp" in chat_cols:
+                cur.execute(
+                    """
+                    UPDATE chat
+                    SET sort_timestamp = MAX(
+                        COALESCE(sort_timestamp, 0),
+                        COALESCE((SELECT sort_timestamp FROM chat WHERE _id = ?), 0),
+                        COALESCE((SELECT MAX(timestamp) FROM message WHERE chat_row_id = ?), 0)
+                    )
+                    WHERE _id = ?
+                    """,
+                    (c2_id, c1_id, c1_id),
+                )
+
+            if "display_message_row_id" in chat_cols:
+                cur.execute(
+                    """
+                    UPDATE chat
+                    SET display_message_row_id = (
+                        SELECT _id FROM message
+                        WHERE chat_row_id = ? AND message_type NOT IN (25, 67, 74, 79)
+                        ORDER BY timestamp DESC, _id DESC LIMIT 1
+                    )
+                    WHERE _id = ?
+                    """,
+                    (c1_id, c1_id),
+                )
+            if "last_message_row_id" in chat_cols:
+                cur.execute(
+                    """
+                    UPDATE chat
+                    SET last_message_row_id = (
+                        SELECT _id FROM message
+                        WHERE chat_row_id = ?
+                        ORDER BY timestamp DESC, _id DESC LIMIT 1
+                    )
+                    WHERE _id = ?
+                    """,
+                    (c1_id, c1_id),
+                )
+
+            if msgs_moved > 0:
+                logger.info(
+                    f"Consolidated natural duplicate chat pair (base_chat={c1_id}, dup_chat={c2_id}): moved {msgs_moved} messages."
+                )
+
+    # Step D: Re-point any companion sender JIDs in message to canonical primary JID
+    try:
+        cur.execute("""
+            UPDATE message
+            SET sender_jid_row_id = (
+                SELECT j_pri._id FROM jid j_comp
+                JOIN jid j_pri ON j_pri.user = j_comp.user AND j_pri.server = j_comp.server
+                WHERE j_comp._id = message.sender_jid_row_id
+                  AND (j_pri.device IS NULL OR j_pri.device = 0)
+                  AND (j_pri.raw_string = j_pri.user || '@' || j_pri.server OR j_pri.raw_string IS NULL OR j_pri.raw_string = '')
+                ORDER BY j_pri._id ASC
+                LIMIT 1
+            )
+            WHERE sender_jid_row_id > 0
+              AND EXISTS (
+                  SELECT 1 FROM jid j_comp
+                  WHERE j_comp._id = message.sender_jid_row_id
+                    AND (j_comp.device > 0 OR j_comp.raw_string LIKE '%.%:%@%')
+              )
+              AND (
+                  SELECT j_pri._id FROM jid j_comp
+                  JOIN jid j_pri ON j_pri.user = j_comp.user AND j_pri.server = j_comp.server
+                  WHERE j_comp._id = message.sender_jid_row_id
+                    AND (j_pri.device IS NULL OR j_pri.device = 0)
+                    AND (j_pri.raw_string = j_pri.user || '@' || j_pri.server OR j_pri.raw_string IS NULL OR j_pri.raw_string = '')
+                  ORDER BY j_pri._id ASC
+                  LIMIT 1
+              ) IS NOT NULL
+        """)
+        if cur.rowcount > 0:
+            logger.info(
+                f"Re-pointed {cur.rowcount} message sender JIDs from companion devices to primary canonical JIDs."
+            )
+    except sqlite3.OperationalError:
+        pass
+
+    conn.commit()
+
+
 def merge_increments(
     base_db_path: str,
     increment_paths: list[str],
@@ -3167,21 +3592,71 @@ def merge_increments(
         cur = conn.cursor()
         jid_cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
         has_raw_string = "raw_string" in jid_cols
+        has_device = "device" in jid_cols
         jid_sql = (
-            "SELECT user, server, _id, raw_string FROM jid"
+            "SELECT user, server, _id, raw_string, device FROM jid "
+            "ORDER BY "
+            "CASE WHEN (raw_string = user || '@' || server OR raw_string IS NULL OR raw_string = '') AND (device IS NULL OR device = 0) THEN 0 "
+            "     WHEN device IS NULL OR device = 0 THEN 1 ELSE 2 END, "
+            "_id ASC"
+            if (has_raw_string and has_device)
+            else "SELECT user, server, _id, raw_string, 0 FROM jid ORDER BY _id ASC"
             if has_raw_string
-            else "SELECT user, server, _id FROM jid"
+            else "SELECT user, server, _id, '', 0 FROM jid ORDER BY _id ASC"
         )
         for r in cur.execute(jid_sql).fetchall():
-            jid_cache[f"{r[0]}@{r[1]}"] = r[2]
-            jid_cache[r[0]] = r[2]
-            if has_raw_string and r[3]:
-                jid_cache[r[3]] = r[2]
+            u, s, jid_id, raw_str, _dev = r[0], r[1], r[2], r[3], r[4]
+            canonical_key = f"{u}@{s}"
+            if canonical_key not in jid_cache:
+                jid_cache[canonical_key] = jid_id
+            if u not in jid_cache:
+                jid_cache[u] = jid_id
+            if raw_str and raw_str not in jid_cache:
+                jid_cache[raw_str] = jid_id
+
+        # Map companion device raw strings to canonical primary JID
+        for raw_k in list(jid_cache.keys()):
+            sanitized = sanitize_jid_string(raw_k)
+            if sanitized in jid_cache:
+                jid_cache[raw_k] = jid_cache[sanitized]
 
         chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+        has_hidden = "hidden" in chat_cols
+        has_jid_map = False
+        try:
+            cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'")
+            has_jid_map = cur.fetchone() is not None
+        except sqlite3.OperationalError:
+            pass
+
         if "jid_row_id" in chat_cols:
-            for r in cur.execute("SELECT jid_row_id, _id FROM chat").fetchall():
+            # First cache visible chats (hidden = 0 or NULL)
+            c_sql = (
+                "SELECT jid_row_id, _id FROM chat WHERE hidden = 0 OR hidden IS NULL"
+                if has_hidden
+                else "SELECT jid_row_id, _id FROM chat"
+            )
+            for r in cur.execute(c_sql).fetchall():
                 chat_cache[r[0]] = r[1]
+
+            # If jid_map is available, map lid_row_id directly to the visible phone chat
+            if has_jid_map:
+                jm_sql = (
+                    """
+                    SELECT jm.lid_row_id, c._id
+                    FROM chat c
+                    JOIN jid_map jm ON c.jid_row_id = jm.jid_row_id
+                    WHERE c.hidden = 0 OR c.hidden IS NULL
+                    """
+                    if has_hidden
+                    else """
+                    SELECT jm.lid_row_id, c._id
+                    FROM chat c
+                    JOIN jid_map jm ON c.jid_row_id = jm.jid_row_id
+                    """
+                )
+                for r in cur.execute(jm_sql).fetchall():
+                    chat_cache[r[0]] = r[1]
 
         for idx, inc_path in enumerate(increment_paths):
             logger.info(
@@ -3202,7 +3677,10 @@ def merge_increments(
                 f"{stats['entity_modified']} entities modified."
             )
 
-        # Step 6: Rebuild database indexes after all increments are applied, matching vendor MessageStoreBackupUtils/reindex
+        # Step 6: Post-restore LID migration, matching vendor RestoredBackupLidMigrationHelper
+        migrate_restored_backup_to_lid(conn, logger)
+
+        # Step 7: Rebuild database indexes after all increments are applied, matching vendor MessageStoreBackupUtils/reindex
         logger.info("Rebuilding database indexes (REINDEX)...")
         conn.execute("REINDEX")
 
