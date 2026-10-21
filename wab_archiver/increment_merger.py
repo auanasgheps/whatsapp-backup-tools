@@ -261,19 +261,25 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     # Field 16: starred
     starred = 1 if fields.get(16, [(0, 0)])[0][1] else 0
 
-    # Field 39: userReceipt (repeated UserReceipt)
+    # Field 39: photoChange (PhotoChange; e.g. group icon updates containing JPEG image bytes)
+    # Field 40: userReceipt (repeated UserReceipt)
     user_receipts: list[dict] = []
-    if 39 in fields:
-        for tuple_item in fields[39]:
+    if 40 in fields:
+        for tuple_item in fields[40]:
             ur_bytes = tuple_item[1]
             if not isinstance(ur_bytes, bytes):
                 continue
-            ur_fields = parse_wire_fields(ur_bytes)
+            try:
+                ur_fields = parse_wire_fields(ur_bytes)
+            except Exception:
+                continue
             ujid = (
                 ur_fields.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
                 if 1 in ur_fields
                 else ""
             )
+            if ujid and not is_valid_jid_string(ujid):
+                continue
             rec_raw = ur_fields.get(2, [(0, 0)])[0][1] if 2 in ur_fields else 0
             read_raw = ur_fields.get(3, [(0, 0)])[0][1] if 3 in ur_fields else 0
             play_raw = ur_fields.get(4, [(0, 0)])[0][1] if 4 in ur_fields else 0
@@ -2612,11 +2618,16 @@ def apply_messages_bin(
             if ru_cols:
                 for ur in msg["user_receipts"]:
                     ur_jid = ur.get("user_jid", "")
-                    ur_jid_id = (
-                        resolve_or_create_jid(conn, ur_jid, logger, jid_cache)
-                        if ur_jid
-                        else chat_jid_row_id
-                    )
+                    if ur_jid and not is_valid_jid_string(ur_jid):
+                        continue
+                    try:
+                        ur_jid_id = (
+                            resolve_or_create_jid(conn, ur_jid, logger, jid_cache)
+                            if ur_jid
+                            else chat_jid_row_id
+                        )
+                    except ValueError:
+                        continue
                     cur.execute(
                         "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
                         "VALUES (?, ?, ?, ?, ?)",
