@@ -10,6 +10,7 @@ import sqlite3
 import struct
 import zipfile
 import zlib
+from dataclasses import dataclass
 
 # ==============================================================================
 # increment_merger.py — WhatsApp Android Incremental Backup Merger
@@ -1446,6 +1447,18 @@ def find_message_row_id(
     return None
 
 
+@dataclass(slots=True)
+class PendingAddOn:
+    add_on_type: str
+    target_key_id: str
+    msg: dict
+    sender_jid_row_id: int | None
+    from_me: int
+    timestamp: int
+    key_id: str
+    chat_row_id: int | None
+
+
 def apply_reaction_record(
     conn: sqlite3.Connection,
     reaction_info: dict,
@@ -1457,19 +1470,19 @@ def apply_reaction_record(
     logger: logging.Logger,
     key_id: str,
     chat_row_id: int | None,
-) -> None:
-    """Apply a reaction message add-on to the database, ensuring key_id satisfies NOT NULL constraints."""
+) -> bool:
+    """Apply a reaction message add-on to the database, ensuring key_id satisfies NOT NULL constraints. Returns True if applied, False otherwise."""
     target_key_id = reaction_info.get("target_key_id", "")
     if not target_key_id:
-        return
+        return False
     parent_row_id = find_message_row_id(conn, target_key_id, key_cache)
     if parent_row_id is None:
-        logger.debug(f"Target message '{target_key_id}' for reaction not found; skipping add-on.")
-        return
+        logger.debug(f"Target message '{target_key_id}' for reaction not found in cache/database.")
+        return False
 
     add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
     if not add_on_cols:
-        return
+        return False
 
     cur = conn.cursor()
     emoji = reaction_info.get("emoji", "")
@@ -1481,7 +1494,7 @@ def apply_reaction_record(
             "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 1",
             (parent_row_id, sender_jid_row_id),
         )
-        return
+        return True
 
     # Delete any prior reaction by this sender on this message
     reaction_cols = get_table_columns(conn, "message_add_on_reaction", schema_cache)
@@ -1517,6 +1530,7 @@ def apply_reaction_record(
             "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) VALUES (?, ?, ?)",
             (add_on_id, emoji, sender_ts),
         )
+    return True
 
 
 def apply_poll_creation(
@@ -1557,20 +1571,20 @@ def apply_pin_in_chat(
     logger: logging.Logger,
     key_id: str,
     chat_row_id: int | None,
-) -> None:
-    """Record a pin-in-chat add-on for a message, satisfying message_add_on NOT NULL constraints."""
+) -> bool:
+    """Record a pin-in-chat add-on for a message, satisfying message_add_on NOT NULL constraints. Returns True if applied, False otherwise."""
     target_key_id = pin_info.get("target_key_id", "")
     if not target_key_id:
-        return
+        return False
     parent_row_id = find_message_row_id(conn, target_key_id, key_cache)
     if parent_row_id is None:
-        logger.debug(f"Target message '{target_key_id}' for pin not found; skipping add-on.")
-        return
+        logger.debug(f"Target message '{target_key_id}' for pin not found in cache/database.")
+        return False
 
     add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
     pin_cols = get_table_columns(conn, "message_add_on_pin_in_chat", schema_cache)
     if not add_on_cols:
-        return
+        return False
 
     cur = conn.cursor()
     pin_state = pin_info.get("pin_state", 1)
@@ -1609,6 +1623,7 @@ def apply_pin_in_chat(
             "INSERT INTO message_add_on_pin_in_chat (message_add_on_row_id, pin_in_chat_state, sender_timestamp) VALUES (?, ?, ?)",
             (add_on_id, pin_state, sender_ts),
         )
+    return True
 
 
 def apply_location_record(
@@ -1648,9 +1663,11 @@ def apply_protocol_record(
     schema_cache: dict[str, set[str]] | None,
     logger: logging.Logger,
     chat_row_id: int | None,
-) -> None:
-    """Apply protocol revoke or edit updates to an existing message, recording edit add-ons."""
+) -> bool:
+    """Apply protocol revoke or edit updates to an existing message, recording edit add-ons. Returns True if applied, False otherwise."""
     cur = conn.cursor()
+    applied = False
+
     if msg.get("revoke_info"):
         target_key = msg["revoke_info"].get("target_key_id", "")
         if target_key:
@@ -1661,6 +1678,7 @@ def apply_protocol_record(
                     (target_id,),
                 )
                 cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (target_id,))
+                applied = True
 
     if msg.get("edit_info"):
         target_key = msg["edit_info"].get("target_key_id", "")
@@ -1697,6 +1715,163 @@ def apply_protocol_record(
                         f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
                         [row_map[c] for c in valid_cols],
                     )
+                applied = True
+
+    return applied
+
+
+@dataclass(slots=True)
+class DeletionAuditRecord:
+    msg_id: int
+    key_id: str | None
+    chat_row_id: int | None
+    timestamp: int | None
+    verified: bool
+    rejection_reason: str | None
+
+
+CLOCK_SKEW_TOLERANCE_MS = 3_600_000  # 1 hour clock skew tolerance
+
+
+def verify_message_deletion_candidates(
+    conn: sqlite3.Connection,
+    candidate_ids: list[int],
+    backup_timestamp: int | None,
+    max_sequence: int | None,
+    logger: logging.Logger,
+    schema_cache: dict[str, set[str]] | None,
+) -> tuple[list[int], list[DeletionAuditRecord]]:
+    """Verify deletion candidate IDs against message timestamps, sequence ceilings, and stanza keys.
+
+    Gates candidate IDs to prevent accidental message loss from drifted SQLite autoincrement sequences:
+    - Gate 1: Causality verification (message timestamp <= backup_timestamp + 1h).
+    - Gate 2: Sequence ceiling verification (candidate _id <= max_sequence).
+    - Gate 3: Stanza key validation (key_id must be non-empty valid string).
+    """
+    if not candidate_ids:
+        return [], []
+
+    # Defensive normalization: convert epoch seconds to epoch milliseconds if needed
+    normalized_backup_ts = backup_timestamp
+    if normalized_backup_ts is not None and normalized_backup_ts < 100_000_000_000:
+        normalized_backup_ts *= 1000
+
+    msg_cols = get_table_columns(conn, "message", schema_cache)
+    has_key_id = "key_id" in msg_cols
+    has_timestamp = "timestamp" in msg_cols
+    has_chat_row_id = "chat_row_id" in msg_cols
+
+    sel_key = "key_id" if has_key_id else "NULL"
+    sel_ts = "timestamp" if has_timestamp else "NULL"
+    sel_chat = "chat_row_id" if has_chat_row_id else "NULL"
+
+    chunk_size = 500
+    cur = conn.cursor()
+    verified_ids: list[int] = []
+    audit_records: list[DeletionAuditRecord] = []
+
+    for i in range(0, len(candidate_ids), chunk_size):
+        chunk = candidate_ids[i : i + chunk_size]
+        placeholders = ", ".join("?" for _ in chunk)
+        cur.execute(
+            f"SELECT _id, {sel_key}, {sel_ts}, {sel_chat} FROM message WHERE _id IN ({placeholders})",
+            chunk,
+        )
+        row_map = {row[0]: row for row in cur.fetchall()}
+
+        for cid in chunk:
+            row = row_map.get(cid)
+            if row is None:
+                audit_records.append(
+                    DeletionAuditRecord(
+                        msg_id=cid,
+                        key_id=None,
+                        chat_row_id=None,
+                        timestamp=None,
+                        verified=False,
+                        rejection_reason="ROW_NOT_FOUND",
+                    )
+                )
+                continue
+
+            msg_id, key_id, ts, chat_row_id = row
+
+            # Gate 1: Causality check (timestamp upper-bound)
+            if (
+                normalized_backup_ts is not None
+                and ts is not None
+                and ts > (normalized_backup_ts + CLOCK_SKEW_TOLERANCE_MS)
+            ):
+                logger.warning(
+                    "Rejected deletion of message %d (key_id=%s, ts=%d): timestamp exceeds backup creation date %d (Gate 1 Time Paradox)",
+                    msg_id,
+                    key_id,
+                    ts,
+                    normalized_backup_ts,
+                )
+                audit_records.append(
+                    DeletionAuditRecord(
+                        msg_id=msg_id,
+                        key_id=key_id,
+                        chat_row_id=chat_row_id,
+                        timestamp=ts,
+                        verified=False,
+                        rejection_reason="TIME_PARADOX",
+                    )
+                )
+                continue
+
+            # Gate 2: Sequence ceiling check
+            if max_sequence is not None and msg_id > max_sequence:
+                logger.warning(
+                    "Rejected deletion of message %d (key_id=%s): ID exceeds backup max sequence %d (Gate 2 Sequence Overflow)",
+                    msg_id,
+                    key_id,
+                    max_sequence,
+                )
+                audit_records.append(
+                    DeletionAuditRecord(
+                        msg_id=msg_id,
+                        key_id=key_id,
+                        chat_row_id=chat_row_id,
+                        timestamp=ts,
+                        verified=False,
+                        rejection_reason="SEQUENCE_OVERFLOW",
+                    )
+                )
+                continue
+
+            # Gate 3: Stanza key integrity
+            if has_key_id and (not key_id or not isinstance(key_id, str) or not key_id.strip()):
+                logger.warning(
+                    "Rejected deletion of message %d: missing or invalid stanza key (Gate 3 Invalid Key)",
+                    msg_id,
+                )
+                audit_records.append(
+                    DeletionAuditRecord(
+                        msg_id=msg_id,
+                        key_id=key_id,
+                        chat_row_id=chat_row_id,
+                        timestamp=ts,
+                        verified=False,
+                        rejection_reason="INVALID_KEY",
+                    )
+                )
+                continue
+
+            verified_ids.append(msg_id)
+            audit_records.append(
+                DeletionAuditRecord(
+                    msg_id=msg_id,
+                    key_id=key_id,
+                    chat_row_id=chat_row_id,
+                    timestamp=ts,
+                    verified=True,
+                    rejection_reason=None,
+                )
+            )
+
+    return verified_ids, audit_records
 
 
 def apply_message_deletions(
@@ -1704,13 +1879,25 @@ def apply_message_deletions(
     deleted_json_path: str,
     logger: logging.Logger,
     schema_cache: dict[str, set[str]] | None,
+    backup_timestamp: int | None,
+    max_sequence: int | None,
 ) -> int:
     """Delete messages and auxiliary records (media, add-ons, polls, quoted, receipts) in deletedMessages_*.json."""
     with open(deleted_json_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    ids = data.get("deleted_ids", data) if isinstance(data, dict) else data
-    if not isinstance(ids, list) or not ids:
+    raw_ids = data.get("deleted_ids", data) if isinstance(data, dict) else data
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return 0
+
+    candidate_ids = [int(i) for i in raw_ids if isinstance(i, (int, str)) and str(i).isdigit()]
+    if not candidate_ids:
+        return 0
+
+    verified_ids, _ = verify_message_deletion_candidates(
+        conn, candidate_ids, backup_timestamp, max_sequence, logger, schema_cache
+    )
+    if not verified_ids:
         return 0
 
     cur = conn.cursor()
@@ -1729,8 +1916,8 @@ def apply_message_deletions(
     has_quoted = bool(get_table_columns(conn, "message_quoted", schema_cache))
     has_receipt_user = bool(get_table_columns(conn, "receipt_user", schema_cache))
 
-    for i in range(0, len(ids), chunk_size):
-        chunk = ids[i : i + chunk_size]
+    for i in range(0, len(verified_ids), chunk_size):
+        chunk = verified_ids[i : i + chunk_size]
         placeholders = ", ".join("?" for _ in chunk)
 
         if has_add_on_reaction and has_add_on:
@@ -2107,6 +2294,7 @@ def apply_messages_bin(
 
     inserted = 0
     key_cache: dict[str, int] = {}
+    pending_add_ons: list[PendingAddOn] = []
     max_ts_per_chat: dict[int, int] = {}
     max_display_msg_per_chat: dict[int, int] = {}
     for msg in messages:
@@ -2255,9 +2443,9 @@ def apply_messages_bin(
                         ),
                     )
 
-        # Apply reaction add-on if present
+        # Apply reaction add-on if present (Pass 1: speculative immediate application)
         if msg.get("reaction_info"):
-            apply_reaction_record(
+            applied = apply_reaction_record(
                 conn,
                 msg["reaction_info"],
                 sender_jid_row_id,
@@ -2269,10 +2457,23 @@ def apply_messages_bin(
                 msg.get("key_id", ""),
                 chat_row_id,
             )
+            if not applied and msg["reaction_info"].get("target_key_id"):
+                pending_add_ons.append(
+                    PendingAddOn(
+                        add_on_type="reaction",
+                        target_key_id=msg["reaction_info"]["target_key_id"],
+                        msg=msg,
+                        sender_jid_row_id=sender_jid_row_id,
+                        from_me=msg["from_me"],
+                        timestamp=msg["timestamp"],
+                        key_id=msg.get("key_id", ""),
+                        chat_row_id=chat_row_id,
+                    )
+                )
 
-        # Apply pin-in-chat add-on if present
+        # Apply pin-in-chat add-on if present (Pass 1)
         if msg.get("pin_info"):
-            apply_pin_in_chat(
+            applied = apply_pin_in_chat(
                 conn,
                 msg["pin_info"],
                 sender_jid_row_id,
@@ -2284,10 +2485,23 @@ def apply_messages_bin(
                 msg.get("key_id", ""),
                 chat_row_id,
             )
+            if not applied and msg["pin_info"].get("target_key_id"):
+                pending_add_ons.append(
+                    PendingAddOn(
+                        add_on_type="pin",
+                        target_key_id=msg["pin_info"]["target_key_id"],
+                        msg=msg,
+                        sender_jid_row_id=sender_jid_row_id,
+                        from_me=msg["from_me"],
+                        timestamp=msg["timestamp"],
+                        key_id=msg.get("key_id", ""),
+                        chat_row_id=chat_row_id,
+                    )
+                )
 
-        # Apply protocol revoke or edit updates if present
+        # Apply protocol revoke or edit updates if present (Pass 1)
         if msg.get("revoke_info") or msg.get("edit_info"):
-            apply_protocol_record(
+            applied = apply_protocol_record(
                 conn,
                 msg,
                 sender_jid_row_id,
@@ -2297,6 +2511,84 @@ def apply_messages_bin(
                 schema_cache,
                 logger,
                 chat_row_id,
+            )
+            if not applied:
+                target_k = (msg.get("revoke_info") or msg.get("edit_info", {})).get(
+                    "target_key_id", ""
+                )
+                if target_k:
+                    pending_add_ons.append(
+                        PendingAddOn(
+                            add_on_type="revoke" if msg.get("revoke_info") else "edit",
+                            target_key_id=target_k,
+                            msg=msg,
+                            sender_jid_row_id=sender_jid_row_id,
+                            from_me=msg["from_me"],
+                            timestamp=msg["timestamp"],
+                            key_id=msg.get("key_id", ""),
+                            chat_row_id=chat_row_id,
+                        )
+                    )
+
+    if pending_add_ons:
+        # Pass 2: Deferred resolution of unlinked add-ons now that all base messages are indexed
+        pending_add_ons.sort(key=lambda p: p.timestamp)
+        pass2_recovered = 0
+        pass2_orphans = 0
+        for pending in pending_add_ons:
+            applied = False
+            if pending.add_on_type == "reaction":
+                applied = apply_reaction_record(
+                    conn,
+                    pending.msg["reaction_info"],
+                    pending.sender_jid_row_id,
+                    pending.from_me,
+                    pending.timestamp,
+                    key_cache,
+                    schema_cache,
+                    logger,
+                    pending.key_id,
+                    pending.chat_row_id,
+                )
+            elif pending.add_on_type == "pin":
+                applied = apply_pin_in_chat(
+                    conn,
+                    pending.msg["pin_info"],
+                    pending.sender_jid_row_id,
+                    pending.from_me,
+                    pending.timestamp,
+                    key_cache,
+                    schema_cache,
+                    logger,
+                    pending.key_id,
+                    pending.chat_row_id,
+                )
+            elif pending.add_on_type in ("edit", "revoke"):
+                applied = apply_protocol_record(
+                    conn,
+                    pending.msg,
+                    pending.sender_jid_row_id,
+                    pending.from_me,
+                    pending.timestamp,
+                    key_cache,
+                    schema_cache,
+                    logger,
+                    pending.chat_row_id,
+                )
+
+            if applied:
+                pass2_recovered += 1
+            else:
+                pass2_orphans += 1
+                logger.debug(
+                    f"Target message '{pending.target_key_id}' for {pending.add_on_type} "
+                    f"not found in database; orphan add-on discarded."
+                )
+
+        if pass2_recovered > 0:
+            logger.info(
+                f"Two-pass add-on staging resolved {pass2_recovered} out-of-order add-on(s) "
+                f"({pass2_orphans} unresolvable orphan(s))."
             )
 
     if max_ts_per_chat:
@@ -2369,6 +2661,42 @@ def apply_increment_folder(
         with open(header_path, encoding="utf-8") as f:
             header = json.load(f)
 
+    # Extract backup creation timestamp defensively from header.json (flat or nested)
+    header_obj = header.get("header") if isinstance(header.get("header"), dict) else {}
+    backup_timestamp = (
+        header.get("creation_date")
+        if header.get("creation_date") is not None
+        else header_obj.get("creation_date")
+    )
+    if isinstance(backup_timestamp, (int, float)):
+        backup_timestamp = int(backup_timestamp)
+    else:
+        backup_timestamp = None
+
+    # Inspect sequence ceiling for message table from sequences.json before deletions
+    seq_name = (
+        header.get("sequences") if isinstance(header.get("sequences"), str) else "sequences.json"
+    )
+    seq_path = os.path.join(inc_dir, seq_name)
+    max_msg_seq = None
+    if os.path.isfile(seq_path):
+        try:
+            with open(seq_path, encoding="utf-8") as sf:
+                seq_data = json.load(sf)
+            seq_items = (
+                seq_data.get("sequences", [])
+                if isinstance(seq_data, dict)
+                else (seq_data if isinstance(seq_data, list) else [])
+            )
+            for item in seq_items:
+                if isinstance(item, dict) and item.get("name") == "message":
+                    val = item.get("value", item.get("seq"))
+                    if val is not None:
+                        max_msg_seq = int(val)
+                        break
+        except Exception as ex:
+            logger.warning("Could not read message sequence ceiling from %s: %s", seq_path, ex)
+
     stats = {
         "entity_modified": 0,
         "entity_deleted": 0,
@@ -2425,15 +2753,18 @@ def apply_increment_folder(
             for fn in os.listdir(inc_dir)
             if fn.startswith("deletedMessages_") and fn.endswith(".json")
         ]
-        if isinstance(header.get("deleted_message_ids_files"), list):
-            for dmf in header["deleted_message_ids_files"]:
+        raw_dmf = header.get("deleted_message_ids_files")
+        if not raw_dmf and isinstance(header.get("deleted_messages"), dict):
+            raw_dmf = header["deleted_messages"].get("deleted_message_ids_files")
+        if isinstance(raw_dmf, list):
+            for dmf in raw_dmf:
                 if dmf not in del_msg_files:
                     del_msg_files.append(dmf)
         for df in sorted(del_msg_files):
             df_path = os.path.join(inc_dir, df)
             if os.path.isfile(df_path):
                 stats["messages_deleted"] += apply_message_deletions(
-                    conn, df_path, logger, schema_cache
+                    conn, df_path, logger, schema_cache, backup_timestamp, max_msg_seq
                 )
 
         # Step 4: Protobuf message replay
