@@ -556,7 +556,7 @@ def test_apply_message_deletions(mock_db, tmp_path):
     del_json.write_text(json.dumps({"deleted_ids": [100]}))
 
     conn = sqlite3.connect(mock_db)
-    count = increment_merger.apply_message_deletions(conn, str(del_json), logger, None)
+    count = increment_merger.apply_message_deletions(conn, str(del_json), logger, None, None, None)
     conn.commit()
     assert count == 1
 
@@ -1137,7 +1137,9 @@ def test_cascading_message_deletions_auxiliary(tmp_path):
     del_json.write_text(json.dumps({"deleted_ids": [42]}))
 
     schema_cache = {}
-    deleted = increment_merger.apply_message_deletions(conn, str(del_json), logger, schema_cache)
+    deleted = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, schema_cache, None, None
+    )
     conn.commit()
 
     assert deleted == 1
@@ -2234,4 +2236,537 @@ def test_apply_entity_modifications_remaps_jid_row_id(mock_db, tmp_path):
     ).fetchone()
     assert chat_row is not None
     assert chat_row[0] == 1  # Successfully remapped
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Two-Pass Add-On Staging Engine Tests
+# ---------------------------------------------------------------------------
+
+
+def _make_two_pass_test_db(db_path):
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT, server TEXT, raw_string TEXT);
+        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER);
+        CREATE TABLE message (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER NOT NULL,
+            message_type INTEGER NOT NULL,
+            text_data TEXT,
+            starred INTEGER DEFAULT 0,
+            status INTEGER DEFAULT 0
+        );
+        CREATE TABLE message_add_on (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            parent_message_row_id INTEGER NOT NULL,
+            status INTEGER DEFAULT 0,
+            message_add_on_type INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE message_add_on_reaction (
+            message_add_on_row_id INTEGER PRIMARY KEY,
+            reaction TEXT NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE message_add_on_pin_in_chat (
+            message_add_on_row_id INTEGER PRIMARY KEY,
+            pin_in_chat_state INTEGER NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE message_edit_info (
+            message_row_id INTEGER PRIMARY KEY,
+            original_key_id TEXT NOT NULL,
+            edited_timestamp INTEGER NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        INSERT INTO jid (user, server, raw_string) VALUES ('5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
+        INSERT INTO chat (jid_row_id) VALUES (1);
+    """)
+    conn.commit()
+    return conn
+
+
+def _build_reaction_wmi(
+    remote_jid: str, react_key_id: str, target_key_id: str, emoji: str, timestamp: int
+) -> bytes:
+    target_key = (
+        _build_field(1, 2, remote_jid.encode("utf-8"))
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, target_key_id.encode("utf-8"))
+    )
+    reaction_bytes = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 2, emoji.encode("utf-8"))
+        + _build_field(4, 0, timestamp * 1000)
+    )
+    return (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, remote_jid.encode("utf-8"))
+            + _build_field(3, 2, react_key_id.encode("utf-8")),
+        )
+        + _build_field(2, 2, _build_field(46, 2, reaction_bytes))
+        + _build_field(3, 0, timestamp)
+    )
+
+
+def _build_pin_wmi(
+    remote_jid: str, pin_key_id: str, target_key_id: str, pin_state: int, timestamp: int
+) -> bytes:
+    target_key = (
+        _build_field(1, 2, remote_jid.encode("utf-8"))
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, target_key_id.encode("utf-8"))
+    )
+    pin_bytes = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, pin_state)
+        + _build_field(3, 0, timestamp * 1000)
+    )
+    return (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, remote_jid.encode("utf-8"))
+            + _build_field(3, 2, pin_key_id.encode("utf-8")),
+        )
+        + _build_field(2, 2, _build_field(63, 2, pin_bytes))
+        + _build_field(3, 0, timestamp)
+    )
+
+
+def _build_edit_wmi(
+    remote_jid: str, edit_key_id: str, target_key_id: str, new_text: str, timestamp: int
+) -> bytes:
+    target_key = (
+        _build_field(1, 2, remote_jid.encode("utf-8"))
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, target_key_id.encode("utf-8"))
+    )
+    edit_proto = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(10, 0, timestamp * 1000)
+        + _build_field(14, 2, _build_field(1, 2, new_text.encode("utf-8")))
+    )
+    return (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, remote_jid.encode("utf-8"))
+            + _build_field(3, 2, edit_key_id.encode("utf-8")),
+        )
+        + _build_field(2, 2, _build_field(12, 2, edit_proto))
+        + _build_field(3, 0, timestamp)
+    )
+
+
+def test_two_pass_reaction_arrives_before_parent_message(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_two_pass_react.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Reaction targeting KEY_PARENT_1
+    wmi_react = _build_reaction_wmi(
+        "5550100@s.whatsapp.net", "REACT_OUT_OF_ORDER", "KEY_PARENT_1", "🔥", 1729000200
+    )
+    # Frame 1: Parent message KEY_PARENT_1
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "KEY_PARENT_1", "Hello parent message", 0, 1729000100
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_react)) + wmi_react)
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 2
+
+    # Verify that reaction was resolved in Pass 2 and linked to KEY_PARENT_1
+    cur = conn.cursor()
+    parent_id = cur.execute("SELECT _id FROM message WHERE key_id = 'KEY_PARENT_1'").fetchone()[0]
+    react_row = cur.execute(
+        "SELECT a.parent_message_row_id, r.reaction, a.message_add_on_type "
+        "FROM message_add_on a JOIN message_add_on_reaction r ON a._id = r.message_add_on_row_id "
+        "WHERE a.parent_message_row_id = ?",
+        (parent_id,),
+    ).fetchone()
+    assert react_row is not None
+    assert react_row[0] == parent_id
+    assert react_row[1] == "🔥"
+    assert react_row[2] == 1
+    conn.close()
+
+
+def test_two_pass_edit_arrives_before_parent_message(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_two_pass_edit.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Edit targeting KEY_PARENT_2 with updated text
+    wmi_edit = _build_edit_wmi(
+        "5550100@s.whatsapp.net",
+        "EDIT_OUT_OF_ORDER",
+        "KEY_PARENT_2",
+        "Edited text from future",
+        1729000300,
+    )
+    # Frame 1: Parent message KEY_PARENT_2 with original text
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "KEY_PARENT_2", "Original initial text", 0, 1729000100
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_edit)) + wmi_edit)
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 2
+
+    cur = conn.cursor()
+    # Parent message text must be updated to the edited text
+    msg_row = cur.execute(
+        "SELECT _id, text_data FROM message WHERE key_id = 'KEY_PARENT_2'"
+    ).fetchone()
+    assert msg_row is not None
+    parent_id, text = msg_row
+    assert text == "Edited text from future"
+
+    # message_edit_info must be populated
+    edit_row = cur.execute(
+        "SELECT message_row_id, original_key_id FROM message_edit_info WHERE message_row_id = ?",
+        (parent_id,),
+    ).fetchone()
+    assert edit_row is not None
+    assert edit_row[0] == parent_id
+    assert edit_row[1] == "KEY_PARENT_2"
+
+    # message_add_on must have an entry of type 74
+    addon_row = cur.execute(
+        "SELECT message_add_on_type FROM message_add_on WHERE parent_message_row_id = ?",
+        (parent_id,),
+    ).fetchone()
+    assert addon_row is not None
+    assert addon_row[0] == 74
+    conn.close()
+
+
+def test_two_pass_pin_arrives_before_parent_message(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_two_pass_pin.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Pin targeting KEY_PARENT_3
+    wmi_pin = _build_pin_wmi(
+        "5550100@s.whatsapp.net", "PIN_OUT_OF_ORDER", "KEY_PARENT_3", 1, 1729000200
+    )
+    # Frame 1: Parent message KEY_PARENT_3
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "KEY_PARENT_3", "Message to pin", 0, 1729000100
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_pin)) + wmi_pin)
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 2
+
+    cur = conn.cursor()
+    parent_id = cur.execute("SELECT _id FROM message WHERE key_id = 'KEY_PARENT_3'").fetchone()[0]
+    pin_row = cur.execute(
+        "SELECT a.parent_message_row_id, p.pin_in_chat_state, a.message_add_on_type "
+        "FROM message_add_on a JOIN message_add_on_pin_in_chat p ON a._id = p.message_add_on_row_id "
+        "WHERE a.parent_message_row_id = ?",
+        (parent_id,),
+    ).fetchone()
+    assert pin_row is not None
+    assert pin_row[0] == parent_id
+    assert pin_row[1] == 1
+    assert pin_row[2] == 79
+    conn.close()
+
+
+def test_two_pass_multiple_chronological_reactions_out_of_order(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_two_pass_chrono.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Newer reaction (timestamp 1729000300, emoji '❤️')
+    wmi_react_newer = _build_reaction_wmi(
+        "5550100@s.whatsapp.net", "REACT_NEW", "KEY_PARENT_4", "❤️", 1729000300
+    )
+    # Frame 1: Older reaction (timestamp 1729000200, emoji '👍')
+    wmi_react_older = _build_reaction_wmi(
+        "5550100@s.whatsapp.net", "REACT_OLD", "KEY_PARENT_4", "👍", 1729000200
+    )
+    # Frame 2: Parent message (timestamp 1729000100)
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "KEY_PARENT_4", "React message", 0, 1729000100
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_react_newer)) + wmi_react_newer)
+        f.write(_encode_varint(len(wmi_react_older)) + wmi_react_older)
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 3
+
+    cur = conn.cursor()
+    parent_id = cur.execute("SELECT _id FROM message WHERE key_id = 'KEY_PARENT_4'").fetchone()[0]
+    # Because Pass 2 sorts by timestamp, REACT_OLD ('👍') was applied first, then REACT_NEW ('❤️') replaced it
+    react_rows = cur.execute(
+        "SELECT r.reaction FROM message_add_on a "
+        "JOIN message_add_on_reaction r ON a._id = r.message_add_on_row_id "
+        "WHERE a.parent_message_row_id = ?",
+        (parent_id,),
+    ).fetchall()
+    assert len(react_rows) == 1
+    assert react_rows[0][0] == "❤️"
+    conn.close()
+
+
+def test_two_pass_true_orphan_add_on_fails_gracefully(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_two_pass_orphan.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Reaction targeting a message that never exists anywhere
+    wmi_orphan_react = _build_reaction_wmi(
+        "5550100@s.whatsapp.net", "REACT_ORPHAN", "NEVER_EXISTING_KEY", "🚀", 1729000200
+    )
+    # Frame 1: Valid text message
+    wmi_valid = _build_text_wmi(
+        "5550100@s.whatsapp.net", "KEY_VALID_5", "Normal message", 0, 1729000100
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_orphan_react)) + wmi_orphan_react)
+        f.write(_encode_varint(len(wmi_valid)) + wmi_valid)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    # Replay must succeed without crashing
+    assert inserted == 2
+
+    cur = conn.cursor()
+    # No message_add_on row should exist since parent was never found
+    addon_count = cur.execute("SELECT COUNT(*) FROM message_add_on").fetchone()[0]
+    assert addon_count == 0
+
+    # Normal message must exist
+    valid_row = cur.execute("SELECT _id FROM message WHERE key_id = 'KEY_VALID_5'").fetchone()
+    assert valid_row is not None
+    conn.close()
+
+
+def test_apply_message_deletions_gate1_time_paradox(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    # Insert message 200 with future timestamp 1729005000000
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (200, 1, 0, 'KEY_FUTURE', 1729005000000, 0, 'Future message')"
+    )
+    conn.commit()
+
+    del_json = tmp_path / "deletedMessages_paradox.json"
+    del_json.write_text(json.dumps({"deleted_ids": [200]}))
+
+    # Backup timestamp is 1729000000000 (5000s earlier, beyond 3600s tolerance)
+    count = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, None, 1729000000000, 500
+    )
+    conn.commit()
+
+    assert count == 0
+    remaining = conn.execute("SELECT COUNT(*) FROM message WHERE _id = 200").fetchone()[0]
+    assert remaining == 1
+    conn.close()
+
+
+def test_apply_message_deletions_gate2_sequence_overflow(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (300, 1, 0, 'KEY_OVERFLOW', 1729000000000, 0, 'Overflow message')"
+    )
+    conn.commit()
+
+    del_json = tmp_path / "deletedMessages_overflow.json"
+    del_json.write_text(json.dumps({"deleted_ids": [300]}))
+
+    # Max sequence is 250 (300 exceeds 250)
+    count = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, None, 1729000100000, 250
+    )
+    conn.commit()
+
+    assert count == 0
+    remaining = conn.execute("SELECT COUNT(*) FROM message WHERE _id = 300").fetchone()[0]
+    assert remaining == 1
+    conn.close()
+
+
+def test_apply_message_deletions_gate3_invalid_stanza_key(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (400, 1, 0, '', 1729000000000, 0, 'Blank key message')"
+    )
+    conn.commit()
+
+    del_json = tmp_path / "deletedMessages_invalid_key.json"
+    del_json.write_text(json.dumps({"deleted_ids": [400]}))
+
+    count = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, None, 1729000100000, 500
+    )
+    conn.commit()
+
+    assert count == 0
+    remaining = conn.execute("SELECT COUNT(*) FROM message WHERE _id = 400").fetchone()[0]
+    assert remaining == 1
+    conn.close()
+
+
+def test_apply_message_deletions_cascades_strictly_for_verified_only(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS message_add_on ("
+        "_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "parent_message_row_id INTEGER NOT NULL, "
+        "from_me INTEGER NOT NULL, "
+        "key_id TEXT NOT NULL, "
+        "timestamp INTEGER NOT NULL, "
+        "message_add_on_type INTEGER NOT NULL"
+        ")"
+    )
+    # Message 501: Valid message within sequence ceiling and causality
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (501, 1, 0, 'KEY_VERIFIED_501', 1729000000000, 0, 'Valid for deletion')"
+    )
+    # Message 502: Invalid message violating causality (future paradox)
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (502, 1, 0, 'KEY_REJECTED_502', 1729050000000, 0, 'Future message')"
+    )
+    # Add media and add-ons for both
+    cur.execute(
+        "INSERT INTO message_media (message_row_id, chat_row_id, file_path) VALUES (501, 1, 'path/to/501.jpg')"
+    )
+    cur.execute(
+        "INSERT INTO message_media (message_row_id, chat_row_id, file_path) VALUES (502, 1, 'path/to/502.jpg')"
+    )
+    cur.execute(
+        "INSERT INTO message_add_on (parent_message_row_id, from_me, key_id, timestamp, message_add_on_type) "
+        "VALUES (501, 0, 'ADDON_501', 1729000010000, 1)"
+    )
+    cur.execute(
+        "INSERT INTO message_add_on (parent_message_row_id, from_me, key_id, timestamp, message_add_on_type) "
+        "VALUES (502, 0, 'ADDON_502', 1729050010000, 1)"
+    )
+    conn.commit()
+
+    del_json = tmp_path / "deletedMessages_mixed.json"
+    del_json.write_text(json.dumps({"deleted_ids": [501, 502]}))
+
+    count = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, None, 1729000500000, 600
+    )
+    conn.commit()
+
+    assert count == 1
+    # 501 was verified and deleted
+    assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 501").fetchone()[0] == 0
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 501").fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_add_on WHERE parent_message_row_id = 501"
+        ).fetchone()[0]
+        == 0
+    )
+
+    # 502 was rejected and protected, along with its media and add-ons!
+    assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 502").fetchone()[0] == 1
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 502").fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_add_on WHERE parent_message_row_id = 502"
+        ).fetchone()[0]
+        == 1
+    )
+    conn.close()
+
+
+def test_apply_increment_folder_nested_header_and_sequences(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    # Message 601: within sequence ceiling (601 <= 650) and before backup time
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (601, 1, 0, 'KEY_INC_601', 1729000000000, 0, 'To be deleted')"
+    )
+    # Message 700: exceeds sequence ceiling (700 > 650)
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (700, 1, 0, 'KEY_INC_700', 1729000000000, 0, 'Must be protected')"
+    )
+    conn.commit()
+
+    inc_dir = tmp_path / "inc_nested"
+    inc_dir.mkdir()
+
+    # Real WhatsApp nested header format
+    header_content = {
+        "format": "protobuf",
+        "header": {"creation_date": 1729001000000},
+        "deleted_messages": {"deleted_message_ids_files": ["deletedMessages_1.json"]},
+        "sequences": "sequences.json",
+    }
+    (inc_dir / "header.json").write_text(json.dumps(header_content))
+
+    # sequences.json capping message sequence at 650
+    sequences_content = {"sequences": [{"name": "message", "value": 650}]}
+    (inc_dir / "sequences.json").write_text(json.dumps(sequences_content))
+
+    # deletedMessages_1.json requesting deletion of 601 and 700
+    (inc_dir / "deletedMessages_1.json").write_text(json.dumps({"deleted_ids": [601, 700]}))
+
+    stats = increment_merger.apply_increment_folder(conn, str(inc_dir), logger, None, None, None)
+
+    # Only 601 was deleted; 700 was rejected due to sequence ceiling
+    assert stats["messages_deleted"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 601").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 700").fetchone()[0] == 1
     conn.close()
