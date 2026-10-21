@@ -947,6 +947,15 @@ def test_apply_messages_bin_auxiliary_entities(tmp_path):
             edited_timestamp INTEGER NOT NULL,
             sender_timestamp INTEGER NOT NULL
         );
+        CREATE TABLE message_add_on_poll_vote (
+            message_add_on_row_id INTEGER PRIMARY KEY,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE message_add_on_poll_vote_selected_option (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_add_on_row_id INTEGER NOT NULL,
+            message_poll_option_id INTEGER NOT NULL
+        );
 
         INSERT INTO jid (user, server, raw_string) VALUES ('5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
         INSERT INTO chat (jid_row_id) VALUES (1);
@@ -2288,6 +2297,21 @@ def _make_two_pass_test_db(db_path):
             edited_timestamp INTEGER NOT NULL,
             sender_timestamp INTEGER NOT NULL
         );
+        CREATE TABLE message_add_on_poll_vote (
+            message_add_on_row_id INTEGER PRIMARY KEY,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE message_add_on_poll_vote_selected_option (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_add_on_row_id INTEGER NOT NULL,
+            message_poll_option_id INTEGER NOT NULL
+        );
+        CREATE TABLE message_poll_option (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            option_name TEXT NOT NULL,
+            vote_total INTEGER DEFAULT 0
+        );
         INSERT INTO jid (user, server, raw_string) VALUES ('5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
         INSERT INTO chat (jid_row_id) VALUES (1);
     """)
@@ -2367,6 +2391,54 @@ def _build_edit_wmi(
             + _build_field(3, 2, edit_key_id.encode("utf-8")),
         )
         + _build_field(2, 2, _build_field(12, 2, edit_proto))
+        + _build_field(3, 0, timestamp)
+    )
+
+
+def _build_poll_creation_wmi(
+    remote_jid: str, poll_key_id: str, question: str, options: list[str], timestamp: int
+) -> bytes:
+    opts_bytes = b"".join(
+        _build_field(3, 2, _build_field(1, 2, opt.encode("utf-8"))) for opt in options
+    )
+    poll_bytes = _build_field(2, 2, question.encode("utf-8")) + opts_bytes + _build_field(4, 0, 1)
+    return (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, remote_jid.encode("utf-8"))
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, poll_key_id.encode("utf-8")),
+        )
+        + _build_field(2, 2, _build_field(49, 2, poll_bytes))
+        + _build_field(3, 0, timestamp)
+    )
+
+
+def _build_poll_vote_wmi(
+    remote_jid: str,
+    vote_key_id: str,
+    poll_key_id: str,
+    timestamp: int,
+    sender_ts_ms: int | None = None,
+) -> bytes:
+    target_key = (
+        _build_field(1, 2, remote_jid.encode("utf-8"))
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, poll_key_id.encode("utf-8"))
+    )
+    vote_bytes = _build_field(1, 2, target_key) + _build_field(
+        3, 0, sender_ts_ms if sender_ts_ms is not None else timestamp * 1000
+    )
+    return (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, remote_jid.encode("utf-8"))
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, vote_key_id.encode("utf-8")),
+        )
+        + _build_field(2, 2, _build_field(50, 2, vote_bytes))
         + _build_field(3, 0, timestamp)
     )
 
@@ -2769,4 +2841,400 @@ def test_apply_increment_folder_nested_header_and_sequences(mock_db, tmp_path):
     assert stats["messages_deleted"] == 1
     assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 601").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 700").fetchone()[0] == 1
+    conn.close()
+
+
+def _build_image_wmi_with_media_data(
+    remote_jid: str,
+    key_id: str,
+    caption: str,
+    mimetype: str,
+    file_sha256: bytes,
+    file_length: int,
+    from_me: int,
+    timestamp: int,
+    local_path: str,
+) -> bytes:
+    base = _build_image_wmi(
+        remote_jid,
+        key_id,
+        caption,
+        mimetype,
+        file_sha256,
+        file_length,
+        from_me,
+        timestamp,
+    )
+    media_data = _build_field(1, 2, local_path.encode("utf-8"))
+    return base + _build_field(38, 2, media_data)
+
+
+def test_decode_wmi_extracts_tag38_local_path():
+    wmi_bytes = _build_image_wmi_with_media_data(
+        "123456789@s.whatsapp.net",
+        "KEY_IMG_38",
+        "Test caption",
+        "image/jpeg",
+        b"\x01" * 32,
+        45000,
+        0,
+        1729000000000,
+        "Media/WhatsApp Images/IMG-20261016-WA0005.jpg",
+    )
+    msg = increment_merger.decode_wmi(wmi_bytes)
+    assert msg["local_path"] == "Media/WhatsApp Images/IMG-20261016-WA0005.jpg"
+    assert msg["media_info"] is not None
+    assert msg["media_info"]["file_path"] == "Media/WhatsApp Images/IMG-20261016-WA0005.jpg"
+
+
+def test_decode_wmi_normalizes_tag38_separators_and_prefixes():
+    wmi_bytes = _build_image_wmi_with_media_data(
+        "123456789@s.whatsapp.net",
+        "KEY_IMG_NORM",
+        "Test caption",
+        "image/jpeg",
+        b"\x02" * 32,
+        35000,
+        0,
+        1729000000000,
+        ".\\Media\\WhatsApp Images\\IMG-20261016-WA0006.jpg",
+    )
+    msg = increment_merger.decode_wmi(wmi_bytes)
+    assert msg["local_path"] == "Media/WhatsApp Images/IMG-20261016-WA0006.jpg"
+    assert msg["media_info"] is not None
+    assert msg["media_info"]["file_path"] == "Media/WhatsApp Images/IMG-20261016-WA0006.jpg"
+
+
+def test_apply_messages_bin_populates_media_file_path_from_tag38(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    wmi_bytes = _build_image_wmi_with_media_data(
+        "123456789@s.whatsapp.net",
+        "KEY_MEDIA_PATH",
+        "Sunset photo",
+        "image/jpeg",
+        b"\x03" * 32,
+        89000,
+        0,
+        1729000000000,
+        "Media/WhatsApp Images/IMG-20261016-WA0007.jpg",
+    )
+    frame = _build_history_sync_frame("123456789@s.whatsapp.net", [wmi_bytes])
+    bin_file = tmp_path / "messages.bin"
+    bin_file.write_bytes(frame)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(
+        conn, str(bin_file), logger, None, None, schema_cache
+    )
+    assert inserted == 1
+
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT mm.file_path, mm.mime_type, mm.file_size FROM message_media mm "
+        "JOIN message m ON m._id = mm.message_row_id WHERE m.key_id = 'KEY_MEDIA_PATH'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "Media/WhatsApp Images/IMG-20261016-WA0007.jpg"
+    assert row[1] == "image/jpeg"
+    assert row[2] == 89000
+    conn.close()
+
+
+def test_apply_messages_bin_prefers_existing_file_path_over_tag38(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    # Pre-seed an existing message with a relocated local path
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type) "
+        "VALUES (800, 1, 0, 'KEY_RELOCATED', 1728900000000, 1)"
+    )
+    cur.execute(
+        "INSERT INTO message_media (message_row_id, chat_row_id, file_path, mime_type, file_size) "
+        "VALUES (800, 1, 'Media/Custom/Relocated.jpg', 'image/jpeg', 89000)"
+    )
+    conn.commit()
+
+    # Replay increment message with identical key_id carrying a different Tag 38 path
+    wmi_bytes = _build_image_wmi_with_media_data(
+        "123456789@s.whatsapp.net",
+        "KEY_RELOCATED",
+        "Updated caption",
+        "image/jpeg",
+        b"\x04" * 32,
+        89000,
+        0,
+        1729000000000,
+        "Media/WhatsApp Images/Original_From_Phone.jpg",
+    )
+    frame = _build_history_sync_frame("123456789@s.whatsapp.net", [wmi_bytes])
+    bin_file = tmp_path / "messages.bin"
+    bin_file.write_bytes(frame)
+
+    schema_cache = {}
+    increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, schema_cache)
+
+    row = cur.execute(
+        "SELECT mm.file_path FROM message_media mm "
+        "JOIN message m ON m._id = mm.message_row_id WHERE m.key_id = 'KEY_RELOCATED'"
+    ).fetchone()
+    assert row is not None
+    # Existing locally preserved path must take precedence
+    assert row[0] == "Media/Custom/Relocated.jpg"
+    conn.close()
+
+
+def test_apply_entity_modifications_skips_unknown_tables(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    # Ensure a dummy user_device table exists
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_device (_id INTEGER PRIMARY KEY, user_jid_row_id INTEGER)"
+    )
+    conn.commit()
+
+    mod_json = tmp_path / "user_device_modified_1.json"
+    mod_json.write_text(
+        json.dumps([{"_id": 1, "user_jid_row_id": 999}]),
+        encoding="utf-8",
+    )
+
+    count = increment_merger.apply_entity_modifications(
+        conn, "user_device", str(mod_json), logger, None
+    )
+    assert count == 0
+    # Table must not have been modified
+    assert conn.execute("SELECT COUNT(*) FROM user_device").fetchone()[0] == 0
+    conn.close()
+
+
+def test_apply_entity_deletions_skips_unknown_tables(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_device (_id INTEGER PRIMARY KEY, user_jid_row_id INTEGER)"
+    )
+    conn.execute("INSERT INTO user_device (_id, user_jid_row_id) VALUES (1, 100)")
+    conn.commit()
+
+    del_json = tmp_path / "user_device_deleted_1.json"
+    del_json.write_text(json.dumps({"deleted_ids": [1]}), encoding="utf-8")
+
+    count = increment_merger.apply_entity_deletions(conn, "user_device", str(del_json), logger)
+    assert count == 0
+    # Row must remain intact
+    assert conn.execute("SELECT COUNT(*) FROM user_device WHERE _id = 1").fetchone()[0] == 1
+    conn.close()
+
+
+def test_apply_increment_folder_safely_skips_vendor_ancillary_tables(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    inc_dir = tmp_path / "inc_ancillary"
+    inc_dir.mkdir()
+
+    # Header with standard metadata
+    (inc_dir / "header.json").write_text(json.dumps({"creation_date": 1729000000000}))
+
+    # Supported table: props
+    (inc_dir / "props_modified_1.json").write_text(
+        json.dumps([{"key": "test_supported_key", "value": "active"}]),
+        encoding="utf-8",
+    )
+
+    # Unsupported auxiliary tables that appear in real WhatsApp backups
+    (inc_dir / "receipt_device_modified_1.json").write_text(
+        json.dumps([{"_id": 99, "device_id": 5}]),
+        encoding="utf-8",
+    )
+    (inc_dir / "user_device_deleted_1.json").write_text(
+        json.dumps({"deleted_ids": [55]}),
+        encoding="utf-8",
+    )
+
+    schema_cache = {}
+    stats = increment_merger.apply_increment_folder(
+        conn, str(inc_dir), logger, None, None, schema_cache
+    )
+
+    # props was applied, receipt_device was skipped cleanly
+    assert stats["entity_modified"] == 1
+    assert stats["entity_deleted"] == 0
+    assert (
+        conn.execute("SELECT value FROM props WHERE key = 'test_supported_key'").fetchone()[0]
+        == "active"
+    )
+    conn.close()
+
+
+def test_apply_poll_vote_in_order(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_poll_in_order.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    wmi_poll = _build_poll_creation_wmi(
+        "5550100@s.whatsapp.net", "POLL_KEY_1", "Favorite color?", ["Red", "Blue"], 1729000100
+    )
+    wmi_vote = _build_poll_vote_wmi(
+        "5550100@s.whatsapp.net", "VOTE_KEY_1", "POLL_KEY_1", 1729000200, 1729000200000
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+        f.write(_encode_varint(len(wmi_vote)) + wmi_vote)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 2
+
+    cur = conn.cursor()
+    poll_id = cur.execute(
+        "SELECT _id, message_type FROM message WHERE key_id = 'POLL_KEY_1'"
+    ).fetchone()[0]
+    vote_row = cur.execute(
+        "SELECT a._id, a.parent_message_row_id, a.message_add_on_type, a.key_id, v.sender_timestamp "
+        "FROM message_add_on a JOIN message_add_on_poll_vote v ON a._id = v.message_add_on_row_id "
+        "WHERE a.parent_message_row_id = ?",
+        (poll_id,),
+    ).fetchone()
+    assert vote_row is not None
+    assert vote_row[1] == poll_id
+    assert vote_row[2] == 67
+    assert vote_row[3] == "VOTE_KEY_1"
+    assert vote_row[4] == 1729000200000
+    conn.close()
+
+
+def test_two_pass_poll_vote_arrives_before_poll_creation(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_two_pass_poll.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Vote arrives first (out of order sync)
+    wmi_vote = _build_poll_vote_wmi(
+        "5550100@s.whatsapp.net", "VOTE_KEY_2", "POLL_KEY_2", 1729000300, 1729000300000
+    )
+    # Frame 1: Poll creation arrives second
+    wmi_poll = _build_poll_creation_wmi(
+        "5550100@s.whatsapp.net", "POLL_KEY_2", "Lunch place?", ["Pizza", "Sushi"], 1729000100
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_vote)) + wmi_vote)
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 2
+
+    cur = conn.cursor()
+    poll_id = cur.execute("SELECT _id FROM message WHERE key_id = 'POLL_KEY_2'").fetchone()[0]
+    vote_row = cur.execute(
+        "SELECT a.parent_message_row_id, a.message_add_on_type, a.key_id, v.sender_timestamp "
+        "FROM message_add_on a JOIN message_add_on_poll_vote v ON a._id = v.message_add_on_row_id "
+        "WHERE a.parent_message_row_id = ?",
+        (poll_id,),
+    ).fetchone()
+    assert vote_row is not None
+    assert vote_row[0] == poll_id
+    assert vote_row[1] == 67
+    assert vote_row[2] == "VOTE_KEY_2"
+    assert vote_row[3] == 1729000300000
+    conn.close()
+
+
+def test_apply_poll_vote_supersedes_prior_vote(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_poll_supersede.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    wmi_poll = _build_poll_creation_wmi(
+        "5550100@s.whatsapp.net", "POLL_KEY_3", "Weekend plan?", ["Hike", "Beach"], 1729000100
+    )
+    wmi_vote_1 = _build_poll_vote_wmi(
+        "5550100@s.whatsapp.net", "VOTE_KEY_3A", "POLL_KEY_3", 1729000200, 1729000200000
+    )
+    wmi_vote_2 = _build_poll_vote_wmi(
+        "5550100@s.whatsapp.net", "VOTE_KEY_3B", "POLL_KEY_3", 1729000300, 1729000300000
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+        f.write(_encode_varint(len(wmi_vote_1)) + wmi_vote_1)
+        f.write(_encode_varint(len(wmi_vote_2)) + wmi_vote_2)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 3
+
+    cur = conn.cursor()
+    poll_id = cur.execute("SELECT _id FROM message WHERE key_id = 'POLL_KEY_3'").fetchone()[0]
+
+    # Only one vote add-on should exist for this sender on this poll
+    add_ons = cur.execute(
+        "SELECT key_id, message_add_on_type FROM message_add_on WHERE parent_message_row_id = ?",
+        (poll_id,),
+    ).fetchall()
+    assert len(add_ons) == 1
+    assert add_ons[0][0] == "VOTE_KEY_3B"
+    assert add_ons[0][1] == 67
+
+    poll_votes = cur.execute(
+        "SELECT v.sender_timestamp FROM message_add_on_poll_vote v "
+        "JOIN message_add_on a ON a._id = v.message_add_on_row_id "
+        "WHERE a.parent_message_row_id = ?",
+        (poll_id,),
+    ).fetchall()
+    assert len(poll_votes) == 1
+    assert poll_votes[0][0] == 1729000300000
+    conn.close()
+
+
+def test_apply_message_deletions_cascades_poll_votes(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_poll_delete_cascade.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    wmi_poll = _build_poll_creation_wmi(
+        "5550100@s.whatsapp.net", "POLL_KEY_4", "Dinner?", ["Burger", "Salad"], 1729000100
+    )
+    wmi_vote = _build_poll_vote_wmi(
+        "5550100@s.whatsapp.net", "VOTE_KEY_4", "POLL_KEY_4", 1729000200, 1729000200000
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+        f.write(_encode_varint(len(wmi_vote)) + wmi_vote)
+
+    schema_cache = {}
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    poll_id = cur.execute("SELECT _id FROM message WHERE key_id = 'POLL_KEY_4'").fetchone()[0]
+    assert (
+        cur.execute("SELECT COUNT(*) FROM message WHERE key_id = 'POLL_KEY_4'").fetchone()[0] == 1
+    )
+    assert (
+        cur.execute("SELECT COUNT(*) FROM message_add_on WHERE key_id = 'VOTE_KEY_4'").fetchone()[0]
+        == 1
+    )
+    assert cur.execute("SELECT COUNT(*) FROM message_add_on_poll_vote").fetchone()[0] == 1
+
+    del_json = tmp_path / "deletedMessages_1.json"
+    del_json.write_text(json.dumps({"deleted_ids": [poll_id]}), encoding="utf-8")
+
+    # Now delete the poll message
+    deleted = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, schema_cache, None, None
+    )
+    conn.commit()
+
+    assert deleted == 1
+    assert (
+        cur.execute("SELECT COUNT(*) FROM message WHERE key_id = 'POLL_KEY_4'").fetchone()[0] == 0
+    )
+    assert (
+        cur.execute("SELECT COUNT(*) FROM message_add_on WHERE key_id = 'VOTE_KEY_4'").fetchone()[0]
+        == 0
+    )
+    assert cur.execute("SELECT COUNT(*) FROM message_add_on_poll_vote").fetchone()[0] == 0
     conn.close()

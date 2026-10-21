@@ -299,6 +299,31 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         if isinstance(val, bytes):
             push_name = val.decode("utf-8", errors="replace").strip()
 
+    # Field 38: MediaData (localPath=1)
+    local_path = None
+    if 38 in fields and fields[38]:
+        for tuple_item in fields[38]:
+            md_bytes = tuple_item[1]
+            if isinstance(md_bytes, bytes):
+                try:
+                    md_fields = parse_wire_fields(md_bytes)
+                    if 1 in md_fields and isinstance(md_fields[1][0][1], bytes):
+                        raw_lp = (
+                            md_fields[1][0][1]
+                            .decode("utf-8", errors="replace")
+                            .strip()
+                            .replace("\\", "/")
+                        )
+                        while raw_lp.startswith("./"):
+                            raw_lp = raw_lp[2:]
+                        if raw_lp.startswith("/"):
+                            raw_lp = raw_lp.lstrip("/")
+                        if raw_lp:
+                            local_path = raw_lp
+                            break
+                except (ValueError, Exception):
+                    pass
+
     message_type = 0
     text_data = None
     media_info = None
@@ -776,6 +801,9 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                     except (ValueError, Exception):
                         pass
 
+    if media_info is not None and local_path:
+        media_info["file_path"] = local_path
+
     return {
         "key_id": key_id,
         "from_me": from_me,
@@ -787,6 +815,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         "message_type": message_type,
         "text_data": text_data,
         "media_info": media_info,
+        "local_path": local_path,
         "vcard": vcard,
         "reaction_info": reaction_info,
         "poll_info": poll_info,
@@ -1130,6 +1159,18 @@ _ENTITY_TABLE_PRIORITY: dict[str, int] = {
     "group_participants": 61,
 }
 
+_SUPPORTED_ENTITY_TABLES: frozenset[str] = frozenset(
+    {
+        "props",
+        "jid",
+        "chat",
+        "jid_map",
+        "lid_display_name",
+        "group_participant_user",
+        "group_participants",
+    }
+)
+
 
 def _entity_file_sort_key(filename: str) -> tuple[int, str]:
     table = filename.split("_modified_")[0].split("_deleted_")[0]
@@ -1144,6 +1185,12 @@ def apply_entity_modifications(
     jid_id_map: dict[int, int] | None = None,
 ) -> int:
     """Upsert modified rows from an entity JSON file into SQLite table."""
+    if table_name not in _SUPPORTED_ENTITY_TABLES:
+        logger.info(
+            f"EntityTableProcessor: skipping import for unknown/unsupported table '{table_name}'"
+        )
+        return 0
+
     with open(modified_json_path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -1399,6 +1446,12 @@ def apply_entity_deletions(
     conn: sqlite3.Connection, table_name: str, deleted_json_path: str, logger: logging.Logger
 ) -> int:
     """Delete entity records listed in an entity deleted JSON file."""
+    if table_name not in _SUPPORTED_ENTITY_TABLES:
+        logger.info(
+            f"EntityTableProcessor: skipping deletions for unknown/unsupported table '{table_name}'"
+        )
+        return 0
+
     with open(deleted_json_path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -1598,6 +1651,81 @@ def apply_poll_creation(
                 "INSERT INTO message_poll_option (message_row_id, option_name, vote_total) VALUES (?, ?, 0)",
                 (msg_row_id, opt_name),
             )
+
+
+def apply_poll_vote(
+    conn: sqlite3.Connection,
+    poll_vote_info: dict,
+    sender_jid_row_id: int | None,
+    from_me: int,
+    timestamp: int,
+    key_cache: dict[str, int],
+    schema_cache: dict[str, set[str]] | None,
+    logger: logging.Logger,
+    key_id: str,
+    chat_row_id: int | None,
+) -> bool:
+    """Record a poll vote add-on for a message, satisfying message_add_on NOT NULL constraints. Returns True if applied, False otherwise."""
+    poll_key_id = poll_vote_info.get("poll_key_id", "")
+    if not poll_key_id:
+        return False
+    parent_row_id = find_message_row_id(conn, poll_key_id, key_cache)
+    if parent_row_id is None:
+        logger.debug(f"Target poll message '{poll_key_id}' for vote not found in cache/database.")
+        return False
+
+    add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
+    vote_cols = get_table_columns(conn, "message_add_on_poll_vote", schema_cache)
+    vote_opt_cols = get_table_columns(
+        conn, "message_add_on_poll_vote_selected_option", schema_cache
+    )
+    if not add_on_cols:
+        return False
+
+    cur = conn.cursor()
+    sender_ts = poll_vote_info.get("sender_ts", timestamp)
+
+    # A sender can have at most one active vote add-on per poll. Remove any prior vote.
+    if vote_opt_cols:
+        cur.execute(
+            "DELETE FROM message_add_on_poll_vote_selected_option WHERE message_add_on_row_id IN ("
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
+            (parent_row_id, sender_jid_row_id),
+        )
+    if vote_cols:
+        cur.execute(
+            "DELETE FROM message_add_on_poll_vote WHERE message_add_on_row_id IN ("
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
+            (parent_row_id, sender_jid_row_id),
+        )
+    cur.execute(
+        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67",
+        (parent_row_id, sender_jid_row_id),
+    )
+
+    row_map = {
+        "parent_message_row_id": parent_row_id,
+        "from_me": from_me,
+        "sender_jid_row_id": sender_jid_row_id,
+        "status": 0,
+        "message_add_on_type": 67,
+        "timestamp": timestamp,
+        "key_id": key_id or "",
+        "chat_row_id": chat_row_id,
+        "received_timestamp": timestamp,
+    }
+    valid_cols = [c for c in row_map if c in add_on_cols]
+    cur.execute(
+        f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
+        [row_map[c] for c in valid_cols],
+    )
+    add_on_id = cur.lastrowid
+    if vote_cols and add_on_id:
+        cur.execute(
+            "INSERT INTO message_add_on_poll_vote (message_add_on_row_id, sender_timestamp) VALUES (?, ?)",
+            (add_on_id, sender_ts),
+        )
+    return True
 
 
 def apply_pin_in_chat(
@@ -1946,6 +2074,10 @@ def apply_message_deletions(
 
     has_add_on_reaction = bool(get_table_columns(conn, "message_add_on_reaction", schema_cache))
     has_add_on_pin = bool(get_table_columns(conn, "message_add_on_pin_in_chat", schema_cache))
+    has_add_on_poll_vote = bool(get_table_columns(conn, "message_add_on_poll_vote", schema_cache))
+    has_add_on_poll_opt = bool(
+        get_table_columns(conn, "message_add_on_poll_vote_selected_option", schema_cache)
+    )
     has_add_on = bool(get_table_columns(conn, "message_add_on", schema_cache))
     has_poll_opt = bool(get_table_columns(conn, "message_poll_option", schema_cache))
     has_poll = bool(get_table_columns(conn, "message_poll", schema_cache))
@@ -1969,6 +2101,18 @@ def apply_message_deletions(
         if has_add_on_pin and has_add_on:
             cur.execute(
                 f"DELETE FROM message_add_on_pin_in_chat WHERE message_add_on_row_id IN ("
+                f"SELECT _id FROM message_add_on WHERE parent_message_row_id IN ({placeholders}))",
+                chunk,
+            )
+        if has_add_on_poll_opt and has_add_on:
+            cur.execute(
+                f"DELETE FROM message_add_on_poll_vote_selected_option WHERE message_add_on_row_id IN ("
+                f"SELECT _id FROM message_add_on WHERE parent_message_row_id IN ({placeholders}))",
+                chunk,
+            )
+        if has_add_on_poll_vote and has_add_on:
+            cur.execute(
+                f"DELETE FROM message_add_on_poll_vote WHERE message_add_on_row_id IN ("
                 f"SELECT _id FROM message_add_on WHERE parent_message_row_id IN ({placeholders}))",
                 chunk,
             )
@@ -2400,9 +2544,11 @@ def apply_messages_bin(
                 else None
             )
 
-            # Reconstruct default expected file_path if document or preserve existing
-            file_path = existing_media_paths.get(msg.get("key_id", ""))
-            if not file_path and media["media_type"] == "document" and media["media_name"]:
+            # Preserve existing on-device path or use native WMI Tag 38 local_path
+            file_path = existing_media_paths.get(msg.get("key_id", "")) or (
+                media.get("file_path") if media else None
+            )
+            if not file_path and media["media_type"] == "document" and media.get("media_name"):
                 file_path = f"Media/WhatsApp Documents/{media['media_name']}"
 
             media_row_map = {
@@ -2539,6 +2685,34 @@ def apply_messages_bin(
                     )
                 )
 
+        # Apply poll vote add-on if present (Pass 1)
+        if msg.get("poll_vote_info"):
+            applied = apply_poll_vote(
+                conn,
+                msg["poll_vote_info"],
+                sender_jid_row_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
+                msg.get("key_id", ""),
+                chat_row_id,
+            )
+            if not applied and msg["poll_vote_info"].get("poll_key_id"):
+                pending_add_ons.append(
+                    PendingAddOn(
+                        add_on_type="poll_vote",
+                        target_key_id=msg["poll_vote_info"]["poll_key_id"],
+                        msg=msg,
+                        sender_jid_row_id=sender_jid_row_id,
+                        from_me=msg["from_me"],
+                        timestamp=msg["timestamp"],
+                        key_id=msg.get("key_id", ""),
+                        chat_row_id=chat_row_id,
+                    )
+                )
+
         # Apply protocol revoke or edit updates if present (Pass 1)
         if msg.get("revoke_info") or msg.get("edit_info"):
             applied = apply_protocol_record(
@@ -2594,6 +2768,19 @@ def apply_messages_bin(
                 applied = apply_pin_in_chat(
                     conn,
                     pending.msg["pin_info"],
+                    pending.sender_jid_row_id,
+                    pending.from_me,
+                    pending.timestamp,
+                    key_cache,
+                    schema_cache,
+                    logger,
+                    pending.key_id,
+                    pending.chat_row_id,
+                )
+            elif pending.add_on_type == "poll_vote":
+                applied = apply_poll_vote(
+                    conn,
+                    pending.msg["poll_vote_info"],
                     pending.sender_jid_row_id,
                     pending.from_me,
                     pending.timestamp,
