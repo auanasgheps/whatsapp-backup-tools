@@ -1274,7 +1274,7 @@ def _build_wmi_with_receipts(
             b += _build_field(3, 0, ur["read_timestamp"])
         if "played_timestamp" in ur and ur["played_timestamp"]:
             b += _build_field(4, 0, ur["played_timestamp"])
-        ur_bytes_list.append(_build_field(39, 2, b))
+        ur_bytes_list.append(_build_field(40, 2, b))
 
     wmi_data = (
         _build_field(1, 2, key_bytes)
@@ -1340,6 +1340,56 @@ def test_decode_wmi_with_user_receipts():
     assert decoded["user_receipts"][1]["user_jid"] == "5550102@s.whatsapp.net"
     assert decoded["user_receipts"][1]["receipt_timestamp"] == 1729000605000
     assert decoded["user_receipts"][1]["read_timestamp"] is None
+
+
+def test_decode_wmi_group_icon_change_tag39_photo_change(mock_db, tmp_path):
+    """Verify Tag 39 (PhotoChange) containing JPEG image bytes is not misparsed as a user receipt."""
+    jpeg_bytes = (
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x02\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00"
+    )
+    photo_change = _build_field(1, 2, jpeg_bytes) + _build_field(3, 0, 1729000600)
+    key_bytes = (
+        _build_field(1, 2, b"12036302@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"STUB_GROUP_ICON_1")
+    )
+    # WMI with stubType 22 (GROUP_CHANGE_ICON) and tag 39 PhotoChange
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(3, 0, 1729000600)
+        + _build_field(4, 0, 1)
+        + _build_field(24, 0, 22)  # GROUP_CHANGE_ICON stub type
+        + _build_field(39, 2, photo_change)  # Tag 39 is PhotoChange, NOT UserReceipt
+    )
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "STUB_GROUP_ICON_1"
+    # User receipts must be empty; JPEG bytes must never pollute user_receipts
+    assert decoded["user_receipts"] == []
+
+    # Ingesting into database must succeed without crashing on invalid JID
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS receipt_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            receipt_user_jid_row_id INTEGER NOT NULL,
+            receipt_timestamp INTEGER,
+            read_timestamp INTEGER,
+            played_timestamp INTEGER
+        );
+    """)
+    bin_path = str(tmp_path / "messages.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_bytes)) + wmi_bytes)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+    assert inserted == 1
+    cur = conn.cursor()
+    ru_count = cur.execute("SELECT COUNT(*) FROM receipt_user").fetchone()[0]
+    assert ru_count == 0
+    conn.close()
 
 
 def test_apply_messages_bin_populates_quoted_and_receipts(mock_db, tmp_path):
