@@ -3358,21 +3358,22 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
             )
             msgs_moved = cur.rowcount
 
-            try:
-                cur.execute(
-                    "UPDATE message_media SET chat_row_id = ? WHERE chat_row_id = ?",
-                    (phone_chat_id, lid_chat_id),
-                )
-            except sqlite3.OperationalError:
-                pass
+            if msgs_moved > 0:
+                try:
+                    cur.execute(
+                        "UPDATE message_media SET chat_row_id = ? WHERE chat_row_id = ?",
+                        (phone_chat_id, lid_chat_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
-            try:
-                cur.execute(
-                    "UPDATE message_quoted SET chat_row_id = ?, parent_message_chat_row_id = ? WHERE chat_row_id = ?",
-                    (phone_chat_id, phone_chat_id, lid_chat_id),
-                )
-            except sqlite3.OperationalError:
-                pass
+                try:
+                    cur.execute(
+                        "UPDATE message_quoted SET chat_row_id = ?, parent_message_chat_row_id = ? WHERE chat_row_id = ?",
+                        (phone_chat_id, phone_chat_id, lid_chat_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
             if has_hidden:
                 cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (phone_chat_id,))
@@ -3449,21 +3450,22 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
             )
             msgs_moved = cur.rowcount
 
-            try:
-                cur.execute(
-                    "UPDATE message_media SET chat_row_id = ? WHERE chat_row_id = ?",
-                    (c1_id, c2_id),
-                )
-            except sqlite3.OperationalError:
-                pass
+            if msgs_moved > 0:
+                try:
+                    cur.execute(
+                        "UPDATE message_media SET chat_row_id = ? WHERE chat_row_id = ?",
+                        (c1_id, c2_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
-            try:
-                cur.execute(
-                    "UPDATE message_quoted SET chat_row_id = ?, parent_message_chat_row_id = ? WHERE chat_row_id = ?",
-                    (c1_id, c1_id, c2_id),
-                )
-            except sqlite3.OperationalError:
-                pass
+                try:
+                    cur.execute(
+                        "UPDATE message_quoted SET chat_row_id = ?, parent_message_chat_row_id = ? WHERE chat_row_id = ?",
+                        (c1_id, c1_id, c2_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
             if has_hidden:
                 cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (c1_id,))
@@ -3517,37 +3519,55 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
 
     # Step D: Re-point any companion sender JIDs in message to canonical primary JID
     try:
-        cur.execute("""
-            UPDATE message
-            SET sender_jid_row_id = (
-                SELECT j_pri._id FROM jid j_comp
-                JOIN jid j_pri ON j_pri.user = j_comp.user AND j_pri.server = j_comp.server
-                WHERE j_comp._id = message.sender_jid_row_id
-                  AND (j_pri.device IS NULL OR j_pri.device = 0)
-                  AND (j_pri.raw_string = j_pri.user || '@' || j_pri.server OR j_pri.raw_string IS NULL OR j_pri.raw_string = '')
-                ORDER BY j_pri._id ASC
-                LIMIT 1
-            )
-            WHERE sender_jid_row_id > 0
-              AND EXISTS (
-                  SELECT 1 FROM jid j_comp
-                  WHERE j_comp._id = message.sender_jid_row_id
-                    AND (j_comp.device > 0 OR j_comp.raw_string LIKE '%.%:%@%')
-              )
-              AND (
-                  SELECT j_pri._id FROM jid j_comp
-                  JOIN jid j_pri ON j_pri.user = j_comp.user AND j_pri.server = j_comp.server
-                  WHERE j_comp._id = message.sender_jid_row_id
-                    AND (j_pri.device IS NULL OR j_pri.device = 0)
-                    AND (j_pri.raw_string = j_pri.user || '@' || j_pri.server OR j_pri.raw_string IS NULL OR j_pri.raw_string = '')
-                  ORDER BY j_pri._id ASC
-                  LIMIT 1
-              ) IS NOT NULL
-        """)
-        if cur.rowcount > 0:
-            logger.info(
-                f"Re-pointed {cur.rowcount} message sender JIDs from companion devices to primary canonical JIDs."
-            )
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'")
+        if cur.fetchone():
+            msg_cols = {r[1] for r in cur.execute("PRAGMA table_info(message)").fetchall()}
+            jid_cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+            if "sender_jid_row_id" in msg_cols and "user" in jid_cols and "server" in jid_cols:
+                has_dev = "device" in jid_cols
+                has_raw = "raw_string" in jid_cols
+
+                dev_cond = "j_comp.device > 0" if has_dev else "0"
+                raw_cond = "j_comp.raw_string LIKE '%.%:%@%'" if has_raw else "0"
+                comp_filter = f"({dev_cond} OR {raw_cond})"
+
+                pri_dev_cond = "(j_pri.device IS NULL OR j_pri.device = 0)" if has_dev else "1"
+                pri_raw_cond = (
+                    "(j_pri.raw_string = j_pri.user || '@' || j_pri.server OR j_pri.raw_string IS NULL OR j_pri.raw_string = '')"
+                    if has_raw
+                    else "1"
+                )
+
+                cur.execute("DROP TABLE IF EXISTS _comp_to_pri")
+                cur.execute(f"""
+                    CREATE TEMP TABLE _comp_to_pri AS
+                    SELECT j_comp._id AS comp_id, MIN(j_pri._id) AS pri_id
+                    FROM jid j_comp
+                    JOIN jid j_pri ON j_pri.user = j_comp.user AND j_pri.server = j_comp.server
+                    WHERE {comp_filter}
+                      AND {pri_dev_cond}
+                      AND {pri_raw_cond}
+                      AND j_comp._id != j_pri._id
+                    GROUP BY j_comp._id
+                """)
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS _idx_comp_to_pri ON _comp_to_pri(comp_id)"
+                )
+
+                cur.execute("SELECT 1 FROM _comp_to_pri LIMIT 1")
+                if cur.fetchone():
+                    cur.execute("""
+                        UPDATE message
+                        SET sender_jid_row_id = (
+                            SELECT pri_id FROM _comp_to_pri WHERE comp_id = message.sender_jid_row_id
+                        )
+                        WHERE sender_jid_row_id IN (SELECT comp_id FROM _comp_to_pri)
+                    """)
+                    if cur.rowcount > 0:
+                        logger.info(
+                            f"Re-pointed {cur.rowcount} message sender JIDs from companion devices to primary canonical JIDs."
+                        )
+                cur.execute("DROP TABLE IF EXISTS _comp_to_pri")
     except sqlite3.OperationalError:
         pass
 
