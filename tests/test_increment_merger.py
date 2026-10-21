@@ -873,8 +873,8 @@ def test_apply_messages_bin_auxiliary_entities(tmp_path):
     db_path = tmp_path / "test_aux.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript("""
-        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT, server TEXT, raw_string TEXT);
-        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER);
+        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT NOT NULL, server TEXT NOT NULL, raw_string TEXT);
+        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER NOT NULL UNIQUE, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER);
         CREATE TABLE message (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_row_id INTEGER NOT NULL,
@@ -921,8 +921,7 @@ def test_apply_messages_bin_auxiliary_entities(tmp_path):
             sender_timestamp INTEGER NOT NULL
         );
         CREATE TABLE message_poll (
-            _id INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_row_id INTEGER NOT NULL,
+            message_row_id INTEGER PRIMARY KEY,
             selectable_options_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE message_poll_option (
@@ -1107,104 +1106,6 @@ def test_apply_messages_bin_auxiliary_entities(tmp_path):
     ).fetchone()
     assert edit_info_row is not None
     assert edit_info_row[0] == "PARENT_KEY_1"
-
-    conn.close()
-
-
-def test_cascading_message_deletions_auxiliary(tmp_path):
-    db_path = tmp_path / "test_cascade.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript("""
-        CREATE TABLE message (_id INTEGER PRIMARY KEY, key_id TEXT);
-        CREATE TABLE message_media (message_row_id INTEGER);
-        CREATE TABLE message_add_on (_id INTEGER PRIMARY KEY, parent_message_row_id INTEGER);
-        CREATE TABLE message_add_on_reaction (message_add_on_row_id INTEGER);
-        CREATE TABLE message_add_on_pin_in_chat (message_add_on_row_id INTEGER);
-        CREATE TABLE message_poll (message_row_id INTEGER);
-        CREATE TABLE message_poll_option (message_row_id INTEGER);
-        CREATE TABLE message_location (message_row_id INTEGER);
-        CREATE TABLE message_edit_info (message_row_id INTEGER);
-        CREATE TABLE message_quoted (message_row_id INTEGER);
-        CREATE TABLE receipt_user (message_row_id INTEGER);
-
-        INSERT INTO message (_id, key_id) VALUES (42, 'DELETE_TARGET');
-        INSERT INTO message_media (message_row_id) VALUES (42);
-        INSERT INTO message_add_on (_id, parent_message_row_id) VALUES (10, 42);
-        INSERT INTO message_add_on_reaction (message_add_on_row_id) VALUES (10);
-        INSERT INTO message_add_on (_id, parent_message_row_id) VALUES (11, 42);
-        INSERT INTO message_add_on_pin_in_chat (message_add_on_row_id) VALUES (11);
-        INSERT INTO message_poll (message_row_id) VALUES (42);
-        INSERT INTO message_poll_option (message_row_id) VALUES (42);
-        INSERT INTO message_location (message_row_id) VALUES (42);
-        INSERT INTO message_edit_info (message_row_id) VALUES (42);
-        INSERT INTO message_quoted (message_row_id) VALUES (42);
-        INSERT INTO receipt_user (message_row_id) VALUES (42);
-    """)
-    conn.commit()
-
-    del_json = tmp_path / "deletedMessages_cascade.json"
-    del_json.write_text(json.dumps({"deleted_ids": [42]}))
-
-    schema_cache = {}
-    deleted = increment_merger.apply_message_deletions(
-        conn, str(del_json), logger, schema_cache, None, None
-    )
-    conn.commit()
-
-    assert deleted == 1
-    assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 42").fetchone()[0] == 0
-    assert (
-        conn.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 42").fetchone()[0]
-        == 0
-    )
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM message_add_on WHERE parent_message_row_id = 42"
-        ).fetchone()[0]
-        == 0
-    )
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM message_add_on_reaction WHERE message_add_on_row_id = 10"
-        ).fetchone()[0]
-        == 0
-    )
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM message_add_on_pin_in_chat WHERE message_add_on_row_id = 11"
-        ).fetchone()[0]
-        == 0
-    )
-    assert (
-        conn.execute("SELECT COUNT(*) FROM message_poll WHERE message_row_id = 42").fetchone()[0]
-        == 0
-    )
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM message_poll_option WHERE message_row_id = 42"
-        ).fetchone()[0]
-        == 0
-    )
-    assert (
-        conn.execute("SELECT COUNT(*) FROM message_location WHERE message_row_id = 42").fetchone()[
-            0
-        ]
-        == 0
-    )
-    assert (
-        conn.execute("SELECT COUNT(*) FROM message_edit_info WHERE message_row_id = 42").fetchone()[
-            0
-        ]
-        == 0
-    )
-    assert (
-        conn.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 42").fetchone()[0]
-        == 0
-    )
-    assert (
-        conn.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 42").fetchone()[0]
-        == 0
-    )
 
     conn.close()
 
@@ -2306,8 +2207,8 @@ def test_apply_entity_modifications_remaps_jid_row_id(mock_db, tmp_path):
 def _make_two_pass_test_db(db_path):
     conn = sqlite3.connect(str(db_path))
     conn.executescript("""
-        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT, server TEXT, raw_string TEXT);
-        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER);
+        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT NOT NULL, server TEXT NOT NULL, raw_string TEXT);
+        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER NOT NULL UNIQUE, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER);
         CREATE TABLE message (
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_row_id INTEGER NOT NULL,
@@ -2777,16 +2678,66 @@ def test_apply_message_deletions_gate3_invalid_stanza_key(mock_db, tmp_path):
 def test_apply_message_deletions_cascades_strictly_for_verified_only(mock_db, tmp_path):
     conn = sqlite3.connect(mock_db)
     cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS message_add_on ("
-        "_id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "parent_message_row_id INTEGER NOT NULL, "
-        "from_me INTEGER NOT NULL, "
-        "key_id TEXT NOT NULL, "
-        "timestamp INTEGER NOT NULL, "
-        "message_add_on_type INTEGER NOT NULL"
-        ")"
-    )
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS message_add_on (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER,
+            parent_message_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER NOT NULL,
+            status INTEGER DEFAULT 0,
+            message_add_on_type INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS message_add_on_reaction (
+            message_add_on_row_id INTEGER PRIMARY KEY,
+            reaction TEXT NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS message_add_on_pin_in_chat (
+            message_add_on_row_id INTEGER PRIMARY KEY,
+            pin_in_chat_state INTEGER NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS message_poll (
+            message_row_id INTEGER PRIMARY KEY,
+            selectable_options_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS message_poll_option (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            option_name TEXT NOT NULL,
+            vote_total INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS message_location (
+            message_row_id INTEGER PRIMARY KEY,
+            latitude REAL,
+            longitude REAL,
+            place_name TEXT
+        );
+        CREATE TABLE IF NOT EXISTS message_edit_info (
+            message_row_id INTEGER PRIMARY KEY,
+            original_key_id TEXT NOT NULL,
+            edited_timestamp INTEGER NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS message_quoted (
+            message_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            timestamp INTEGER,
+            text_data TEXT
+        );
+        CREATE TABLE IF NOT EXISTS receipt_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            receipt_user_jid_row_id INTEGER NOT NULL,
+            receipt_timestamp INTEGER
+        );
+    """)
     # Message 501: Valid message within sequence ceiling and causality
     cur.execute(
         "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
@@ -2797,33 +2748,83 @@ def test_apply_message_deletions_cascades_strictly_for_verified_only(mock_db, tm
         "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
         "VALUES (502, 1, 0, 'KEY_REJECTED_502', 1729050000000, 0, 'Future message')"
     )
-    # Add media and add-ons for both
+
+    # Add auxiliary records for verified message 501 across all child tables
     cur.execute(
         "INSERT INTO message_media (message_row_id, chat_row_id, file_path) VALUES (501, 1, 'path/to/501.jpg')"
     )
     cur.execute(
+        "INSERT INTO message_add_on (_id, parent_message_row_id, from_me, key_id, timestamp, message_add_on_type) VALUES (10, 501, 0, 'ADDON_501', 1729000010000, 1)"
+    )
+    cur.execute(
+        "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) VALUES (10, '👍', 1729000010000)"
+    )
+    cur.execute(
+        "INSERT INTO message_add_on (_id, parent_message_row_id, from_me, key_id, timestamp, message_add_on_type) VALUES (11, 501, 0, 'PIN_501', 1729000011000, 79)"
+    )
+    cur.execute(
+        "INSERT INTO message_add_on_pin_in_chat (message_add_on_row_id, pin_in_chat_state, sender_timestamp) VALUES (11, 1, 1729000011000)"
+    )
+    cur.execute(
+        "INSERT INTO message_poll (message_row_id, selectable_options_count) VALUES (501, 1)"
+    )
+    cur.execute(
+        "INSERT INTO message_poll_option (message_row_id, option_name) VALUES (501, 'Option A')"
+    )
+    cur.execute(
+        "INSERT INTO message_location (message_row_id, latitude, longitude, place_name) VALUES (501, 48.8584, 2.2945, 'Eiffel Tower')"
+    )
+    cur.execute(
+        "INSERT INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp) VALUES (501, 'KEY_VERIFIED_501', 1729000020000, 1729000020000)"
+    )
+    cur.execute(
+        "INSERT INTO message_quoted (message_row_id, chat_row_id, parent_message_chat_row_id, from_me, key_id, timestamp, text_data) VALUES (501, 1, 1, 0, 'STANZA_BASE', 1729000000000, 'Quoted msg')"
+    )
+    cur.execute(
+        "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp) VALUES (501, 1, 1729000010000)"
+    )
+
+    # Add auxiliary records for rejected future message 502 across child tables
+    cur.execute(
         "INSERT INTO message_media (message_row_id, chat_row_id, file_path) VALUES (502, 1, 'path/to/502.jpg')"
     )
     cur.execute(
-        "INSERT INTO message_add_on (parent_message_row_id, from_me, key_id, timestamp, message_add_on_type) "
-        "VALUES (501, 0, 'ADDON_501', 1729000010000, 1)"
+        "INSERT INTO message_add_on (_id, parent_message_row_id, from_me, key_id, timestamp, message_add_on_type) VALUES (12, 502, 0, 'ADDON_502', 1729050010000, 1)"
     )
     cur.execute(
-        "INSERT INTO message_add_on (parent_message_row_id, from_me, key_id, timestamp, message_add_on_type) "
-        "VALUES (502, 0, 'ADDON_502', 1729050010000, 1)"
+        "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) VALUES (12, '❤️', 1729050010000)"
+    )
+    cur.execute(
+        "INSERT INTO message_poll (message_row_id, selectable_options_count) VALUES (502, 1)"
+    )
+    cur.execute(
+        "INSERT INTO message_poll_option (message_row_id, option_name) VALUES (502, 'Option B')"
+    )
+    cur.execute(
+        "INSERT INTO message_location (message_row_id, latitude, longitude, place_name) VALUES (502, 40.7128, -74.0060, 'NYC')"
+    )
+    cur.execute(
+        "INSERT INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp) VALUES (502, 'KEY_REJECTED_502', 1729050020000, 1729050020000)"
+    )
+    cur.execute(
+        "INSERT INTO message_quoted (message_row_id, chat_row_id, parent_message_chat_row_id, from_me, key_id, timestamp, text_data) VALUES (502, 1, 1, 0, 'STANZA_FUTURE', 1729050000000, 'Future quoted')"
+    )
+    cur.execute(
+        "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp) VALUES (502, 1, 1729050010000)"
     )
     conn.commit()
 
     del_json = tmp_path / "deletedMessages_mixed.json"
     del_json.write_text(json.dumps({"deleted_ids": [501, 502]}))
 
+    schema_cache = {}
     count = increment_merger.apply_message_deletions(
-        conn, str(del_json), logger, None, 1729000500000, 600
+        conn, str(del_json), logger, schema_cache, 1729000500000, 600
     )
     conn.commit()
 
     assert count == 1
-    # 501 was verified and deleted
+    # 501 was verified and cascaded across all 10 auxiliary tables
     assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 501").fetchone()[0] == 0
     assert (
         conn.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 501").fetchone()[0]
@@ -2835,8 +2836,50 @@ def test_apply_message_deletions_cascades_strictly_for_verified_only(mock_db, tm
         ).fetchone()[0]
         == 0
     )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_add_on_reaction WHERE message_add_on_row_id = 10"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_add_on_pin_in_chat WHERE message_add_on_row_id = 11"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_poll WHERE message_row_id = 501").fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_poll_option WHERE message_row_id = 501"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_location WHERE message_row_id = 501").fetchone()[
+            0
+        ]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_edit_info WHERE message_row_id = 501"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 501").fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 501").fetchone()[0]
+        == 0
+    )
 
-    # 502 was rejected and protected, along with its media and add-ons!
+    # 502 was rejected and protected, along with its records across all child tables!
     assert conn.execute("SELECT COUNT(*) FROM message WHERE _id = 502").fetchone()[0] == 1
     assert (
         conn.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 502").fetchone()[0]
@@ -2846,6 +2889,42 @@ def test_apply_message_deletions_cascades_strictly_for_verified_only(mock_db, tm
         conn.execute(
             "SELECT COUNT(*) FROM message_add_on WHERE parent_message_row_id = 502"
         ).fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_add_on_reaction WHERE message_add_on_row_id = 12"
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_poll WHERE message_row_id = 502").fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_poll_option WHERE message_row_id = 502"
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_location WHERE message_row_id = 502").fetchone()[
+            0
+        ]
+        == 1
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_edit_info WHERE message_row_id = 502"
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 502").fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 502").fetchone()[0]
         == 1
     )
     conn.close()
