@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import io
 import json
 import logging
@@ -2261,7 +2263,12 @@ def _make_two_pass_test_db(db_path):
             _id INTEGER PRIMARY KEY AUTOINCREMENT,
             message_row_id INTEGER NOT NULL,
             option_name TEXT NOT NULL,
+            option_sha256 TEXT,
             vote_total INTEGER DEFAULT 0
+        );
+        CREATE TABLE message_secret (
+            message_row_id INTEGER PRIMARY KEY,
+            message_secret BLOB
         );
         INSERT INTO jid (user, server, raw_string) VALUES ('5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
         INSERT INTO chat (jid_row_id) VALUES (1);
@@ -3982,4 +3989,388 @@ def test_ensure_jid_map_resolved_bridges_companion_lids(mock_db):
     ).fetchone()
     assert row is not None
     assert row[0] == phone_jid
+    conn.close()
+
+
+def test_decode_wmi_poll_with_embedded_votes():
+    secret = b"\xaa" * 32
+    opt1_hash = hashlib.sha256(b"Option A").digest()
+    opt2_hash = hashlib.sha256(b"Option B").digest()
+
+    poll_bytes = (
+        _build_field(2, 2, b"Poll Question?")
+        + _build_field(3, 2, _build_field(1, 2, b"Option A"))
+        + _build_field(3, 2, _build_field(1, 2, b"Option B"))
+        + _build_field(4, 0, 1)
+    )
+    ctx_bytes = _build_field(3, 2, secret)
+    msg_bytes = _build_field(64, 2, poll_bytes) + _build_field(35, 2, ctx_bytes)
+
+    # Tag 45 vote entry
+    v_key = (
+        _build_field(1, 2, b"12345@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"VOTE_100")
+        + _build_field(4, 2, b"user1@lid")
+    )
+    vote_sub = _build_field(1, 2, opt1_hash) + _build_field(1, 2, opt2_hash)
+    tag45_entry = (
+        _build_field(1, 2, v_key) + _build_field(2, 2, vote_sub) + _build_field(3, 0, 1729000500000)
+    )
+
+    wmi_bytes = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"12345@g.us")
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, b"POLL_100"),
+        )
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000100)
+        + _build_field(45, 2, tag45_entry)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "POLL_100"
+    assert decoded["message_type"] == 66
+    assert decoded["poll_info"] is not None
+    assert decoded["poll_info"]["question"] == "Poll Question?"
+    assert decoded["poll_info"]["options"] == ["Option A", "Option B"]
+    assert decoded["poll_info"]["message_secret"] == secret
+    assert len(decoded["poll_info"]["embedded_votes"]) == 1
+    v = decoded["poll_info"]["embedded_votes"][0]
+    assert v["key_id"] == "VOTE_100"
+    assert v["from_me"] == 0
+    assert v["participant"] == "user1@lid"
+    assert v["sender_ts"] == 1729000500000
+    assert v["selected_option_hashes"] == [opt1_hash, opt2_hash]
+
+
+def test_apply_poll_creation_with_embedded_votes(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_poll_embedded.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    secret = b"\xbb" * 32
+    opt_a_hash = hashlib.sha256(b"Alpha").digest()
+    opt_b_hash = hashlib.sha256(b"Beta").digest()
+
+    poll_bytes = (
+        _build_field(2, 2, b"Test Poll?")
+        + _build_field(3, 2, _build_field(1, 2, b"Alpha"))
+        + _build_field(3, 2, _build_field(1, 2, b"Beta"))
+        + _build_field(4, 0, 1)
+    )
+    ctx_bytes = _build_field(3, 2, secret)
+    msg_bytes = _build_field(64, 2, poll_bytes) + _build_field(35, 2, ctx_bytes)
+
+    # Vote 1: voter 1 voted for Alpha in group 12345@g.us
+    v_key1 = (
+        _build_field(1, 2, b"12345@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"VOTE_EMB_1")
+        + _build_field(4, 2, b"voter1@lid")
+    )
+    vote_sub1 = _build_field(1, 2, opt_a_hash)
+    tag45_1 = (
+        _build_field(1, 2, v_key1)
+        + _build_field(2, 2, vote_sub1)
+        + _build_field(3, 0, 1729000200000)
+    )
+
+    # Vote 2: voter 2 voted for Beta in group 12345@g.us
+    v_key2 = (
+        _build_field(1, 2, b"12345@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"VOTE_EMB_2")
+        + _build_field(4, 2, b"voter2@lid")
+    )
+    vote_sub2 = _build_field(1, 2, opt_b_hash)
+    tag45_2 = (
+        _build_field(1, 2, v_key2)
+        + _build_field(2, 2, vote_sub2)
+        + _build_field(3, 0, 1729000300000)
+    )
+
+    wmi_poll = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"12345@g.us")
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, b"POLL_EMB_1"),
+        )
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000100)
+        + _build_field(45, 2, tag45_1)
+        + _build_field(45, 2, tag45_2)
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+
+    schema_cache = {}
+    logger = logging.getLogger("test")
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    poll_row = cur.execute("SELECT _id FROM message WHERE key_id = 'POLL_EMB_1'").fetchone()
+    assert poll_row is not None
+    poll_id = poll_row[0]
+
+    # Verify secret table
+    sec_row = cur.execute(
+        "SELECT message_secret FROM message_secret WHERE message_row_id = ?", (poll_id,)
+    ).fetchone()
+    assert sec_row is not None
+    assert sec_row[0] == secret
+
+    # Verify poll options
+    opts = cur.execute(
+        "SELECT _id, option_name, option_sha256, vote_total FROM message_poll_option WHERE message_row_id = ? ORDER BY _id ASC",
+        (poll_id,),
+    ).fetchall()
+    assert len(opts) == 2
+    assert opts[0][1] == "Alpha"
+    assert opts[0][2] == base64.b64encode(opt_a_hash).decode("ascii")
+    assert opts[0][3] == 1
+    assert opts[1][1] == "Beta"
+    assert opts[1][2] == base64.b64encode(opt_b_hash).decode("ascii")
+    assert opts[1][3] == 1
+
+    # Verify message_add_on and message_add_on_poll_vote_selected_option
+    add_ons = cur.execute(
+        "SELECT a._id, a.key_id, vso.message_poll_option_id "
+        "FROM message_add_on a "
+        "JOIN message_add_on_poll_vote_selected_option vso ON vso.message_add_on_row_id = a._id "
+        "WHERE a.parent_message_row_id = ? ORDER BY a._id ASC",
+        (poll_id,),
+    ).fetchall()
+    assert len(add_ons) == 2
+    assert add_ons[0][1] == "VOTE_EMB_1"
+    assert add_ons[0][2] == opts[0][0]
+    assert add_ons[1][1] == "VOTE_EMB_2"
+    assert add_ons[1][2] == opts[1][0]
+    conn.close()
+
+
+def test_apply_poll_vote_with_option_hashes(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_poll_opt_hash.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    opt_red_hash = hashlib.sha256(b"Red").digest()
+    opt_blue_hash = hashlib.sha256(b"Blue").digest()
+
+    wmi_poll = _build_poll_creation_wmi(
+        "5550100@s.whatsapp.net", "POLL_KEY_HASH", "Color?", ["Red", "Blue"], 1729000100
+    )
+
+    # Standalone Tag 50 with option hash in vote field (subtag 1)
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"POLL_KEY_HASH")
+    )
+    vote_val = _build_field(1, 2, opt_blue_hash)
+    vote_payload = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 2, vote_val)
+        + _build_field(3, 0, 1729000200000)
+    )
+
+    wmi_vote = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, b"VOTE_KEY_HASH"),
+        )
+        + _build_field(2, 2, _build_field(50, 2, vote_payload))
+        + _build_field(3, 0, 1729000200)
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+        f.write(_encode_varint(len(wmi_vote)) + wmi_vote)
+
+    schema_cache = {}
+    logger = logging.getLogger("test")
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    poll_id = cur.execute("SELECT _id FROM message WHERE key_id = 'POLL_KEY_HASH'").fetchone()[0]
+    opts = cur.execute(
+        "SELECT _id, option_name, vote_total FROM message_poll_option WHERE message_row_id = ? ORDER BY _id ASC",
+        (poll_id,),
+    ).fetchall()
+    assert opts[0][1] == "Red"
+    assert opts[0][2] == 0
+    assert opts[1][1] == "Blue"
+    assert opts[1][2] == 1
+
+    conn.close()
+
+
+def test_hydrate_poll_rows_resilience():
+    from wab_viewer.main import _hydrate_poll_rows
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+    CREATE TABLE message_poll (message_row_id INTEGER PRIMARY KEY, selectable_options_count INTEGER);
+    CREATE TABLE message_poll_option (_id INTEGER PRIMARY KEY AUTOINCREMENT, message_row_id INTEGER, option_name TEXT, vote_total INTEGER);
+    CREATE TABLE message_add_on (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        parent_message_row_id INTEGER,
+        from_me INTEGER,
+        message_add_on_type INTEGER
+    );
+    CREATE TABLE message_add_on_poll_vote_selected_option (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_add_on_row_id INTEGER,
+        message_poll_option_id INTEGER
+    );
+    """)
+
+    conn.execute("INSERT INTO message_poll VALUES (10, 0)")
+    conn.execute("INSERT INTO message_poll_option VALUES (101, 10, 'Yes', 0)")
+    conn.execute("INSERT INTO message_poll_option VALUES (102, 10, 'No', 0)")
+
+    conn.execute("INSERT INTO message_add_on VALUES (1, 10, 0, 67)")
+    conn.execute("INSERT INTO message_add_on VALUES (2, 10, 0, 67)")
+    conn.execute("INSERT INTO message_add_on VALUES (3, 10, 1, 67)")
+    conn.execute("INSERT INTO message_add_on VALUES (4, 10, 0, 67)")
+
+    conn.execute("INSERT INTO message_add_on_poll_vote_selected_option VALUES (1, 1, 101)")
+    conn.execute("INSERT INTO message_add_on_poll_vote_selected_option VALUES (2, 2, 101)")
+    conn.execute("INSERT INTO message_add_on_poll_vote_selected_option VALUES (3, 3, 101)")
+    conn.execute("INSERT INTO message_add_on_poll_vote_selected_option VALUES (4, 4, 102)")
+    conn.commit()
+
+    rows = [
+        {
+            "msg_id": 10,
+            "media_type": "poll",
+            "text_body": "Do you agree?",
+        }
+    ]
+    _hydrate_poll_rows(rows, "android", conn)
+
+    poll_data = rows[0]["poll"]
+    assert poll_data is not None
+    assert poll_data["question"] == "Do you agree?"
+    assert poll_data["total_voters"] == 4
+    assert poll_data["total_votes"] == 4
+    opts = poll_data["options"]
+    assert opts[0]["name"] == "Yes"
+    assert opts[0]["vote_count"] == 3
+    assert opts[0]["user_selected"] is True
+    assert opts[1]["name"] == "No"
+    assert opts[1]["vote_count"] == 1
+    assert opts[1]["user_selected"] is False
+    conn.close()
+
+
+def test_apply_poll_vote_encrypted_payload(tmp_path):
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    conn = _make_two_pass_test_db(tmp_path / "test_poll_enc.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    secret = b"\xcc" * 32
+    opt_cat_hash = hashlib.sha256(b"Cat").digest()
+    opt_dog_hash = hashlib.sha256(b"Dog").digest()
+
+    poll_bytes = (
+        _build_field(2, 2, b"Pet?")
+        + _build_field(3, 2, _build_field(1, 2, b"Cat"))
+        + _build_field(3, 2, _build_field(1, 2, b"Dog"))
+        + _build_field(4, 0, 1)
+    )
+    ctx_bytes = _build_field(3, 2, secret)
+    msg_bytes = _build_field(64, 2, poll_bytes) + _build_field(35, 2, ctx_bytes)
+
+    wmi_poll = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"12345@g.us")
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, b"POLL_ENC_1"),
+        )
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000100)
+    )
+
+    # Derive secret key and encrypt vote payload (voting for Dog)
+    voter_jid = "voter_dog@lid"
+    orig_clean = "12345@g.us"
+    mod_clean = voter_jid
+    use_case_secret = (
+        b"POLL_ENC_1" + orig_clean.encode("utf-8") + mod_clean.encode("utf-8") + b"Poll Vote"
+    )
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=use_case_secret,
+    )
+    derived_key = hkdf.derive(secret)
+    iv = b"\x07" * 12
+    aad = f"POLL_ENC_1\x00{mod_clean}".encode()
+    plaintext_vote = _build_field(1, 2, opt_dog_hash)
+    aesgcm = AESGCM(derived_key)
+    enc_payload = aesgcm.encrypt(iv, plaintext_vote, aad)
+
+    # Standalone Tag 50 with encPayload (tag 1) and encIv (tag 2) inside vote (tag 2)
+    target_key = (
+        _build_field(1, 2, b"12345@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"POLL_ENC_1")
+    )
+    enc_vote_fields = _build_field(1, 2, enc_payload) + _build_field(2, 2, iv)
+    vote_payload = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 2, enc_vote_fields)
+        + _build_field(3, 0, 1729000200000)
+    )
+
+    wmi_vote = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"12345@g.us")
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, b"VOTE_ENC_1")
+            + _build_field(4, 2, voter_jid.encode("utf-8")),
+        )
+        + _build_field(2, 2, _build_field(50, 2, vote_payload))
+        + _build_field(3, 0, 1729000200)
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+        f.write(_encode_varint(len(wmi_vote)) + wmi_vote)
+
+    schema_cache = {}
+    logger = logging.getLogger("test")
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    poll_id = cur.execute("SELECT _id FROM message WHERE key_id = 'POLL_ENC_1'").fetchone()[0]
+    opts = cur.execute(
+        "SELECT _id, option_name, vote_total FROM message_poll_option WHERE message_row_id = ? ORDER BY _id ASC",
+        (poll_id,),
+    ).fetchall()
+    assert opts[0][1] == "Cat"
+    assert opts[0][2] == 0
+    assert opts[1][1] == "Dog"
+    assert opts[1][2] == 1
+
     conn.close()

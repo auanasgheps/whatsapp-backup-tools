@@ -1251,6 +1251,7 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
 
         user_voted_options = set()
         voter_counts = {}
+        addon_votes_by_opt = {}
         if "message_add_on" in tables and "message_add_on_poll_vote_selected_option" in tables:
             try:
                 user_v_rows = wa_conn.execute(
@@ -1280,13 +1281,31 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                opt_ids = [opt["_id"] for opt in opt_rows]
+                if opt_ids:
+                    opt_ph = ",".join("?" * len(opt_ids))
+                    v_cnt_rows = wa_conn.execute(
+                        f"""
+                        SELECT ps.message_poll_option_id, COUNT(DISTINCT ps.message_add_on_row_id)
+                        FROM message_add_on_poll_vote_selected_option ps
+                        WHERE ps.message_poll_option_id IN ({opt_ph})
+                        GROUP BY ps.message_poll_option_id
+                        """,
+                        opt_ids,
+                    ).fetchall()
+                    addon_votes_by_opt = {r[0]: r[1] for r in v_cnt_rows}
+            except sqlite3.OperationalError:
+                pass
+
         options_by_mid = collections.defaultdict(list)
         for opt in opt_rows:
+            v_cnt = max(opt["vote_total"] or 0, addon_votes_by_opt.get(opt["_id"], 0))
             options_by_mid[opt["message_row_id"]].append(
                 {
                     "id": opt["_id"],
                     "name": opt["option_name"] or "",
-                    "vote_count": opt["vote_total"] or 0,
+                    "vote_count": v_cnt,
                     "user_selected": opt["_id"] in user_voted_options,
                 }
             )
