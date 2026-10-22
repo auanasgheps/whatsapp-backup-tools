@@ -5089,11 +5089,11 @@ class TestServiceMessages:
             resp = client.get("/api/messages?chat_id=10&chat_type=group&limit=50")
             msgs = resp.get_json()
 
-            # Noisy actions 67 and 18 must be filtered out
+            # Actions 67 and 18 are E2E encryption notices and are displayed
             msg_ids = [m["msg_id"] for m in msgs]
-            assert 14 not in msg_ids
-            assert 15 not in msg_ids
-            assert len(msgs) == 20  # 19 service messages + 1 text message
+            assert 14 in msg_ids
+            assert 15 in msg_ids
+            assert len(msgs) == 22  # 21 service messages + 1 text message
 
             by_id = {m["msg_id"]: m for m in msgs}
 
@@ -5150,6 +5150,14 @@ class TestServiceMessages:
             assert by_id[13]["text_body"] == "Alice Smith added Unknown"
             assert "103624826949099" not in by_id[13]["text_body"]
             assert "@lid" not in by_id[13]["text_body"]
+
+            # 14. E2E encryption notice (action 67)
+            assert by_id[14]["media_type"] == "service"
+            assert "end-to-end encrypted" in by_id[14]["text_body"]
+
+            # 15. E2E encryption notice (action 18)
+            assert by_id[15]["media_type"] == "service"
+            assert "end-to-end encrypted" in by_id[15]["text_body"]
 
             # 16. Regular message
             assert by_id[16]["media_type"] == "text"
@@ -5241,6 +5249,165 @@ class TestServiceMessages:
             by_id = {m["msg_id"]: m for m in msgs}
             assert by_id[2]["media_type"] == "service"
             assert by_id[2]["text_body"] == 'You changed the subject to "Renamed Team"'
+
+    def test_android_business_event_filtered_when_no_user_messages(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER, text_data TEXT, message_type INTEGER DEFAULT 0);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE message_system (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL, action_type INTEGER NOT NULL);
+            CREATE TABLE message_system_chat_participant (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL, user_jid_row_id INTEGER NOT NULL);
+
+            INSERT INTO jid VALUES (1, '15551111111', 's.whatsapp.net', '15551111111@s.whatsapp.net');
+            INSERT INTO jid VALUES (2, '15552222222', 's.whatsapp.net', '15552222222@s.whatsapp.net');
+            INSERT INTO jid VALUES (3, '15553333333', 's.whatsapp.net', '15553333333@s.whatsapp.net');
+
+            -- Chat 1: 1:1 contact chat with only business account verified event (action 69) and 0 user messages
+            INSERT INTO chat VALUES (1, 1, NULL, 0, 1700000010000, 1);
+            INSERT INTO message VALUES (1, 1, 1, 0, 1700000010000, NULL, 7);
+            INSERT INTO message_system VALUES (1, 1, 69);
+
+            -- Chat 2: 1:1 contact chat with real user message + business account verified event
+            INSERT INTO chat VALUES (2, 2, NULL, 0, 1700000020000, 3);
+            INSERT INTO message VALUES (2, 2, 0, 2, 1700000015000, 'Hello from business', 0);
+            INSERT INTO message VALUES (3, 2, 1, 0, 1700000020000, NULL, 7);
+            INSERT INTO message_system VALUES (2, 3, 69);
+
+            -- Chat 3: 1:1 contact chat with E2E encryption notice (action 67)
+            INSERT INTO chat VALUES (3, 3, NULL, 0, 1700000030000, 4);
+            INSERT INTO message VALUES (4, 3, 1, 0, 1700000030000, NULL, 7);
+            INSERT INTO message_system VALUES (3, 4, 67);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = sqlite3.connect(str(archive_path))
+        archive_conn.executescript("""
+            CREATE TABLE contacts (number TEXT PRIMARY KEY, display_name TEXT, folder TEXT);
+            CREATE TABLE archive_copies (original_path TEXT PRIMARY KEY, archive_path TEXT);
+        """)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            chat_ids = [c["id"] for c in chats]
+            # Chat 1 (only business state, 0 user messages) must be filtered out
+            assert "15551111111" not in chat_ids
+            # Chat 2 (has real user message) must be present
+            assert "15552222222" in chat_ids
+            # Chat 3 (has E2E banner) is present with formatted preview
+            assert "15553333333" in chat_ids
+            c3 = next(c for c in chats if c["id"] == "15553333333")
+            assert c3["last_msg_type"] == "service"
+            assert "Messages and calls are end-to-end encrypted" in c3["last_msg_preview"]
+
+            # Opening Chat 3 displays the E2E banner message
+            m_resp = client.get("/api/messages?chat_id=15553333333&chat_type=contact")
+            msgs = m_resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["media_type"] == "service"
+            assert "Messages and calls are end-to-end encrypted" in msgs[0]["text_body"]
+
+    def test_ios_e2e_event_and_empty_chat_filtering(self, tmp_path):
+        ios_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(ios_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZHIDDEN INTEGER DEFAULT 0,
+                ZGROUPINFO INTEGER,
+                ZMESSAGECOUNTER INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER NOT NULL,
+                ZMESSAGETYPE INTEGER DEFAULT 0,
+                ZGROUPEVENTTYPE INTEGER DEFAULT 0,
+                ZMESSAGEDATE REAL,
+                ZISFROMME INTEGER DEFAULT 0,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT,
+                ZTOJID TEXT,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER
+            );
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+
+            -- Chat 1: 1:1 contact chat with background/empty event (0 user messages)
+            INSERT INTO ZWACHATSESSION VALUES (1, '15551111111@s.whatsapp.net', 'Contact One', 0, NULL, 1);
+            INSERT INTO ZWAMESSAGE VALUES (1, 1, 10, 0, 700000000.0, 0, NULL, NULL, '15551111111@s.whatsapp.net', NULL, NULL, NULL, NULL);
+
+            -- Chat 2: 1:1 contact chat with user message + Event 2
+            INSERT INTO ZWACHATSESSION VALUES (2, '15552222222@s.whatsapp.net', 'Contact Two', 0, NULL, 2);
+            INSERT INTO ZWAMESSAGE VALUES (2, 2, 10, 2, 700000000.0, 0, NULL, NULL, '15552222222@s.whatsapp.net', NULL, NULL, NULL, NULL);
+            INSERT INTO ZWAMESSAGE VALUES (3, 2, 0, 0, 700000010.0, 0, NULL, 'Hello from iPhone', '15552222222@s.whatsapp.net', NULL, NULL, NULL, NULL);
+
+            -- Chat 3: 1:1 contact chat with only Event 2 (session/E2E init) and 0 user messages
+            INSERT INTO ZWACHATSESSION VALUES (3, '15553333333@s.whatsapp.net', 'Contact Three', 0, NULL, 1);
+            INSERT INTO ZWAMESSAGE VALUES (4, 3, 10, 2, 700000005.0, 0, NULL, NULL, '15553333333@s.whatsapp.net', NULL, NULL, NULL, NULL);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = sqlite3.connect(str(archive_path))
+        archive_conn.executescript("""
+            CREATE TABLE contacts (number TEXT PRIMARY KEY, display_name TEXT, folder TEXT);
+            CREATE TABLE archive_copies (original_path TEXT PRIMARY KEY, archive_path TEXT);
+        """)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            chat_ids = [c["id"] for c in chats]
+            # Chat 1 (background event, 0 user messages) must be filtered out
+            assert "1" not in chat_ids
+            # Chat 2 (has real message) must be present
+            assert "2" in chat_ids
+            # Chat 3 (has E2E banner) must be present
+            assert "3" in chat_ids
+            c3 = next(c for c in chats if c["id"] == "3")
+            assert c3["last_msg_type"] == "service"
+            assert "Messages and calls are end-to-end encrypted" in c3["last_msg_preview"]
+
+            # Opening Chat 2 returns both the user message and the formatted E2E notice
+            m_resp = client.get("/api/messages?chat_id=2&chat_type=contact")
+            msgs = m_resp.get_json()
+            assert len(msgs) == 2
+            by_id = {m["msg_id"]: m for m in msgs}
+            assert by_id[3]["text_body"] == "Hello from iPhone"
+            assert by_id[2]["media_type"] == "service"
+            assert "Messages and calls are end-to-end encrypted" in by_id[2]["text_body"]
+
+            # Opening Chat 3 displays the E2E banner message
+            m_resp3 = client.get("/api/messages?chat_id=3&chat_type=contact")
+            msgs3 = m_resp3.get_json()
+            assert len(msgs3) == 1
+            assert msgs3[0]["media_type"] == "service"
+            assert "Messages and calls are end-to-end encrypted" in msgs3[0]["text_body"]
 
     def test_fts_indexing_ignores_raw_lid_or_json(self, tmp_path):
         cache_path = tmp_path / "cache.db"

@@ -657,7 +657,9 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
         )
         return format_ios_system_event(ev, sender or "Someone", [target], txt, is_from_me)
 
-    if ev == 2:  # Participant added or joined
+    if ev == 2:  # Participant added or joined / E2E notice for 1:1 contact chats
+        if row.get("chat_type") == "contact" or (not member_jid and not txt):
+            return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
         if member_jid:
             actor = (
                 "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
@@ -950,12 +952,38 @@ def _format_service_rows(
             has_jid_server,
             has_jid_raw_string,
         )
+        meta_map: dict[int, dict[str, str]] = {}
+        m_ids = [r["msg_id"] for r in service_rows if r.get("msg_id")]
+        if m_ids:
+            ph = ",".join("?" * len(m_ids))
+            try:
+                eph_rows = conn.execute(
+                    f"SELECT message_row_id, setting_duration FROM message_ephemeral_setting WHERE message_row_id IN ({ph})",
+                    m_ids,
+                ).fetchall()
+                for er in eph_rows:
+                    meta_map.setdefault(er[0], {})["setting_duration"] = str(er[1])
+            except sqlite3.OperationalError:
+                pass
+            try:
+                priv_rows = conn.execute(
+                    f"SELECT message_row_id, verified_biz_name FROM message_system_initial_privacy_provider WHERE message_row_id IN ({ph}) AND verified_biz_name IS NOT NULL",
+                    m_ids,
+                ).fetchall()
+                for pr in priv_rows:
+                    if pr[1]:
+                        meta_map.setdefault(pr[0], {})["verified_biz_name"] = str(pr[1])
+            except sqlite3.OperationalError:
+                pass
+
         for r in service_rows:
             names = p_map.get(r["msg_id"], [])
             if not r.get("participant_names"):
                 r["participant_names"] = names
             if not r.get("participant_name"):
                 r["participant_name"] = format_participant_names(names) if names else ""
+            if r.get("msg_id") in meta_map:
+                r.setdefault("service_metadata", {}).update(meta_map[r["msg_id"]])
             r["text_body"] = _format_android_service_row(r)
 
 
@@ -2577,17 +2605,23 @@ _SUPPORTED_ANDROID_SYSTEM_ACTIONS = (
     13,
     14,
     15,
+    18,
     19,
     20,
     27,
     28,
+    56,
     58,
     61,
+    67,
+    68,
     69,
+    70,
     79,
     123,
     124,
     127,
+    129,
     136,
     144,
     146,
@@ -4184,6 +4218,16 @@ def create_app(output_root: Path, rescan: bool = False):
             con_ldn_folder_arm = "con_ldn.folder," if has_lid_dn else ""
             ldn_chat_name_arm = "NULLIF(ldn_c.display_name, '')," if has_lid_dn else ""
             ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if has_lid_dn else ""
+            biz_event_filter = (
+                """AND EXISTS (
+                    SELECT 1 FROM message m_chk
+                    LEFT JOIN message_system ms_chk ON ms_chk.message_row_id = m_chk._id
+                    WHERE m_chk.chat_row_id = c._id
+                      AND (ms_chk.action_type IS NULL OR ms_chk.action_type NOT IN (61, 69))
+                )"""
+                if has_message_system
+                else ""
+            )
             rows = conn.execute(f"""
                 SELECT
                     CASE WHEN {is_group_chat} THEN CAST(c._id AS TEXT)
@@ -4262,7 +4306,17 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j_s_real ON j_s_real._id = jm_s.jid_row_id
                 LEFT JOIN _contacts_resolved con_s ON con_s.clean_number = {_clean_user_sql("COALESCE(j_s_real.user, j_s.user)")}
                 {ms_chat_join}
-                WHERE (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90)))
+                WHERE (
+                    ({is_group_chat} AND (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))))
+                    OR
+                    (NOT ({is_group_chat}) AND (
+                        EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))
+                        OR (
+                            (c.hidden = 0 OR c.hidden IS NULL)
+                            {biz_event_filter}
+                        )
+                    ))
+                )
                 ORDER BY COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) DESC
             """).fetchall()
             seen_ids = set()
@@ -4280,6 +4334,11 @@ def create_app(output_root: Path, rescan: bool = False):
                 "OR (msg.ZMESSAGETYPE IN (6, 10) AND msg.ZGROUPEVENTTYPE IN (1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 15, 21, 26, 36, 37, 38, 44, 50, 56, 58))"
                 if has_ios_group_event
                 else "OR (msg.ZMESSAGETYPE IN (6, 10))"
+            )
+            ios_e2e_sec_clause = (
+                "OR EXISTS (SELECT 1 FROM ZWAMESSAGE msg_sys WHERE msg_sys.ZCHATSESSION = cs.Z_PK AND msg_sys.ZMESSAGETYPE IN (6, 10) AND msg_sys.ZGROUPEVENTTYPE IN (2, 56))"
+                if has_ios_group_event
+                else ""
             )
             rows = conn.execute(f"""
                 SELECT
@@ -4329,6 +4388,15 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
                 LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
                 WHERE cs.ZHIDDEN = 0
+                  AND (
+                      cs.ZGROUPINFO IS NOT NULL
+                      OR EXISTS (
+                          SELECT 1 FROM ZWAMESSAGE msg_real
+                          WHERE msg_real.ZCHATSESSION = cs.Z_PK
+                            AND (msg_real.ZMESSAGETYPE NOT IN (6, 10) OR msg_real.ZMESSAGETYPE IS NULL)
+                      )
+                      {ios_e2e_sec_clause}
+                  )
                 ORDER BY m.ZMESSAGEDATE DESC
             """).fetchall()
 
@@ -4529,6 +4597,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         "from_me": d.get("last_msg_from_me", 0),
                         "sender": sender_name,
                         "member_jid": last_msg_member_jid or "",
+                        "chat_type": d.get("type", "contact"),
                     }
                     d["last_msg_preview"] = _format_ios_service_row(s_row, ios_contacts_map)
                     d["last_msg_type"] = "service"
@@ -6853,6 +6922,22 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_b_raw:
                     bulk_g_parts.append("(j.raw_string IS NOT NULL AND j.raw_string LIKE '%@g.us')")
                 bulk_is_group = " OR ".join(bulk_g_parts)
+                bulk_has_ms = "message_system" in {
+                    r[0]
+                    for r in wa_conn_bulk.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                bulk_biz_filter = (
+                    """AND EXISTS (
+                        SELECT 1 FROM message m_chk
+                        LEFT JOIN message_system ms_chk ON ms_chk.message_row_id = m_chk._id
+                        WHERE m_chk.chat_row_id = c._id
+                          AND (ms_chk.action_type IS NULL OR ms_chk.action_type NOT IN (61, 69))
+                    )"""
+                    if bulk_has_ms
+                    else ""
+                )
                 chat_rows = wa_conn_bulk.execute(f"""
                     SELECT
                         CASE WHEN ({bulk_is_group}) THEN CAST(c._id AS TEXT)
@@ -6861,14 +6946,43 @@ def create_app(output_root: Path, rescan: bool = False):
                         CASE WHEN ({bulk_is_group}) THEN 'group' ELSE 'contact' END AS type
                     FROM chat c
                     LEFT JOIN jid j ON j._id = c.jid_row_id
-                    WHERE (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90)))
+                    WHERE (
+                        ({bulk_is_group} AND (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))))
+                        OR
+                        (NOT ({bulk_is_group}) AND (
+                            EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))
+                            OR (
+                                (c.hidden = 0 OR c.hidden IS NULL)
+                                {bulk_biz_filter}
+                            )
+                        ))
+                    )
                 """).fetchall()
                 total = wa_conn_bulk.execute("SELECT COUNT(*) FROM message").fetchone()[0]
             else:
-                chat_rows = wa_conn_bulk.execute("""
+                has_b_group_event = "ZGROUPEVENTTYPE" in {
+                    r["name"] if isinstance(r, sqlite3.Row) else r[1]
+                    for r in wa_conn_bulk.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()
+                }
+                bulk_ios_sec_clause = (
+                    "OR EXISTS (SELECT 1 FROM ZWAMESSAGE msg_sys WHERE msg_sys.ZCHATSESSION = cs.Z_PK AND msg_sys.ZMESSAGETYPE IN (6, 10) AND msg_sys.ZGROUPEVENTTYPE IN (2, 56))"
+                    if has_b_group_event
+                    else ""
+                )
+                chat_rows = wa_conn_bulk.execute(f"""
                     SELECT CAST(cs.Z_PK AS TEXT) AS id,
                            CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group' ELSE 'contact' END AS type
                     FROM ZWACHATSESSION cs
+                    WHERE cs.ZHIDDEN = 0
+                      AND (
+                          cs.ZGROUPINFO IS NOT NULL
+                          OR EXISTS (
+                              SELECT 1 FROM ZWAMESSAGE msg_real
+                              WHERE msg_real.ZCHATSESSION = cs.Z_PK
+                                AND (msg_real.ZMESSAGETYPE NOT IN (6, 10) OR msg_real.ZMESSAGETYPE IS NULL)
+                          )
+                          {bulk_ios_sec_clause}
+                      )
                 """).fetchall()
                 total = wa_conn_bulk.execute("SELECT COUNT(*) FROM ZWAMESSAGE").fetchone()[0]
             wa_conn_bulk.close()
