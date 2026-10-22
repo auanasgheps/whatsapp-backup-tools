@@ -55,7 +55,7 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 - **Structured & Human-Readable**: Organises media into `Contacts/` and `Groups/` sorted by year and `Sent/Received`, with original WhatsApp message timestamps preserved.
 - **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
-- **Deleted Message & Chat Preservation**: Seamlessly retains messages and chats deleted from your phone or revoked by senders across backup cycles (`-P`/`--preserve-deleted`).
+- **Deleted Message & Chat Preservation**: Seamlessly retains messages and chats deleted from your phone or revoked by senders across backup cycles (`-P`/`--preserve-deleted`), including call logs, interactive polls, shared locations, and progressive edit history.
 - **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
 - **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents, Stickers, and Contact cards (.vcf).
 
@@ -63,7 +63,7 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 Explore and search your archived chats through a local web UI replicating WhatsApp Web.
 
 - **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, customizable font size, and regional date formats.
-- **Rich Chat Timeline**: Chronological chat history with interactive polls, reactions, quoted replies, revoked message tombstones, view-once badges, and delivery/read receipts.
+- **Rich Chat Timeline**: Chronological chat history with interactive polls, reactions, quoted replies, progressive edit history disclosure, revoked message tombstones, view-once badges, and delivery/read receipts.
 - **Interactive WhatsApp Polls**: Native poll cards with option percentages, checkmarks, and an interactive "View votes" popup detailing voter identities.
 - **In-Browser Media Player & Gallery**: Stream video and voice notes with seeking, open photos in a lightbox, and explore chat media via thumbnail grid or folder tree.
 - **Full-Text Search & Navigation**: Search across all chats or within a single conversation, jump directly to matches, or jump to specific dates with the date picker.

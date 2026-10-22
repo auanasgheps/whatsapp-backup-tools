@@ -1659,13 +1659,98 @@ def _query_preserved_messages(
         d["msg_id"] = -int(d["rowid"])
         d["sort_id"] = -int(d["rowid"])
         d["is_preserved"] = 1
-        d["is_view_once"] = 0
+        d["is_view_once"] = int(d.get("is_view_once") or 0)
+        d["is_edited"] = int(d.get("is_edited") or 0)
+        d["quoted_msg_id"] = None
+        if d.get("poll_data"):
+            try:
+                p = (
+                    json.loads(d["poll_data"])
+                    if isinstance(d["poll_data"], str)
+                    else d["poll_data"]
+                )
+                if isinstance(p, dict):
+                    d["poll"] = p
+            except Exception:
+                pass
         d.pop("rowid", None)
         d.pop("action_type", None)
         d.pop("participant_name", None)
-        d.pop("source_platform", None)
         result.append(d)
     return result
+
+
+def _resolve_quoted_msg_ids(
+    rows: list[dict],
+    source_type: str,
+    wa_conn: sqlite3.Connection | None,
+    pres_conn: sqlite3.Connection | None,
+) -> None:
+    if not rows:
+        return
+
+    try:
+        unresolved = [
+            r for r in rows if r.get("quoted_msg_id") is None and r.get("quoted_stanza_id")
+        ]
+        if not unresolved:
+            return
+
+        local_map = {
+            r.get("stanza_id"): r["msg_id"]
+            for r in rows
+            if r.get("stanza_id") and r.get("msg_id") is not None
+        }
+        still_needed = set()
+        for r in unresolved:
+            q_stanza = r["quoted_stanza_id"]
+            if q_stanza in local_map:
+                r["quoted_msg_id"] = local_map[q_stanza]
+            else:
+                still_needed.add(q_stanza)
+
+        if not still_needed:
+            return
+
+        if pres_conn is not None:
+            ph = ",".join("?" * len(still_needed))
+            try:
+                pres_matches = pres_conn.execute(
+                    f"SELECT stanza_id, -rowid AS pres_id FROM preserved_messages WHERE stanza_id IN ({ph})",
+                    list(still_needed),
+                ).fetchall()
+                pres_map = {m["stanza_id"]: m["pres_id"] for m in pres_matches}
+                for r in unresolved:
+                    if r.get("quoted_msg_id") is None and r["quoted_stanza_id"] in pres_map:
+                        r["quoted_msg_id"] = pres_map[r["quoted_stanza_id"]]
+                        still_needed.discard(r["quoted_stanza_id"])
+            except sqlite3.OperationalError:
+                pass
+
+        if not still_needed or wa_conn is None:
+            return
+
+        ph = ",".join("?" * len(still_needed))
+        try:
+            if source_type == "android":
+                live_matches = wa_conn.execute(
+                    f"SELECT key_id AS stanza_id, _id AS live_id FROM message WHERE key_id IN ({ph})",
+                    list(still_needed),
+                ).fetchall()
+            else:
+                live_matches = wa_conn.execute(
+                    f"SELECT ZSTANZAID AS stanza_id, Z_PK AS live_id FROM ZWAMESSAGE WHERE ZSTANZAID IN ({ph})",
+                    list(still_needed),
+                ).fetchall()
+            live_map = {m["stanza_id"]: m["live_id"] for m in live_matches}
+            for r in unresolved:
+                if r.get("quoted_msg_id") is None and r["quoted_stanza_id"] in live_map:
+                    r["quoted_msg_id"] = live_map[r["quoted_stanza_id"]]
+        except sqlite3.OperationalError:
+            pass
+    finally:
+        for r in rows:
+            r.pop("quoted_stanza_id", None)
 
 
 def _merge_messages(
@@ -1731,9 +1816,14 @@ def _merge_preserved_chats(
     for c in result:
         c.setdefault("is_preserved_only", False)
 
-    pres_chats = pres_conn.execute(
-        "SELECT chat_id, chat_type, newest_ts FROM preserved_chats"
-    ).fetchall()
+    try:
+        pres_chats = pres_conn.execute(
+            "SELECT chat_id, chat_type, newest_ts, subject FROM preserved_chats"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        pres_chats = pres_conn.execute(
+            "SELECT chat_id, chat_type, newest_ts FROM preserved_chats"
+        ).fetchall()
 
     for pc in pres_chats:
         cid = pc["chat_id"]
@@ -1748,6 +1838,8 @@ def _merge_preserved_chats(
             ).fetchone()
             if grp_row and grp_row["subject"]:
                 display_name = grp_row["subject"]
+            elif "subject" in pc.keys() and pc["subject"]:
+                display_name = pc["subject"]
             elif grp_row and grp_row["folder"]:
                 display_name = grp_row["folder"]
         else:
@@ -1763,23 +1855,37 @@ def _merge_preserved_chats(
             else:
                 display_name = f"+{cid}"
 
-        last_msg = pres_conn.execute(
-            """
-            SELECT text_body, media_type, from_me, media_name
-            FROM preserved_messages
-            WHERE chat_id = ? AND chat_type = ?
-            ORDER BY timestamp_ms DESC LIMIT 1
-            """,
-            (cid, ctype),
-        ).fetchone()
+        try:
+            last_msg = pres_conn.execute(
+                """
+                SELECT text_body, media_type, from_me, media_name, is_view_once
+                FROM preserved_messages
+                WHERE chat_id = ? AND chat_type = ?
+                ORDER BY timestamp_ms DESC LIMIT 1
+                """,
+                (cid, ctype),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            last_msg = pres_conn.execute(
+                """
+                SELECT text_body, media_type, from_me, media_name
+                FROM preserved_messages
+                WHERE chat_id = ? AND chat_type = ?
+                ORDER BY timestamp_ms DESC LIMIT 1
+                """,
+                (cid, ctype),
+            ).fetchone()
 
         last_preview = ""
         last_type = "text"
         last_from_me = 0
+        is_vo = 0
         if last_msg:
             last_preview = last_msg["text_body"] or last_msg["media_name"] or ""
             last_type = last_msg["media_type"] or "text"
             last_from_me = int(last_msg["from_me"])
+            if "is_view_once" in last_msg.keys() and last_msg["is_view_once"]:
+                is_vo = int(last_msg["is_view_once"])
 
         result.append(
             {
@@ -1790,6 +1896,7 @@ def _merge_preserved_chats(
                 "last_msg_preview": last_preview,
                 "last_msg_type": last_type,
                 "last_msg_from_me": last_from_me,
+                "is_view_once": is_vo,
                 "is_preserved_only": True,
             }
         )
@@ -2614,6 +2721,8 @@ _IOS_SENDER_RAW = """COALESCE(
 _IOS_SENDER_JID = f"""NULLIF(SUBSTR({_IOS_SENDER_RAW}, 1,
                     INSTR({_IOS_SENDER_RAW} || '@', '@') - 1), '')"""
 
+quoted_stanza_id_ios = "NULL"
+
 _IOS_SELECT = f"""
     SELECT
         m.Z_PK                                                       AS msg_id,
@@ -2693,6 +2802,7 @@ _IOS_SELECT = f"""
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
         qm.Z_PK                                                      AS quoted_msg_id,
+        {quoted_stanza_id_ios}                                       AS quoted_stanza_id,
         NULL                                                          AS reactions,
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
@@ -3721,6 +3831,7 @@ def create_app(output_root: Path, rescan: bool = False):
             if has_ios_stanza_id
             else "'msg_' || m.Z_PK"
         )
+        quoted_stanza_id_ios = "qm.ZSTANZAID" if has_ios_stanza_id else "NULL"
         ios_filesize_col = "COALESCE(mi.ZFILESIZE, 0)" if has_ios_filesize else "0"
         ios_duration_col = "COALESCE(mi.ZMOVIEDURATION, 0)" if has_ios_duration else "0"
         ios_aspect_ratio_col = "COALESCE(mi.ZASPECTRATIO, 0.0)" if has_ios_aspect_ratio else "0.0"
@@ -3839,6 +3950,7 @@ def create_app(output_root: Path, rescan: bool = False):
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
         qm.Z_PK                                                      AS quoted_msg_id,
+        {quoted_stanza_id_ios}                                       AS quoted_stanza_id,
         NULL                                                          AS reactions,
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
@@ -3996,6 +4108,7 @@ def create_app(output_root: Path, rescan: bool = False):
     )
 
     quoted_msg_id_col = "NULL"
+    quoted_stanza_id_col = "NULL"
     quoted_ts_col = "COALESCE(mq.timestamp, 0)"
     m_orig_join = ""
     if has_android_key_id and has_mq_key_id:
@@ -4006,6 +4119,7 @@ def create_app(output_root: Path, rescan: bool = False):
         )
         m_orig_join = f"    LEFT JOIN message m_orig ON m_orig.key_id = mq.key_id {pm_clause}\n"
         quoted_msg_id_col = "m_orig._id"
+        quoted_stanza_id_col = "mq.key_id"
         quoted_ts_col = "COALESCE(NULLIF(mq.timestamp, 0), m_orig.timestamp, 0)"
 
     if has_mq_msg_type:
@@ -4104,6 +4218,7 @@ def create_app(output_root: Path, rescan: bool = False):
                  '') END                                             AS quoted_sender,
         {quoted_ts_col}                                              AS quoted_ts,
         {quoted_msg_id_col}                                          AS quoted_msg_id,
+        {quoted_stanza_id_col}                                       AS quoted_stanza_id,
         {edit_is_edited_col}                                         AS is_edited,
         {edit_ts_col}                                                AS edited_ts,
         CASE WHEN m.message_type IN (42, 43, 82) THEN 1 ELSE 0 END   AS is_view_once,
@@ -4775,6 +4890,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         )
                         if pres_rows:
                             rows = _merge_messages(rows, pres_rows, True, limit)
+                    _resolve_quoted_msg_ids(rows, source_type, get_wa(), pres)
                 return jsonify(rows)
 
         conn = get_wa()
@@ -4784,6 +4900,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 b_val = int(before) if before else None
                 a_val = int(after) if after else None
                 pres_rows = _query_preserved_messages(pres, chat_id, chat_type, b_val, a_val, limit)
+                _resolve_quoted_msg_ids(pres_rows, source_type, None, pres)
                 return jsonify(pres_rows)
             return jsonify([])
 
@@ -4901,6 +5018,7 @@ def create_app(output_root: Path, rescan: bool = False):
             if pres_rows:
                 descending = after is None
                 rows = _merge_messages(rows, pres_rows, descending, limit)
+        _resolve_quoted_msg_ids(rows, source_type, conn, pres)
         return jsonify(rows)
 
     # ---- API: messages around a timestamp ----------------------------------
@@ -4927,7 +5045,9 @@ def create_app(output_root: Path, rescan: bool = False):
                     pres, chat_id, chat_type, ts + 1, None, half
                 )
                 pres_after = _query_preserved_messages(pres, chat_id, chat_type, None, ts, half)
-                return jsonify(list(reversed(pres_before)) + pres_after)
+                combined = list(reversed(pres_before)) + pres_after
+                _resolve_quoted_msg_ids(combined, source_type, None, pres)
+                return jsonify(combined)
             return jsonify([])
 
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
@@ -4983,6 +5103,7 @@ def create_app(output_root: Path, rescan: bool = False):
             merged_before = _merge_messages(live_before, pres_before, True, half)
             merged_after = _merge_messages(live_after, pres_after, False, half)
             combined = list(reversed(merged_before)) + merged_after
+        _resolve_quoted_msg_ids(combined, source_type, conn, pres)
         return jsonify(_strip_none_reactions(combined))
 
     # ---- API: media gallery ------------------------------------------------
@@ -6661,6 +6782,53 @@ def create_app(output_root: Path, rescan: bool = False):
                                 display_name = f"+{chat_id}"
                             number = chat_id
 
+        calls_count = 0
+        pres = get_preserved()
+        if pres is not None:
+            try:
+                pc_row = pres.execute(
+                    """
+                    SELECT subject, description, created_ts, creator_jid, oldest_ts, newest_ts, msg_count, members_json
+                    FROM preserved_chats
+                    WHERE chat_id = ? AND chat_type = ?
+                    """,
+                    (chat_id, chat_type),
+                ).fetchone()
+                if pc_row:
+                    if not display_name and pc_row["subject"]:
+                        display_name = pc_row["subject"]
+                    if not description and pc_row["description"]:
+                        description = pc_row["description"]
+                    if created_ts is None and pc_row["created_ts"]:
+                        created_ts = pc_row["created_ts"]
+                    if first_ts is None and pc_row["oldest_ts"]:
+                        first_ts = pc_row["oldest_ts"]
+                    if last_ts is None and pc_row["newest_ts"]:
+                        last_ts = pc_row["newest_ts"]
+                    if (total is None or total == 0) and pc_row["msg_count"]:
+                        total = pc_row["msg_count"]
+                    if chat_type == "group" and not members and pc_row["members_json"]:
+                        try:
+                            members = json.loads(pc_row["members_json"])
+                        except Exception:
+                            pass
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                c_row = pres.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM preserved_calls
+                    WHERE chat_id = ? OR chat_jid = ?
+                    """,
+                    (chat_id, chat_id),
+                ).fetchone()
+                if c_row and c_row["cnt"]:
+                    calls_count = int(c_row["cnt"])
+            except sqlite3.OperationalError:
+                pass
+
         result = {
             "display_name": display_name,
             "number": number,
@@ -6669,6 +6837,7 @@ def create_app(output_root: Path, rescan: bool = False):
             "sent": sent,
             "received": received,
             "total": total,
+            "calls_count": calls_count,
         }
         if chat_type == "group":
             result["description"] = description

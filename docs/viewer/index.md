@@ -67,6 +67,9 @@ The source WhatsApp database (`msgstore.db` or `ChatStorage.sqlite`) is strictly
 - **Media gallery & stickers** — browse chat media by thumbnail grid or folder tree, with dedicated stickers section and contact cards (.vcf)
 - **Fast, lightweight scrolling** — chats and massive media collections load smoothly on demand without slowing down your browser
 - **Message & chat preservation** — messages deleted on the device ("Delete for Me"), messages revoked by sender ("Delete for Everyone"), or chats entirely deleted from the device are seamlessly preserved and badged when archiving with `-P` / `--preserve-deleted`
+- **Edit history progressive disclosure** — edited messages retain their pre-edited original draft; click the "Edited" badge or "ⓘ" message details button to inspect the original text and edit timestamp
+- **Interactive reply jumping** — reply bubbles accurately jump to original messages across both live and preserved conversations
+- **Shared location cards** — shared location pins render with venue names, addresses, and direct Google Maps links
 
 ## Cache Invalidation
 

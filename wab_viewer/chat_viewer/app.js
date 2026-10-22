@@ -400,7 +400,7 @@
   }
 
   const MEDIA_LABELS = {image:'📷 Photo', video:'🎥 Video', audio:'🎵 Voice message',
-                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link'};
+                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link', location:'📍 Location'};
   function chatPreview(chat) {
     const prefix = chat.last_msg_from_me ? 'You: ' : '';
     if (chat.last_msg_type === 'service') {
@@ -920,10 +920,20 @@
         const editedSpan = document.createElement('span');
         editedSpan.className = 'msg-edited';
         editedSpan.textContent = 'Edited';
-        const editedTs = unit.members.find(m => m.edited_ts)?.edited_ts;
-        if (editedTs) {
-          editedSpan.title = 'Edited: ' + fmtTime(editedTs);
+        const editedMember = unit.members.find(m => m.edited_ts || m.original_text_body);
+        if (editedMember && editedMember.edited_ts) {
+          editedSpan.title = 'Edited: ' + fmtTime(editedMember.edited_ts);
         }
+        editedSpan.addEventListener('click', e => {
+          e.stopPropagation();
+          showMsgDetails(
+            null,
+            editedSpan,
+            null,
+            null,
+            editedMember ? { original_text: editedMember.original_text_body || null, edited_ts: editedMember.edited_ts || null } : null
+          );
+        });
         meta.appendChild(editedSpan);
       }
       meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
@@ -997,7 +1007,10 @@
       badge.textContent = 'You';
       meta.appendChild(badge);
     }
-    const showInfo = msg.media_type !== 'deleted' && ((msg.from_me && !msg.is_preserved) ? !!msg.msg_id : (!!msg.archive_path || !!msg.is_preserved));
+    const showInfo = (msg.from_me && !msg.is_preserved && !!msg.msg_id) ||
+                     !!msg.archive_path ||
+                     !!msg.is_preserved ||
+                     (msg.is_edited && !!msg.original_text_body);
     if (showInfo) {
       const infoBtn = document.createElement('span');
       infoBtn.className = 'msg-info-btn';
@@ -1009,7 +1022,8 @@
           (msg.from_me && !msg.is_preserved) ? msg.msg_id : null,
           infoBtn,
           msg.archive_path || null,
-          msg.is_preserved ? { reason: msg.preservation_reason, at: msg.preserved_at } : null
+          msg.is_preserved ? { reason: msg.preservation_reason, at: msg.preserved_at, platform: msg.source_platform || null } : null,
+          msg.is_edited ? { original_text: msg.original_text_body || null, edited_ts: msg.edited_ts || null } : null
         );
       });
       meta.appendChild(infoBtn);
@@ -1035,6 +1049,16 @@
       if (msg.edited_ts) {
         editedSpan.title = 'Edited: ' + fmtTime(msg.edited_ts);
       }
+      editedSpan.addEventListener('click', e => {
+        e.stopPropagation();
+        showMsgDetails(
+          (msg.from_me && !msg.is_preserved) ? msg.msg_id : null,
+          editedSpan,
+          msg.archive_path || null,
+          msg.is_preserved ? { reason: msg.preservation_reason, at: msg.preserved_at, platform: msg.source_platform || null } : null,
+          { original_text: msg.original_text_body || null, edited_ts: msg.edited_ts || null }
+        );
+      });
       meta.appendChild(editedSpan);
     }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
@@ -1068,6 +1092,38 @@
       bubble.appendChild(voEl);
     } else if (msg.media_type === 'poll') {
       bubble.appendChild(renderPoll(msg));
+    } else if (msg.media_type === 'location') {
+      const locEl = document.createElement('div');
+      locEl.className = 'msg-location-card';
+      const locIcon = document.createElement('span');
+      locIcon.className = 'location-icon';
+      locIcon.textContent = '📍';
+      locEl.appendChild(locIcon);
+      const locDetails = document.createElement('div');
+      locDetails.className = 'location-details';
+      if (msg.location_name) {
+        const nameEl = document.createElement('div');
+        nameEl.className = 'location-name';
+        nameEl.textContent = msg.location_name;
+        locDetails.appendChild(nameEl);
+      }
+      if (msg.location_address) {
+        const addrEl = document.createElement('div');
+        addrEl.className = 'location-address';
+        addrEl.textContent = msg.location_address;
+        locDetails.appendChild(addrEl);
+      }
+      if (msg.latitude && msg.longitude) {
+        const linkEl = document.createElement('a');
+        linkEl.className = 'location-map-link';
+        linkEl.target = '_blank';
+        linkEl.rel = 'noopener noreferrer';
+        linkEl.href = msg.location_url || ('https://maps.google.com/?q=' + msg.latitude + ',' + msg.longitude);
+        linkEl.textContent = 'View on Google Maps';
+        locDetails.appendChild(linkEl);
+      }
+      locEl.appendChild(locDetails);
+      bubble.appendChild(locEl);
     } else if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
         bubble.appendChild(renderMissingMedia(msg));
@@ -3110,6 +3166,10 @@
       body.appendChild(_infoRow('Total messages', fmtNum(info.total)).row);
     }
 
+    if (info.calls_count) {
+      body.appendChild(_infoRow('Preserved calls', fmtNum(info.calls_count)).row);
+    }
+
     // Gallery link row
     const galleryLink = document.createElement('button');
     galleryLink.className = 'chat-info-link';
@@ -3199,7 +3259,7 @@
     return '—';
   }
 
-  async function showMsgDetails(msgId, anchorEl, archivePath, presInfo) {
+  async function showMsgDetails(msgId, anchorEl, archivePath, presInfo, editInfo) {
     let html = '';
 
     if (presInfo) {
@@ -3208,7 +3268,19 @@
         : (presInfo.reason === 'chat_deleted' ? 'Chat deleted on device' : 'Deleted on device');
       const presTs = typeof presInfo.at === 'number' ? presInfo.at * 1000 : Date.parse(presInfo.at);
       const atText = !isNaN(presTs) ? fmtTime(presTs) : (presInfo.at || 'Unknown');
-      html += `<div class="msg-details-row"><span class="msg-details-label">Preserved</span><span class="msg-details-value">${reasonText} (${atText})</span></div>`;
+      const platformText = presInfo.platform ? (' • ' + esc(presInfo.platform)) : '';
+      html += `<div class="msg-details-row"><span class="msg-details-label">Preserved</span><span class="msg-details-value">${reasonText} (${atText})${platformText}</span></div>`;
+    }
+
+    if (editInfo && (editInfo.original_text || editInfo.edited_ts)) {
+      html += '<div class="msg-details-section msg-edit-history">';
+      if (editInfo.original_text) {
+        html += `<div class="msg-details-row"><span class="msg-details-label">Original (Pre-edit)</span><span class="msg-details-value msg-pre-edit-text">${esc(editInfo.original_text)}</span></div>`;
+      }
+      if (editInfo.edited_ts) {
+        html += `<div class="msg-details-row"><span class="msg-details-label">Edited On</span><span class="msg-details-value">${fmtTime(editInfo.edited_ts)}</span></div>`;
+      }
+      html += '</div>';
     }
 
     if (msgId !== null) {
@@ -3225,9 +3297,11 @@
       }
 
       if (!data.available || !(data.members || []).length) {
-        html = '<span class="msg-details-na">No receipt data available.</span>';
+        if (!html) {
+          html = '<span class="msg-details-na">No receipt data available.</span>';
+        }
       } else if (data.members.length === 1) {
-        html =
+        html +=
           `<div class="msg-details-row"><span class="msg-details-label">Delivered</span><span class="msg-details-value">${fmtReceipt(data.delivered_ts)}</span></div>` +
           `<div class="msg-details-row"><span class="msg-details-label">Read</span><span class="msg-details-value">${fmtRead(data)}</span></div>`;
       } else {
@@ -3235,7 +3309,7 @@
         for (const m of data.members) {
           rows += `<tr><td>${esc(m.name || m.jid || '?')}</td><td>${fmtReceipt(m.delivered_ts)}</td><td>${fmtRead(m)}</td></tr>`;
         }
-        html = `<table class="msg-details-table"><thead><tr><th>Member</th><th>Delivered</th><th>Read</th></tr></thead><tbody>${rows}</tbody></table>`;
+        html += `<table class="msg-details-table"><thead><tr><th>Member</th><th>Delivered</th><th>Read</th></tr></thead><tbody>${rows}</tbody></table>`;
       }
     }
 
