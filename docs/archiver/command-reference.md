@@ -268,7 +268,7 @@ wab-archiver archive \
   --preserve-deleted
 ```
 
-> 💡 Preserved messages and sender-revoked messages ("Delete for Everyone") are automatically surfaced in the viewer with visual badges and preserved chat indicators. The archiver logs the exact counts of preserved messages and affected chats during execution and in the completion run summary (`Preserved: X message(s) across Y chat(s)`).
+> 💡 Preserved messages, sender-revoked messages ("Delete for Everyone"), voice and video calls (`preserved_calls`), interactive polls, shared locations, view-once media metadata, and pre-edited message drafts are retained into `preserved_messages.db` across backup cycles. Preserved content and deleted chats are automatically surfaced in the viewer with visual badges, progressive edit disclosure, and bidirectional reply linking. The archiver logs the exact counts during execution and in the completion run summary (`Preserved: X message(s) across Y chat(s)`).
 
 #### iOS — pre-extracted mode
 
@@ -293,7 +293,7 @@ wab-archiver archive \
 | `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths, organized into clear visual sections by media type (Photos & Images, Videos, Documents, Audio, Animated GIFs, Contacts, Stickers) so high-value duplicates are highlighted first. Includes columns `media_type`, `group_id` (continuous numbering across sections), `file_count`, `archived_path`, `md5_hex`, `link_status` (`hardlink` or `duplicate_copy`), and `original_timestamp` (message timestamp formatted in run timezone). Only written when duplicates exist |
 | `source_conflicts_report.csv` | Written when multiple `--wa-root` roots contain different versions of the same file. Only written when conflicts exist |
 | `.wa_media_archiver.db` | SQLite database storing all persistent state: contact folder index, group folder index, and the file archive map. Health checks run automatically on every open. Do not delete unless you want to reset all tracking |
-| `preserved_messages.db` | SQLite database storing preserved messages, sender-revoked messages, and deleted chats across backup cycles. Only written when `-P` / `--preserve-deleted` is enabled |
+| `preserved_messages.db` | SQLite database storing preserved messages, sender-revoked messages, call history (`preserved_calls`), and deleted chats with participant rosters across backup cycles. Only written when `-P` / `--preserve-deleted` is enabled |
 | `adb_conflicts_report.csv` | Written when `--pull-media` finds a file with the same name but different content on the device vs the archive. Only written when conflicts exist; resolve manually |
 | `restore_report.csv` | Written by restore mode when issues are encountered. Not written if there are no issues |
 

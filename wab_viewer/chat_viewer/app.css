@@ -1280,6 +1280,50 @@
       transition: color 0.15s, border-color 0.15s;
     }
     .msg-details-copy-btn:hover { color: var(--text); border-color: var(--accent); }
+    .msg-details-section { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
+    .msg-details-section:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+    .msg-pre-edit-text { font-style: italic; max-width: 280px; overflow-wrap: break-word; word-break: break-word; color: var(--text); }
+    .msg-edited { cursor: pointer; }
+    .msg-edited:hover { text-decoration: underline; }
+
+    /* ---- location message cards ---- */
+    .msg-location-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 4px;
+    }
+    .location-icon {
+      font-size: 20px;
+      line-height: 1;
+    }
+    .location-details {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      font-size: 13px;
+    }
+    .location-name {
+      font-weight: 600;
+      color: var(--text);
+    }
+    .location-address {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .location-map-link {
+      font-size: 12px;
+      color: var(--accent);
+      text-decoration: none;
+      margin-top: 2px;
+    }
+    .location-map-link:hover {
+      text-decoration: underline;
+    }
 
     /* ---- chat info panel ---- */
     #chat-info-panel {
