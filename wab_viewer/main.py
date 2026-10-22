@@ -2533,67 +2533,6 @@ def _maybe_start_indexing(
     ).start()
 
 
-def _build_media_only(
-    archive_conn: sqlite3.Connection, cache_conn: sqlite3.Connection, output_root: Path
-):
-    archive_map = {
-        row["original_path"]: row["archive_path"]
-        for row in archive_conn.execute(
-            "SELECT original_path, archive_path FROM archive_copies"
-        ).fetchall()
-    }
-
-    group_folders = {
-        r["folder"]: ("group", str(r["chat_row_id"]))
-        for r in archive_conn.execute("SELECT folder, chat_row_id FROM groups").fetchall()
-    }
-    folder_map = {
-        **{
-            r["folder"]: ("contact", str(r["number"]))
-            for r in archive_conn.execute("SELECT folder, number FROM contacts").fetchall()
-        },
-        **group_folders,
-    }
-
-    cache_conn.execute("DELETE FROM message_index")
-    cache_conn.execute("DROP TABLE IF EXISTS message_index_fts")
-    cache_conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS message_index_fts USING fts5(\n"
-        "    text_body,\n"
-        "    content=''\n"
-        ")"
-    )
-    cache_conn.commit()
-
-    insert_sql = """
-        INSERT INTO message_index (chat_id, chat_type, timestamp_ms)
-        VALUES (?, ?, ?)
-    """
-    batch = []
-    for original_path, archive_path in archive_map.items():
-        if not archive_path:
-            continue
-        parts = archive_path.split("/")
-        if len(parts) < 2:
-            continue
-        folder = parts[1]
-        chat_key = folder_map.get(folder) or folder_map.get(parts[0])
-        if chat_key is None:
-            chat_key = ("contact", parts[1] if len(parts) > 1 else folder)
-        chat_type, chat_id = chat_key
-
-        full_path = output_root / archive_path
-        if not full_path.exists():
-            continue
-        mtime_ms = int(os.path.getmtime(full_path) * 1000)
-        batch.append((chat_id, chat_type, mtime_ms))
-
-    cache_conn.executemany(insert_sql, batch)
-    cache_conn.commit()
-    cache_conn.execute("PRAGMA incremental_vacuum(500)")
-    cache_conn.execute("PRAGMA optimize")
-
-
 # ---------------------------------------------------------------------------
 # SQL fragments
 # ---------------------------------------------------------------------------
@@ -3184,10 +3123,13 @@ def create_app(output_root: Path, rescan: bool = False):
 
     archive_db_path = get_archive_db_path(output_root)
     source_type, wa_db_path = _detect_source_db(output_root)
+    if not wa_db_path:
+        raise FileNotFoundError(
+            f"WhatsApp database not found in {output_root} (msgstore.db or ChatStorage.sqlite)"
+        )
     preserved_db_path = _detect_preserved_db(output_root)
     _ensure_writable(archive_db_path)
-    if wa_db_path:
-        _ensure_writable(Path(wa_db_path))
+    _ensure_writable(Path(wa_db_path))
     cache_conn = _open_cache_db(output_root)
     _indexing_state: dict = {}
     _indexing_lock = threading.Lock()
@@ -3199,34 +3141,26 @@ def create_app(output_root: Path, rescan: bool = False):
 
     schema_alert = None
     source_is_changed = False
-    if source_type in ("android", "ios") and wa_db_path:
-        with contextlib.closing(sqlite3.connect(str(wa_db_path))) as chk_conn:
-            schema_res = validate_viewer_schema(chk_conn.cursor(), source_type, _get_version())
-            if not schema_res.is_valid:
-                print(schema_res.banner)
-                schema_alert = {
-                    "summary": schema_res.summary,
-                    "issue_url": schema_res.issue_url,
-                    "platform": source_type,
-                    "is_legacy": schema_res.is_legacy,
-                }
-                source_type = None
+    with contextlib.closing(sqlite3.connect(str(wa_db_path))) as chk_conn:
+        schema_res = validate_viewer_schema(chk_conn.cursor(), source_type, _get_version())
+        if not schema_res.is_valid:
+            print(schema_res.banner)
+            schema_alert = {
+                "summary": schema_res.summary,
+                "issue_url": schema_res.issue_url,
+                "platform": source_type,
+                "is_legacy": schema_res.is_legacy,
+            }
+            source_type = None
 
     app.config["SCHEMA_ALERT"] = schema_alert
     has_android_hd = False
     has_ios_hd = False
 
     if source_type is None:
-        if schema_alert:
-            print(
-                "[wab_viewer] Notice: Falling back to media-only mode due to WhatsApp schema incompatibility."
-            )
-        else:
-            print("[wab_viewer] Warning: No source WA DB found. Media-only mode.")
-        archive_conn_tmp = sqlite3.connect(str(archive_db_path), check_same_thread=False)
-        archive_conn_tmp.row_factory = sqlite3.Row
-        _build_media_only(archive_conn_tmp, cache_conn, output_root)
-        archive_conn_tmp.close()
+        print(
+            "[wab_viewer] Notice: WhatsApp schema incompatibility detected. Chats cannot be loaded."
+        )
     else:
         print(f"[wab_viewer] Source DB: {source_type} at {wa_db_path}")
 
@@ -4222,30 +4156,7 @@ def create_app(output_root: Path, rescan: bool = False):
     def api_chats():
         conn = get_wa()
         if conn is None:
-            rows = (
-                get_cache()
-                .execute("""
-                SELECT chat_id AS id, chat_type AS type,
-                       MAX(NULLIF(timestamp_ms, 0)) AS newest_ts
-                FROM message_index
-                GROUP BY chat_id, chat_type
-                ORDER BY newest_ts DESC
-            """)
-                .fetchall()
-            )
-            result = [
-                {
-                    "id": r["id"],
-                    "type": r["type"],
-                    "display_name": r["id"],
-                    "newest_ts": r["newest_ts"],
-                    "last_msg_preview": "",
-                    "last_msg_type": "text",
-                    "last_msg_from_me": 0,
-                    "is_preserved_only": False,
-                }
-                for r in rows
-            ]
+            result = []
             pres = get_preserved()
             if pres is not None:
                 result = _merge_preserved_chats(result, pres, get_archive())
@@ -7384,6 +7295,16 @@ def validate_output_root(output_root: Path) -> None:
     if not archive_db.exists():
         print(f"Error: archive database not found: {archive_db}", file=sys.stderr)
         print(f"Hint:  {hint}", file=sys.stderr)
+        sys.exit(1)
+
+    source_type, wa_db_path = _detect_source_db(output_root)
+    if not wa_db_path:
+        print(f"Error: WhatsApp database not found in {output_root}", file=sys.stderr)
+        print(
+            "Hint:  Ensure 'msgstore.db' (Android) or 'ChatStorage.sqlite' (iOS) is present "
+            "in the archive (e.g. in 'Whatsapp Databases' subfolder or root).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 

@@ -2377,23 +2377,14 @@ class TestChatInfo:
         assert data["first_ts"] == 1700000000000
         assert data["last_ts"] == 1700000000000
 
-    def test_media_only_mode_returns_null_counts(self, tmp_path):
-        """Without a WA source DB, counts are null and first_ts comes from cache."""
+    def test_create_app_raises_when_no_wa_db(self, tmp_path):
+        """Without a WA source DB, create_app refuses to start by raising FileNotFoundError."""
         archive_path = tmp_path / ".wa_media_archiver.db"
         archive_conn = make_archive_db(archive_path)
-        archive_conn.execute(
-            "INSERT INTO contacts (number, folder, display_name) VALUES ('123456789', 'Alice', 'Alice')"
-        )
-        archive_conn.commit()
         archive_conn.close()
 
-        app = viewer.create_app(tmp_path, rescan=False)
-        app.config["TESTING"] = True
-        with app.test_client() as client:
-            data = client.get("/api/chat-info?chat_id=123456789&chat_type=contact").get_json()
-        assert data["sent"] is None
-        assert data["received"] is None
-        assert data["total"] is None
+        with pytest.raises(FileNotFoundError, match="WhatsApp database not found"):
+            viewer.create_app(tmp_path, rescan=False)
 
     def test_media_size_returns_bytes(self, tmp_path):
         """media-size sums file sizes for the chat folder."""
@@ -5472,6 +5463,8 @@ class TestFaviconAndStaticAssets:
     def test_favicon_served(self, tmp_path):
         archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         archive_conn.close()
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.close()
         app = viewer.create_app(tmp_path, rescan=False)
         app.config["TESTING"] = True
         with app.test_client() as client:
@@ -5545,6 +5538,11 @@ class TestViewerEntrypoint:
         assert exc.value.code == 1
 
         (tmp_path / ".wa_media_archiver.db").touch()
+        with pytest.raises(SystemExit) as exc_no_wa:
+            viewer.validate_output_root(tmp_path)
+        assert exc_no_wa.value.code == 1
+
+        (tmp_path / "msgstore.db").touch()
         viewer.validate_output_root(tmp_path)
 
     def test_resolve_browser_url(self):
@@ -5717,6 +5715,7 @@ class TestDatabaseOptimizationsAndMaintenance:
 
     def test_api_index_optimize_endpoint(self, tmp_path):
         make_archive_db(tmp_path / ".wa_media_archiver.db")
+        make_android_db(tmp_path / "msgstore.db").close()
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
             resp = client.post("/api/index/optimize")
@@ -5729,6 +5728,7 @@ class TestDatabaseOptimizationsAndMaintenance:
 
     def test_api_index_optimize_conflict_when_indexing(self, tmp_path):
         make_archive_db(tmp_path / ".wa_media_archiver.db")
+        make_android_db(tmp_path / "msgstore.db").close()
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
             with app._indexing_lock:
@@ -5743,6 +5743,7 @@ class TestDatabaseOptimizationsAndMaintenance:
 
     def test_api_index_clear_conflict_when_indexing(self, tmp_path):
         make_archive_db(tmp_path / ".wa_media_archiver.db")
+        make_android_db(tmp_path / "msgstore.db").close()
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
             with app._indexing_lock:
@@ -5758,6 +5759,8 @@ class TestDatabaseOptimizationsAndMaintenance:
     def test_api_index_all_endpoint_validation(self, tmp_path):
 
         make_archive_db(tmp_path / ".wa_media_archiver.db")
+        # Incompatible schema causes source_type to be None while DB file exists
+        sqlite3.connect(tmp_path / "msgstore.db").close()
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
             resp = client.post("/api/index/all")
@@ -5804,54 +5807,20 @@ class TestDatabaseOptimizationsAndMaintenance:
                 assert app._bulk_index_state["total_msgs"] >= 1
 
 
-class TestStandaloneMediaOnlyMode:
-    def test_build_media_only_and_api_chats(self, tmp_path):
+class TestNoDatabaseRefusal:
+    def test_refuse_to_start_without_wa_db(self, tmp_path):
         arc_path = tmp_path / ".wa_media_archiver.db"
         arc_conn = make_archive_db(arc_path)
-        arc_conn.execute(
-            "INSERT INTO contacts (number, folder, display_name) VALUES ('1001', 'Alice (001)', 'Alice')"
-        )
-        arc_conn.execute(
-            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('2001', 'Family Group (002)', 'Family')"
-        )
-        arc_conn.execute("INSERT INTO files (original_path, md5) VALUES ('orig1.jpg', X'01020304')")
-        arc_conn.execute("INSERT INTO files (original_path, md5) VALUES ('orig2.jpg', X'05060708')")
-        arc_conn.execute(
-            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('orig1.jpg', 'Contacts/Alice (001)/photo.jpg')"
-        )
-        arc_conn.execute(
-            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('orig2.jpg', 'Groups/Family Group (002)/doc.pdf')"
-        )
-        arc_conn.commit()
-
-        c_file = tmp_path / "Contacts" / "Alice (001)" / "photo.jpg"
-        c_file.parent.mkdir(parents=True, exist_ok=True)
-        c_file.write_bytes(b"photo-data")
-
-        g_file = tmp_path / "Groups" / "Family Group (002)" / "doc.pdf"
-        g_file.parent.mkdir(parents=True, exist_ok=True)
-        g_file.write_bytes(b"pdf-data")
-
-        cache_conn = viewer._open_cache_db(tmp_path)
-        viewer._build_media_only(arc_conn, cache_conn, tmp_path)
-
-        idx_rows = cache_conn.execute(
-            "SELECT chat_id, chat_type FROM message_index ORDER BY chat_id"
-        ).fetchall()
-        assert len(idx_rows) == 2
-        assert (idx_rows[0]["chat_id"], idx_rows[0]["chat_type"]) == ("1001", "contact")
-        assert (idx_rows[1]["chat_id"], idx_rows[1]["chat_type"]) == ("2001", "group")
-        cache_conn.close()
         arc_conn.close()
 
-        app = viewer.create_app(tmp_path, rescan=False)
-        with app.test_client() as client:
-            resp = client.get("/api/chats")
-            assert resp.status_code == 200
-            chats = resp.get_json()
-            assert len(chats) == 2
-            ids = {c["id"] for c in chats}
-            assert ids == {"1001", "2001"}
+        # CLI entrypoint validation fails
+        with pytest.raises(SystemExit) as exc:
+            viewer.validate_output_root(tmp_path)
+        assert exc.value.code == 1
+
+        # Application factory fails
+        with pytest.raises(FileNotFoundError, match="WhatsApp database not found"):
+            viewer.create_app(tmp_path, rescan=False)
 
 
 class TestAndroidMessageReceiptsApi:
@@ -6429,10 +6398,11 @@ class TestBulkIndexAndMaintenanceApi:
                 assert app._bulk_index_state["total_msgs"] == 2
 
     def test_api_index_clear_and_optimize(self, tmp_path):
-        from tests.test_wa_chat_viewer import make_archive_db
+        from tests.test_wa_chat_viewer import make_android_db, make_archive_db
 
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
+        make_android_db(tmp_path / "msgstore.db").close()
 
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
@@ -6464,10 +6434,11 @@ class TestBulkIndexAndMaintenanceApi:
 
 class TestPreferencesEndpoint:
     def test_preferences_flow(self, tmp_path):
-        from tests.test_wa_chat_viewer import make_archive_db
+        from tests.test_wa_chat_viewer import make_android_db, make_archive_db
 
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
+        make_android_db(tmp_path / "msgstore.db").close()
 
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
@@ -6498,10 +6469,11 @@ class TestPreferencesEndpoint:
 
 class TestMediaServingEndpoint:
     def test_serve_media_full_and_range_requests(self, tmp_path):
-        from tests.test_wa_chat_viewer import make_archive_db
+        from tests.test_wa_chat_viewer import make_android_db, make_archive_db
 
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
+        make_android_db(tmp_path / "msgstore.db").close()
 
         media_dir = tmp_path / "Media"
         media_dir.mkdir(parents=True, exist_ok=True)
@@ -6552,10 +6524,11 @@ class TestMediaServingEndpoint:
 
 class TestStaticAssetsAndUiRoutes:
     def test_static_assets_and_index_html(self, tmp_path):
-        from tests.test_wa_chat_viewer import make_archive_db
+        from tests.test_wa_chat_viewer import make_android_db, make_archive_db
 
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
+        make_android_db(tmp_path / "msgstore.db").close()
 
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
@@ -6597,7 +6570,13 @@ class TestMainEntrypointValidation:
 
         arc_conn = make_archive_db(valid_dir / ".wa_media_archiver.db")
         arc_conn.close()
-        # Should now succeed without raising SystemExit
+        # Missing WA db still raises SystemExit
+        with pytest.raises(SystemExit) as exc_no_wa:
+            viewer.validate_output_root(valid_dir)
+        assert exc_no_wa.value.code == 1
+
+        # Providing msgstore.db succeeds
+        (valid_dir / "msgstore.db").touch()
         viewer.validate_output_root(valid_dir)
 
     def test_main_cli_execution(self, tmp_path, monkeypatch):
@@ -6607,6 +6586,7 @@ class TestMainEntrypointValidation:
 
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.close()
+        make_android_db(tmp_path / "msgstore.db").close()
 
         monkeypatch.setattr(
             sys, "argv", ["wab-viewer", str(tmp_path), "--port", "5099", "--no-browser"]
@@ -6744,7 +6724,7 @@ class TestProtobufWireTypesInReceiptBlob:
 
 class TestChatInfoMediaSizeAndStatus:
     def test_chat_info_media_size_contact_and_group(self, tmp_path):
-        from tests.test_wa_chat_viewer import make_archive_db
+        from tests.test_wa_chat_viewer import make_android_db, make_archive_db
 
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
         arc_conn.execute(
@@ -6763,6 +6743,8 @@ class TestChatInfoMediaSizeAndStatus:
         )
         arc_conn.commit()
         arc_conn.close()
+
+        make_android_db(tmp_path / "msgstore.db").close()
 
         c_file = tmp_path / "Contacts" / "Alice" / "pic.jpg"
         c_file.parent.mkdir(parents=True, exist_ok=True)
