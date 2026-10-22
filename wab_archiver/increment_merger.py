@@ -3130,7 +3130,9 @@ def apply_messages_bin(
 
     inserted = 0
     key_cache: dict[str, int] = {}
+    key_ts_cache: dict[str, int] = {}
     pending_add_ons: list[PendingAddOn] = []
+    pending_quotes: list[tuple[int, str]] = []
     max_ts_per_chat: dict[int, int] = {}
     max_display_msg_per_chat: dict[int, int] = {}
     for msg in messages:
@@ -3201,6 +3203,8 @@ def apply_messages_bin(
 
         if msg.get("key_id") and msg_row_id:
             key_cache[msg["key_id"]] = msg_row_id
+            if msg.get("timestamp"):
+                key_ts_cache[msg["key_id"]] = msg["timestamp"]
 
         # Insert media record if present
         if msg["media_info"] and sql_insert_media:
@@ -3280,6 +3284,16 @@ def apply_messages_bin(
                     q_sender_id = resolve_or_create_jid(conn, q_part, logger, jid_cache)
                 else:
                     q_sender_id = 0
+                q_stanza_id = qi.get("stanza_id") or msg.get("key_id", "") or ""
+                quoted_ts = key_ts_cache.get(q_stanza_id, 0)
+                if not quoted_ts and q_stanza_id:
+                    cur.execute("SELECT timestamp FROM message WHERE key_id = ?", (q_stanza_id,))
+                    t_row = cur.fetchone()
+                    if t_row and t_row[0]:
+                        quoted_ts = int(t_row[0])
+                        key_ts_cache[q_stanza_id] = quoted_ts
+                    else:
+                        pending_quotes.append((msg_row_id, q_stanza_id))
                 q_row_map = {
                     "message_row_id": msg_row_id,
                     "chat_row_id": chat_row_id,
@@ -3287,8 +3301,8 @@ def apply_messages_bin(
                     "text_data": qi.get("quoted_text", ""),
                     "from_me": qi.get("from_me", 0),
                     "sender_jid_row_id": q_sender_id,
-                    "key_id": qi.get("stanza_id") or msg.get("key_id", "") or "",
-                    "timestamp": 0,
+                    "key_id": q_stanza_id,
+                    "timestamp": quoted_ts,
                     "message_type": 0,
                 }
                 valid_q_cols = [c for c in q_row_map if c in quoted_cols]
@@ -3512,6 +3526,27 @@ def apply_messages_bin(
             logger.info(
                 f"Two-pass add-on staging resolved {pass2_recovered} out-of-order add-on(s) "
                 f"({pass2_orphans} unresolvable orphan(s))."
+            )
+
+    if pending_quotes:
+        recovered_quotes = 0
+        for q_msg_id, q_stanza_id in pending_quotes:
+            q_ts = key_ts_cache.get(q_stanza_id, 0)
+            if not q_ts:
+                cur.execute("SELECT timestamp FROM message WHERE key_id = ?", (q_stanza_id,))
+                t_row = cur.fetchone()
+                if t_row and t_row[0]:
+                    q_ts = int(t_row[0])
+                    key_ts_cache[q_stanza_id] = q_ts
+            if q_ts:
+                cur.execute(
+                    "UPDATE message_quoted SET timestamp = ? WHERE message_row_id = ?",
+                    (q_ts, q_msg_id),
+                )
+                recovered_quotes += 1
+        if recovered_quotes > 0:
+            logger.info(
+                f"Two-pass quote reconciliation resolved {recovered_quotes} out-of-order quoted timestamp(s)."
             )
 
     if max_ts_per_chat:

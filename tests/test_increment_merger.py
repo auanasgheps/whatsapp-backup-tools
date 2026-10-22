@@ -4374,3 +4374,100 @@ def test_apply_poll_vote_encrypted_payload(tmp_path):
     assert opts[1][2] == 1
 
     conn.close()
+
+
+def test_apply_messages_bin_resolves_quoted_timestamp_immediate_and_deferred(mock_db, tmp_path):
+    """Verify apply_messages_bin resolves quoted message timestamp immediately and deferred in Pass 2."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_quoted (
+            message_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            sender_jid_row_id INTEGER,
+            key_id TEXT NOT NULL,
+            timestamp INTEGER,
+            message_type INTEGER,
+            text_data TEXT
+        );
+    """)
+
+    # 1. Base message already in DB (immediate resolution via DB lookup)
+    conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data) "
+        "VALUES (50, 1, 0, 'PRE_EXISTING_KEY', 1, 1729000050000, 0, 'Pre-existing message')"
+    )
+    conn.commit()
+
+    # Case A: Reply quotes PRE_EXISTING_KEY (resolved immediately via DB)
+    wmi_reply_pre = _build_quoted_wmi(
+        "5550100@s.whatsapp.net",
+        "REPLY_TO_PRE",
+        "Replying to pre-existing",
+        1,
+        1729000100,
+        "PRE_EXISTING_KEY",
+        "Pre-existing message",
+        "5550100@s.whatsapp.net",
+    )
+
+    # Case B: Out-of-order pair where Reply arrives BEFORE target message
+    # Message 2 in stream quotes LATER_KEY (which is Message 3 in stream)
+    wmi_reply_later = _build_quoted_wmi(
+        "5550100@s.whatsapp.net",
+        "REPLY_TO_LATER",
+        "Replying to later message",
+        1,
+        1729000200,
+        "LATER_KEY",
+        "Later message text",
+        "5550100@s.whatsapp.net",
+    )
+
+    # Message 3 in stream is LATER_KEY with timestamp 1729000150000
+    key_bytes_later = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"LATER_KEY")
+    )
+    msg_bytes_later = _build_field(1, 2, b"Later message text")
+    wmi_later = (
+        _build_field(1, 2, key_bytes_later)
+        + _build_field(2, 2, msg_bytes_later)
+        + _build_field(3, 0, 1729000150)
+    )
+
+    bin_path = str(tmp_path / "messages_quoted_resolved.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_reply_pre)) + wmi_reply_pre)
+        f.write(_encode_varint(len(wmi_reply_later)) + wmi_reply_later)
+        f.write(_encode_varint(len(wmi_later)) + wmi_later)
+
+    schema_cache = {}
+    logger = logging.getLogger("test")
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+    assert inserted == 3
+
+    # Check timestamps in message_quoted
+    cur = conn.cursor()
+    # Case A: pre-existing key resolved to 1729000050000
+    row_a = cur.execute(
+        "SELECT mq.timestamp FROM message_quoted mq "
+        "JOIN message m ON m._id = mq.message_row_id "
+        "WHERE m.key_id = 'REPLY_TO_PRE'"
+    ).fetchone()
+    assert row_a is not None
+    assert row_a[0] == 1729000050000
+
+    # Case B: later key resolved via Pass 2 to 1729000150000 (1729000150 * 1000)
+    row_b = cur.execute(
+        "SELECT mq.timestamp FROM message_quoted mq "
+        "JOIN message m ON m._id = mq.message_row_id "
+        "WHERE m.key_id = 'REPLY_TO_LATER'"
+    ).fetchone()
+    assert row_b is not None
+    assert row_b[0] == 1729000150000
+
+    conn.close()

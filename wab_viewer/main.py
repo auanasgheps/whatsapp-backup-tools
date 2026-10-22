@@ -531,6 +531,14 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                     "CREATE INDEX IF NOT EXISTS idx_zwamessage_chat_ts "
                     "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE)"
                 )
+        if "idx_message_key_id" not in existing:
+            has_android = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
+            ).fetchone()
+            if has_android:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
+                if "key_id" in cols:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_key_id ON message(key_id)")
         conn.commit()
     except sqlite3.OperationalError as e:
         if "readonly" in str(e).lower():
@@ -1407,40 +1415,56 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
 def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> None:
     if not rows:
         return
-    sql = """
-        INSERT OR REPLACE INTO recent_messages
-            (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
-             archive_path, media_type, media_name, text_body,
-             quoted_text, quoted_sender, quoted_ts, reactions,
-             is_edited, edited_ts, is_view_once)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
+    cur_cols = {r[1] for r in archive_conn.execute("PRAGMA table_info(recent_messages)").fetchall()}
+    has_qmid = "quoted_msg_id" in cur_cols
+    if has_qmid:
+        sql = """
+            INSERT OR REPLACE INTO recent_messages
+                (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                 archive_path, media_type, media_name, text_body,
+                 quoted_text, quoted_sender, quoted_ts, quoted_msg_id, reactions,
+                 is_edited, edited_ts, is_view_once)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+    else:
+        sql = """
+            INSERT OR REPLACE INTO recent_messages
+                (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                 archive_path, media_type, media_name, text_body,
+                 quoted_text, quoted_sender, quoted_ts, reactions,
+                 is_edited, edited_ts, is_view_once)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
     keys = rows[0].keys()
-    archive_conn.executemany(
-        sql,
-        [
-            (
-                r["chat_id"],
-                r["chat_type"],
-                r["msg_id"],
-                r["timestamp_ms"],
-                r["sender"],
-                r["from_me"],
-                r["archive_path"] if "archive_path" in keys else None,
-                r["media_type"],
-                r["media_name"] if "media_name" in keys else None,
-                r["text_body"],
-                r["quoted_text"] if "quoted_text" in keys else None,
-                r["quoted_sender"] if "quoted_sender" in keys else None,
-                r["quoted_ts"] if "quoted_ts" in keys else None,
+    params = []
+    for r in rows:
+        row_vals = [
+            r["chat_id"],
+            r["chat_type"],
+            r["msg_id"],
+            r["timestamp_ms"],
+            r["sender"],
+            r["from_me"],
+            r["archive_path"] if "archive_path" in keys else None,
+            r["media_type"],
+            r["media_name"] if "media_name" in keys else None,
+            r["text_body"],
+            r["quoted_text"] if "quoted_text" in keys else None,
+            r["quoted_sender"] if "quoted_sender" in keys else None,
+            r["quoted_ts"] if "quoted_ts" in keys else None,
+        ]
+        if has_qmid:
+            row_vals.append(r["quoted_msg_id"] if "quoted_msg_id" in keys else None)
+        row_vals.extend(
+            [
                 r["reactions"] if "reactions" in keys else None,
                 r["is_edited"] if "is_edited" in keys else 0,
                 r["edited_ts"] if "edited_ts" in keys else None,
                 r["is_view_once"] if "is_view_once" in keys else 0,
-            )
-            for r in rows
-        ],
-    )
+            ]
+        )
+        params.append(tuple(row_vals))
+    archive_conn.executemany(sql, params)
     archive_conn.commit()
 
 
@@ -2706,7 +2730,17 @@ _IOS_SELECT = f"""
             END,
             ''
         )                                                             AS text_body,
-        COALESCE(qm.ZTEXT, CASE WHEN qm.ZMESSAGETYPE = 46 THEN 'Poll' END, '') AS quoted_text,
+        COALESCE(
+            qm.ZTEXT,
+            CASE
+                WHEN qm.ZMESSAGETYPE = 46 THEN 'Poll'
+                WHEN qm.ZMESSAGETYPE = 1 THEN '📷 Photo'
+                WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
+                WHEN qm.ZMESSAGETYPE = 3 THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE = 15 THEN 'Sticker'
+            END,
+            ''
+        )                                                             AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
@@ -2719,6 +2753,7 @@ _IOS_SELECT = f"""
                  '')
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
+        qm.Z_PK                                                      AS quoted_msg_id,
         NULL                                                          AS reactions,
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
@@ -3567,6 +3602,7 @@ def create_app(output_root: Path, rescan: bool = False):
             quoted_text    TEXT,
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
+            quoted_msg_id  INTEGER,
             reactions      TEXT,
             is_edited      INTEGER NOT NULL DEFAULT 0,
             edited_ts      INTEGER,
@@ -3606,8 +3642,10 @@ def create_app(output_root: Path, rescan: bool = False):
         _archive_conn.execute(
             "ALTER TABLE recent_messages ADD COLUMN is_view_once INTEGER NOT NULL DEFAULT 0"
         )
-    if _archive_conn.execute("PRAGMA user_version").fetchone()[0] < 3:
-        _archive_conn.execute("PRAGMA user_version = 3")
+    if "quoted_msg_id" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN quoted_msg_id INTEGER")
+    if _archive_conn.execute("PRAGMA user_version").fetchone()[0] < 4:
+        _archive_conn.execute("PRAGMA user_version = 4")
     if rescan or (source_is_changed and has_prior_stamp):
         _archive_conn.execute("DELETE FROM recent_messages")
         try:
@@ -3652,6 +3690,9 @@ def create_app(output_root: Path, rescan: bool = False):
     has_ios_aspect_ratio = False
     has_ios_filesize = False
     has_ios_duration = False
+    has_mq_key_id = False
+    has_mq_msg_type = False
+    has_mq_pm_chat = False
     _mi_cols = set()
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
@@ -3667,6 +3708,14 @@ def create_app(output_root: Path, rescan: bool = False):
         has_message_thumbnail = "message_thumbnail" in _wa_tables
         has_media_hash_thumbnail = "media_hash_thumbnail" in _wa_tables
         has_message_quoted_media = "message_quoted_media" in _wa_tables
+        _mq_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_quoted)").fetchall()}
+            if "message_quoted" in _wa_tables
+            else set()
+        )
+        has_mq_key_id = "key_id" in _mq_cols
+        has_mq_msg_type = "message_type" in _mq_cols
+        has_mq_pm_chat = "parent_message_chat_row_id" in _mq_cols
         _mm_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_media)").fetchall()}
             if "message_media" in _wa_tables
@@ -3832,7 +3881,17 @@ def create_app(output_root: Path, rescan: bool = False):
             END,
             ''
         )                                                             AS text_body,
-        COALESCE(qm.ZTEXT, CASE WHEN qm.ZMESSAGETYPE = 46 THEN 'Poll' END, '') AS quoted_text,
+        COALESCE(
+            qm.ZTEXT,
+            CASE
+                WHEN qm.ZMESSAGETYPE = 46 THEN 'Poll'
+                WHEN qm.ZMESSAGETYPE = 1 THEN '📷 Photo'
+                WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
+                WHEN qm.ZMESSAGETYPE = 3 THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE = 15 THEN 'Sticker'
+            END,
+            ''
+        )                                                             AS quoted_text,
         CASE WHEN qm.ZISFROMME = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
@@ -3845,6 +3904,7 @@ def create_app(output_root: Path, rescan: bool = False):
                  '')
         END                                                          AS quoted_sender,
         COALESCE(CAST((qm.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER), 0) AS quoted_ts,
+        qm.Z_PK                                                      AS quoted_msg_id,
         NULL                                                          AS reactions,
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
@@ -4001,6 +4061,34 @@ def create_app(output_root: Path, rescan: bool = False):
         else "0"
     )
 
+    quoted_msg_id_col = "NULL"
+    quoted_ts_col = "COALESCE(mq.timestamp, 0)"
+    m_orig_join = ""
+    if has_android_key_id and has_mq_key_id:
+        pm_clause = (
+            "AND (m_orig.chat_row_id = mq.parent_message_chat_row_id OR mq.parent_message_chat_row_id IS NULL) "
+            if has_mq_pm_chat
+            else ""
+        )
+        m_orig_join = f"    LEFT JOIN message m_orig ON m_orig.key_id = mq.key_id {pm_clause}\n"
+        quoted_msg_id_col = "m_orig._id"
+        quoted_ts_col = "COALESCE(NULLIF(mq.timestamp, 0), m_orig.timestamp, 0)"
+
+    if has_mq_msg_type:
+        quoted_text_expr = """COALESCE(
+            NULLIF(mq.text_data, ''),
+            CASE
+                WHEN mq.message_type = 1 THEN '📷 Photo'
+                WHEN mq.message_type = 2 THEN '🎵 Audio'
+                WHEN mq.message_type = 3 THEN '🎥 Video'
+                WHEN mq.message_type = 20 THEN 'Sticker'
+                WHEN mq.message_type = 66 THEN 'Poll'
+            END,
+            ''
+        )"""
+    else:
+        quoted_text_expr = "COALESCE(mq.text_data, '')"
+
     group_cond_parts = ["c.subject IS NOT NULL"]
     if has_jid_server:
         group_cond_parts.append("j_chat.server = 'g.us'")
@@ -4071,7 +4159,7 @@ def create_app(output_root: Path, rescan: bool = False):
             END,
             ''
         )                                                            AS text_body,
-        COALESCE(mq.text_data, '')                                   AS quoted_text,
+        {quoted_text_expr}                                           AS quoted_text,
         CASE WHEN mq.from_me = 1 THEN 'You'
              ELSE COALESCE(
                  NULLIF(con_sq.display_name, ''),
@@ -4080,7 +4168,8 @@ def create_app(output_root: Path, rescan: bool = False):
                  {ldn_quoted_sender_arm}
                  CASE WHEN NOT ({jq_is_lid}) AND jq.user IS NOT NULL THEN '+' || {_clean_user_sql("jq.user")} END,
                  '') END                                             AS quoted_sender,
-        COALESCE(mq.timestamp, 0)                                    AS quoted_ts,
+        {quoted_ts_col}                                              AS quoted_ts,
+        {quoted_msg_id_col}                                          AS quoted_msg_id,
         {edit_is_edited_col}                                         AS is_edited,
         {edit_ts_col}                                                AS edited_ts,
         CASE WHEN m.message_type IN (42, 43, 82) THEN 1 ELSE 0 END   AS is_view_once,
@@ -4101,7 +4190,7 @@ def create_app(output_root: Path, rescan: bool = False):
     LEFT JOIN jid j ON j._id = m.sender_jid_row_id
     {_ANDROID_JID_MAP}
     LEFT JOIN message_quoted mq ON mq.message_row_id = m._id
-    LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id
+{m_orig_join}    LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id
     LEFT JOIN _jid_map_resolved jmq ON jmq.lid_row_id = mq.sender_jid_row_id
     LEFT JOIN jid jq2 ON jq2._id = jmq.jid_row_id
     {ldn_select_joins}
