@@ -1,6 +1,14 @@
 # WhatsApp Backup Tools v0.70
 
-Version 0.70 marks a major milestone for WhatsApp Backup Tools, introducing deleted message preservation, rich Android incremental backup merging, interactive polls, missing media thumbnail previews, and comprehensive system event support.
+Version 0.70 marks a major milestone for _WhatsApp Backup Tools_, progressing towards a more mature suite to handle your archiving needs.
+
+Introducing deleted message preservation, Android incremental backup merging, polls, missing media thumbnail previews, and comprehensive system event support.
+
+Work is planned to fully support features like call history and starred messages. 
+
+Your feedback is highly appreciated!
+
+#### **Release highlights:**
 
 > 🛡️ **Message Preservation Across Backups**:
 > Traditional WhatsApp backups only reflect the current state of your device, meaning messages or chats deleted between backup cycles vanish forever. With the new Message Preservation engine (`-P` / `--preserve-deleted`), deleted messages, revoked "Delete for Everyone" texts, and removed chats are automatically saved into a dedicated preserved history (`preserved_messages.db`). Preserved records remain fully searchable and browsable in the web viewer with clear badges, without modifying original WhatsApp databases.
@@ -30,7 +38,6 @@ Version 0.70 marks a major milestone for WhatsApp Backup Tools, introducing dele
 
 #### 🐛 Bug Fixes
 - **Sticker Categorization in Duplicate Reports**: Categorized `.webp` and `.was` stickers under the dedicated Stickers section at the end of duplicate reports across iOS and Android.
-- **ADB Incremental Merge Redundancy**: Prevented redundant database merge invocations during automated ADB archiving runs.
 - **Restore Command Argument Guard**: Fixed an issue where running reverse restore could fail when network path warnings were evaluated.
 - Minor bug fixes and reliability improvements.
 
@@ -39,7 +46,7 @@ Version 0.70 marks a major milestone for WhatsApp Backup Tools, introducing dele
 ### 🌐 WhatsApp Viewer
 
 #### ✨ New Features
-- **Interactive WhatsApp Polls**: Polls on both Android and iOS are now rendered just like in WhatsApp, showing options, vote bars, and who voted for each choice.
+- **WhatsApp Polls**: Polls on both Android and iOS are now rendered just like in WhatsApp, showing options, vote bars, and who voted for each choice.
 - **Exhaustive System & Group Events**: Group events and system notifications—including member additions and removals (with natural phrasing like "Alice, Bob, and Charlie"), group subject/icon changes, admin promotions, disappearing message timer changes, and security codes—are now fully recognized and rendered across Android and iOS.
 - **Missing Media Previews & Details**: When photos or videos are missing from your computer, the viewer renders neat missing media cards showing media type, dimensions, duration, and file size, with blurred thumbnail previews extracted directly from the backup database.
 - **Preserved & Revoked Message Visibility**: Messages deleted on the phone or revoked via "Delete for Everyone" are clearly labeled with preserved badges and status indicators.
