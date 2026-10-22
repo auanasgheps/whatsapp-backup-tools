@@ -720,15 +720,37 @@
     }
   }
 
+  function flashHighlightRow(row) {
+    if (!row) return;
+    const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
+    if (bubble) {
+      bubble.classList.remove('search-jump-highlight');
+      void bubble.offsetWidth;
+      bubble.classList.add('search-jump-highlight');
+      const timer = setTimeout(() => bubble.classList.remove('search-jump-highlight'), 1200);
+      bubble.addEventListener('animationend', () => {
+        clearTimeout(timer);
+        bubble.classList.remove('search-jump-highlight');
+      }, { once: true });
+    }
+  }
+
   async function jumpToMessage(msg) {
     const inWin = rowForMsgId(msg.msg_id);
-    if (inWin) { inWin.scrollIntoView({ behavior: 'instant', block: 'center' }); return inWin; }
-    await jumpToTimestamp(msg.timestamp_ms, msg.msg_id);
+    if (inWin) {
+      suppressScroll = true;
+      inWin.scrollIntoView({ behavior: 'instant', block: 'center' });
+      suppressScroll = false;
+      flashHighlightRow(inWin);
+      return inWin;
+    }
+    await jumpToTimestamp(msg.timestamp_ms, msg.msg_id, true);
     const row = rowForMsgId(msg.msg_id);
     if (row) {
       suppressScroll = true;
       row.scrollIntoView({ behavior: 'instant', block: 'center' });
       suppressScroll = false;
+      flashHighlightRow(row);
     }
     return row;
   }
@@ -952,10 +974,17 @@
       qText.textContent = msg.quoted_text;
       quote.appendChild(qSender);
       quote.appendChild(qText);
-      if (msg.quoted_ts) {
+      if (msg.quoted_msg_id || msg.quoted_ts) {
         quote.style.cursor = 'pointer';
         quote.title = 'Jump to original message';
-        quote.addEventListener('click', () => jumpToTimestamp(msg.quoted_ts, null));
+        quote.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (msg.quoted_msg_id) {
+            jumpToMessage({ msg_id: msg.quoted_msg_id, timestamp_ms: msg.quoted_ts });
+          } else {
+            jumpToTimestamp(msg.quoted_ts, null, true);
+          }
+        });
       }
       bubble.appendChild(quote);
     }
@@ -2641,7 +2670,7 @@
         const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
         if (el2) {
           await selectChat(chat, el2);
-          const row = await jumpToTimestamp(r.timestamp_ms, null);
+          const row = await jumpToTimestamp(r.timestamp_ms, null, true);
           if (row) {
             const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
             if (bubble) {
@@ -2787,7 +2816,7 @@
       highlightMessageRow(existing);
       return;
     }
-    await jumpToTimestamp(result.timestamp_ms, result.msg_id);
+    await jumpToTimestamp(result.timestamp_ms, result.msg_id, true);
     const loaded = rowForMsgId(result.msg_id);
     if (loaded) highlightMessageRow(loaded);
   }
@@ -2815,7 +2844,7 @@
     btn.disabled = true;
     btn.setAttribute('aria-busy', 'true');
     try {
-      await jumpToTimestamp(new Date(val).getTime(), null);
+      await jumpToTimestamp(new Date(val).getTime(), null, false);
     } finally {
       btn.disabled = false;
       btn.removeAttribute('aria-busy');
@@ -2886,17 +2915,19 @@
   }
 
   // exactMsgId: when the caller needs a specific message in the DOM (e.g. jumpToMessage,
-  // chat search), pass its msg_id to bypass the nearest-ts early-exit — the caller already
-  // confirmed the message is not in the current window, so a full fetch is always needed.
-  // Pass null for nearest-ts callers (date picker, quoted-message jumps).
-  async function jumpToTimestamp(ts, exactMsgId) {
+  // chat search), pass its msg_id to bypass the nearest-ts early-exit.
+  // isExactTarget: true when jumping to a specific message or quote (tightens threshold to 1500ms
+  // instead of the 24-hour date-picker window).
+  async function jumpToTimestamp(ts, exactMsgId, isExactTarget) {
     if (exactMsgId == null) {
       const near = nearestMsgToTs(ts);
-      const existing = near && Math.abs(near.timestamp_ms - ts) < 86400000 && rowForMsgId(near.msg_id);
+      const threshold = isExactTarget ? 1500 : 86400000;
+      const existing = near && Math.abs(near.timestamp_ms - ts) <= threshold && rowForMsgId(near.msg_id);
       if (existing) {
         suppressScroll = true;
         existing.scrollIntoView({ behavior: 'instant', block: 'center' });
         suppressScroll = false;
+        if (isExactTarget) flashHighlightRow(existing);
         return existing;
       }
     }
@@ -2923,9 +2954,12 @@
       mergePage(msgs);
       renderWindow();
 
-      const target = nearestMsgToTs(ts);
+      const target = exactMsgId != null ? { msg_id: exactMsgId } : nearestMsgToTs(ts);
       const targetEl = target && rowForMsgId(target.msg_id);
-      if (targetEl) await _pinToMsg(targetEl, gen);
+      if (targetEl) {
+        await _pinToMsg(targetEl, gen);
+        if (isExactTarget) flashHighlightRow(targetEl);
+      }
       if (gen !== _loadGen) return null;
       return targetEl || null;
     } finally {

@@ -58,6 +58,7 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
             quoted_text    TEXT,
             quoted_sender  TEXT,
             quoted_ts      INTEGER,
+            quoted_msg_id  INTEGER,
             reactions      TEXT,
             is_edited      INTEGER NOT NULL DEFAULT 0,
             edited_ts      INTEGER,
@@ -2921,6 +2922,7 @@ class TestRecentMessagesRouting:
             "quoted_text",
             "quoted_sender",
             "quoted_ts",
+            "quoted_msg_id",
             "reactions",
             "is_edited",
             "edited_ts",
@@ -9118,3 +9120,156 @@ class TestAndroidHdAndMediaMatching:
             # Must resolve to phone number and contact display name, NOT the raw LID
             assert chats[0]["id"] == "393454408875"
             assert chats[0]["display_name"] == "Agata"
+
+
+class TestQuotedMessageResolution:
+    def test_android_quoted_message_resolves_quoted_msg_id_and_ts(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (
+                _id INTEGER PRIMARY KEY,
+                user TEXT NOT NULL,
+                server TEXT,
+                raw_string TEXT NOT NULL
+            );
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER NOT NULL,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                key_id TEXT NOT NULL,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (
+                _id INTEGER PRIMARY KEY,
+                message_row_id INTEGER,
+                file_path TEXT,
+                media_name TEXT
+            );
+            CREATE TABLE message_quoted (
+                message_row_id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                parent_message_chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                sender_jid_row_id INTEGER,
+                key_id TEXT NOT NULL,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+
+            INSERT INTO jid VALUES (1, '15551234567', 's.whatsapp.net', '15551234567@s.whatsapp.net');
+            INSERT INTO chat VALUES (10, 1, NULL, 0, 1700000010000, 2);
+
+            -- Message 1: Original message at ts 1700000000000
+            INSERT INTO message VALUES (1, 10, 0, 'KEY_ORIG_1', 1, 1700000000000, 'Original text', 0);
+
+            -- Message 2: Reply quoting Message 1, but with timestamp=0 in message_quoted
+            INSERT INTO message VALUES (2, 10, 1, 'KEY_REPLY_2', 1, 1700000010000, 'Reply text', 0);
+            INSERT INTO message_quoted VALUES (2, 10, 10, 0, 1, 'KEY_ORIG_1', 0, 0, 'Original text');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=15551234567&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 2
+            reply_msg = next(m for m in msgs if m["msg_id"] == 2)
+            assert reply_msg["quoted_msg_id"] == 1
+            assert reply_msg["quoted_ts"] == 1700000000000
+            assert reply_msg["quoted_text"] == "Original text"
+
+    def test_ios_quoted_message_resolves_quoted_msg_id_and_media_label(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCREATIONDATE REAL,
+                ZCREATORJID TEXT,
+                ZPICTUREID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 0, '15559876543@s.whatsapp.net', 'Bob');
+
+            INSERT INTO ZWAMEDIAITEM VALUES (1, 'photo.jpg', 'photo.jpg');
+
+            -- Message 1: Photo message without caption
+            INSERT INTO ZWAMESSAGE VALUES (10, 1, 0, 700000000.0, 'STANZA_PHOTO', 1, 1, NULL, NULL, 'Bob', NULL, '15559876543@s.whatsapp.net');
+
+            -- Message 2: Quoted reply pointing to Message 1
+            INSERT INTO ZWAMESSAGE VALUES (11, 1, 1, 700000010.0, 'STANZA_REPLY', 0, NULL, NULL, 10, 'You', 'Great shot!', '15559876543@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 2
+            reply_msg = next(m for m in msgs if m["msg_id"] == 11)
+            assert reply_msg["quoted_msg_id"] == 10
+            assert reply_msg["quoted_ts"] == int((700000000.0 + 978307200) * 1000)
+            assert reply_msg["quoted_text"] == "📷 Photo"
