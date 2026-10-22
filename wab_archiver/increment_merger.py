@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import logging
@@ -11,6 +12,7 @@ import struct
 import zipfile
 import zlib
 from dataclasses import dataclass
+from typing import Any
 
 # ==============================================================================
 # increment_merger.py — WhatsApp Android Incremental Backup Merger
@@ -356,6 +358,40 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     quoted_info = None
     is_view_once = 0
     is_ephemeral = 0
+
+    # Field 45: Embedded poll votes (in poll creation/update WMI envelope)
+    embedded_poll_votes: list[dict[str, Any]] = []
+    if 45 in fields and fields[45]:
+        for entry in fields[45]:
+            if not isinstance(entry[1], bytes):
+                continue
+            try:
+                sub = parse_wire_fields(entry[1])
+                v_key = (
+                    parse_message_key(sub[1][0][1])
+                    if 1 in sub and isinstance(sub[1][0][1], bytes)
+                    else {}
+                )
+                v_sender_ts = sub.get(3, [(0, 0)])[0][1] if 3 in sub else timestamp_ms
+                v2 = (
+                    parse_wire_fields(sub[2][0][1])
+                    if 2 in sub and isinstance(sub[2][0][1], bytes)
+                    else {}
+                )
+                selected_hashes = [
+                    h[1] for h in v2.get(1, []) if isinstance(h[1], bytes) and len(h[1]) == 32
+                ]
+                embedded_poll_votes.append(
+                    {
+                        "key_id": v_key.get("key_id", ""),
+                        "from_me": v_key.get("from_me", 0),
+                        "participant": v_key.get("participant"),
+                        "sender_ts": v_sender_ts,
+                        "selected_option_hashes": selected_hashes,
+                    }
+                )
+            except (ValueError, Exception):
+                pass
 
     # Field 2: Message payload
     if 2 in fields:
@@ -740,10 +776,37 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                         options.append(opt_name)
             selectable_count = poll_fields.get(4, [(0, 0)])[0][1] if 4 in poll_fields else 0
             text_data = name
+
+            m_secret = None
+            if 35 in msg_fields and isinstance(msg_fields[35][0][1], bytes):
+                try:
+                    ctx_f = parse_wire_fields(msg_fields[35][0][1])
+                    if (
+                        3 in ctx_f
+                        and isinstance(ctx_f[3][0][1], bytes)
+                        and len(ctx_f[3][0][1]) == 32
+                    ):
+                        m_secret = ctx_f[3][0][1]
+                except (ValueError, Exception):
+                    pass
+            if not m_secret and 35 in poll_fields and isinstance(poll_fields[35][0][1], bytes):
+                try:
+                    ctx_f = parse_wire_fields(poll_fields[35][0][1])
+                    if (
+                        3 in ctx_f
+                        and isinstance(ctx_f[3][0][1], bytes)
+                        and len(ctx_f[3][0][1]) == 32
+                    ):
+                        m_secret = ctx_f[3][0][1]
+                except (ValueError, Exception):
+                    pass
+
             poll_info = {
                 "question": name,
                 "options": options,
                 "selectable_count": selectable_count,
+                "message_secret": m_secret,
+                "embedded_votes": embedded_poll_votes,
             }
 
         # 50: pollUpdateMessage (poll vote)
@@ -756,9 +819,32 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 else {}
             )
             sender_ts = pu_fields.get(3, [(0, 0)])[0][1] if 3 in pu_fields else timestamp_ms
+            opt_hashes: list[bytes] = []
+            enc_payload: bytes | None = None
+            enc_iv: bytes | None = None
+            if 2 in pu_fields and isinstance(pu_fields[2][0][1], bytes):
+                try:
+                    v2_fields = parse_wire_fields(pu_fields[2][0][1])
+                    for h in v2_fields.get(1, []) + v2_fields.get(3, []):
+                        if isinstance(h[1], bytes) and len(h[1]) == 32:
+                            opt_hashes.append(h[1])
+                    if not opt_hashes:
+                        if 1 in v2_fields and isinstance(v2_fields[1][0][1], bytes):
+                            enc_payload = v2_fields[1][0][1]
+                        if (
+                            2 in v2_fields
+                            and isinstance(v2_fields[2][0][1], bytes)
+                            and len(v2_fields[2][0][1]) == 12
+                        ):
+                            enc_iv = v2_fields[2][0][1]
+                except (ValueError, Exception):
+                    pass
             poll_vote_info = {
                 "poll_key_id": poll_key.get("key_id", ""),
                 "sender_ts": sender_ts,
+                "selected_option_hashes": opt_hashes,
+                "enc_payload": enc_payload,
+                "enc_iv": enc_iv,
             }
 
         # 63: pinInChatMessage
@@ -847,6 +933,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         "user_receipts": user_receipts,
         "quoted_info": quoted_info,
         "push_name": push_name,
+        "embedded_poll_votes": embedded_poll_votes,
     }
 
 
@@ -1818,31 +1905,243 @@ def apply_reaction_record(
     return True
 
 
+def decrypt_poll_vote_payload(
+    enc_payload: bytes,
+    enc_iv: bytes,
+    poll_msg_id: str,
+    poll_creator_jid_str: str,
+    voter_jid_str: str,
+    orig_msg_secret: bytes,
+) -> list[bytes]:
+    """Decrypt AES-256-GCM poll vote payload using HKDF derived key and return option SHA256 hashes."""
+    try:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    except ImportError:
+        return []
+
+    try:
+        orig_clean = (
+            poll_creator_jid_str.split(":")[0].split("@")[0]
+            + "@"
+            + poll_creator_jid_str.split("@")[-1]
+            if "@" in poll_creator_jid_str
+            else poll_creator_jid_str
+        )
+        mod_clean = (
+            voter_jid_str.split(":")[0].split("@")[0] + "@" + voter_jid_str.split("@")[-1]
+            if "@" in voter_jid_str
+            else voter_jid_str
+        )
+        use_case_secret = (
+            poll_msg_id.encode("utf-8")
+            + orig_clean.encode("utf-8")
+            + mod_clean.encode("utf-8")
+            + b"Poll Vote"
+        )
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=use_case_secret,
+        )
+        secret_key = hkdf.derive(orig_msg_secret)
+        aad = f"{poll_msg_id}\x00{mod_clean}".encode()
+        aesgcm = AESGCM(secret_key)
+        decrypted = aesgcm.decrypt(enc_iv, enc_payload, aad)
+
+        vote_fields = parse_wire_fields(decrypted)
+        return [
+            item[1]
+            for item in vote_fields.get(1, [])
+            if isinstance(item[1], bytes) and len(item[1]) == 32
+        ]
+    except Exception:
+        return []
+
+
+def apply_embedded_poll_votes(
+    conn: sqlite3.Connection,
+    parent_row_id: int,
+    embedded_votes: list[dict],
+    schema_cache: dict[str, set[str]] | None,
+    logger: logging.Logger,
+    chat_row_id: int | None,
+    is_group: bool,
+    jid_cache: dict[str, int],
+) -> None:
+    """Apply embedded poll votes from WMI Tag 45 into message_add_on and message_add_on_poll_vote."""
+    add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
+    vote_cols = get_table_columns(conn, "message_add_on_poll_vote", schema_cache)
+    vote_opt_cols = get_table_columns(
+        conn, "message_add_on_poll_vote_selected_option", schema_cache
+    )
+    poll_opt_cols = get_table_columns(conn, "message_poll_option", schema_cache)
+    if not add_on_cols or not vote_opt_cols or chat_row_id is None:
+        return
+
+    cur = conn.cursor()
+
+    # Pre-map option sha256 to option _id for this poll
+    hash_to_opt_id: dict[bytes, int] = {}
+    if poll_opt_cols:
+        cur.execute(
+            "SELECT _id, option_name, option_sha256 FROM message_poll_option WHERE message_row_id = ?",
+            (parent_row_id,),
+        )
+        for opt_r in cur.fetchall():
+            opt_id, opt_name, opt_sha = opt_r[0], opt_r[1], opt_r[2]
+            if opt_sha:
+                try:
+                    h = base64.b64decode(opt_sha)
+                    hash_to_opt_id[h] = opt_id
+                except (ValueError, Exception):
+                    pass
+            if opt_name:
+                h_from_name = hashlib.sha256(opt_name.encode("utf-8")).digest()
+                hash_to_opt_id[h_from_name] = opt_id
+
+    for v in embedded_votes:
+        v_key_id = v.get("key_id", "")
+        from_me = v.get("from_me", 0)
+        part = v.get("participant")
+        if not is_group or from_me == 1:
+            s_jid_id = -1
+        elif part:
+            s_jid_id = resolve_or_create_jid(conn, part, logger, jid_cache)
+        else:
+            s_jid_id = -1
+
+        v_ts = v.get("sender_ts", 0)
+        sel_hashes = v.get("selected_option_hashes", [])
+
+        # Delete prior vote for this sender on this poll
+        cur.execute(
+            "DELETE FROM message_add_on_poll_vote_selected_option WHERE message_add_on_row_id IN ("
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
+            (parent_row_id, s_jid_id),
+        )
+        if vote_cols:
+            cur.execute(
+                "DELETE FROM message_add_on_poll_vote WHERE message_add_on_row_id IN ("
+                "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
+                (parent_row_id, s_jid_id),
+            )
+        cur.execute(
+            "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67",
+            (parent_row_id, s_jid_id),
+        )
+
+        row_map = {
+            "parent_message_row_id": parent_row_id,
+            "from_me": from_me,
+            "sender_jid_row_id": s_jid_id,
+            "status": 0,
+            "message_add_on_type": 67,
+            "timestamp": v_ts,
+            "key_id": v_key_id,
+            "chat_row_id": chat_row_id,
+            "received_timestamp": v_ts,
+        }
+        valid_cols = [c for c in row_map if c in add_on_cols]
+        cur.execute(
+            f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
+            [row_map[c] for c in valid_cols],
+        )
+        add_on_id = cur.lastrowid
+
+        if vote_cols and add_on_id:
+            cur.execute(
+                "INSERT INTO message_add_on_poll_vote (message_add_on_row_id, sender_timestamp) VALUES (?, ?)",
+                (add_on_id, v_ts),
+            )
+
+        if add_on_id:
+            for h in sel_hashes:
+                if h in hash_to_opt_id:
+                    cur.execute(
+                        "INSERT INTO message_add_on_poll_vote_selected_option (message_add_on_row_id, message_poll_option_id) VALUES (?, ?)",
+                        (add_on_id, hash_to_opt_id[h]),
+                    )
+
+    # Recalculate vote_total for all options of this poll
+    if poll_opt_cols:
+        cur.execute(
+            "UPDATE message_poll_option SET vote_total = ("
+            "  SELECT COUNT(DISTINCT ps.message_add_on_row_id) "
+            "  FROM message_add_on_poll_vote_selected_option ps "
+            "  JOIN message_add_on mao ON mao._id = ps.message_add_on_row_id "
+            "  WHERE ps.message_poll_option_id = message_poll_option._id AND mao.parent_message_row_id = ?"
+            ") WHERE message_row_id = ?",
+            (parent_row_id, parent_row_id),
+        )
+
+
 def apply_poll_creation(
     conn: sqlite3.Connection,
     msg_row_id: int,
     poll_info: dict,
     schema_cache: dict[str, set[str]] | None,
     logger: logging.Logger,
+    chat_row_id: int | None,
+    is_group: bool,
+    jid_cache: dict[str, int],
 ) -> None:
-    """Insert message_poll and message_poll_option records for a poll message."""
+    """Insert message_poll and message_poll_option records for a poll message, and apply embedded votes."""
     poll_cols = get_table_columns(conn, "message_poll", schema_cache)
     poll_opt_cols = get_table_columns(conn, "message_poll_option", schema_cache)
+    secret_cols = get_table_columns(conn, "message_secret", schema_cache)
     cur = conn.cursor()
 
     if poll_cols:
         selectable = poll_info.get("selectable_count", 0)
         cur.execute(
-            "INSERT INTO message_poll (message_row_id, selectable_options_count) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO message_poll (message_row_id, selectable_options_count) VALUES (?, ?)",
             (msg_row_id, selectable),
         )
 
+    msg_secret = poll_info.get("message_secret")
+    if secret_cols and msg_secret:
+        cur.execute(
+            "INSERT OR REPLACE INTO message_secret (message_row_id, message_secret) VALUES (?, ?)",
+            (msg_row_id, msg_secret),
+        )
+
     if poll_opt_cols:
-        for opt_name in poll_info.get("options", []):
-            cur.execute(
-                "INSERT INTO message_poll_option (message_row_id, option_name, vote_total) VALUES (?, ?, 0)",
-                (msg_row_id, opt_name),
-            )
+        cur.execute(
+            "SELECT COUNT(*) FROM message_poll_option WHERE message_row_id = ?",
+            (msg_row_id,),
+        )
+        existing_count = cur.fetchone()[0]
+        has_sha_col = "option_sha256" in poll_opt_cols
+        if existing_count == 0:
+            for opt_name in poll_info.get("options", []):
+                h = hashlib.sha256(opt_name.encode("utf-8")).digest()
+                h_b64 = base64.b64encode(h).decode("ascii")
+                if has_sha_col:
+                    cur.execute(
+                        "INSERT INTO message_poll_option (message_row_id, option_name, option_sha256, vote_total) VALUES (?, ?, ?, 0)",
+                        (msg_row_id, opt_name, h_b64),
+                    )
+                else:
+                    cur.execute(
+                        "INSERT INTO message_poll_option (message_row_id, option_name, vote_total) VALUES (?, ?, 0)",
+                        (msg_row_id, opt_name),
+                    )
+
+    embedded_votes = poll_info.get("embedded_votes", [])
+    if embedded_votes:
+        apply_embedded_poll_votes(
+            conn,
+            msg_row_id,
+            embedded_votes,
+            schema_cache,
+            logger,
+            chat_row_id,
+            is_group,
+            jid_cache,
+        )
 
 
 def apply_poll_vote(
@@ -1871,6 +2170,7 @@ def apply_poll_vote(
     vote_opt_cols = get_table_columns(
         conn, "message_add_on_poll_vote_selected_option", schema_cache
     )
+    poll_opt_cols = get_table_columns(conn, "message_poll_option", schema_cache)
     if not add_on_cols:
         return False
 
@@ -1917,6 +2217,83 @@ def apply_poll_vote(
             "INSERT INTO message_add_on_poll_vote (message_add_on_row_id, sender_timestamp) VALUES (?, ?)",
             (add_on_id, sender_ts),
         )
+
+    # Link selected options if present or encrypted
+    sel_hashes = list(poll_vote_info.get("selected_option_hashes", []))
+    enc_payload = poll_vote_info.get("enc_payload")
+    enc_iv = poll_vote_info.get("enc_iv")
+    if not sel_hashes and enc_payload and enc_iv:
+        secret_cols = get_table_columns(conn, "message_secret", schema_cache)
+        if secret_cols:
+            cur.execute(
+                "SELECT message_secret FROM message_secret WHERE message_row_id = ?",
+                (parent_row_id,),
+            )
+            s_row = cur.fetchone()
+            if s_row and s_row[0]:
+                orig_secret = s_row[0]
+                cur.execute(
+                    "SELECT m.key_id, COALESCE(NULLIF(j.raw_string, ''), j_chat.raw_string, '') "
+                    "FROM message m "
+                    "LEFT JOIN jid j ON j._id = m.sender_jid_row_id "
+                    "LEFT JOIN chat c ON c._id = m.chat_row_id "
+                    "LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id "
+                    "WHERE m._id = ?",
+                    (parent_row_id,),
+                )
+                p_info = cur.fetchone()
+                p_key_id = p_info[0] if p_info else poll_key_id
+                p_creator_jid = p_info[1] if p_info else ""
+                cur.execute(
+                    "SELECT raw_string FROM jid WHERE _id = ?",
+                    (sender_jid_row_id,),
+                )
+                v_jid_row = cur.fetchone()
+                v_jid_str = v_jid_row[0] if v_jid_row else ""
+                sel_hashes = decrypt_poll_vote_payload(
+                    enc_payload,
+                    enc_iv,
+                    p_key_id,
+                    p_creator_jid,
+                    v_jid_str,
+                    orig_secret,
+                )
+
+    if vote_opt_cols and add_on_id and sel_hashes and poll_opt_cols:
+        cur.execute(
+            "SELECT _id, option_name, option_sha256 FROM message_poll_option WHERE message_row_id = ?",
+            (parent_row_id,),
+        )
+        opt_lookup: dict[bytes, int] = {}
+        for opt_r in cur.fetchall():
+            opt_id, opt_name, opt_sha = opt_r[0], opt_r[1], opt_r[2]
+            if opt_sha:
+                try:
+                    h = base64.b64decode(opt_sha)
+                    opt_lookup[h] = opt_id
+                except (ValueError, Exception):
+                    pass
+            if opt_name:
+                h_name = hashlib.sha256(opt_name.encode("utf-8")).digest()
+                opt_lookup[h_name] = opt_id
+
+        for h in sel_hashes:
+            if h in opt_lookup:
+                cur.execute(
+                    "INSERT INTO message_add_on_poll_vote_selected_option (message_add_on_row_id, message_poll_option_id) VALUES (?, ?)",
+                    (add_on_id, opt_lookup[h]),
+                )
+
+        cur.execute(
+            "UPDATE message_poll_option SET vote_total = ("
+            "  SELECT COUNT(DISTINCT ps.message_add_on_row_id) "
+            "  FROM message_add_on_poll_vote_selected_option ps "
+            "  JOIN message_add_on mao ON mao._id = ps.message_add_on_row_id "
+            "  WHERE ps.message_poll_option_id = message_poll_option._id AND mao.parent_message_row_id = ?"
+            ") WHERE message_row_id = ?",
+            (parent_row_id, parent_row_id),
+        )
+
     return True
 
 
@@ -2279,6 +2656,7 @@ def apply_message_deletions(
     has_media = bool(get_table_columns(conn, "message_media", schema_cache))
     has_quoted = bool(get_table_columns(conn, "message_quoted", schema_cache))
     has_receipt_user = bool(get_table_columns(conn, "receipt_user", schema_cache))
+    has_secret = bool(get_table_columns(conn, "message_secret", schema_cache))
 
     for i in range(0, len(verified_ids), chunk_size):
         chunk = verified_ids[i : i + chunk_size]
@@ -2321,6 +2699,11 @@ def apply_message_deletions(
         if has_poll:
             cur.execute(
                 f"DELETE FROM message_poll WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_secret:
+            cur.execute(
+                f"DELETE FROM message_secret WHERE message_row_id IN ({placeholders})",
                 chunk,
             )
         if has_loc:
@@ -2859,9 +3242,33 @@ def apply_messages_bin(
         if msg.get("location_info") and msg_row_id:
             apply_location_record(conn, msg_row_id, msg["location_info"], schema_cache, logger)
 
-        # Apply poll creation metadata if present
+        # Apply poll creation metadata and embedded votes if present
         if msg.get("poll_info") and msg_row_id:
-            apply_poll_creation(conn, msg_row_id, msg["poll_info"], schema_cache, logger)
+            apply_poll_creation(
+                conn,
+                msg_row_id,
+                msg["poll_info"],
+                schema_cache,
+                logger,
+                chat_row_id,
+                is_group,
+                jid_cache,
+            )
+        elif msg.get("embedded_poll_votes") and msg.get("key_id"):
+            parent_id = key_cache.get(msg["key_id"]) or find_message_row_id(
+                conn, msg["key_id"], key_cache
+            )
+            if parent_id:
+                apply_embedded_poll_votes(
+                    conn,
+                    parent_id,
+                    msg["embedded_poll_votes"],
+                    schema_cache,
+                    logger,
+                    chat_row_id,
+                    is_group,
+                    jid_cache,
+                )
 
         # Insert message_quoted record if present
         if msg.get("quoted_info") and msg_row_id:
