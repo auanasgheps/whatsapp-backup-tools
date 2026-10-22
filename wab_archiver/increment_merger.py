@@ -3338,7 +3338,7 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
             """
         )
         if cur.rowcount > 0:
-            logger.info(f"Updated account_jid_row_id for {cur.rowcount} chat(s) from jid_map")
+            logger.debug(f"Updated account_jid_row_id for {cur.rowcount} chat(s) from jid_map")
 
     # Step B: Identify and consolidate duplicate split chats (phone chat + LID chat)
     query = """
@@ -3350,7 +3350,7 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
     """
     dup_pairs = cur.execute(query).fetchall()
     if dup_pairs:
-        logger.info(f"Consolidating {len(dup_pairs)} split phone/LID chat pairs...")
+        logger.debug(f"Consolidating {len(dup_pairs)} split phone/LID chat pairs...")
         for phone_chat_id, lid_chat_id, lid_row_id in dup_pairs:
             cur.execute(
                 "UPDATE message SET chat_row_id = ? WHERE chat_row_id = ?",
@@ -3426,7 +3426,7 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
                 )
 
             if msgs_moved > 0:
-                logger.info(
+                logger.debug(
                     f"Consolidated chat pair (phone_chat={phone_chat_id}, lid_chat={lid_chat_id}): moved {msgs_moved} messages."
                 )
 
@@ -3442,7 +3442,7 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
     """
     dup_chats = cur.execute(dup_query).fetchall()
     if dup_chats:
-        logger.info(f"Consolidating {len(dup_chats)} duplicate natural chat pairs...")
+        logger.debug(f"Consolidating {len(dup_chats)} duplicate natural chat pairs...")
         for c1_id, c2_id, _j1, _j2 in dup_chats:
             cur.execute(
                 "UPDATE message SET chat_row_id = ? WHERE chat_row_id = ?",
@@ -3513,7 +3513,7 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
                 )
 
             if msgs_moved > 0:
-                logger.info(
+                logger.debug(
                     f"Consolidated natural duplicate chat pair (base_chat={c1_id}, dup_chat={c2_id}): moved {msgs_moved} messages."
                 )
 
@@ -3564,7 +3564,7 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
                         WHERE sender_jid_row_id IN (SELECT comp_id FROM _comp_to_pri)
                     """)
                     if cur.rowcount > 0:
-                        logger.info(
+                        logger.debug(
                             f"Re-pointed {cur.rowcount} message sender JIDs from companion devices to primary canonical JIDs."
                         )
                 cur.execute("DROP TABLE IF EXISTS _comp_to_pri")
@@ -3701,7 +3701,7 @@ def merge_increments(
         migrate_restored_backup_to_lid(conn, logger)
 
         # Step 7: Rebuild database indexes after all increments are applied, matching vendor MessageStoreBackupUtils/reindex
-        logger.info("Rebuilding database indexes (REINDEX)...")
+        logger.info("Rebuilding database indexes...")
         conn.execute("REINDEX")
 
         # Restore synchronous mode and execute quick integrity check
