@@ -52,9 +52,8 @@ On first run (or with `--rescan`), the viewer builds a cache DB (`.wa_chat_viewe
 
 1. **Source WhatsApp database** (`msgstore.db` for Android, `ChatStorage.sqlite` for iOS) — timestamps, sender names, and text message bodies
 2. **Archive database** (`.wa_media_archiver.db`) — maps original media paths to archived file locations
-3. **File mtime fallback** — used when no source WA database is present (media-only mode)
 
-The source WA database must be present for the viewer to resolve media file paths. If you archived without keeping it, only timestamps from file modification times are available.
+The source WhatsApp database (`msgstore.db` or `ChatStorage.sqlite`) is strictly required for the viewer to launch and resolve chat messages and media paths.
 
 ## Features
 
@@ -89,12 +88,12 @@ The server binds to `127.0.0.1` by default — it is not accessible from other m
 
 **Media files return 404**
 
-- The source WA database must be present for the viewer to resolve `archive_path` from `original_path`
-- If you archived without keeping the source DB, only file-mtime timestamps will be available (media-only mode)
+- The source WA database must be present in the archive directory (`Whatsapp Databases/` or root) for the viewer to resolve `archive_path` from `original_path`
+- Verify that the archived media files have not been moved or renamed after archiving
 
 **Text messages are missing**
 
-- The source WA database is required to show text-only messages. Media messages with captions will show the caption but not text-only messages.
+- Ensure you have not excluded message tables or run with a corrupted WhatsApp database. The viewer requires a valid `msgstore.db` or `ChatStorage.sqlite` to load messages.
 
 ## Known Limitations
 
