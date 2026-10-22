@@ -58,6 +58,7 @@ Preserved records remain fully searchable and browsable in the web viewer with c
 
 #### 🐛 Bug Fixes
 
+- **Background Event Chat List Filtering**: Contacts with zero exchanged messages no longer appear in your recent chat list due to background business account notifications.
 - **iOS Group Event Classification**: Resolved an issue where iOS group events could be ignored or treated as undownloaded media cards.
 - Minor UI polish and rendering fixes.
 

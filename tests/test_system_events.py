@@ -365,3 +365,58 @@ def test_association_type_enum():
     assert AssociationType.IOS_HD_VIDEO == 5
     assert AssociationType.IOS_HD_PHOTO == 10
     assert AssociationType.IOS_LIVE_PHOTO == 12
+
+
+def test_format_android_e2e_and_privacy_notices():
+    """Verify E2E encryption and initial privacy provider notices formatting."""
+    e2e_text = "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
+    assert (
+        format_android_system_event(SystemActionType.E2E_ENCRYPTION, "Alice", [], "", {})
+        == e2e_text
+    )
+    assert (
+        format_android_system_event(SystemActionType.INITIAL_PRIVACY_PROVIDER, "Alice", [], "", {})
+        == e2e_text
+    )
+    assert (
+        format_android_system_event(SystemActionType.E2E_IDENTITY_NOTICE, "Alice", [], "", {})
+        == e2e_text
+    )
+
+    biz_e2e = format_android_system_event(
+        SystemActionType.INITIAL_PRIVACY_PROVIDER,
+        "Alice",
+        [],
+        "",
+        {"verified_biz_name": "Acme Corp"},
+    )
+    assert (
+        biz_e2e
+        == "This chat is with the official business account of Acme Corp. Messages and calls are end-to-end encrypted."
+    )
+
+
+def test_format_android_ephemeral_and_call_settings():
+    """Verify ephemeral setting action 56, 68 and group call action 70."""
+    res_eph_56 = format_android_system_event(
+        SystemActionType.EPHEMERAL_SETTING,
+        "Alice",
+        [],
+        "",
+        {"setting_duration": "604800"},
+    )
+    assert res_eph_56 == "Disappearing messages set to 7 days"
+
+    res_eph_off = format_android_system_event(
+        SystemActionType.EPHEMERAL_SETTING_ALT,
+        "Alice",
+        [],
+        "",
+        {"setting_duration": "0"},
+    )
+    assert res_eph_off == "Disappearing messages turned off"
+
+    assert (
+        format_android_system_event(SystemActionType.LINKED_GROUP_CALL, "Alice", [], "", {})
+        == "Group call"
+    )

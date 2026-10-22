@@ -20,18 +20,24 @@ class SystemActionType(IntEnum):
     PARTICIPANT_LEFT = 13
     PARTICIPANT_REMOVED = 14
     ADMIN_PROMOTED = 15
+    E2E_ENCRYPTION = 18
     EPHEMERAL_TOGGLE = 19
     ADMIN_DEMOTED = 20
     DESCRIPTION_CHANGED = 27
     DESCRIPTION_DELETED = 28
+    EPHEMERAL_SETTING = 56
     ANNOUNCEMENT_MODE = 58
     BIZ_ACCOUNT_STATE = 61
+    INITIAL_PRIVACY_PROVIDER = 67
     EPHEMERAL_TIMER_SET = 67
+    EPHEMERAL_SETTING_ALT = 68
     BIZ_ACCOUNT_VERIFIED = 69
+    LINKED_GROUP_CALL = 70
     JOINED_VIA_INVITE_LINK = 79
     JOINED_VIA_INVITE_LINK_ALT = 123
     MEMBERSHIP_APPROVAL_REQUEST = 124
     COMMUNITY_LINK_CHANGED = 127
+    E2E_IDENTITY_NOTICE = 129
     MEMBERSHIP_APPROVAL_MODE = 136
     MEMBERSHIP_APPROVAL_APPROVED = 144
     EPHEMERAL_DEFAULT_TIMER = 146
@@ -184,8 +190,37 @@ def format_android_system_event(
             return "You're no longer an admin"
         return f"{target_str} is no longer an admin"
 
-    if action_type in (SystemActionType.EPHEMERAL_TOGGLE, SystemActionType.EPHEMERAL_TIMER_SET):
-        secs = int(text) if text and text.isdigit() else 0
+    if action_type in (
+        SystemActionType.E2E_ENCRYPTION,
+        SystemActionType.E2E_IDENTITY_NOTICE,
+    ):
+        biz_name = metadata.get("verified_biz_name")
+        if biz_name:
+            return f"This chat is with the official business account of {biz_name}. Messages and calls are end-to-end encrypted."
+        return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
+
+    if action_type == SystemActionType.INITIAL_PRIVACY_PROVIDER:
+        if text and text.isdigit():
+            secs = int(text)
+            if secs > 0:
+                days = secs // 86400
+                if days >= 1:
+                    return f"Disappearing messages set to {days} days"
+                hours = secs // 3600
+                return f"Disappearing messages set to {hours} hours"
+            return "Disappearing messages turned off"
+        biz_name = metadata.get("verified_biz_name")
+        if biz_name:
+            return f"This chat is with the official business account of {biz_name}. Messages and calls are end-to-end encrypted."
+        return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
+
+    if action_type in (
+        SystemActionType.EPHEMERAL_TOGGLE,
+        SystemActionType.EPHEMERAL_SETTING,
+        SystemActionType.EPHEMERAL_SETTING_ALT,
+    ):
+        dur = metadata.get("setting_duration") or metadata.get("duration") or text
+        secs = int(dur) if dur and str(dur).isdigit() else 0
         if secs > 0:
             days = secs // 86400
             if days >= 1:
@@ -193,6 +228,9 @@ def format_android_system_event(
             hours = secs // 3600
             return f"Disappearing messages set to {hours} hours"
         return "Disappearing messages turned off"
+
+    if action_type == SystemActionType.LINKED_GROUP_CALL:
+        return "Group call"
 
     if action_type == SystemActionType.EPHEMERAL_DEFAULT_TIMER:
         secs = int(text) if text and text.isdigit() else 0
