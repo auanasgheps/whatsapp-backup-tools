@@ -2630,6 +2630,42 @@ class TestBuildIosNumberMap:
         result = ios.build_ios_number_map(conn.cursor(), logger)
         assert result == {}
 
+    def test_lid_mapped_to_phone_from_chatsession(self, logger):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZCONTACTIDENTIFIER TEXT,
+                ZGROUPINFO INTEGER,
+                ZCONTACTABID INTEGER,
+                ZLASTMESSAGEDATE REAL
+            );
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZGROUPINFO, ZCONTACTABID, ZLASTMESSAGEDATE)
+            VALUES (1, '123456789012345@lid', '393001112223@s.whatsapp.net', NULL, NULL, 1000.0);
+        """)
+        result = ios.build_ios_number_map(conn.cursor(), logger)
+        assert result == {"123456789012345": "393001112223"}
+
+    def test_load_ios_lid_map_extracts_pairs(self, tmp_path, logger):
+        db_path = tmp_path / "ContactsV2.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE ZWAADDRESSBOOKCONTACT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZLID TEXT,
+                ZWHATSAPPID TEXT,
+                ZFULLNAME TEXT
+            );
+            INSERT INTO ZWAADDRESSBOOKCONTACT (Z_PK, ZLID, ZWHATSAPPID, ZFULLNAME)
+            VALUES (1, '123456789012345@lid', '393001112223@s.whatsapp.net', 'Synthetic Contact');
+        """)
+        conn.commit()
+        conn.close()
+
+        result = ios.load_ios_lid_map(str(db_path), logger)
+        assert result == {"123456789012345": "393001112223"}
+
 
 # ===========================================================================
 # adb_extractor

@@ -2488,6 +2488,11 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 if not contacts and ios_contacts_path:
                     contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
 
+                if ios_contacts_path:
+                    lid_map = ios_handler.load_ios_lid_map(ios_contacts_path, logger)
+                    for lid_key, phone_val in lid_map.items():
+                        number_map.setdefault(lid_key, phone_val)
+
                 pushname_map = ios_handler.build_ios_pushname_map(cursor, logger)
                 for key, name in pushname_map.items():
                     contacts.setdefault(key, name)

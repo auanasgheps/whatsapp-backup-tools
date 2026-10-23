@@ -395,12 +395,49 @@ def build_ios_number_map(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict
         raw_pairs = cursor.fetchall()
     except sqlite3.OperationalError as e:
         logger.warning(f"iOS number-change query unavailable ({e}); skipping consolidation.")
-        return {}
-
-    if not raw_pairs:
-        return {}
+        raw_pairs = []
 
     direct = {old: new for old, new in raw_pairs if old and new}
+    try:
+        cs_cols = {r[1] for r in cursor.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if "ZCONTACTIDENTIFIER" in cs_cols:
+            lid_pairs = cursor.execute("""
+                SELECT
+                    CASE WHEN INSTR(ZCONTACTJID, '@') > 0
+                         THEN SUBSTR(ZCONTACTJID, 1, INSTR(ZCONTACTJID, '@') - 1)
+                         ELSE ZCONTACTJID END,
+                    CASE WHEN INSTR(ZCONTACTIDENTIFIER, '@') > 0
+                         THEN SUBSTR(ZCONTACTIDENTIFIER, 1, INSTR(ZCONTACTIDENTIFIER, '@') - 1)
+                         ELSE ZCONTACTIDENTIFIER END
+                FROM ZWACHATSESSION
+                WHERE ZCONTACTJID LIKE '%@lid'
+                  AND ZCONTACTIDENTIFIER LIKE '%@s.whatsapp.net'
+            """).fetchall()
+            for lid, phone in lid_pairs:
+                if lid and phone:
+                    direct[lid] = phone
+
+            lid_pairs_inv = cursor.execute("""
+                SELECT
+                    CASE WHEN INSTR(ZCONTACTIDENTIFIER, '@') > 0
+                         THEN SUBSTR(ZCONTACTIDENTIFIER, 1, INSTR(ZCONTACTIDENTIFIER, '@') - 1)
+                         ELSE ZCONTACTIDENTIFIER END,
+                    CASE WHEN INSTR(ZCONTACTJID, '@') > 0
+                         THEN SUBSTR(ZCONTACTJID, 1, INSTR(ZCONTACTJID, '@') - 1)
+                         ELSE ZCONTACTJID END
+                FROM ZWACHATSESSION
+                WHERE ZCONTACTJID LIKE '%@s.whatsapp.net'
+                  AND ZCONTACTIDENTIFIER LIKE '%@lid'
+            """).fetchall()
+            for lid, phone in lid_pairs_inv:
+                if lid and phone:
+                    direct[lid] = phone
+    except sqlite3.OperationalError as e:
+        logger.debug(f"ZCONTACTIDENTIFIER LID mapping query unavailable ({e}); skipping.")
+
+    if not direct:
+        return {}
+
     cyclic: set[str] = set()
 
     def resolve(number, visited=None):
@@ -463,6 +500,9 @@ def load_ios_contacts(sqlite_path: str, logger: logging.Logger) -> dict[str, str
 
     try:
         with contextlib.closing(sqlite3.connect(sqlite_path)) as conn:
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(ZWAADDRESSBOOKCONTACT)").fetchall()
+            }
             rows = conn.execute("""
                 SELECT SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1),
                        ZFULLNAME
@@ -470,12 +510,51 @@ def load_ios_contacts(sqlite_path: str, logger: logging.Logger) -> dict[str, str
                 WHERE ZWHATSAPPID LIKE '%@s.whatsapp.net'
                   AND ZFULLNAME IS NOT NULL
             """).fetchall()
+            contacts = {number: name for number, name in rows if number}
+
+            if "ZLID" in cols:
+                lid_rows = conn.execute("""
+                    SELECT SUBSTR(ZLID, 1, INSTR(ZLID, '@') - 1),
+                           ZFULLNAME
+                    FROM ZWAADDRESSBOOKCONTACT
+                    WHERE ZLID LIKE '%@lid'
+                      AND ZFULLNAME IS NOT NULL
+                """).fetchall()
+                for lid, name in lid_rows:
+                    if lid and name:
+                        contacts.setdefault(lid, name)
     except sqlite3.OperationalError as e:
         logger.warning(f"Could not read iOS contacts ({e}); proceeding without names.")
         return {}
-
-    contacts = {number: name for number, name in rows if number}
     unique_contacts = len({name for name in contacts.values() if name})
     logger.info(f"Loaded {len(contacts)} phone number(s) across {unique_contacts} iOS contact(s).")
     contacts.setdefault("0", "WhatsApp")
     return contacts
+
+
+def load_ios_lid_map(sqlite_path: str, logger: logging.Logger) -> dict[str, str]:
+    """
+    Load LID -> phone_number mapping from ContactsV2.sqlite (ZWAADDRESSBOOKCONTACT).
+    Returns {lid_prefix: phone_number}.
+    """
+    if not sqlite_path or not os.path.isfile(sqlite_path):
+        return {}
+
+    try:
+        with contextlib.closing(sqlite3.connect(sqlite_path)) as conn:
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(ZWAADDRESSBOOKCONTACT)").fetchall()
+            }
+            if "ZLID" not in cols or "ZWHATSAPPID" not in cols:
+                return {}
+            rows = conn.execute("""
+                SELECT SUBSTR(ZLID, 1, INSTR(ZLID, '@') - 1),
+                       SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
+                FROM ZWAADDRESSBOOKCONTACT
+                WHERE ZLID LIKE '%@lid'
+                  AND ZWHATSAPPID LIKE '%@s.whatsapp.net'
+            """).fetchall()
+            return {lid: phone for lid, phone in rows if lid and phone}
+    except sqlite3.OperationalError as e:
+        logger.debug(f"Could not read iOS ContactsV2 LID mapping ({e}).")
+        return {}
