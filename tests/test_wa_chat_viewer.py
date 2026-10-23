@@ -2925,6 +2925,10 @@ class TestRecentMessagesRouting:
             "media_duration",
             "aspect_ratio",
             "has_thumbnail",
+            "link_title",
+            "link_desc",
+            "link_url",
+            "link_preview_type",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -9520,3 +9524,204 @@ class TestQuotedMessageResolution:
             assert reply_msg["quoted_msg_id"] == 10
             assert reply_msg["quoted_ts"] == int((700000000.0 + 978307200) * 1000)
             assert reply_msg["quoted_text"] == "📷 Photo"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Rich Link Previews (Android and iOS)
+# ---------------------------------------------------------------------------
+
+
+class TestRichLinkPreviews:
+    """Verify rich link previews decoding, caching, and serving across endpoints."""
+
+    def test_android_rich_link_previews(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS message_text (
+                message_row_id INTEGER PRIMARY KEY,
+                description TEXT,
+                page_title TEXT,
+                url TEXT,
+                matched_text TEXT,
+                canonical_url TEXT,
+                preview_type INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS message_thumbnail (
+                message_row_id INTEGER PRIMARY KEY,
+                thumbnail BLOB
+            );
+        """)
+        seed_android_db(wa_conn, make_archive_db(archive_path))
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type)
+            VALUES (2, 10, 0, 1, 1700000001000, 'Check this https://github.com', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_text (message_row_id, description, page_title, url, matched_text, canonical_url, preview_type)
+            VALUES (2, 'GitHub: Let’s build from here', 'GitHub', 'https://github.com', 'https://github.com', 'https://github.com', 1)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_thumbnail (message_row_id, thumbnail)
+            VALUES (2, X'FFD8FFE000104A464946')
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            link_msg = next(m for m in msgs if m["msg_id"] == 2)
+            assert link_msg["link_title"] == "GitHub"
+            assert link_msg["link_desc"] == "GitHub: Let’s build from here"
+            assert link_msg["link_url"] == "https://github.com"
+            assert link_msg["link_preview_type"] == 1
+            assert bool(link_msg["has_thumbnail"]) is True
+
+            # Also verify /api/media/links endpoint
+            resp_links = client.get("/api/media/links?chat_id=10&chat_type=contact")
+            assert resp_links.status_code == 200
+            links = resp_links.get_json()
+            assert len(links) >= 1
+            assert any(item["link_title"] == "GitHub" for item in links)
+
+    def test_ios_rich_link_previews(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMETADATA BLOB
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCREATIONDATE REAL,
+                ZCREATORJID TEXT,
+                ZPICTUREID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 0, '15559876543@s.whatsapp.net', 'Bob');
+        """)
+        # Wire tag 3: (3 << 3) | 2 = 26 (0x1A), len 14, b"Python website"
+        desc_bytes = b"Python website"
+        metadata_blob = b"\x1a" + bytes([len(desc_bytes)]) + desc_bytes
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA) VALUES (1, NULL, 'Welcome to Python.org', ?)",
+            (metadata_blob,),
+        )
+        # Message type 7 is link preview on iOS!
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (10, 1, 0, 700000000.0, 'STANZA_LINK_7', 7, 1, NULL, NULL, 'Bob', 'https://www.python.org', '15559876543@s.whatsapp.net')
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            link_msg = msgs[0]
+            assert link_msg["msg_id"] == 10
+            assert link_msg["media_type"] == "link"
+            assert link_msg["link_title"] == "Welcome to Python.org"
+            assert link_msg["link_desc"] == "Python website"
+            assert link_msg["link_url"] == "https://www.python.org"
+
+            # Also check /api/media/links endpoint
+            resp_links = client.get("/api/media/links?chat_id=1&chat_type=contact")
+            assert resp_links.status_code == 200
+            links = resp_links.get_json()
+            assert len(links) == 1
+            assert links[0]["link_title"] == "Welcome to Python.org"
+
+    def test_recent_messages_caches_link_preview_info(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS message_text (
+                message_row_id INTEGER PRIMARY KEY,
+                description TEXT,
+                page_title TEXT,
+                url TEXT,
+                matched_text TEXT,
+                canonical_url TEXT,
+                preview_type INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS message_thumbnail (
+                message_row_id INTEGER PRIMARY KEY,
+                thumbnail BLOB
+            );
+        """)
+        seed_android_db(wa_conn, make_archive_db(archive_path))
+        wa_conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type)
+            VALUES (2, 10, 0, 1, 1700000001000, 'Check this https://github.com', 0)
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_text (message_row_id, description, page_title, url, matched_text, canonical_url, preview_type)
+            VALUES (2, 'GitHub Desc', 'GitHub Title', 'https://github.com', 'https://github.com', 'https://github.com', 1)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=True)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=contact")
+            assert resp.status_code == 200
+
+        archive_conn = sqlite3.connect(str(archive_path))
+        archive_conn.row_factory = sqlite3.Row
+        row = archive_conn.execute("SELECT * FROM recent_messages WHERE msg_id = 2").fetchone()
+        assert row is not None
+        assert row["link_title"] == "GitHub Title"
+        assert row["link_desc"] == "GitHub Desc"
+        assert row["link_url"] == "https://github.com"
+        assert row["link_preview_type"] == 1
+        archive_conn.close()

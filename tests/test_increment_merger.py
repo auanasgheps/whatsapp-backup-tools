@@ -4471,3 +4471,78 @@ def test_apply_messages_bin_resolves_quoted_timestamp_immediate_and_deferred(moc
     assert row_b[0] == 1729000150000
 
     conn.close()
+
+
+def test_apply_messages_bin_link_preview(mock_db, tmp_path):
+    """Verify decode_wmi and apply_messages_bin extract link previews into message_text and message_thumbnail."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_text (
+            message_row_id INTEGER PRIMARY KEY,
+            description TEXT,
+            page_title TEXT,
+            url TEXT,
+            matched_text TEXT,
+            canonical_url TEXT,
+            preview_type INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS message_thumbnail (
+            message_row_id INTEGER PRIMARY KEY,
+            thumbnail BLOB
+        );
+    """)
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"LINK_MSG_KEY")
+    )
+    ext_bytes = (
+        _build_field(1, 2, b"Check https://example.com")
+        + _build_field(2, 2, b"https://example.com")
+        + _build_field(4, 2, b"https://example.com")
+        + _build_field(5, 2, b"Example domain website")
+        + _build_field(6, 2, b"Example Domain")
+        + _build_field(10, 0, 1)
+        + _build_field(16, 2, b"\xff\xd8\xff\xe0\x00")
+    )
+    msg_bytes = _build_field(6, 2, ext_bytes)
+    wmi = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000100)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi)
+    assert decoded["link_preview_info"] is not None
+    assert decoded["link_preview_info"]["title"] == "Example Domain"
+    assert decoded["link_preview_info"]["description"] == "Example domain website"
+    assert decoded["link_preview_info"]["url"] == "https://example.com"
+    assert decoded["link_preview_info"]["preview_type"] == 1
+    assert decoded["link_preview_info"]["thumbnail"] == b"\xff\xd8\xff\xe0\x00"
+
+    bin_path = str(tmp_path / "messages_link.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi)) + wmi)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+    assert inserted == 1
+
+    cur = conn.cursor()
+    row = cur.execute("""
+        SELECT mt.page_title, mt.description, mt.url, mt.preview_type, mth.thumbnail
+        FROM message m
+        JOIN message_text mt ON mt.message_row_id = m._id
+        LEFT JOIN message_thumbnail mth ON mth.message_row_id = m._id
+        WHERE m.key_id = 'LINK_MSG_KEY'
+    """).fetchone()
+
+    assert row is not None
+    assert row[0] == "Example Domain"
+    assert row[1] == "Example domain website"
+    assert row[2] == "https://example.com"
+    assert row[3] == 1
+    assert row[4] == b"\xff\xd8\xff\xe0\x00"
+    conn.close()

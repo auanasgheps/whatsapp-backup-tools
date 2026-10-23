@@ -1436,12 +1436,80 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
             }
 
 
+def _extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
+    """Extract page description string from wire tag 3 of an iOS ZMETADATA protobuf blob."""
+    if not metadata_bytes or not isinstance(metadata_bytes, (bytes, bytearray)):
+        return None
+    try:
+        idx = 0
+        n = len(metadata_bytes)
+        while idx < n:
+            b = metadata_bytes[idx]
+            idx += 1
+            wire_type = b & 7
+            field_num = b >> 3
+            if wire_type == 0:
+                while idx < n and (metadata_bytes[idx] & 0x80):
+                    idx += 1
+                idx += 1
+            elif wire_type == 2:
+                length = 0
+                shift = 0
+                while idx < n:
+                    lb = metadata_bytes[idx]
+                    idx += 1
+                    length |= (lb & 0x7F) << shift
+                    if not (lb & 0x80):
+                        break
+                    shift += 7
+                if field_num == 3:
+                    desc_bytes = metadata_bytes[idx : idx + length]
+                    return desc_bytes.decode("utf-8", errors="replace")
+                idx += length
+            elif wire_type == 5:
+                idx += 4
+            elif wire_type == 1:
+                idx += 8
+            else:
+                break
+    except Exception:
+        pass
+    return None
+
+
+def _hydrate_link_preview_rows(rows: list[dict], source_type: str) -> None:
+    """Hydrate link preview fields across Android and iOS rows."""
+    if not rows:
+        return
+    for row in rows:
+        raw_meta = row.pop("_raw_metadata", None)
+        if source_type == "ios" and raw_meta and not row.get("link_desc"):
+            desc = _extract_ios_link_description(raw_meta)
+            if desc:
+                row["link_desc"] = desc
+        if not row.get("link_url") and (row.get("link_title") or row.get("media_type") == "link"):
+            m = re.search(r"https?://[^\s<>\"']+", row.get("text_body") or "")
+            if m:
+                row["link_url"] = m.group(0).rstrip(".,;:!?)\\'\"")
+
+
 def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> None:
     if not rows:
         return
     cur_cols = {r[1] for r in archive_conn.execute("PRAGMA table_info(recent_messages)").fetchall()}
     has_qmid = "quoted_msg_id" in cur_cols
-    if has_qmid:
+    has_lp = "link_title" in cur_cols and "has_thumbnail" in cur_cols
+    if has_lp:
+        sql = """
+            INSERT OR REPLACE INTO recent_messages
+                (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                 archive_path, media_type, media_name, text_body,
+                 quoted_text, quoted_sender, quoted_ts, quoted_msg_id, reactions,
+                 is_edited, edited_ts, is_view_once, link_title, link_desc, link_url,
+                 link_preview_type, has_thumbnail)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+    elif has_qmid:
         sql = """
             INSERT OR REPLACE INTO recent_messages
                 (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
@@ -1477,7 +1545,7 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
             r["quoted_sender"] if "quoted_sender" in keys else None,
             r["quoted_ts"] if "quoted_ts" in keys else None,
         ]
-        if has_qmid:
+        if has_qmid or has_lp:
             row_vals.append(r["quoted_msg_id"] if "quoted_msg_id" in keys else None)
         row_vals.extend(
             [
@@ -1487,6 +1555,16 @@ def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> N
                 r["is_view_once"] if "is_view_once" in keys else 0,
             ]
         )
+        if has_lp:
+            row_vals.extend(
+                [
+                    r["link_title"] if "link_title" in keys else None,
+                    r["link_desc"] if "link_desc" in keys else None,
+                    r["link_url"] if "link_url" in keys else None,
+                    r["link_preview_type"] if "link_preview_type" in keys else 0,
+                    r["has_thumbnail"] if "has_thumbnail" in keys else 0,
+                ]
+            )
         params.append(tuple(row_vals))
     archive_conn.executemany(sql, params)
     archive_conn.commit()
@@ -1695,6 +1773,25 @@ def _query_preserved_messages(
                 )
                 if isinstance(p, dict):
                     d["poll"] = p
+            except Exception:
+                pass
+        d["link_title"] = None
+        d["link_desc"] = None
+        d["link_url"] = None
+        d["link_preview_type"] = 0
+        if d.get("service_metadata"):
+            try:
+                sm = (
+                    json.loads(d["service_metadata"])
+                    if isinstance(d["service_metadata"], str)
+                    else d["service_metadata"]
+                )
+                if isinstance(sm, dict) and "link_preview" in sm:
+                    lp = sm["link_preview"]
+                    d["link_title"] = lp.get("title")
+                    d["link_desc"] = lp.get("desc")
+                    d["link_url"] = lp.get("url")
+                    d["link_preview_type"] = int(lp.get("preview_type", 0) or 0)
             except Exception:
                 pass
         d.pop("rowid", None)
@@ -2786,6 +2883,7 @@ _IOS_SELECT = f"""
             WHEN m.ZMESSAGETYPE = 39 THEN 'video'
             WHEN m.ZMESSAGETYPE = 53 THEN 'audio'
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
+            WHEN m.ZMESSAGETYPE = 7 THEN 'link'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -2833,7 +2931,18 @@ _IOS_SELECT = f"""
         CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         0                                                            AS group_event_type,
-        gm.ZMEMBERJID                                                AS member_jid
+        gm.ZMEMBERJID                                                AS member_jid,
+        0                                                            AS media_width,
+        0                                                            AS media_height,
+        0                                                            AS media_size,
+        0                                                            AS media_duration,
+        0.0                                                          AS aspect_ratio,
+        0                                                            AS has_thumbnail,
+        NULLIF(mi.ZTITLE, '')                                        AS link_title,
+        NULL                                                         AS link_desc,
+        NULLIF(mi.ZMEDIAURL, '')                                     AS link_url,
+        0                                                            AS link_preview_type,
+        NULL                                                         AS _raw_metadata
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
@@ -2891,10 +3000,10 @@ _ANDROID_IS_LINK = (
     "      OR INSTR(LOWER(m.text_data), 'https://') > 0)"
 )
 _IOS_IS_LINK = (
-    "(m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+    "(m.ZMESSAGETYPE = 7 OR ((m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
     " AND m.ZTEXT IS NOT NULL"
     " AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0"
-    "      OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)"
+    "      OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)))"
 )
 
 _ANDROID_IS_DOCUMENT_UNDOWNLOADED = (
@@ -3675,6 +3784,11 @@ def create_app(output_root: Path, rescan: bool = False):
             is_edited      INTEGER NOT NULL DEFAULT 0,
             edited_ts      INTEGER,
             is_view_once   INTEGER NOT NULL DEFAULT 0,
+            link_title     TEXT,
+            link_desc      TEXT,
+            link_url       TEXT,
+            link_preview_type INTEGER NOT NULL DEFAULT 0,
+            has_thumbnail  INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -3712,8 +3826,22 @@ def create_app(output_root: Path, rescan: bool = False):
         )
     if "quoted_msg_id" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN quoted_msg_id INTEGER")
-    if _archive_conn.execute("PRAGMA user_version").fetchone()[0] < 4:
-        _archive_conn.execute("PRAGMA user_version = 4")
+    if "link_title" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN link_title TEXT")
+    if "link_desc" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN link_desc TEXT")
+    if "link_url" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN link_url TEXT")
+    if "link_preview_type" not in cols:
+        _archive_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN link_preview_type INTEGER NOT NULL DEFAULT 0"
+        )
+    if "has_thumbnail" not in cols:
+        _archive_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN has_thumbnail INTEGER NOT NULL DEFAULT 0"
+        )
+    if _archive_conn.execute("PRAGMA user_version").fetchone()[0] < 5:
+        _archive_conn.execute("PRAGMA user_version = 5")
     if rescan or (source_is_changed and has_prior_stamp):
         _archive_conn.execute("DELETE FROM recent_messages")
         try:
@@ -3834,6 +3962,19 @@ def create_app(output_root: Path, rescan: bool = False):
         has_ios_aspect_ratio = "ZASPECTRATIO" in _mi_cols
         has_ios_filesize = "ZFILESIZE" in _mi_cols
         has_ios_duration = "ZMOVIEDURATION" in _mi_cols
+        has_ios_title = "ZTITLE" in _mi_cols
+        has_ios_mediaurl = "ZMEDIAURL" in _mi_cols
+        has_ios_metadata = "ZMETADATA" in _mi_cols
+        has_message_text = "message_text" in _wa_tables
+        _mt_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_text)").fetchall()}
+            if has_message_text
+            else set()
+        )
+        has_mt_title = "page_title" in _mt_cols
+        has_mt_desc = "description" in _mt_cols
+        has_mt_url = "url" in _mt_cols
+        has_mt_preview_type = "preview_type" in _mt_cols
         _zwa_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
             if "ZWAMESSAGE" in _wa_tables
@@ -3857,6 +3998,9 @@ def create_app(output_root: Path, rescan: bool = False):
         ios_filesize_col = "COALESCE(mi.ZFILESIZE, 0)" if has_ios_filesize else "0"
         ios_duration_col = "COALESCE(mi.ZMOVIEDURATION, 0)" if has_ios_duration else "0"
         ios_aspect_ratio_col = "COALESCE(mi.ZASPECTRATIO, 0.0)" if has_ios_aspect_ratio else "0.0"
+        ios_link_title = "NULLIF(mi.ZTITLE, '')" if has_ios_title else "NULL"
+        ios_link_url = "NULLIF(mi.ZMEDIAURL, '')" if has_ios_mediaurl else "NULL"
+        ios_raw_metadata = "mi.ZMETADATA" if has_ios_metadata else "NULL"
         ios_thumb_arms = []
         if "ZXMPPTHUMBPATH" in _mi_cols:
             ios_thumb_arms.append("mi.ZXMPPTHUMBPATH IS NOT NULL")
@@ -3889,6 +4033,7 @@ def create_app(output_root: Path, rescan: bool = False):
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
         OR (m.ZMESSAGETYPE = 46)
+        OR (m.ZMESSAGETYPE = 7)
         {ios_service_filter}
     )
 """
@@ -3940,6 +4085,7 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.ZMESSAGETYPE = 39 THEN 'video'
             WHEN m.ZMESSAGETYPE = 53 THEN 'audio'
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
+            WHEN m.ZMESSAGETYPE = 7 THEN 'link'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
                 CASE WHEN m.ZTEXT IS NOT NULL
                       AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
@@ -3994,7 +4140,12 @@ def create_app(output_root: Path, rescan: bool = False):
         {ios_filesize_col}                                           AS media_size,
         {ios_duration_col}                                           AS media_duration,
         {ios_aspect_ratio_col}                                       AS aspect_ratio,
-        {ios_has_thumb_expr}                                         AS has_thumbnail
+        {ios_has_thumb_expr}                                         AS has_thumbnail,
+        {ios_link_title}                                             AS link_title,
+        NULL                                                         AS link_desc,
+        {ios_link_url}                                               AS link_url,
+        0                                                            AS link_preview_type,
+        {ios_raw_metadata}                                           AS _raw_metadata
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
@@ -4196,6 +4347,16 @@ def create_app(output_root: Path, rescan: bool = False):
     """
     android_chat_type = f"CASE WHEN ({is_group_chat_select}) THEN 'group' ELSE 'contact' END"
 
+    android_text_join = (
+        "    LEFT JOIN message_text mtxt ON mtxt.message_row_id = m._id\n"
+        if has_message_text
+        else ""
+    )
+    mt_title_col = "NULLIF(mtxt.page_title, '')" if has_mt_title else "NULL"
+    mt_desc_col = "NULLIF(mtxt.description, '')" if has_mt_desc else "NULL"
+    mt_url_col = "NULLIF(mtxt.url, '')" if has_mt_url else "NULL"
+    mt_preview_type_col = "COALESCE(mtxt.preview_type, 0)" if has_mt_preview_type else "0"
+
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
@@ -4268,10 +4429,14 @@ def create_app(output_root: Path, rescan: bool = False):
         {mm_size_col}                                                AS media_size,
         {mm_duration_col}                                            AS media_duration,
         {mm_aspect_col}                                              AS aspect_ratio,
-        {android_has_thumb_expr}                                     AS has_thumbnail
+        {android_has_thumb_expr}                                     AS has_thumbnail,
+        {mt_title_col}                                               AS link_title,
+        {mt_desc_col}                                                AS link_desc,
+        {mt_url_col}                                                 AS link_url,
+        {mt_preview_type_col}                                        AS link_preview_type
     FROM message m
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
-{android_thumb_joins}    LEFT JOIN chat c ON c._id = m.chat_row_id
+{android_thumb_joins}{android_text_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
     LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
     LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
     LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
@@ -4922,6 +5087,7 @@ def create_app(output_root: Path, rescan: bool = False):
                             if row["msg_id"] in rx_map:
                                 row["reactions"] = rx_map[row["msg_id"]]
                     _hydrate_poll_rows(rows, source_type, get_wa())
+                    _hydrate_link_preview_rows(rows, source_type)
                     pres = get_preserved()
                     if pres is not None:
                         pres_rows = _query_preserved_messages(
@@ -5049,6 +5215,7 @@ def create_app(output_root: Path, rescan: bool = False):
             ).start()
 
         _hydrate_poll_rows(rows, source_type, conn)
+        _hydrate_link_preview_rows(rows, source_type)
         pres = get_preserved()
         if pres is not None:
             b_val = int(before) if before else None
@@ -5133,6 +5300,7 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("raw_msg_type", None)
             row.pop("member_jid", None)
         _hydrate_poll_rows(combined, source_type, conn)
+        _hydrate_link_preview_rows(combined, source_type)
         pres = get_preserved()
         if pres is not None:
             pres_before = _query_preserved_messages(pres, chat_id, chat_type, ts + 1, None, half)
@@ -5281,8 +5449,9 @@ def create_app(output_root: Path, rescan: bool = False):
             is_link = _IOS_IS_LINK
             ts_col = _IOS_TS
         sql = f"{select} WHERE {chat_pred} AND {is_link} ORDER BY {ts_col} DESC"
-        rows = conn.execute(sql, chat_params).fetchall()
-        return jsonify([dict(r) for r in rows])
+        rows = [dict(r) for r in conn.execute(sql, chat_params).fetchall()]
+        _hydrate_link_preview_rows(rows, source_type)
+        return jsonify(rows)
 
     @app.route("/api/media/documents")
     def api_media_documents():

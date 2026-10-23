@@ -2904,3 +2904,100 @@ def test_viewer_chat_info_preserved_roster_and_calls(tmp_path: Path) -> None:
     assert len(data["members"]) == 2
     assert data["members"][0]["name"] == "Mom"
     assert data["members"][1]["name"] == "Dad"
+
+
+def test_diff_and_extract_android_link_preview(tmp_path: Path) -> None:
+    """Verify Android link preview metadata in message_text is preserved in service_metadata."""
+    old_db = tmp_path / "old_msgstore.db"
+    new_db = tmp_path / "new_msgstore.db"
+    arch_db = tmp_path / "arch.db"
+    _make_dummy_archive_db(arch_db)
+
+    for p in (old_db, new_db):
+        with sqlite3.connect(p) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY, chat_row_id INTEGER, from_me INTEGER,
+                    sender_jid_row_id INTEGER, key_id TEXT, timestamp INTEGER,
+                    message_type INTEGER, text_data TEXT
+                );
+                CREATE TABLE message_text (
+                    message_row_id INTEGER PRIMARY KEY,
+                    description TEXT,
+                    page_title TEXT,
+                    url TEXT,
+                    preview_type INTEGER
+                );
+                INSERT INTO jid VALUES (1, 'alice', 'alice@s.whatsapp.net');
+                INSERT INTO chat VALUES (1, 1);
+            """)
+
+    with sqlite3.connect(old_db) as conn:
+        conn.execute("""
+            INSERT INTO message VALUES (1, 1, 0, 1, 'key_link_1', 1000, 0, 'Check this link')
+        """)
+        conn.execute("""
+            INSERT INTO message_text VALUES (1, 'Page description', 'Page Title', 'https://example.com', 1)
+        """)
+        conn.commit()
+
+    extracted = preservation.diff_and_extract_android(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    assert len(extracted) == 1
+    meta = json.loads(extracted[0]["service_metadata"])
+    assert "link_preview" in meta
+    assert meta["link_preview"]["title"] == "Page Title"
+    assert meta["link_preview"]["desc"] == "Page description"
+    assert meta["link_preview"]["url"] == "https://example.com"
+    assert meta["link_preview"]["preview_type"] == 1
+
+
+def test_diff_and_extract_ios_link_preview(tmp_path: Path) -> None:
+    """Verify iOS link preview metadata in ZWAMEDIAITEM is preserved in service_metadata."""
+    old_db = tmp_path / "old_chatstorage.sqlite"
+    new_db = tmp_path / "new_chatstorage.sqlite"
+    arch_db = tmp_path / "arch.db"
+    _make_dummy_archive_db(arch_db)
+
+    for p in (old_db, new_db):
+        with sqlite3.connect(p) as conn:
+            conn.executescript("""
+                CREATE TABLE ZWACHATSESSION (
+                    Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+                );
+                CREATE TABLE ZWAMEDIAITEM (
+                    Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT, ZMEDIALOCALPATH TEXT, ZMETADATA BLOB
+                );
+                CREATE TABLE ZWAMESSAGE (
+                    Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                    ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                    ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                    ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+                );
+                INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+            """)
+
+    with sqlite3.connect(old_db) as conn:
+        desc_bytes = b"iOS page snippet"
+        metadata_blob = b"\x1a" + bytes([len(desc_bytes)]) + desc_bytes
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (1, 'iOS Title', NULL, ?)",
+            (metadata_blob,),
+        )
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE VALUES (1, 1, 'ios_link_key', 0, 'partner@s.whatsapp.net', 1000.0, 7, 'https://example.org', 'Partner', 1, NULL)
+        """)
+        conn.commit()
+
+    extracted = preservation.diff_and_extract_ios(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    assert len(extracted) == 1
+    meta = json.loads(extracted[0]["service_metadata"])
+    assert "link_preview" in meta
+    assert meta["link_preview"]["title"] == "iOS Title"
+    assert meta["link_preview"]["desc"] == "iOS page snippet"
+    assert meta["link_preview"]["url"] == "https://example.org"

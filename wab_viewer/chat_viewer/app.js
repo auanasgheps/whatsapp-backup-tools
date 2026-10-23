@@ -1138,6 +1138,9 @@
         txt.className = 'msg-text';
         txt.innerHTML = highlight(msg.text_body, '');
         bubble.appendChild(txt);
+        if (msg.link_title || msg.link_url || msg.link_desc) {
+          bubble.appendChild(renderLinkPreview(msg));
+        }
       }
     } else {
       const mediaEl = renderMedia(msg);
@@ -1183,6 +1186,74 @@
 
     row.appendChild(bubble);
     return row;
+  }
+
+  function extractDomain(url) {
+    if (!url) return '';
+    try {
+      const u = new URL(url);
+      return u.hostname.replace(/^www\./, '').toUpperCase();
+    } catch {
+      return '';
+    }
+  }
+
+  function renderLinkPreview(msg) {
+    const card = document.createElement('div');
+    const isBanner = Number(msg.link_preview_type) === 1;
+    card.className = 'msg-link-preview' + (isBanner ? ' banner' : ' compact');
+
+    const anchor = document.createElement('a');
+    anchor.className = 'link-preview-anchor';
+    anchor.href = msg.link_url || '#';
+    anchor.target = '_blank';
+    anchor.rel = 'noopener noreferrer';
+    const domain = extractDomain(msg.link_url);
+    const ariaTitle = msg.link_title || domain || 'Web page';
+    anchor.setAttribute('aria-label', 'Link preview: ' + ariaTitle);
+
+    if (msg.has_thumbnail && msg.msg_id) {
+      const mediaBox = document.createElement('div');
+      mediaBox.className = 'link-preview-media';
+      const img = document.createElement('img');
+      img.className = 'link-preview-thumb';
+      img.src = '/api/thumbnail/' + msg.msg_id;
+      img.alt = '';
+      img.loading = 'lazy';
+      img.onerror = () => {
+        mediaBox.style.display = 'none';
+      };
+      mediaBox.appendChild(img);
+      anchor.appendChild(mediaBox);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'link-preview-body';
+
+    if (domain) {
+      const domEl = document.createElement('div');
+      domEl.className = 'link-preview-domain';
+      domEl.textContent = domain;
+      body.appendChild(domEl);
+    }
+
+    if (msg.link_title) {
+      const titleEl = document.createElement('div');
+      titleEl.className = 'link-preview-title';
+      titleEl.textContent = msg.link_title;
+      body.appendChild(titleEl);
+    }
+
+    if (msg.link_desc) {
+      const descEl = document.createElement('div');
+      descEl.className = 'link-preview-desc';
+      descEl.textContent = msg.link_desc;
+      body.appendChild(descEl);
+    }
+
+    anchor.appendChild(body);
+    card.appendChild(anchor);
+    return card;
   }
 
   function renderMissingMedia(msg) {
