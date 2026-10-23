@@ -5384,11 +5384,11 @@ class TestServiceMessages:
             assert "1" not in chat_ids
             # Chat 2 (has real message) must be present
             assert "2" in chat_ids
-            # Chat 3 (has E2E banner) must be present
-            assert "3" in chat_ids
-            c3 = next(c for c in chats if c["id"] == "3")
-            assert c3["last_msg_type"] == "service"
-            assert "Messages and calls are end-to-end encrypted" in c3["last_msg_preview"]
+            c2 = next(c for c in chats if c["id"] == "2")
+            # Chat list preview and sorting must only reflect real user interactions, never internal E2E banners
+            assert c2["last_msg_preview"] == "Hello from iPhone"
+            # Chat 3 (has only E2E banner and 0 user messages) must be excluded from chat list
+            assert "3" not in chat_ids
 
             # Opening Chat 2 returns both the user message and the formatted E2E notice
             m_resp = client.get("/api/messages?chat_id=2&chat_type=contact")
@@ -5399,7 +5399,7 @@ class TestServiceMessages:
             assert by_id[2]["media_type"] == "service"
             assert "Messages and calls are end-to-end encrypted" in by_id[2]["text_body"]
 
-            # Opening Chat 3 displays the E2E banner message
+            # Opening Chat 3 directly displays the internal E2E banner message in conversation history
             m_resp3 = client.get("/api/messages?chat_id=3&chat_type=contact")
             msgs3 = m_resp3.get_json()
             assert len(msgs3) == 1
@@ -5957,6 +5957,179 @@ class TestIosMessageReceiptsGroupFilter:
                 assert data["available"] is True
                 assert len(data["members"]) == 1
                 assert data["members"][0]["jid"] == "member1"
+
+    def test_ios_group_receipts_includes_silent_members_and_lid_bridging(self, tmp_path):
+        from unittest.mock import patch
+
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.close()
+
+        conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEINFO INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGESTATUS INTEGER,
+                ZSTANZAID TEXT,
+                ZFROMJID TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+            CREATE TABLE ZWAMESSAGEINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMESSAGE INTEGER,
+                ZRECEIPTINFO BLOB
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+        """)
+        conn.execute("INSERT INTO ZWAGROUPINFO (Z_PK) VALUES (1)")
+        conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, 'group1@g.us', 1, 'Group 1')"
+        )
+        # member1 (sender), silent_reader (never sent a message, phone JID), lid_member (LID in ZRECEIPTINFO, mapped in _ios_contacts)
+        conn.execute(
+            "INSERT INTO ZWAGROUPMEMBER (Z_PK, ZCHATSESSION, ZMEMBERJID, ZCONTACTNAME) VALUES (10, 1, 'member1@s.whatsapp.net', 'Member One')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAGROUPMEMBER (Z_PK, ZCHATSESSION, ZMEMBERJID, ZCONTACTNAME) VALUES (11, 1, 'silent_reader@s.whatsapp.net', 'Silent Reader')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAGROUPMEMBER (Z_PK, ZCHATSESSION, ZMEMBERJID, ZCONTACTNAME) VALUES (12, 1, '44112233@s.whatsapp.net', 'LID Member')"
+        )
+        # Only member1 has a row in ZWAMESSAGE; silent_reader and 44112233 have NO rows in ZWAMESSAGE
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEINFO, ZMESSAGEDATE, ZMESSAGESTATUS, ZSTANZAID, ZGROUPMEMBER) VALUES (100, 1, 1, 1, 700000000.0, 3, 'stanza1', 10)"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGEINFO (Z_PK, ZMESSAGE, ZRECEIPTINFO) VALUES (1, 100, X'0102')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Create LID.sqlite so _init_ios_contacts automatically bridges 999888777@lid <-> 44112233
+        lid_conn = sqlite3.connect(str(tmp_path / "LID.sqlite"))
+        lid_conn.executescript("""
+            CREATE TABLE ZWAZACCOUNT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZIDENTIFIER TEXT,
+                ZPHONENUMBER TEXT
+            );
+            INSERT INTO ZWAZACCOUNT VALUES (1, '999888777@lid', '44112233');
+        """)
+        lid_conn.commit()
+        lid_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            with patch("wab_viewer.main._parse_ios_receipt_blob") as mock_parse:
+                mock_parse.return_value = [
+                    {"jid": "member1", "delivered_ts": 1000, "read_ts": 2000},
+                    {"jid": "silent_reader", "delivered_ts": 1100, "read_ts": 2100},
+                    {"jid": "999888777", "delivered_ts": 1200, "read_ts": 2200},
+                    {"jid": "outsider", "delivered_ts": 1300, "read_ts": 2300},
+                ]
+                resp = client.get("/api/message_receipts/100")
+                assert resp.status_code == 200
+                data = resp.get_json()
+                assert data["available"] is True
+                returned_jids = [m["jid"] for m in data["members"]]
+                assert "member1" in returned_jids
+                assert "silent_reader" in returned_jids
+                assert "999888777" in returned_jids
+                assert "outsider" not in returned_jids
+
+
+class TestIosMediaGallerySerialization:
+    def test_ios_media_endpoints_with_blob_metadata(self, tmp_path):
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Message/media1.jpg', 'archived/media1.jpg')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZHIDDEN INTEGER DEFAULT 0,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZMETADATA BLOB,
+                ZTITLE TEXT,
+                ZMEDIAURL TEXT,
+                ZFILESIZE INTEGER,
+                ZMOVIEDURATION INTEGER,
+                ZASPECTRATIO REAL
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMESSAGETYPE INTEGER DEFAULT 1,
+                ZMESSAGEDATE REAL,
+                ZISFROMME INTEGER DEFAULT 1,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZFROMJID TEXT,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER
+            );
+        """)
+        conn.execute(
+            "INSERT INTO ZWACHATSESSION VALUES (1, 'contact1@s.whatsapp.net', 0, NULL, 'Contact')"
+        )
+        # mi.ZMETADATA is a raw binary BLOB
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (1, 'media1.jpg', X'08011204deadbeef', 'Photo', NULL, 1024, 0, 1.0)"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZMESSAGETYPE, ZMESSAGEDATE, ZISFROMME, ZMEDIAITEM) VALUES (1, 1, 1, 700000000.0, 1, 1)"
+        )
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp_media = client.get("/api/media?chat_id=1&chat_type=contact")
+            assert resp_media.status_code == 200
+            items = resp_media.get_json()
+            assert len(items) == 1
+            assert "_raw_metadata" not in items[0]
+            assert items[0]["msg_id"] == 1
+
+            resp_docs = client.get("/api/media/documents?chat_id=1&chat_type=contact")
+            assert resp_docs.status_code == 200
 
 
 class TestIosChatSummary:
