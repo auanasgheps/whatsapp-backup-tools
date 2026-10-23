@@ -175,3 +175,44 @@ def classify_media_type(path: str | None, fallback_path: str | None) -> str:
             return "gif"
 
     return "document"
+
+
+def extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
+    """Extract page description string from wire tag 3 of an iOS ZMETADATA protobuf blob."""
+    if not metadata_bytes or not isinstance(metadata_bytes, (bytes, bytearray)):
+        return None
+    try:
+        idx = 0
+        n = len(metadata_bytes)
+        while idx < n:
+            b = metadata_bytes[idx]
+            idx += 1
+            wire_type = b & 7
+            field_num = b >> 3
+            if wire_type == 0:
+                while idx < n and (metadata_bytes[idx] & 0x80):
+                    idx += 1
+                idx += 1
+            elif wire_type == 2:
+                length = 0
+                shift = 0
+                while idx < n:
+                    lb = metadata_bytes[idx]
+                    idx += 1
+                    length |= (lb & 0x7F) << shift
+                    if not (lb & 0x80):
+                        break
+                    shift += 7
+                if field_num == 3:
+                    desc_bytes = metadata_bytes[idx : idx + length]
+                    return desc_bytes.decode("utf-8", errors="replace")
+                idx += length
+            elif wire_type == 5:
+                idx += 4
+            elif wire_type == 1:
+                idx += 8
+            else:
+                break
+    except Exception:
+        pass
+    return None

@@ -2,11 +2,13 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 from datetime import UTC, datetime
 from typing import NamedTuple
 
+from shared.db import extract_ios_link_description
 from shared.source_detection import WA_DATABASES_DIR_NAME
 
 from .progress import ProgressReporter
@@ -1113,6 +1115,45 @@ def diff_and_extract_android(
                         meta_dict, ensure_ascii=False, separators=(",", ":")
                     )
 
+            # Hydrate link preview metadata from old_db.message_text
+            if "message_text" in old_tables and extracted_rows:
+                mt_msg_ids = [
+                    r["msg_id"] for r in extracted_rows if r.get("media_type") in ("link", "text")
+                ]
+                if mt_msg_ids:
+                    chunk_size_mt = 900
+                    mt_map = {}
+                    for i in range(0, len(mt_msg_ids), chunk_size_mt):
+                        chunk = mt_msg_ids[i : i + chunk_size_mt]
+                        ph = ",".join("?" * len(chunk))
+                        mt_rows = conn.execute(
+                            f"""
+                            SELECT message_row_id, page_title, description, url, preview_type
+                            FROM old_db.message_text
+                            WHERE message_row_id IN ({ph})
+                            """,
+                            chunk,
+                        ).fetchall()
+                        for mtr in mt_rows:
+                            mt_map[mtr[0]] = {
+                                "title": mtr[1],
+                                "desc": mtr[2],
+                                "url": mtr[3],
+                                "preview_type": mtr[4] or 0,
+                            }
+                    for r in extracted_rows:
+                        if r["msg_id"] in mt_map:
+                            existing_meta = {}
+                            if r.get("service_metadata"):
+                                try:
+                                    existing_meta = json.loads(r["service_metadata"])
+                                except Exception:
+                                    pass
+                            existing_meta["link_preview"] = mt_map[r["msg_id"]]
+                            r["service_metadata"] = json.dumps(
+                                existing_meta, ensure_ascii=False, separators=(",", ":")
+                            )
+
             # 8. Hydrate deleted group member roster
             if has_group_participants and extracted_rows:
                 group_chat_jids: dict[str, int] = {}
@@ -1822,6 +1863,7 @@ def diff_and_extract_ios(
             WHEN m.ZMESSAGETYPE IN (6, 10) THEN 'service'
             WHEN m.ZMESSAGETYPE IN (4, 14) THEN 'vcard'
             WHEN m.ZMESSAGETYPE = 5 THEN 'location'
+            WHEN m.ZMESSAGETYPE = 7 THEN 'link'
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
@@ -2143,6 +2185,57 @@ def diff_and_extract_ios(
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
+
+            # Hydrate iOS link preview service metadata
+            if "ZWAMEDIAITEM" in old_tables and extracted_rows:
+                link_candidates = [
+                    r
+                    for r in extracted_rows
+                    if r.get("media_type") == "link" or r.get("raw_msg_type") == 7
+                ]
+                if link_candidates:
+                    pks = [r["msg_id"] for r in link_candidates]
+                    chunk_size_lp = 900
+                    lp_map = {}
+                    lp_title_col = "mi.ZTITLE" if "ZTITLE" in mi_cols else "NULL"
+                    lp_url_col = "mi.ZMEDIAURL" if "ZMEDIAURL" in mi_cols else "NULL"
+                    lp_meta_col = "mi.ZMETADATA" if "ZMETADATA" in mi_cols else "NULL"
+                    for i in range(0, len(pks), chunk_size_lp):
+                        chunk = pks[i : i + chunk_size_lp]
+                        ph = ",".join("?" * len(chunk))
+                        lp_rows = conn.execute(
+                            f"""
+                            SELECT m.Z_PK, {lp_title_col}, {lp_url_col}, {lp_meta_col}
+                            FROM old_db.ZWAMESSAGE m
+                            JOIN old_db.ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                            WHERE m.Z_PK IN ({ph})
+                            """,
+                            chunk,
+                        ).fetchall()
+                        for lpr in lp_rows:
+                            lp_map[lpr[0]] = {
+                                "title": lpr[1],
+                                "desc": extract_ios_link_description(lpr[3]),
+                                "url": lpr[2],
+                                "preview_type": 0,
+                            }
+                    for r in link_candidates:
+                        if r["msg_id"] in lp_map:
+                            lp_data = lp_map[r["msg_id"]]
+                            if not lp_data.get("url") and r.get("text_body"):
+                                m_url = re.search(r"https?://[^\s]+", r["text_body"])
+                                if m_url:
+                                    lp_data["url"] = m_url.group(0)
+                            existing_meta = {}
+                            if r.get("service_metadata"):
+                                try:
+                                    existing_meta = json.loads(r["service_metadata"])
+                                except Exception:
+                                    pass
+                            existing_meta["link_preview"] = lp_data
+                            r["service_metadata"] = json.dumps(
+                                existing_meta, ensure_ascii=False, separators=(",", ":")
+                            )
 
             progress.finish({"deleted": deleted_count, "revoked": revoked_count})
         except Exception:

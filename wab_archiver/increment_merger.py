@@ -356,6 +356,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     revoke_info = None
     edit_info = None
     quoted_info = None
+    link_preview_info = None
     is_view_once = 0
     is_ephemeral = 0
 
@@ -505,6 +506,40 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 if 1 in ext_fields
                 else None
             )
+            matched_text = (
+                ext_fields.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 2 in ext_fields
+                else None
+            )
+            canonical_url = (
+                ext_fields.get(4, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 4 in ext_fields
+                else None
+            )
+            description = (
+                ext_fields.get(5, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 5 in ext_fields
+                else None
+            )
+            title = (
+                ext_fields.get(6, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 6 in ext_fields
+                else None
+            )
+            preview_type = ext_fields.get(10, [(0, 0)])[0][1] if 10 in ext_fields else 0
+            jpeg_thumbnail = (
+                ext_fields.get(16, [(2, b"")])[0][1]
+                if 16 in ext_fields and ext_fields[16][0][1]
+                else None
+            )
+            if matched_text or canonical_url or description or title or jpeg_thumbnail:
+                link_preview_info = {
+                    "url": canonical_url or matched_text,
+                    "title": title,
+                    "description": description,
+                    "preview_type": preview_type,
+                    "thumbnail": jpeg_thumbnail,
+                }
 
         # 7: documentMessage
         elif 7 in msg_fields:
@@ -934,6 +969,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         "quoted_info": quoted_info,
         "push_name": push_name,
         "embedded_poll_votes": embedded_poll_votes,
+        "link_preview_info": link_preview_info,
     }
 
 
@@ -3067,6 +3103,28 @@ def apply_messages_bin(
         if schema_cache is not None:
             schema_cache["message_vcard"] = {"exists"} if has_vcard_table else set()
 
+    if schema_cache is not None and "message_text" in schema_cache:
+        has_message_text_table = bool(schema_cache["message_text"])
+    else:
+        has_message_text_table = bool(
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_text'"
+            ).fetchone()
+        )
+        if schema_cache is not None:
+            schema_cache["message_text"] = {"exists"} if has_message_text_table else set()
+
+    if schema_cache is not None and "message_thumbnail" in schema_cache:
+        has_message_thumbnail_table = bool(schema_cache["message_thumbnail"])
+    else:
+        has_message_thumbnail_table = bool(
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_thumbnail'"
+            ).fetchone()
+        )
+        if schema_cache is not None:
+            schema_cache["message_thumbnail"] = {"exists"} if has_message_thumbnail_table else set()
+
     # Fast batch deletion of conflicting messages by key_id
     existing_media_paths: dict[str, str] = {}
     if "key_id" in msg_cols:
@@ -3241,6 +3299,40 @@ def apply_messages_bin(
                 "INSERT INTO message_vcard (message_row_id, vcard) VALUES (?, ?)",
                 (msg_row_id, msg["vcard"]),
             )
+
+        # Insert link preview records if present
+        if msg.get("link_preview_info") and msg_row_id:
+            lp = msg["link_preview_info"]
+            if has_message_text_table:
+                try:
+                    cur.execute(
+                        """
+                        INSERT OR REPLACE INTO message_text
+                            (message_row_id, description, page_title, url, preview_type)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            msg_row_id,
+                            lp.get("description"),
+                            lp.get("title"),
+                            lp.get("url"),
+                            lp.get("preview_type", 0),
+                        ),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            if has_message_thumbnail_table and lp.get("thumbnail"):
+                try:
+                    cur.execute(
+                        """
+                        INSERT OR REPLACE INTO message_thumbnail
+                            (message_row_id, thumbnail)
+                        VALUES (?, ?)
+                        """,
+                        (msg_row_id, lp["thumbnail"]),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
         # Apply location metadata if present
         if msg.get("location_info") and msg_row_id:
