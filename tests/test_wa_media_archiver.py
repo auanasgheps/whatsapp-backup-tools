@@ -928,7 +928,7 @@ class TestExtractPlaintext:
         )
         assert contacts_path == fake_contacts
 
-    def test_overwrite_warning_logged(self, tmp_path, logger):
+    def test_overwrite_debug_logged(self, tmp_path, logger):
         backup_dir = self._make_backup(tmp_path / "backup")
         output_dir = tmp_path / "output"
         db_dir = output_dir / "Whatsapp Databases"
@@ -937,10 +937,10 @@ class TestExtractPlaintext:
         (db_dir / "ChatStorage.sqlite").write_bytes(b"OLD")
         import unittest.mock as mock
 
-        with mock.patch.object(logger, "warning") as mock_warn:
+        with mock.patch.object(logger, "debug") as mock_debug:
             br.extract_plaintext(str(backup_dir), str(output_dir), None, False, logger)
-        warning_msgs = " ".join(str(c) for c in mock_warn.call_args_list)
-        assert "Overwriting" in warning_msgs or "overwriting" in warning_msgs.lower()
+        debug_msgs = " ".join(str(c) for c in mock_debug.call_args_list)
+        assert "Overwriting" in debug_msgs or "overwriting" in debug_msgs.lower()
 
 
 # ===========================================================================
@@ -4680,6 +4680,68 @@ class TestIosAuxiliaryDatabaseExtraction:
 
         assert not (output_dir / "ExtChatDatabase.sqlite").exists()
         assert not (output_dir / "MessagingInfraDatabase.sqlite").exists()
+
+    def test_extract_auxiliary_databases_encrypted_summary_and_stdout_suppression(self, tmp_path):
+        import logging
+        from unittest.mock import MagicMock
+
+        from wab_archiver import backup_reader as br
+
+        mock_backup = MagicMock()
+
+        def fake_extract_file(*, relative_path, domain_like, output_filename):
+            if relative_path == "ExtChatDB/ExtChatDatabase.sqlite":
+                print("WARN: decrypted 123 bytes of 'temp.sqlite', expected 456 bytes!")
+                with open(output_filename, "wb") as f:
+                    f.write(b"EXT_DATA")
+            elif relative_path == "LID.sqlite":
+                with open(output_filename, "wb") as f:
+                    f.write(b"LID_DATA")
+            else:
+                raise FileNotFoundError(relative_path)
+
+        mock_backup.extract_file.side_effect = fake_extract_file
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        logger = MagicMock(spec=logging.Logger)
+
+        br._extract_auxiliary_databases_encrypted(
+            mock_backup, "%whatsapp%", str(output_dir), logger
+        )
+
+        assert (output_dir / "ExtChatDatabase.sqlite").read_bytes() == b"EXT_DATA"
+        assert (output_dir / "LID.sqlite").read_bytes() == b"LID_DATA"
+        logger.info.assert_called_once_with(
+            "Decrypted 2 auxiliary databases: ExtChatDatabase.sqlite, LID.sqlite."
+        )
+        debug_calls = [c[0][0] for c in logger.debug.call_args_list]
+        assert any(
+            "iphone_backup_decrypt output for ExtChatDB/ExtChatDatabase.sqlite" in m
+            for m in debug_calls
+        )
+        assert any("WARN: decrypted 123 bytes" in m for m in debug_calls)
+
+    def test_save_db_to_output_overwrite_logs_debug_not_warning(self, tmp_path):
+        import logging
+        from unittest.mock import MagicMock
+
+        from wab_archiver import backup_reader as br
+
+        src = tmp_path / "source.sqlite"
+        src.write_bytes(b"NEW_DATA")
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        existing = output_dir / "ContactsV2.sqlite"
+        existing.write_bytes(b"OLD_DATA")
+
+        logger = MagicMock(spec=logging.Logger)
+        dest = br._save_db_to_output(str(src), str(output_dir), "ContactsV2.sqlite", logger)
+
+        assert (output_dir / "ContactsV2.sqlite").read_bytes() == b"NEW_DATA"
+        assert dest == str(existing)
+        logger.warning.assert_not_called()
+        logger.debug.assert_called_once()
+        assert "Overwriting existing" in logger.debug.call_args[0][0]
 
 
 class TestIosHdDeduplication:
