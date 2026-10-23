@@ -690,47 +690,18 @@ def process_rows(
 
     progress = ProgressReporter("Progress", total, logger, sys.stderr, 0.2)
 
-    for i, row in enumerate(rows, 1):
-        (
-            msg_id,
-            timestamp,
-            file_path,
-            mime_type,
-            chat_row_id,
-            chat_subject,
-            sender,
-            key_from_me,
-            message_url,
-            media_name,
-        ) = row[:10]
-        thumb_path = row[10] if len(row) > 10 else None
-
-        if thumb_path:
-            src_thumb = media_resolver(thumb_path)
-            if src_thumb and os.path.isfile(src_thumb):
-                thumb_rel = (
-                    thumb_path[len("Message/") :]
-                    if thumb_path.startswith("Message/")
-                    else thumb_path
-                )
-                dest_thumb = os.path.join(output_root, thumb_rel)
-                if not dry_run:
-                    os.makedirs(os.path.dirname(dest_thumb), exist_ok=True)
-                    try:
-                        shutil.copy2(src_thumb, dest_thumb)
-                        if cursor is not None:
-                            rel = os.path.relpath(dest_thumb, output_root).replace(os.sep, "/")
-                            archive_db.record_file_archived(
-                                cursor,
-                                thumb_path,
-                                b"",
-                                rel,
-                                os.path.getsize(dest_thumb),
-                                0,
-                                timestamp,
-                            )
-                    except OSError:
-                        pass
+    for i, (
+        msg_id,
+        timestamp,
+        file_path,
+        mime_type,
+        chat_row_id,
+        chat_subject,
+        sender,
+        key_from_me,
+        message_url,
+        media_name,
+    ) in enumerate(rows, 1):
         is_group = chat_subject is not None
         filename = media_name if media_name else (os.path.basename(file_path) if file_path else "")
 
@@ -2497,8 +2468,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
                 hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
 
-                has_thumb = ios_handler.has_ios_thumb_support(cursor)
-                query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup, has_thumb)
+                query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup)
                 vcard_query = (
                     ios_handler.build_ios_vcard_query(args.limit, since_ms)
                     if ios_handler.has_ios_vcard_support(cursor)

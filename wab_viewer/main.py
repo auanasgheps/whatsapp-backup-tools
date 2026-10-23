@@ -7453,21 +7453,6 @@ def create_app(output_root: Path, rescan: bool = False):
                                 thumb_bytes = cand.read_bytes()
                             except OSError:
                                 pass
-                        if not thumb_bytes:
-                            try:
-                                ac_row = conn.execute(
-                                    "SELECT archive_path FROM arch.archive_copies WHERE original_path IN (?, ?)",
-                                    (thumb_path, "Message/" + thumb_path),
-                                ).fetchone()
-                                if ac_row and ac_row["archive_path"]:
-                                    cand_ac = (output_root / ac_row["archive_path"]).resolve()
-                                    if cand_ac.exists():
-                                        try:
-                                            thumb_bytes = cand_ac.read_bytes()
-                                        except OSError:
-                                            pass
-                            except sqlite3.OperationalError:
-                                pass
 
             if not thumb_bytes and "ZMETADATA" in _mi_cols:
                 meta_row = conn.execute(
