@@ -539,6 +539,30 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
                 if "key_id" in cols:
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_message_key_id ON message(key_id)")
+        if "idx_message_quoted_key_id" not in existing:
+            has_mq = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_quoted'"
+            ).fetchone()
+            if has_mq:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(message_quoted)").fetchall()}
+                if "key_id" in cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_message_quoted_key_id "
+                        "ON message_quoted(key_id)"
+                    )
+        if "idx_message_quoted_media_row_id" not in existing:
+            has_mqm = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_quoted_media'"
+            ).fetchone()
+            if has_mqm:
+                cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(message_quoted_media)").fetchall()
+                }
+                if "message_row_id" in cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_message_quoted_media_row_id "
+                        "ON message_quoted_media(message_row_id)"
+                    )
         conn.commit()
     except sqlite3.OperationalError as e:
         if "readonly" in str(e).lower():
@@ -3835,9 +3859,18 @@ def create_app(output_root: Path, rescan: bool = False):
         ios_filesize_col = "COALESCE(mi.ZFILESIZE, 0)" if has_ios_filesize else "0"
         ios_duration_col = "COALESCE(mi.ZMOVIEDURATION, 0)" if has_ios_duration else "0"
         ios_aspect_ratio_col = "COALESCE(mi.ZASPECTRATIO, 0.0)" if has_ios_aspect_ratio else "0.0"
+        ios_thumb_arms = []
+        if has_ios_xmpp_thumb:
+            ios_thumb_arms.append(
+                "mi.ZXMPPTHUMBPATH IS NOT NULL OR mi.ZTHUMBNAILLOCALPATH IS NOT NULL"
+            )
+        if "ZMETADATA" in _mi_cols:
+            ios_thumb_arms.append(
+                "(mi.ZMETADATA IS NOT NULL AND INSTR(mi.ZMETADATA, X'ffd8ff') > 0)"
+            )
         ios_has_thumb_expr = (
-            "CASE WHEN mi.ZXMPPTHUMBPATH IS NOT NULL OR mi.ZTHUMBNAILLOCALPATH IS NOT NULL THEN 1 ELSE 0 END"
-            if has_ios_xmpp_thumb
+            "CASE WHEN " + " OR ".join(ios_thumb_arms) + " THEN 1 ELSE 0 END"
+            if ios_thumb_arms
             else "0"
         )
         ios_service_filter = (
@@ -4099,6 +4132,14 @@ def create_app(output_root: Path, rescan: bool = False):
         )
         android_has_thumb_arms.append(
             "(mqm.message_row_id IS NOT NULL AND mqm.thumbnail IS NOT NULL)"
+        )
+    if has_message_quoted_media and has_mq_key_id and has_android_key_id:
+        android_has_thumb_arms.append(
+            "(m.message_type IN (1, 3, 9, 20, 26, 42, 43, 82) AND EXISTS ("
+            "    SELECT 1 FROM message_quoted mq_orig "
+            "    JOIN message_quoted_media mqm_orig ON mqm_orig.message_row_id = mq_orig.message_row_id "
+            "    WHERE mq_orig.key_id = m.key_id AND mqm_orig.thumbnail IS NOT NULL"
+            "))"
         )
 
     android_has_thumb_expr = (
@@ -7359,6 +7400,26 @@ def create_app(output_root: Path, rescan: bool = False):
                 ).fetchone()
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
+
+            if (
+                not thumb_bytes
+                and has_message_quoted_media
+                and has_mq_key_id
+                and has_android_key_id
+            ):
+                row = conn.execute(
+                    """
+                    SELECT mqm.thumbnail
+                    FROM message m
+                    JOIN message_quoted mq ON mq.key_id = m.key_id
+                    JOIN message_quoted_media mqm ON mqm.message_row_id = mq.message_row_id
+                    WHERE m._id = ? AND mqm.thumbnail IS NOT NULL
+                    LIMIT 1
+                    """,
+                    (msg_id,),
+                ).fetchone()
+                if row and row["thumbnail"]:
+                    thumb_bytes = row["thumbnail"]
         elif source_type == "ios":
             thumb_cols = []
             if "ZXMPPTHUMBPATH" in _mi_cols:
@@ -7392,8 +7453,42 @@ def create_app(output_root: Path, rescan: bool = False):
                                 thumb_bytes = cand.read_bytes()
                             except OSError:
                                 pass
+                        if not thumb_bytes:
+                            try:
+                                ac_row = conn.execute(
+                                    "SELECT archive_path FROM arch.archive_copies WHERE original_path IN (?, ?)",
+                                    (thumb_path, "Message/" + thumb_path),
+                                ).fetchone()
+                                if ac_row and ac_row["archive_path"]:
+                                    cand_ac = (output_root / ac_row["archive_path"]).resolve()
+                                    if cand_ac.exists():
+                                        try:
+                                            thumb_bytes = cand_ac.read_bytes()
+                                        except OSError:
+                                            pass
+                            except sqlite3.OperationalError:
+                                pass
 
-        if not thumb_bytes:
+            if not thumb_bytes and "ZMETADATA" in _mi_cols:
+                meta_row = conn.execute(
+                    """
+                    SELECT mi.ZMETADATA
+                    FROM ZWAMESSAGE m
+                    LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                    WHERE m.Z_PK = ?
+                    """,
+                    (msg_id,),
+                ).fetchone()
+                if meta_row and meta_row["ZMETADATA"]:
+                    blob = meta_row["ZMETADATA"]
+                    if isinstance(blob, bytes):
+                        jpeg_idx = blob.find(b"\xff\xd8\xff")
+                        if jpeg_idx != -1:
+                            eoi_idx = blob.find(b"\xff\xd9", jpeg_idx)
+                            if eoi_idx != -1:
+                                thumb_bytes = blob[jpeg_idx : eoi_idx + 2]
+
+        if not thumb_bytes or len(thumb_bytes) < 16:
             return "Thumbnail not found", 404
 
         mime = "image/jpeg"

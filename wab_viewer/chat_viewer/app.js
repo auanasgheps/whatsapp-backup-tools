@@ -1207,6 +1207,9 @@
       img.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
       img.loading = 'lazy';
       img.alt = '';
+      img.onerror = () => {
+        img.style.display = 'none';
+      };
       card.appendChild(img);
     }
 
