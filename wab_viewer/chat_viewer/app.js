@@ -2384,60 +2384,74 @@
     galleryAllLoaded = false;
     galleryLoadingMore = false;
 
-    // fetch counts, documents, and links in parallel, then render media
-    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
-    const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
-    const [counts, docItems, linkItems] = await Promise.all([
-      fetch('/api/media/count?' + qs).then(r => r.json()),
-      fetch('/api/media/documents?' + qs).then(r => r.json()),
-      fetch('/api/media/links?' + qs).then(r => r.json()),
-    ]);
-    stats.innerHTML = '';
-    if (counts.total) {
-      stats.appendChild(_makeStatPill('total', counts.total, null, counts.total - counts.archived));
-      for (const t of typeOrder) {
-        const d = counts.by_type[t];
-        if (!d) continue;
-        stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
+    try {
+      // fetch counts, documents, and links in parallel, then render media
+      const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
+      const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
+      const [counts, docItems, linkItems] = await Promise.all([
+        fetch('/api/media/count?' + qs).then(r => {
+          if (!r.ok) throw new Error('Failed to fetch media count');
+          return r.json();
+        }),
+        fetch('/api/media/documents?' + qs).then(r => {
+          if (!r.ok) throw new Error('Failed to fetch documents');
+          return r.json();
+        }),
+        fetch('/api/media/links?' + qs).then(r => {
+          if (!r.ok) throw new Error('Failed to fetch links');
+          return r.json();
+        }),
+      ]);
+      stats.innerHTML = '';
+      if (counts.total) {
+        stats.appendChild(_makeStatPill('total', counts.total, null, counts.total - counts.archived));
+        for (const t of typeOrder) {
+          const d = counts.by_type[t];
+          if (!d) continue;
+          stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
+        }
+        // secondary types (links, documents) and stickers are hidden by default
+        const hasDeselected = typeOrder.some(t => DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
+        const defaultTypes = typeOrder.filter(t => !DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
+        if (hasDeselected && defaultTypes.length > 0) {
+          defaultTypes.forEach(t => activeTypes.add(t));
+          defaultActiveTypes = new Set(activeTypes);
+        } else {
+          defaultActiveTypes = new Set();
+        }
+        _syncStatPills();
       }
-      // secondary types (links, documents) and stickers are hidden by default
-      const hasDeselected = typeOrder.some(t => DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
-      const defaultTypes = typeOrder.filter(t => !DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
-      if (hasDeselected && defaultTypes.length > 0) {
-        defaultTypes.forEach(t => activeTypes.add(t));
-        defaultActiveTypes = new Set(activeTypes);
-      } else {
-        defaultActiveTypes = new Set();
+
+      grid.innerHTML = '';
+
+      // attach IntersectionObserver sentinel at bottom of grid
+      gallerySentinel = document.createElement('div');
+      gallerySentinel.style.height = '1px';
+      grid.appendChild(gallerySentinel);
+      galleryObserver = new IntersectionObserver(entries => {
+        if (entries[0].isIntersecting) {
+          const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
+          _loadGalleryPage(oldest);
+        }
+      }, { root: grid, threshold: 0.1 });
+      galleryObserver.observe(gallerySentinel);
+
+      getGalleryMediaObserver();
+
+      await _loadGalleryPage(null);
+
+      if (!currentGalleryItems.length && !docItems.length && !linkItems.length) {
+        grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
+        return;
       }
-      _syncStatPills();
-    }
 
-    grid.innerHTML = '';
-
-    // attach IntersectionObserver sentinel at bottom of grid
-    gallerySentinel = document.createElement('div');
-    gallerySentinel.style.height = '1px';
-    grid.appendChild(gallerySentinel);
-    galleryObserver = new IntersectionObserver(entries => {
-      if (entries[0].isIntersecting) {
-        const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
-        _loadGalleryPage(oldest);
+      // append document and link cards; hidden when secondary types are filtered out by default
+      for (const msg of [...docItems, ...linkItems]) {
+        _insertGalleryGridItem(grid, msg);
       }
-    }, { root: grid, threshold: 0.1 });
-    galleryObserver.observe(gallerySentinel);
-
-    getGalleryMediaObserver();
-
-    await _loadGalleryPage(null);
-
-    if (!currentGalleryItems.length && !docItems.length && !linkItems.length) {
-      grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
-      return;
-    }
-
-    // append document and link cards; hidden when secondary types are filtered out by default
-    for (const msg of [...docItems, ...linkItems]) {
-      _insertGalleryGridItem(grid, msg);
+    } catch (err) {
+      console.error('Failed to load media gallery:', err);
+      grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">Failed to load media gallery.</div>';
     }
     _syncMonthHeaders();
   }
@@ -2454,7 +2468,9 @@
                   '&chat_type=' + encodeURIComponent(currentChat.type) +
                   typesParam +
                   (before != null ? '&before=' + before : '');
-      const items = await fetch(url).then(r => r.json());
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to fetch media');
+      const items = await res.json();
       if (items.length < 100) galleryAllLoaded = true;
       currentGalleryItems.push(...items);
 
