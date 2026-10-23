@@ -8305,6 +8305,186 @@ class TestPollSupport:
         t2 = client.get("/api/thumbnail/2")
         assert t2.status_code == 404
 
+    def test_missing_media_quoted_thumbnail_resolution(self, tmp_path):
+        """Verify quoted media thumbnails are linked to original missing media messages."""
+        arch_conn = sqlite3.connect(tmp_path / ".wa_media_archiver.db")
+        arch_conn.execute("CREATE TABLE archive_copies (original_path TEXT, archive_path TEXT)")
+        arch_conn.execute("CREATE TABLE contacts (number TEXT, display_name TEXT)")
+        arch_conn.commit()
+
+        wa_conn = sqlite3.connect(tmp_path / "msgstore.db")
+        wa_conn.execute("CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT)")
+        wa_conn.execute(
+            "CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER)"
+        )
+        wa_conn.execute("""
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                from_me INTEGER,
+                key_id TEXT,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE message_media (
+                message_row_id INTEGER PRIMARY KEY,
+                file_path TEXT,
+                file_size INTEGER,
+                width INTEGER,
+                height INTEGER,
+                media_duration INTEGER,
+                file_hash TEXT,
+                media_name TEXT
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE message_quoted (
+                message_row_id INTEGER PRIMARY KEY,
+                key_id TEXT,
+                parent_message_chat_row_id INTEGER,
+                from_me INTEGER,
+                text_data TEXT,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE message_quoted_media (
+                message_row_id INTEGER PRIMARY KEY,
+                thumbnail BLOB
+            )
+        """)
+
+        wa_conn.execute("INSERT INTO jid VALUES (1, '15551234567')")
+        wa_conn.execute("INSERT INTO chat VALUES (1, 1, 'Test Chat', 0)")
+
+        fake_quote_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xfe\x00\x05QUOTE\xff\xd9"
+        # msg 10: original photo message with missing file on disk
+        wa_conn.execute(
+            "INSERT INTO message VALUES (10, 1, 0, 'PHOTO_ORIG_KEY', 1, 1700000010000, 'orig photo', 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media VALUES (10, 'Media/WhatsApp Images/missing10.jpg', 45000, 1200, 900, 0, 'hash10', 'missing10.jpg')"
+        )
+
+        # msg 11: reply message quoting msg 10
+        wa_conn.execute(
+            "INSERT INTO message VALUES (11, 1, 1, 'REPLY_KEY_11', 1, 1700000020000, 'nice picture!', 0)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_quoted VALUES (11, 'PHOTO_ORIG_KEY', 1, 0, 'orig photo', 1, 1700000010000)"
+        )
+        wa_conn.execute("INSERT INTO message_quoted_media VALUES (11, ?)", (fake_quote_jpeg,))
+
+        wa_conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=True)
+        client = app.test_client()
+
+        res = client.get("/api/messages?chat_id=1&chat_type=contact")
+        assert res.status_code == 200
+        msgs = {m["msg_id"]: m for m in res.get_json()}
+
+        # Original missing message 10 must have has_thumbnail = 1 bridged from quote
+        assert msgs[10]["has_thumbnail"] == 1
+
+        # Fetch thumbnail for message 10
+        t10 = client.get("/api/thumbnail/10")
+        assert t10.status_code == 200
+        assert t10.content_type == "image/jpeg"
+        assert t10.data == fake_quote_jpeg
+        assert "public, max-age=86400, immutable" in t10.headers.get("Cache-Control", "")
+
+    def test_missing_media_ios_zmetadata_fallback_thumbnail(self, tmp_path):
+        """Verify iOS missing media falls back to embedded JPEG in ZWAMEDIAITEM.ZMETADATA."""
+        arch_conn = sqlite3.connect(tmp_path / ".wa_media_archiver.db")
+        arch_conn.execute("CREATE TABLE archive_copies (original_path TEXT, archive_path TEXT)")
+        arch_conn.execute("CREATE TABLE contacts (number TEXT, display_name TEXT)")
+        arch_conn.commit()
+
+        wa_conn = sqlite3.connect(tmp_path / "ChatStorage.sqlite")
+        wa_conn.execute("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZFILESIZE INTEGER,
+                ZASPECTRATIO FLOAT,
+                ZMOVIEDURATION INTEGER,
+                ZXMPPTHUMBPATH TEXT,
+                ZTHUMBNAILLOCALPATH TEXT,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMETADATA BLOB
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE FLOAT,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZFROMJID TEXT,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            )
+        """)
+
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION VALUES (1, '15551234567@s.whatsapp.net', 'Alice', NULL)"
+        )
+        fake_embedded_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xfe\x00\x04EMB\xff\xd9"
+        proto_blob = b"\x08\x01\x12\x20" + b"\x00" * 32 + fake_embedded_jpeg + b"\x18\x02"
+
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (1, 30000, 1.0, 0, NULL, NULL, 'missing_ios.jpg', 'img.jpg', ?)",
+            (proto_blob,),
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (1, 1, 1, 0, 700000000.0, 1, 'embedded thumb test', '15551234567@s.whatsapp.net', NULL, NULL, 'Alice')"
+        )
+        wa_conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=True)
+        client = app.test_client()
+
+        res = client.get("/api/messages?chat_id=1&chat_type=contact")
+        assert res.status_code == 200
+        msgs = {m["msg_id"]: m for m in res.get_json()}
+        assert msgs[1]["has_thumbnail"] == 1
+
+        t1 = client.get("/api/thumbnail/1")
+        assert t1.status_code == 200
+        assert t1.content_type == "image/jpeg"
+        assert t1.data == fake_embedded_jpeg
+
 
 class TestIncrementViewerMessages:
     """Verify viewer displays messages ingested from incremental backups."""
