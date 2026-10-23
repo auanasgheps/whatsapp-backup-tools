@@ -2390,7 +2390,8 @@ def test_diff_indexes_creation_and_chunked_progress_android(tmp_path: Path) -> N
         indexes = {
             r[1] for r in conn.execute("SELECT * FROM sqlite_master WHERE type='index'").fetchall()
         }
-        assert "idx_pres_cur_key_id" in indexes
+        assert "idx_message_key_id" in indexes
+        assert "idx_pres_cur_key_id" not in indexes
 
 
 def test_diff_indexes_creation_and_chunked_progress_ios(tmp_path: Path) -> None:

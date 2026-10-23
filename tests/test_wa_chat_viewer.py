@@ -63,6 +63,7 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
             is_edited      INTEGER NOT NULL DEFAULT 0,
             edited_ts      INTEGER,
             is_view_once   INTEGER NOT NULL DEFAULT 0,
+            quoted_has_thumb INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -74,7 +75,7 @@ def make_archive_db(path: Path) -> sqlite3.Connection:
             PRIMARY KEY (chat_id, msg_id)
         );
     """)
-    conn.execute("PRAGMA user_version = 3")
+    conn.execute("PRAGMA user_version = 6")
     conn.commit()
     conn.row_factory = sqlite3.Row
     return conn
@@ -10094,10 +10095,241 @@ class TestRichLinkPreviews:
 
         archive_conn = sqlite3.connect(str(archive_path))
         archive_conn.row_factory = sqlite3.Row
-        row = archive_conn.execute("SELECT * FROM recent_messages WHERE msg_id = 2").fetchone()
+        row = None
+        for _ in range(20):
+            row = archive_conn.execute("SELECT * FROM recent_messages WHERE msg_id = 2").fetchone()
+            if row is not None:
+                break
+            time.sleep(0.1)
         assert row is not None
         assert row["link_title"] == "GitHub Title"
         assert row["link_desc"] == "GitHub Desc"
         assert row["link_url"] == "https://github.com"
         assert row["link_preview_type"] == 1
         archive_conn.close()
+
+    def test_ios_photo_and_document_captions(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMETADATA BLOB,
+                ZMEDIAURL TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCREATIONDATE REAL,
+                ZCREATORJID TEXT,
+                ZPICTUREID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 0, '15559876543@s.whatsapp.net', 'Alice');
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA, ZMEDIAURL)
+            VALUES
+                (1, 'Media/photo.jpg', 'Beautiful Sunset', NULL, 'https://mmg.whatsapp.net/mms/photo.jpg'),
+                (2, 'Media/reqs.docx', 'Please review this doc', NULL, 'https://mmg.whatsapp.net/mms/reqs.docx');
+
+            -- Photo with caption (ZMESSAGETYPE=1, ZTEXT is NULL, ZTITLE is caption)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (20, 1, 0, 700000000.0, 'STANZA_PHOTO_20', 1, 1, NULL, NULL, 'Alice', NULL, '15559876543@s.whatsapp.net');
+
+            -- Document with caption (ZMESSAGETYPE=8, ZTEXT is filename, ZTITLE is caption)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (21, 1, 0, 700000010.0, 'STANZA_DOC_21', 8, 2, NULL, NULL, 'Alice', 'Requirements_2026.docx', '15559876543@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 2
+            photo_msg = next(m for m in msgs if m["msg_id"] == 20)
+            doc_msg = next(m for m in msgs if m["msg_id"] == 21)
+
+            assert photo_msg["text_body"] == "Beautiful Sunset"
+            assert photo_msg["media_type"] == "image"
+            assert photo_msg["link_url"] is None
+
+            assert doc_msg["text_body"] == "Please review this doc"
+            assert doc_msg["media_name"] == "Requirements_2026.docx"
+            assert doc_msg["media_type"] == "document"
+            assert doc_msg["link_url"] is None
+
+    def test_ios_quoted_media_reply_no_url_leak(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMETADATA BLOB,
+                ZMEDIAURL TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCREATIONDATE REAL,
+                ZCREATORJID TEXT,
+                ZPICTUREID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 0, '15559876543@s.whatsapp.net', 'Alice');
+        """)
+
+        def encode_varint(v):
+            res = bytearray()
+            while v > 0x7F:
+                res.append((v & 0x7F) | 0x80)
+                v >>= 7
+            res.append(v & 0x7F)
+            return bytes(res)
+
+        stanza_bytes = b"STANZA_ORIG_100"
+        sender_bytes = b"15559876543@s.whatsapp.net"
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+
+        im_payload = encode_varint((16 << 3) | 2) + encode_varint(len(fake_jpeg)) + fake_jpeg
+        t19_sub3 = encode_varint((3 << 3) | 2) + encode_varint(len(im_payload)) + im_payload
+
+        metadata_blob = (
+            encode_varint((5 << 3) | 2)
+            + encode_varint(len(stanza_bytes))
+            + stanza_bytes
+            + encode_varint((6 << 3) | 2)
+            + encode_varint(len(sender_bytes))
+            + sender_bytes
+            + encode_varint((19 << 3) | 2)
+            + encode_varint(len(t19_sub3))
+            + t19_sub3
+        )
+
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA, ZMEDIAURL) VALUES (10, 'Media/moon.jpg', 'Look at moon', NULL, 'https://mmg.whatsapp.net/mms/moon.jpg')"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA, ZMEDIAURL) VALUES (11, NULL, NULL, ?, 'https://mmg.whatsapp.net/mms/dummy_url')",
+            (metadata_blob,),
+        )
+
+        # Message 100: Photo
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (100, 1, 0, 700000000.0, 'STANZA_ORIG_100', 1, 10, NULL, NULL, 'Alice', NULL, '15559876543@s.whatsapp.net')
+        """)
+
+        # Message 101: Reply to photo (ZMESSAGETYPE=0, ZTEXT='With your phone?', ZMEDIAITEM=11)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (101, 1, 1, 700000010.0, 'STANZA_REPLY_101', 0, 11, NULL, NULL, 'Me', 'With your phone?', '15551234567@s.whatsapp.net')
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 2
+            reply_msg = next(m for m in msgs if m["msg_id"] == 101)
+
+            # Quoted metadata should be extracted and linked
+            assert reply_msg["quoted_msg_id"] == 100
+            assert reply_msg["quoted_sender"] == "Alice"
+            assert reply_msg["quoted_has_thumb"] == 1
+            assert reply_msg["quoted_ts"] == int((700000000.0 + 978307200) * 1000)
+
+            # WhatsApp MMS CDN URL must NOT leak as link preview!
+            assert reply_msg["link_url"] is None
+            assert reply_msg["link_title"] is None
+            assert reply_msg["has_thumbnail"] == 0
+
+            # Jump to timestamp via /api/messages/at
+            ts_ms = reply_msg["quoted_ts"]
+            resp_at = client.get(f"/api/messages/at?chat_id=1&ts={ts_ms}")
+            assert resp_at.status_code == 200
+            at_msgs = resp_at.get_json()
+            assert any(m["msg_id"] == 100 for m in at_msgs)
+
+            # Thumbnail fallback recovery for message 100 from reply quote
+            resp_thumb = client.get("/api/thumbnail/100")
+            assert resp_thumb.status_code == 200
+            assert resp_thumb.data == fake_jpeg

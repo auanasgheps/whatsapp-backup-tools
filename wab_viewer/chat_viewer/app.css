@@ -1198,14 +1198,30 @@
     .load-spinner { display: flex; justify-content: center; padding: 10px; color: var(--text-muted); font-size: 20px; }
 
     .msg-quote {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
       background: rgba(0,0,0,0.08);
       border-left: 3px solid var(--accent);
       border-radius: 4px; padding: 4px 8px; margin-bottom: 4px;
       max-width: 100%; overflow: hidden;
     }
     .msg-row.sent .msg-quote { background: rgba(0,0,0,0.1); }
+    .msg-quote-content {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+    }
     .msg-quote-sender { font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 1px; }
     .msg-quote-text { font-size: 12px; color: var(--bubble-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .msg-quote-thumb {
+      width: 36px;
+      height: 36px;
+      object-fit: cover;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
     .msg-quote[style*="cursor: pointer"]:hover { background: rgba(0,0,0,0.15); }
 
     .msg-bubble.search-highlight,

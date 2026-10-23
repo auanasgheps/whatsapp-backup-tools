@@ -975,6 +975,8 @@
     if (msg.quoted_text && msg.media_type !== 'deleted') {
       const quote = document.createElement('div');
       quote.className = 'msg-quote';
+      const qContent = document.createElement('div');
+      qContent.className = 'msg-quote-content';
       const qSender = document.createElement('div');
       qSender.className = 'msg-quote-sender';
       const qs = msg.quoted_sender;
@@ -982,8 +984,20 @@
       const qText = document.createElement('div');
       qText.className = 'msg-quote-text';
       qText.textContent = msg.quoted_text;
-      quote.appendChild(qSender);
-      quote.appendChild(qText);
+      qContent.appendChild(qSender);
+      qContent.appendChild(qText);
+      quote.appendChild(qContent);
+
+      if (msg.quoted_has_thumb && (msg.quoted_msg_id || msg.msg_id)) {
+        const qThumb = document.createElement('img');
+        qThumb.className = 'msg-quote-thumb';
+        qThumb.alt = '';
+        qThumb.loading = 'lazy';
+        qThumb.src = '/api/thumbnail/' + (msg.quoted_msg_id || msg.msg_id);
+        qThumb.onerror = () => { qThumb.style.display = 'none'; };
+        quote.appendChild(qThumb);
+      }
+
       if (msg.quoted_msg_id || msg.quoted_ts) {
         quote.style.cursor = 'pointer';
         quote.title = 'Jump to original message';
