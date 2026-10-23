@@ -345,12 +345,18 @@ def verify_account_match(
 def _ensure_android_diff_indexes(conn: sqlite3.Connection) -> None:
     """Ensure indexes on key_id and fallback columns exist for fast diff performance."""
     with contextlib.suppress(sqlite3.OperationalError):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_pres_cur_key_id ON message(key_id)")
+        conn.execute("DROP INDEX IF EXISTS idx_pres_cur_key_id")
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_key_id ON message(key_id)")
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pres_old_key_id ON old_db.message(key_id)")
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pres_cur_fallback ON message(chat_row_id, timestamp, from_me)"
         )
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("DROP INDEX IF EXISTS idx_pres_cur_revoked")
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pres_cur_revoked ON message(key_id) WHERE message_type IN (15, 64)"
         )
@@ -1730,7 +1736,15 @@ def diff_and_extract_ios(
             if "ZMEDIALOCALPATH" in mi_cols
             else "('vcard:' || m.Z_PK)"
         )
-        media_name_col = "COALESCE(mi.ZTITLE, '')" if "ZTITLE" in mi_cols else "''"
+        media_name_col = (
+            """COALESCE(
+                CASE WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(m.ZTEXT, '') END,
+                mi.ZMEDIALOCALPATH,
+                ''
+            )"""
+            if (has_media and "ZMEDIALOCALPATH" in mi_cols)
+            else "CASE WHEN m.ZMESSAGETYPE = 8 THEN COALESCE(m.ZTEXT, '') ELSE '' END"
+        )
         if "ZMEDIALOCALPATH" in mi_cols and "ZTITLE" in mi_cols:
             media_local_expr = "COALESCE(mi.ZMEDIALOCALPATH, mi.ZTITLE, '')"
         elif "ZMEDIALOCALPATH" in mi_cols:
@@ -1931,7 +1945,14 @@ def diff_and_extract_ios(
                 COALESCE(m.ZFROMJID, {chat_contact_jid_expr}) AS sender_jid,
                 SUBSTR(COALESCE(m.ZFROMJID, {chat_contact_jid_expr}, ''), 1, INSTR(COALESCE(m.ZFROMJID, {chat_contact_jid_expr}, '') || '@', '@') - 1) AS sender_phone,
                 m.ZISFROMME AS from_me,
-                COALESCE(m.ZTEXT, '') AS text_body,
+                COALESCE(
+                    CASE
+                        WHEN m.ZMESSAGETYPE = 8 THEN NULLIF({title_col}, '')
+                        WHEN m.ZMESSAGETYPE IN (1, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({title_col}, ''))
+                        ELSE m.ZTEXT
+                    END,
+                    ''
+                ) AS text_body,
                 {media_type_expr} AS media_type,
                 {media_name_col} AS media_name,
                 {ac_path_col} AS archive_path,
@@ -2020,7 +2041,14 @@ def diff_and_extract_ios(
                 COALESCE(m.ZFROMJID, {chat_contact_jid_expr}) AS sender_jid,
                 SUBSTR(COALESCE(m.ZFROMJID, {chat_contact_jid_expr}, ''), 1, INSTR(COALESCE(m.ZFROMJID, {chat_contact_jid_expr}, '') || '@', '@') - 1) AS sender_phone,
                 m.ZISFROMME AS from_me,
-                COALESCE(m.ZTEXT, '') AS text_body,
+                COALESCE(
+                    CASE
+                        WHEN m.ZMESSAGETYPE = 8 THEN NULLIF({title_col}, '')
+                        WHEN m.ZMESSAGETYPE IN (1, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({title_col}, ''))
+                        ELSE m.ZTEXT
+                    END,
+                    ''
+                ) AS text_body,
                 {media_type_expr} AS media_type,
                 {media_name_col} AS media_name,
                 {ac_path_col} AS archive_path,

@@ -539,6 +539,8 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
                 if "key_id" in cols:
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_message_key_id ON message(key_id)")
+        if "idx_pres_cur_key_id" in existing:
+            conn.execute("DROP INDEX IF EXISTS idx_pres_cur_key_id")
         if "idx_message_quoted_key_id" not in existing:
             has_mq = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_quoted'"
@@ -1436,18 +1438,31 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
             }
 
 
-def _extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
-    """Extract page description string from wire tag 3 of an iOS ZMETADATA protobuf blob."""
+def _extract_ios_quoted_info(metadata_bytes: bytes | None) -> dict | None:
+    """Extract quoted message metadata from iOS ZWAMEDIAITEM.ZMETADATA protobuf blob."""
     if not metadata_bytes or not isinstance(metadata_bytes, (bytes, bytearray)):
         return None
     try:
         idx = 0
         n = len(metadata_bytes)
+        q_stanza = None
+        q_sender = None
+        q_text = None
+        q_has_thumb = False
+
         while idx < n:
-            b = metadata_bytes[idx]
-            idx += 1
-            wire_type = b & 7
-            field_num = b >> 3
+            val = 0
+            shift = 0
+            while idx < n:
+                b = metadata_bytes[idx]
+                idx += 1
+                val |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+            wire_type = val & 7
+            field_num = val >> 3
+
             if wire_type == 0:
                 while idx < n and (metadata_bytes[idx] & 0x80):
                     idx += 1
@@ -1462,9 +1477,232 @@ def _extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
                     if not (lb & 0x80):
                         break
                     shift += 7
+                if idx + length > n:
+                    break
+                data = metadata_bytes[idx : idx + length]
+                idx += length
+
+                if field_num == 5:
+                    q_stanza = data.decode("utf-8", errors="replace")
+                elif field_num == 6:
+                    q_sender = data.decode("utf-8", errors="replace")
+                elif field_num == 19:
+                    sub_idx = 0
+                    sub_n = len(data)
+                    while sub_idx < sub_n:
+                        sval = 0
+                        sshift = 0
+                        while sub_idx < sub_n:
+                            sb = data[sub_idx]
+                            sub_idx += 1
+                            sval |= (sb & 0x7F) << sshift
+                            if not (sb & 0x80):
+                                break
+                            sshift += 7
+                        swire = sval & 7
+                        sfield = sval >> 3
+
+                        if swire == 0:
+                            while sub_idx < sub_n and (data[sub_idx] & 0x80):
+                                sub_idx += 1
+                            sub_idx += 1
+                        elif swire == 2:
+                            slen = 0
+                            sshift = 0
+                            while sub_idx < sub_n:
+                                slb = data[sub_idx]
+                                sub_idx += 1
+                                slen |= (slb & 0x7F) << sshift
+                                if not (slb & 0x80):
+                                    break
+                                sshift += 7
+                            if sub_idx + slen > sub_n:
+                                break
+                            sdata = data[sub_idx : sub_idx + slen]
+                            sub_idx += slen
+
+                            if sfield == 1:
+                                q_text = sdata.decode("utf-8", errors="replace")
+                            elif sfield == 3:
+                                q_has_thumb = True
+                                im_idx = 0
+                                im_n = len(sdata)
+                                im_caption = None
+                                while im_idx < im_n:
+                                    ival = 0
+                                    ishift = 0
+                                    while im_idx < im_n:
+                                        ib = sdata[im_idx]
+                                        im_idx += 1
+                                        ival |= (ib & 0x7F) << ishift
+                                        if not (ib & 0x80):
+                                            break
+                                        ishift += 7
+                                    iwire = ival & 7
+                                    ifield = ival >> 3
+                                    if iwire == 0:
+                                        while im_idx < im_n and (sdata[im_idx] & 0x80):
+                                            im_idx += 1
+                                        im_idx += 1
+                                    elif iwire == 2:
+                                        ilen = 0
+                                        ishift = 0
+                                        while im_idx < im_n:
+                                            ilb = sdata[im_idx]
+                                            im_idx += 1
+                                            ilen |= (ilb & 0x7F) << ishift
+                                            if not (ilb & 0x80):
+                                                break
+                                            ishift += 7
+                                        if im_idx + ilen > im_n:
+                                            break
+                                        idata = sdata[im_idx : im_idx + ilen]
+                                        im_idx += ilen
+                                        if ifield == 3:
+                                            im_caption = idata.decode("utf-8", errors="replace")
+                                    elif iwire == 1:
+                                        im_idx += 8
+                                    elif iwire == 5:
+                                        im_idx += 4
+                                    else:
+                                        break
+                                q_text = f"📷 {im_caption}" if im_caption else "📷 Photo"
+                            elif sfield == 8:
+                                q_text = "🎵 Audio"
+                            elif sfield == 9:
+                                q_has_thumb = True
+                                q_text = "🎥 Video"
+                            elif sfield == 26:
+                                q_has_thumb = True
+                                q_text = "Sticker"
+                            elif sfield == 7:
+                                q_text = "📄 Document"
+                        elif swire == 1:
+                            sub_idx += 8
+                        elif swire == 5:
+                            sub_idx += 4
+                        else:
+                            break
+            elif wire_type == 1:
+                idx += 8
+            elif wire_type == 5:
+                idx += 4
+            else:
+                break
+
+        if q_stanza:
+            return {
+                "quoted_stanza_id": q_stanza,
+                "quoted_sender": q_sender,
+                "quoted_text": q_text or "",
+                "quoted_has_thumb": q_has_thumb,
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _hydrate_quoted_rows(
+    rows: list[dict],
+    source_type: str,
+    wa_conn: sqlite3.Connection | None,
+) -> None:
+    """Hydrate quoted message fields on iOS rows from embedded ZMETADATA blobs."""
+    if not rows or source_type != "ios":
+        return
+
+    extracted_senders = {}
+    for row in rows:
+        if row.get("quoted_stanza_id"):
+            continue
+        raw_meta = row.get("_raw_metadata")
+        if not raw_meta:
+            continue
+        q_info = _extract_ios_quoted_info(raw_meta)
+        if q_info:
+            row["quoted_stanza_id"] = q_info["quoted_stanza_id"]
+            if not row.get("quoted_text"):
+                row["quoted_text"] = q_info["quoted_text"]
+            if q_info.get("quoted_has_thumb"):
+                row["quoted_has_thumb"] = 1
+            row["link_title"] = None
+            row["link_url"] = None
+            row["link_desc"] = None
+            if row.get("media_type") == "text":
+                row["has_thumbnail"] = 0
+
+            sender_jid = q_info.get("quoted_sender")
+            if sender_jid and not row.get("quoted_sender"):
+                extracted_senders[row["msg_id"]] = sender_jid
+
+    if extracted_senders and wa_conn is not None:
+        jids = list(set(extracted_senders.values()))
+        ph = ",".join("?" * len(jids))
+        contact_map = {}
+        try:
+            c_rows = wa_conn.execute(
+                f"SELECT jid, full_name, phone_number FROM _ios_contacts WHERE jid IN ({ph})",
+                jids,
+            ).fetchall()
+            for cr in c_rows:
+                name = cr["full_name"] or cr["phone_number"]
+                if name:
+                    contact_map[cr["jid"]] = name
+        except sqlite3.OperationalError:
+            pass
+
+        for row in rows:
+            mid = row.get("msg_id")
+            if mid in extracted_senders:
+                raw_s = extracted_senders[mid]
+                if raw_s in contact_map:
+                    row["quoted_sender"] = contact_map[raw_s]
+                else:
+                    phone = raw_s.split("@")[0] if "@" in raw_s else raw_s
+                    row["quoted_sender"] = f"+{phone}" if phone.isdigit() else phone
+
+
+def _extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
+    """Extract page description string from wire tag 3 of an iOS ZMETADATA protobuf blob."""
+    if not metadata_bytes or not isinstance(metadata_bytes, (bytes, bytearray)):
+        return None
+    try:
+        idx = 0
+        n = len(metadata_bytes)
+        while idx < n:
+            val = 0
+            shift = 0
+            while idx < n:
+                b = metadata_bytes[idx]
+                idx += 1
+                val |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+            wire_type = val & 7
+            field_num = val >> 3
+            if wire_type == 0:
+                while idx < n and (metadata_bytes[idx] & 0x80):
+                    idx += 1
+                idx += 1
+            elif wire_type == 2:
+                length = 0
+                shift = 0
+                while idx < n:
+                    lb = metadata_bytes[idx]
+                    idx += 1
+                    length |= (lb & 0x7F) << shift
+                    if not (lb & 0x80):
+                        break
+                    shift += 7
+                if idx + length > n:
+                    break
                 if field_num == 3:
                     desc_bytes = metadata_bytes[idx : idx + length]
-                    return desc_bytes.decode("utf-8", errors="replace")
+                    if b"\x00" not in desc_bytes and b"\xff\xd8\xff" not in desc_bytes:
+                        decoded = desc_bytes.decode("utf-8", errors="replace")
+                        if not decoded.startswith("http"):
+                            return decoded
                 idx += length
             elif wire_type == 5:
                 idx += 4
@@ -1484,13 +1722,19 @@ def _hydrate_link_preview_rows(rows: list[dict], source_type: str) -> None:
     for row in rows:
         raw_meta = row.pop("_raw_metadata", None)
         if source_type == "ios" and raw_meta and not row.get("link_desc"):
-            desc = _extract_ios_link_description(raw_meta)
-            if desc:
-                row["link_desc"] = desc
+            if (
+                row.get("media_type") == "link"
+                or row.get("raw_msg_type") == 7
+                or row.get("link_url")
+                or row.get("link_title")
+            ):
+                desc = _extract_ios_link_description(raw_meta)
+                if desc:
+                    row["link_desc"] = desc
         if not row.get("link_url") and (row.get("link_title") or row.get("media_type") == "link"):
             m = re.search(r"https?://[^\s<>\"']+", row.get("text_body") or "")
             if m:
-                row["link_url"] = m.group(0).rstrip(".,;:!?)\\'\"")
+                row["link_url"] = m.group(0).rstrip(".,;:!?)'\"")
 
 
 def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> None:
@@ -1818,7 +2062,7 @@ def _resolve_quoted_msg_ids(
             return
 
         local_map = {
-            r.get("stanza_id"): r["msg_id"]
+            r.get("stanza_id"): (r["msg_id"], r.get("timestamp_ms", 0))
             for r in rows
             if r.get("stanza_id") and r.get("msg_id") is not None
         }
@@ -1826,7 +2070,9 @@ def _resolve_quoted_msg_ids(
         for r in unresolved:
             q_stanza = r["quoted_stanza_id"]
             if q_stanza in local_map:
-                r["quoted_msg_id"] = local_map[q_stanza]
+                r["quoted_msg_id"], loc_ts = local_map[q_stanza]
+                if not r.get("quoted_ts") and loc_ts:
+                    r["quoted_ts"] = loc_ts
             else:
                 still_needed.add(q_stanza)
 
@@ -1855,18 +2101,22 @@ def _resolve_quoted_msg_ids(
         try:
             if source_type == "android":
                 live_matches = wa_conn.execute(
-                    f"SELECT key_id AS stanza_id, _id AS live_id FROM message WHERE key_id IN ({ph})",
+                    f"SELECT key_id AS stanza_id, _id AS live_id, timestamp FROM message WHERE key_id IN ({ph})",
                     list(still_needed),
                 ).fetchall()
+                live_map = {m["stanza_id"]: (m["live_id"], m["timestamp"]) for m in live_matches}
             else:
                 live_matches = wa_conn.execute(
-                    f"SELECT ZSTANZAID AS stanza_id, Z_PK AS live_id FROM ZWAMESSAGE WHERE ZSTANZAID IN ({ph})",
+                    f"SELECT ZSTANZAID AS stanza_id, Z_PK AS live_id, CAST((ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS ts FROM ZWAMESSAGE WHERE ZSTANZAID IN ({ph})",
                     list(still_needed),
                 ).fetchall()
-            live_map = {m["stanza_id"]: m["live_id"] for m in live_matches}
+                live_map = {m["stanza_id"]: (m["live_id"], m["ts"]) for m in live_matches}
             for r in unresolved:
                 if r.get("quoted_msg_id") is None and r["quoted_stanza_id"] in live_map:
-                    r["quoted_msg_id"] = live_map[r["quoted_stanza_id"]]
+                    live_id, live_ts = live_map[r["quoted_stanza_id"]]
+                    r["quoted_msg_id"] = live_id
+                    if not r.get("quoted_ts"):
+                        r["quoted_ts"] = live_ts
         except sqlite3.OperationalError:
             pass
     finally:
@@ -2891,12 +3141,18 @@ _IOS_SELECT = f"""
                      THEN 'link' ELSE 'text' END
             ELSE {_MEDIA_TYPE_EXPR.format(col="('Message/' || COALESCE(mi.ZMEDIALOCALPATH,''))")}
         END                                                           AS media_type,
-        COALESCE(mi.ZTITLE, '')                                      AS media_name,
         COALESCE(
-            m.ZTEXT,
+            CASE WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(m.ZTEXT, '') END,
+            mi.ZMEDIALOCALPATH,
+            ''
+        )                                                             AS media_name,
+        COALESCE(
             CASE
                 WHEN m.ZISFROMME = 1 AND m.ZMESSAGETYPE = 14 THEN 'You deleted this message'
                 WHEN m.ZMESSAGETYPE = 14 THEN 'This message was deleted'
+                WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(mi.ZTITLE, '')
+                WHEN m.ZMESSAGETYPE IN (1, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))
+                ELSE m.ZTEXT
             END,
             ''
         )                                                             AS text_body,
@@ -2938,9 +3194,9 @@ _IOS_SELECT = f"""
         0                                                            AS media_duration,
         0.0                                                          AS aspect_ratio,
         0                                                            AS has_thumbnail,
-        NULLIF(mi.ZTITLE, '')                                        AS link_title,
+        CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZTITLE, '') END  AS link_title,
         NULL                                                         AS link_desc,
-        NULLIF(mi.ZMEDIAURL, '')                                     AS link_url,
+        CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZMEDIAURL, '') END AS link_url,
         0                                                            AS link_preview_type,
         NULL                                                         AS _raw_metadata
     FROM ZWAMESSAGE m
@@ -3978,8 +4234,10 @@ def create_app(output_root: Path, rescan: bool = False):
         _archive_conn.execute(
             "ALTER TABLE recent_messages ADD COLUMN has_thumbnail INTEGER NOT NULL DEFAULT 0"
         )
-    if _archive_conn.execute("PRAGMA user_version").fetchone()[0] < 5:
-        _archive_conn.execute("PRAGMA user_version = 5")
+    if "quoted_has_thumb" not in cols:
+        _archive_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN quoted_has_thumb INTEGER NOT NULL DEFAULT 0"
+        )
     if rescan or (source_is_changed and has_prior_stamp):
         _archive_conn.execute("DELETE FROM recent_messages")
         try:
@@ -4136,8 +4394,16 @@ def create_app(output_root: Path, rescan: bool = False):
         ios_filesize_col = "COALESCE(mi.ZFILESIZE, 0)" if has_ios_filesize else "0"
         ios_duration_col = "COALESCE(mi.ZMOVIEDURATION, 0)" if has_ios_duration else "0"
         ios_aspect_ratio_col = "COALESCE(mi.ZASPECTRATIO, 0.0)" if has_ios_aspect_ratio else "0.0"
-        ios_link_title = "NULLIF(mi.ZTITLE, '')" if has_ios_title else "NULL"
-        ios_link_url = "NULLIF(mi.ZMEDIAURL, '')" if has_ios_mediaurl else "NULL"
+        ios_link_title = (
+            "CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZTITLE, '') END"
+            if has_ios_title
+            else "NULL"
+        )
+        ios_link_url = (
+            "CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZMEDIAURL, '') END"
+            if has_ios_mediaurl
+            else "NULL"
+        )
         ios_raw_metadata = "mi.ZMETADATA" if has_ios_metadata else "NULL"
         ios_thumb_arms = []
         if "ZXMPPTHUMBPATH" in _mi_cols:
@@ -4146,7 +4412,7 @@ def create_app(output_root: Path, rescan: bool = False):
             ios_thumb_arms.append("mi.ZTHUMBNAILLOCALPATH IS NOT NULL")
         if "ZMETADATA" in _mi_cols:
             ios_thumb_arms.append(
-                "(mi.ZMETADATA IS NOT NULL AND INSTR(mi.ZMETADATA, X'ffd8ff') > 0)"
+                "(m.ZMESSAGETYPE != 0 AND mi.ZMETADATA IS NOT NULL AND INSTR(mi.ZMETADATA, X'ffd8ff') > 0)"
             )
         ios_has_thumb_expr = (
             "CASE WHEN " + " OR ".join(ios_thumb_arms) + " THEN 1 ELSE 0 END"
@@ -4231,13 +4497,20 @@ def create_app(output_root: Path, rescan: bool = False):
                      THEN 'link' ELSE 'text' END
             ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE('Message/' || mi.ZMEDIALOCALPATH, mi.ZTITLE)")}
         END                                                           AS media_type,
-        COALESCE(mi.ZTITLE, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END, '') AS media_name,
         COALESCE(
-            m.ZTEXT,
+            CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END,
+            CASE WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(m.ZTEXT, '') END,
+            mi.ZMEDIALOCALPATH,
+            ''
+        )                                                             AS media_name,
+        COALESCE(
             CASE
                 WHEN m.ZISFROMME = 1 AND m.ZMESSAGETYPE = 14 THEN 'You deleted this message'
                 WHEN m.ZMESSAGETYPE = 14 THEN 'This message was deleted'
                 WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios}
+                WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(mi.ZTITLE, '')
+                WHEN m.ZMESSAGETYPE IN (1, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))
+                ELSE m.ZTEXT
             END,
             ''
         )                                                             AS text_body,
@@ -5233,6 +5506,7 @@ def create_app(output_root: Path, rescan: bool = False):
                             if row["msg_id"] in rx_map:
                                 row["reactions"] = rx_map[row["msg_id"]]
                     _hydrate_poll_rows(rows, source_type, get_wa())
+                    _hydrate_quoted_rows(rows, source_type, get_wa())
                     _hydrate_link_preview_rows(rows, source_type)
                     pres = get_preserved()
                     if pres is not None:
@@ -5361,6 +5635,7 @@ def create_app(output_root: Path, rescan: bool = False):
             ).start()
 
         _hydrate_poll_rows(rows, source_type, conn)
+        _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
         pres = get_preserved()
         if pres is not None:
@@ -5446,6 +5721,7 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("raw_msg_type", None)
             row.pop("member_jid", None)
         _hydrate_poll_rows(combined, source_type, conn)
+        _hydrate_quoted_rows(combined, source_type, conn)
         _hydrate_link_preview_rows(combined, source_type)
         pres = get_preserved()
         if pres is not None:
@@ -5587,6 +5863,7 @@ def create_app(output_root: Path, rescan: bool = False):
             dict(r)
             for r in conn.execute(sql, params + type_params + [GALLERY_PAGE_SIZE]).fetchall()
         ]
+        _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
         return jsonify(rows)
 
@@ -5608,6 +5885,7 @@ def create_app(output_root: Path, rescan: bool = False):
             ts_col = _IOS_TS
         sql = f"{select} WHERE {chat_pred} AND {is_link} ORDER BY {ts_col} DESC"
         rows = [dict(r) for r in conn.execute(sql, chat_params).fetchall()]
+        _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
         return jsonify(rows)
 
@@ -5629,6 +5907,7 @@ def create_app(output_root: Path, rescan: bool = False):
             ts_col = _IOS_TS
         sql = f"{select} WHERE {chat_pred} AND {is_doc} ORDER BY {ts_col} DESC"
         rows = [dict(r) for r in conn.execute(sql, chat_params).fetchall()]
+        _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
         return jsonify(rows)
 
@@ -7894,6 +8173,29 @@ def create_app(output_root: Path, rescan: bool = False):
                             eoi_idx = blob.find(b"\xff\xd9", jpeg_idx)
                             if eoi_idx != -1:
                                 thumb_bytes = blob[jpeg_idx : eoi_idx + 2]
+                if not thumb_bytes:
+                    try:
+                        reply_row = conn.execute(
+                            """
+                            SELECT reply_mi.ZMETADATA
+                            FROM ZWAMESSAGE m
+                            JOIN ZWAMESSAGE reply_m ON INSTR(reply_mi.ZMETADATA, m.ZSTANZAID) > 0
+                            JOIN ZWAMEDIAITEM reply_mi ON reply_mi.Z_PK = reply_m.ZMEDIAITEM
+                            WHERE m.Z_PK = ? AND INSTR(reply_mi.ZMETADATA, X'ffd8ff') > 0
+                            LIMIT 1
+                            """,
+                            (msg_id,),
+                        ).fetchone()
+                        if reply_row and reply_row[0]:
+                            rblob = reply_row[0]
+                            if isinstance(rblob, bytes):
+                                j_idx = rblob.find(b"\xff\xd8\xff")
+                                if j_idx != -1:
+                                    e_idx = rblob.find(b"\xff\xd9", j_idx)
+                                    if e_idx != -1:
+                                        thumb_bytes = rblob[j_idx : e_idx + 2]
+                    except sqlite3.OperationalError:
+                        pass
 
         if not thumb_bytes or len(thumb_bytes) < 16:
             return "Thumbnail not found", 404
