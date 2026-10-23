@@ -698,7 +698,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, 'nojid');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False, False)).fetchall()
         assert len(rows) == 1
         sender = rows[0][6]  # sender column
         assert sender == "nojid"
@@ -710,7 +710,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False, False)).fetchall()
         assert len(rows) == 1
         sender = rows[0][6]  # sender column
         assert sender == "nojid"
@@ -723,7 +723,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False, False)).fetchall()
         assert rows[0][6] == "447700900123"
 
     def test_1to1_sender_normal_jid_strips_at_suffix(self):
@@ -733,7 +733,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Message/img.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False, False)).fetchall()
         assert rows[0][6] == "447700900456"
 
     def test_status_media_excluded_from_group_query(self):
@@ -744,7 +744,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAGROUPMEMBER  VALUES (1, '447700900123@s.whatsapp.net');
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, 1, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False, False)).fetchall()
         assert len(rows) == 0
 
     def test_status_media_excluded_from_1to1_query(self):
@@ -754,7 +754,7 @@ class TestBuildIosQuery:
             INSERT INTO ZWAMEDIAITEM    VALUES (1, 'Media/393384259462@status/6/d/photo.jpg', NULL, NULL);
             INSERT INTO ZWAMESSAGE      VALUES (1, 1000.0, 0, 1, 1, NULL, NULL);
         """)
-        rows = conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        rows = conn.execute(ios.build_ios_query(None, None, False, False)).fetchall()
         assert len(rows) == 0
 
 
@@ -4734,10 +4734,10 @@ class TestIosHdDeduplication:
     def test_build_ios_query_hd_dedup_clause(self):
         from wab_archiver import ios_handler as ios
 
-        query_no_dedup = ios.build_ios_query(None, None, False)
+        query_no_dedup = ios.build_ios_query(None, None, False, False)
         assert "ext.message_parent_association" not in query_no_dedup
 
-        query_with_dedup = ios.build_ios_query(None, None, True)
+        query_with_dedup = ios.build_ios_query(None, None, True, False)
         assert "ext.message_parent_association" in query_with_dedup
         assert "mpa.type IN (10, 5)" in query_with_dedup
 
@@ -4777,11 +4777,11 @@ class TestIosHdDeduplication:
         main_conn.execute("ATTACH DATABASE ? AS ext", (str(tmp_path / "ExtChatDatabase.sqlite"),))
 
         # Without dedup: both rows returned
-        rows_no_dedup = main_conn.execute(ios.build_ios_query(None, None, False)).fetchall()
+        rows_no_dedup = main_conn.execute(ios.build_ios_query(None, None, False, False)).fetchall()
         assert len(rows_no_dedup) == 2
 
         # With dedup: only the HD row returned (LQ parent filtered out)
-        rows_dedup = main_conn.execute(ios.build_ios_query(None, None, True)).fetchall()
+        rows_dedup = main_conn.execute(ios.build_ios_query(None, None, True, False)).fetchall()
         assert len(rows_dedup) == 1
         assert rows_dedup[0][0] == 101  # HD message ID
         assert rows_dedup[0][2] == "Message/hd.jpg"
@@ -4887,6 +4887,172 @@ class TestIosHdDeduplication:
         ):
             args = parse_args()
         run_forward_mode(args, logger)
+
+
+class TestIosThumbnailExtraction:
+    def test_has_ios_thumb_support(self):
+        from wab_archiver import ios_handler as ios
+
+        conn = sqlite3.connect(":memory:")
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT)")
+        assert ios.has_ios_thumb_support(cursor) is False
+
+        cursor.execute("ALTER TABLE ZWAMEDIAITEM ADD COLUMN ZXMPPTHUMBPATH TEXT")
+        assert ios.has_ios_thumb_support(cursor) is True
+
+    def test_build_ios_query_thumb_clause(self):
+        from wab_archiver import ios_handler as ios
+
+        query_no_thumb = ios.build_ios_query(None, None, False, False)
+        assert "ZXMPPTHUMBPATH" not in query_no_thumb
+
+        query_with_thumb = ios.build_ios_query(None, None, False, True)
+        assert "ZXMPPTHUMBPATH" in query_with_thumb
+        assert "AS thumb_path" in query_with_thumb
+        assert "mi.ZXMPPTHUMBPATH IS NOT NULL" in query_with_thumb
+
+    def test_run_forward_mode_ios_conditional_thumbnail_extraction(self, tmp_path, logger):
+        from wab_archiver.main import parse_args, run_forward_mode
+
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT, ZXMPPTHUMBPATH TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
+                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
+                ZPUSHNAME TEXT, ZSTANZAID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
+
+            INSERT INTO ZWACHATSESSION VALUES (1, '123456@s.whatsapp.net', 0, 'Alice', 1, 1000.0);
+            -- Row 1: media exists, thumb exists
+            INSERT INTO ZWAMEDIAITEM VALUES (1, 'media1.jpg', NULL, NULL, 'thumb1.thumb');
+            INSERT INTO ZWAMESSAGE VALUES (10, 1000.0, 0, 1, 1, NULL, 'Alice', 'STANZA1');
+
+            -- Row 2: media missing, thumb exists
+            INSERT INTO ZWAMEDIAITEM VALUES (2, 'missing.jpg', NULL, NULL, 'thumb2.thumb');
+            INSERT INTO ZWAMESSAGE VALUES (11, 1001.0, 0, 1, 2, NULL, 'Alice', 'STANZA2');
+        """)
+        conn.close()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        msg_dir = wa_root / "Message"
+        msg_dir.mkdir()
+        (msg_dir / "media1.jpg").write_bytes(b"JPEG_MEDIA_1")
+        (msg_dir / "thumb1.thumb").write_bytes(b"JPEG_THUMB_1")
+        (msg_dir / "thumb2.thumb").write_bytes(b"JPEG_THUMB_2")
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with patch(
+            "sys.argv",
+            [
+                "wab-archiver",
+                "archive",
+                "--msgstore",
+                str(db_path),
+                "--wa-root",
+                str(wa_root),
+                "--output",
+                str(output_dir),
+            ],
+        ):
+            args = parse_args()
+        run_forward_mode(args, logger)
+
+        # Verified: media1 was copied to Contacts
+        media1_files = list(output_dir.rglob("*media1*"))
+        assert len(media1_files) == 1
+        assert media1_files[0].read_bytes() == b"JPEG_MEDIA_1"
+
+        # Verified: thumb1 was NOT extracted because media1 exists!
+        thumb_dir = output_dir / "Whatsapp Databases" / ".thumbnails"
+        assert not (thumb_dir / "thumb1.thumb").exists()
+
+        # Verified: thumb2 WAS extracted because media2 is missing!
+        assert (thumb_dir / "thumb2.thumb").exists()
+        assert (thumb_dir / "thumb2.thumb").read_bytes() == b"JPEG_THUMB_2"
+
+        # Check archive_copies table
+        db_out = sqlite3.connect(str(output_dir / ".wa_media_archiver.db"))
+        copies = db_out.execute(
+            "SELECT original_path, archive_path FROM archive_copies ORDER BY original_path"
+        ).fetchall()
+        db_out.close()
+
+        paths = {c[0]: c[1] for c in copies}
+        # thumb1 must not be in archive_copies
+        assert "Message/thumb1.thumb" not in paths
+        # thumb2 must be in archive_copies pointing to Whatsapp Databases/.thumbnails/thumb2.thumb
+        assert "Message/thumb2.thumb" in paths
+        assert paths["Message/thumb2.thumb"] == "Whatsapp Databases/.thumbnails/thumb2.thumb"
+
+    def test_run_forward_mode_ios_dry_run_does_not_extract_thumbnails(self, tmp_path, logger):
+        from wab_archiver.main import parse_args, run_forward_mode
+
+        db_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT, ZXMPPTHUMBPATH TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
+                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
+                ZPUSHNAME TEXT, ZSTANZAID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
+
+            INSERT INTO ZWACHATSESSION VALUES (1, '123456@s.whatsapp.net', 0, 'Alice', 1, 1000.0);
+            INSERT INTO ZWAMEDIAITEM VALUES (1, 'missing.jpg', NULL, NULL, 'thumb.thumb');
+            INSERT INTO ZWAMESSAGE VALUES (10, 1000.0, 0, 1, 1, NULL, 'Alice', 'STANZA1');
+        """)
+        conn.close()
+
+        wa_root = tmp_path / "AppDomainGroup"
+        wa_root.mkdir()
+        msg_dir = wa_root / "Message"
+        msg_dir.mkdir()
+        (msg_dir / "thumb.thumb").write_bytes(b"JPEG_THUMB")
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with patch(
+            "sys.argv",
+            [
+                "wab-archiver",
+                "archive",
+                "--msgstore",
+                str(db_path),
+                "--wa-root",
+                str(wa_root),
+                "--output",
+                str(output_dir),
+                "--dry-run",
+            ],
+        ):
+            args = parse_args()
+        run_forward_mode(args, logger)
+
+        thumb_dir = output_dir / "Whatsapp Databases" / ".thumbnails"
+        assert not thumb_dir.exists()
 
 
 # ===========================================================================
