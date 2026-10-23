@@ -43,6 +43,35 @@ class SystemActionType(IntEnum):
     EPHEMERAL_DEFAULT_TIMER = 146
 
 
+ALLOWED_GROUP_SYSTEM_ACTIONS = (
+    int(SystemActionType.SUBJECT_CHANGE),
+    int(SystemActionType.PARTICIPANT_JOINED_LEGACY),
+    int(SystemActionType.PARTICIPANT_LEFT_LEGACY),
+    int(SystemActionType.ICON_CHANGED),
+    int(SystemActionType.ICON_DELETED),
+    int(SystemActionType.GROUP_CREATED),
+    int(SystemActionType.PARTICIPANT_ADDED),
+    int(SystemActionType.PARTICIPANT_LEFT),
+    int(SystemActionType.PARTICIPANT_REMOVED),
+    int(SystemActionType.ADMIN_PROMOTED),
+    int(SystemActionType.EPHEMERAL_TOGGLE),
+    int(SystemActionType.ADMIN_DEMOTED),
+    int(SystemActionType.DESCRIPTION_CHANGED),
+    int(SystemActionType.DESCRIPTION_DELETED),
+    int(SystemActionType.EPHEMERAL_SETTING),
+    int(SystemActionType.ANNOUNCEMENT_MODE),
+    int(SystemActionType.EPHEMERAL_SETTING_ALT),
+    int(SystemActionType.LINKED_GROUP_CALL),
+    int(SystemActionType.JOINED_VIA_INVITE_LINK),
+    int(SystemActionType.JOINED_VIA_INVITE_LINK_ALT),
+    int(SystemActionType.MEMBERSHIP_APPROVAL_REQUEST),
+    int(SystemActionType.COMMUNITY_LINK_CHANGED),
+    int(SystemActionType.MEMBERSHIP_APPROVAL_MODE),
+    int(SystemActionType.MEMBERSHIP_APPROVAL_APPROVED),
+    int(SystemActionType.EPHEMERAL_DEFAULT_TIMER),
+)
+
+
 class IOSEventType(IntEnum):
     """iOS ZGROUPEVENTTYPE constants."""
 

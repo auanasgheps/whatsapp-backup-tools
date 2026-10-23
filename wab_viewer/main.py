@@ -47,6 +47,7 @@ except ImportError:
 from wab_viewer.chat_viewer.template import HTML_TEMPLATE
 
 from .system_events import (
+    ALLOWED_GROUP_SYSTEM_ACTIONS,
     format_android_system_event,
     format_ios_system_event,
     format_participant_names,
@@ -4917,6 +4918,37 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_message_system
                 else ""
             )
+            ms_allowed_actions_tuple = tuple(ALLOWED_GROUP_SYSTEM_ACTIONS)
+            ms_disp_join = (
+                "LEFT JOIN message_system ms_disp ON ms_disp.message_row_id = m_disp._id"
+                if has_message_system
+                else ""
+            )
+            ms_sub_join = (
+                "LEFT JOIN message_system ms_sub ON ms_sub.message_row_id = m_sub._id"
+                if has_message_system
+                else ""
+            )
+            ms_disp_allowed_clause = (
+                f"AND ms_disp.action_type IN {ms_allowed_actions_tuple}"
+                if has_message_system
+                else "AND 0"
+            )
+            ms_sub_allowed_clause = (
+                f"AND ms_sub.action_type IN {ms_allowed_actions_tuple}"
+                if has_message_system
+                else "AND 0"
+            )
+            ms_ts_join = (
+                "LEFT JOIN message_system ms_ts ON ms_ts.message_row_id = m_ts._id"
+                if has_message_system
+                else ""
+            )
+            ms_ts_allowed_clause = (
+                f"AND ms_ts.action_type IN {ms_allowed_actions_tuple}"
+                if has_message_system
+                else "AND 0"
+            )
             ldn_s_join = (
                 """
                 LEFT JOIN _lid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id
@@ -4948,16 +4980,6 @@ def create_app(output_root: Path, rescan: bool = False):
             con_ldn_folder_arm = "con_ldn.folder," if has_lid_dn else ""
             ldn_chat_name_arm = "NULLIF(ldn_c.display_name, '')," if has_lid_dn else ""
             ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if has_lid_dn else ""
-            biz_event_filter = (
-                """AND EXISTS (
-                    SELECT 1 FROM message m_chk
-                    LEFT JOIN message_system ms_chk ON ms_chk.message_row_id = m_chk._id
-                    WHERE m_chk.chat_row_id = c._id
-                      AND (ms_chk.action_type IS NULL OR ms_chk.action_type NOT IN (61, 69))
-                )"""
-                if has_message_system
-                else ""
-            )
             rows = conn.execute(f"""
                 SELECT
                     CASE WHEN {is_group_chat} THEN CAST(c._id AS TEXT)
@@ -4984,7 +5006,22 @@ def create_app(output_root: Path, rescan: bool = False):
                         CASE WHEN NOT ({j_c_is_lid}) AND j_chat.user IS NOT NULL THEN '+' || {_clean_user_sql("j_chat.user")} END,
                         'Unknown Contact (' || c._id || ')'
                     )                                                   AS display_name,
-                    COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) AS newest_ts,
+                    COALESCE(
+                        (
+                            SELECT MAX(m_ts.timestamp)
+                            FROM message m_ts
+                            {ms_ts_join}
+                            WHERE m_ts.chat_row_id = c._id
+                              AND m_ts.message_type NOT IN (25, 67, 74, 79, 90)
+                              AND (
+                                  (m_ts.text_data IS NOT NULL AND m_ts.text_data != '' AND (m_ts.message_type IS NULL OR m_ts.message_type = 0 OR m_ts.message_type IN (5, 16)))
+                                  OR (m_ts.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                                  OR ({is_group_chat} AND m_ts.message_type = 7 {ms_ts_allowed_clause})
+                              )
+                        ),
+                        NULLIF(c.sort_timestamp, 0),
+                        0
+                    ) AS newest_ts,
                     COALESCE(m.text_data, '')                          AS last_msg_preview,
                     COALESCE(m.message_type, 0)                        AS last_msg_type,
                     COALESCE(m.from_me, 0)                             AS last_msg_from_me,
@@ -5012,19 +5049,26 @@ def create_app(output_root: Path, rescan: bool = False):
                     (
                         SELECT m_disp._id
                         FROM message m_disp
+                        {ms_disp_join}
                         WHERE m_disp._id = c.display_message_row_id
                           AND m_disp.chat_row_id = c._id
+                          AND m_disp.message_type NOT IN (25, 67, 74, 79, 90)
+                          AND (
+                              (m_disp.text_data IS NOT NULL AND m_disp.text_data != '' AND (m_disp.message_type IS NULL OR m_disp.message_type = 0 OR m_disp.message_type IN (5, 16)))
+                              OR (m_disp.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                              OR ({is_group_chat} AND m_disp.message_type = 7 {ms_disp_allowed_clause})
+                          )
                     ),
                     (
                         SELECT m_sub._id
                         FROM message m_sub
+                        {ms_sub_join}
                         WHERE m_sub.chat_row_id = c._id
-                          AND m_sub.message_type NOT IN (25, 67, 74, 79)
+                          AND m_sub.message_type NOT IN (25, 67, 74, 79, 90)
                           AND (
                               (m_sub.text_data IS NOT NULL AND m_sub.text_data != '' AND (m_sub.message_type IS NULL OR m_sub.message_type = 0 OR m_sub.message_type IN (5, 16)))
-                              OR (m_sub.message_type IS NOT NULL AND m_sub.message_type != 0 AND m_sub.message_type != 7)
-                              OR (m_sub.message_type IN (4, 14, 15, 64, 42, 43, 82, 66))
-                              OR (m_sub.message_type = 7)
+                              OR (m_sub.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                              OR ({is_group_chat} AND m_sub.message_type = 7 {ms_sub_allowed_clause})
                           )
                         ORDER BY m_sub.timestamp DESC, m_sub._id DESC
                         LIMIT 1
@@ -5041,13 +5085,9 @@ def create_app(output_root: Path, rescan: bool = False):
                     OR
                     (NOT ({is_group_chat}) AND (
                         EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))
-                        OR (
-                            (c.hidden = 0 OR c.hidden IS NULL)
-                            {biz_event_filter}
-                        )
                     ))
                 )
-                ORDER BY COALESCE(NULLIF(c.sort_timestamp, 0), (SELECT MAX(timestamp) FROM message WHERE chat_row_id = c._id), 0) DESC
+                ORDER BY newest_ts DESC
             """).fetchall()
             seen_ids = set()
             deduped_rows = []
@@ -7816,22 +7856,6 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_b_raw:
                     bulk_g_parts.append("(j.raw_string IS NOT NULL AND j.raw_string LIKE '%@g.us')")
                 bulk_is_group = " OR ".join(bulk_g_parts)
-                bulk_has_ms = "message_system" in {
-                    r[0]
-                    for r in wa_conn_bulk.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table'"
-                    ).fetchall()
-                }
-                bulk_biz_filter = (
-                    """AND EXISTS (
-                        SELECT 1 FROM message m_chk
-                        LEFT JOIN message_system ms_chk ON ms_chk.message_row_id = m_chk._id
-                        WHERE m_chk.chat_row_id = c._id
-                          AND (ms_chk.action_type IS NULL OR ms_chk.action_type NOT IN (61, 69))
-                    )"""
-                    if bulk_has_ms
-                    else ""
-                )
                 chat_rows = wa_conn_bulk.execute(f"""
                     SELECT
                         CASE WHEN ({bulk_is_group}) THEN CAST(c._id AS TEXT)
@@ -7845,10 +7869,6 @@ def create_app(output_root: Path, rescan: bool = False):
                         OR
                         (NOT ({bulk_is_group}) AND (
                             EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))
-                            OR (
-                                (c.hidden = 0 OR c.hidden IS NULL)
-                                {bulk_biz_filter}
-                            )
                         ))
                     )
                 """).fetchall()
