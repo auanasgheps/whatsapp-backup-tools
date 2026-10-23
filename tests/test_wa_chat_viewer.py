@@ -8485,6 +8485,91 @@ class TestPollSupport:
         assert t1.content_type == "image/jpeg"
         assert t1.data == fake_embedded_jpeg
 
+    def test_missing_media_ios_extracted_thumbnails_dir_resolution(self, tmp_path):
+        """Verify viewer resolves iOS thumbnails extracted to Whatsapp Databases/.thumbnails/."""
+        arch_conn = sqlite3.connect(tmp_path / ".wa_media_archiver.db")
+        arch_conn.execute("CREATE TABLE archive_copies (original_path TEXT, archive_path TEXT)")
+        arch_conn.execute("CREATE TABLE contacts (number TEXT, display_name TEXT)")
+        arch_conn.execute(
+            "INSERT INTO archive_copies VALUES ('Message/Media/123@s.whatsapp.net/uuid123.thumb', 'Whatsapp Databases/.thumbnails/uuid123.thumb')"
+        )
+        arch_conn.commit()
+
+        # Place the thumbnail in Whatsapp Databases/.thumbnails/
+        thumb_dir = tmp_path / "Whatsapp Databases" / ".thumbnails"
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\xff\xd9"
+        (thumb_dir / "uuid123.thumb").write_bytes(fake_jpeg)
+
+        wa_conn = sqlite3.connect(tmp_path / "ChatStorage.sqlite")
+        wa_conn.execute("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZXMPPTHUMBPATH TEXT,
+                ZMEDIALOCALPATH TEXT,
+                ZFILESIZE INTEGER,
+                ZASPECTRATIO FLOAT,
+                ZMOVIEDURATION INTEGER,
+                ZTITLE TEXT
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE FLOAT,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZFROMJID TEXT,
+                ZSTANZAID TEXT,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER
+            )
+        """)
+        wa_conn.execute("""
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT
+            )
+        """)
+        wa_conn.execute("CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT)")
+
+        wa_conn.execute("INSERT INTO ZWACHATSESSION VALUES (1, '123@s.whatsapp.net', 'Bob', NULL)")
+        # Missing media item with thumb path
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (1, 'Media/123@s.whatsapp.net/uuid123.thumb', 'Media/123@s.whatsapp.net/missing.jpg', 1234, 1.0, 0, NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (1, 1, 1, 0, 1000.0, 1, NULL, '123@s.whatsapp.net', 'S1', 'Bob', NULL, NULL)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=True)
+        client = app.test_client()
+
+        res = client.get("/api/messages?chat_id=1&chat_type=contact")
+        assert res.status_code == 200
+        msgs = {m["msg_id"]: m for m in res.get_json()}
+        assert msgs[1]["has_thumbnail"] == 1
+
+        t1 = client.get("/api/thumbnail/1")
+        assert t1.status_code == 200
+        assert t1.content_type == "image/jpeg"
+        assert t1.data == fake_jpeg
+        assert "immutable" in t1.headers.get("Cache-Control", "")
+
 
 class TestIncrementViewerMessages:
     """Verify viewer displays messages ingested from incremental backups."""

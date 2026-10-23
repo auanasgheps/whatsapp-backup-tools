@@ -3754,7 +3754,6 @@ def create_app(output_root: Path, rescan: bool = False):
     has_mm_size = False
     has_mm_duration = False
     has_mm_file_hash = False
-    has_ios_xmpp_thumb = False
     has_ios_aspect_ratio = False
     has_ios_filesize = False
     has_ios_duration = False
@@ -3832,7 +3831,6 @@ def create_app(output_root: Path, rescan: bool = False):
             else set()
         )
         has_ios_vcard_name = "ZVCARDNAME" in _mi_cols
-        has_ios_xmpp_thumb = "ZXMPPTHUMBPATH" in _mi_cols or "ZTHUMBNAILLOCALPATH" in _mi_cols
         has_ios_aspect_ratio = "ZASPECTRATIO" in _mi_cols
         has_ios_filesize = "ZFILESIZE" in _mi_cols
         has_ios_duration = "ZMOVIEDURATION" in _mi_cols
@@ -3860,10 +3858,10 @@ def create_app(output_root: Path, rescan: bool = False):
         ios_duration_col = "COALESCE(mi.ZMOVIEDURATION, 0)" if has_ios_duration else "0"
         ios_aspect_ratio_col = "COALESCE(mi.ZASPECTRATIO, 0.0)" if has_ios_aspect_ratio else "0.0"
         ios_thumb_arms = []
-        if has_ios_xmpp_thumb:
-            ios_thumb_arms.append(
-                "mi.ZXMPPTHUMBPATH IS NOT NULL OR mi.ZTHUMBNAILLOCALPATH IS NOT NULL"
-            )
+        if "ZXMPPTHUMBPATH" in _mi_cols:
+            ios_thumb_arms.append("mi.ZXMPPTHUMBPATH IS NOT NULL")
+        if "ZTHUMBNAILLOCALPATH" in _mi_cols:
+            ios_thumb_arms.append("mi.ZTHUMBNAILLOCALPATH IS NOT NULL")
         if "ZMETADATA" in _mi_cols:
             ios_thumb_arms.append(
                 "(mi.ZMETADATA IS NOT NULL AND INSTR(mi.ZMETADATA, X'ffd8ff') > 0)"
@@ -7447,12 +7445,39 @@ def create_app(output_root: Path, rescan: bool = False):
                         )
                     )
                     if thumb_path:
-                        cand = (output_root / thumb_path).resolve()
-                        if cand.exists():
+                        cand_thumb = (
+                            output_root
+                            / "Whatsapp Databases"
+                            / ".thumbnails"
+                            / Path(thumb_path).name
+                        ).resolve()
+                        if cand_thumb.exists():
                             try:
-                                thumb_bytes = cand.read_bytes()
+                                thumb_bytes = cand_thumb.read_bytes()
                             except OSError:
                                 pass
+                        if not thumb_bytes:
+                            try:
+                                ac_row = conn.execute(
+                                    "SELECT archive_path FROM arch.archive_copies WHERE original_path IN (?, ?)",
+                                    (thumb_path, "Message/" + thumb_path),
+                                ).fetchone()
+                                if ac_row and ac_row["archive_path"]:
+                                    cand_ac = (output_root / ac_row["archive_path"]).resolve()
+                                    if cand_ac.exists():
+                                        try:
+                                            thumb_bytes = cand_ac.read_bytes()
+                                        except OSError:
+                                            pass
+                            except sqlite3.OperationalError:
+                                pass
+                        if not thumb_bytes:
+                            cand = (output_root / thumb_path).resolve()
+                            if cand.exists():
+                                try:
+                                    thumb_bytes = cand.read_bytes()
+                                except OSError:
+                                    pass
 
             if not thumb_bytes and "ZMETADATA" in _mi_cols:
                 meta_row = conn.execute(

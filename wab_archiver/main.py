@@ -689,24 +689,57 @@ def process_rows(
     cursor = conn.cursor() if conn is not None else None
 
     progress = ProgressReporter("Progress", total, logger, sys.stderr, 0.2)
+    thumb_dir_ensured = False
 
-    for i, (
-        msg_id,
-        timestamp,
-        file_path,
-        mime_type,
-        chat_row_id,
-        chat_subject,
-        sender,
-        key_from_me,
-        message_url,
-        media_name,
-    ) in enumerate(rows, 1):
+    for i, row in enumerate(rows, 1):
+        (
+            msg_id,
+            timestamp,
+            file_path,
+            mime_type,
+            chat_row_id,
+            chat_subject,
+            sender,
+            key_from_me,
+            message_url,
+            media_name,
+        ) = row[:10]
+        thumb_path = row[10] if len(row) > 10 else None
         is_group = chat_subject is not None
         filename = media_name if media_name else (os.path.basename(file_path) if file_path else "")
 
+        def _extract_thumb_if_missing():
+            nonlocal thumb_dir_ensured
+            if thumb_path:
+                src_thumb = media_resolver(thumb_path)
+                if src_thumb and os.path.isfile(src_thumb):
+                    thumb_dest_dir = os.path.join(output_root, "Whatsapp Databases", ".thumbnails")
+                    thumb_filename = os.path.basename(thumb_path)
+                    dest_thumb = os.path.join(thumb_dest_dir, thumb_filename)
+                    if not dry_run:
+                        if not thumb_dir_ensured:
+                            os.makedirs(thumb_dest_dir, exist_ok=True)
+                            thumb_dir_ensured = True
+                        try:
+                            if not os.path.exists(dest_thumb):
+                                shutil.copy2(src_thumb, dest_thumb)
+                            if cursor is not None:
+                                rel = os.path.relpath(dest_thumb, output_root).replace(os.sep, "/")
+                                archive_db.record_file_archived(
+                                    cursor,
+                                    thumb_path,
+                                    b"",
+                                    rel,
+                                    os.path.getsize(dest_thumb),
+                                    0,
+                                    timestamp,
+                                )
+                        except OSError:
+                            pass
+
         if not file_path:
             logger.debug(f"SKIP (no file_path): message_id={msg_id}")
+            _extract_thumb_if_missing()
             missing_rows.append(
                 _build_missing_row(
                     msg_id,
@@ -739,6 +772,7 @@ def process_rows(
 
         if src is None or not os.path.isfile(src):
             logger.warning(f"MISSING source file (message_id={msg_id}): {file_path}")
+            _extract_thumb_if_missing()
             missing_rows.append(
                 _build_missing_row(
                     msg_id,
@@ -2468,7 +2502,8 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
                 hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
 
-                query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup)
+                has_thumb = ios_handler.has_ios_thumb_support(cursor)
+                query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup, has_thumb)
                 vcard_query = (
                     ios_handler.build_ios_vcard_query(args.limit, since_ms)
                     if ios_handler.has_ios_vcard_support(cursor)
