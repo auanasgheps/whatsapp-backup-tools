@@ -1,11 +1,13 @@
 import atexit
 import contextlib
+import io
 import logging
 import os
 import plistlib
 import shutil
 import sqlite3
 import tempfile
+import typing
 
 from shared.source_detection import WA_DATABASES_DIR_NAME
 
@@ -33,10 +35,34 @@ _IOS_AUXILIARY_DATABASES: list[tuple[list[str], str]] = [
 ]
 
 
+def _extract_file_safely(
+    backup: typing.Any,
+    relative_path: str,
+    domain_like: str,
+    output_filename: str,
+    logger: logging.Logger,
+) -> None:
+    """
+    Extract a single file from an encrypted backup while capturing 3rd-party stdout noise.
+    Any stdout output (e.g. byte length warnings) is logged at DEBUG level.
+    """
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        backup.extract_file(
+            relative_path=relative_path,
+            domain_like=domain_like,
+            output_filename=output_filename,
+        )
+    output = buf.getvalue().strip()
+    if output:
+        logger.debug(f"iphone_backup_decrypt output for {relative_path}: {output}")
+
+
 def _extract_auxiliary_databases_unencrypted(
     manifest_map: dict[str, str], output_dir: str, logger: logging.Logger
 ) -> None:
     """Extract optional auxiliary iOS databases if present in the backup manifest."""
+    extracted_names: list[str] = []
     for candidates, target_name in _IOS_AUXILIARY_DATABASES:
         found_path = None
         for cand in candidates:
@@ -44,34 +70,49 @@ def _extract_auxiliary_databases_unencrypted(
                 found_path = cand
                 break
         if found_path is not None:
-            logger.info(f"Extracting {target_name} from backup...")
+            logger.debug(f"Extracting {target_name} from backup...")
             tmp = extract_to_temp(manifest_map, found_path, logger)
             _save_db_to_output(tmp, output_dir, target_name, logger)
             os.unlink(tmp)
+            extracted_names.append(target_name)
+    if extracted_names:
+        logger.info(
+            f"Extracted {len(extracted_names)} auxiliary databases: {', '.join(extracted_names)}."
+        )
 
 
 def _extract_auxiliary_databases_encrypted(
-    backup, domain_like: str, output_dir: str, logger: logging.Logger
+    backup: typing.Any, domain_like: str, output_dir: str, logger: logging.Logger
 ) -> None:
     """Decrypt optional auxiliary iOS databases if present in the encrypted backup."""
+    extracted_names: list[str] = []
     for candidates, target_name in _IOS_AUXILIARY_DATABASES:
         extracted = False
         for cand in candidates:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
             tmp.close()
             try:
-                backup.extract_file(
-                    relative_path=cand, domain_like=domain_like, output_filename=tmp.name
+                _extract_file_safely(
+                    backup=backup,
+                    relative_path=cand,
+                    domain_like=domain_like,
+                    output_filename=tmp.name,
+                    logger=logger,
                 )
                 _save_db_to_output(tmp.name, output_dir, target_name, logger)
                 os.unlink(tmp.name)
-                logger.info(f"Decrypted {target_name}.")
+                logger.debug(f"Decrypted auxiliary database: {target_name}.")
+                extracted_names.append(target_name)
                 extracted = True
                 break
             except FileNotFoundError:
                 os.unlink(tmp.name)
         if not extracted:
             logger.debug(f"{target_name} not found in encrypted backup.")
+    if extracted_names:
+        logger.info(
+            f"Decrypted {len(extracted_names)} auxiliary databases: {', '.join(extracted_names)}."
+        )
 
 
 def _raise_macos_fda_error(path: str, logger: logging.Logger) -> None:
@@ -213,11 +254,11 @@ def extract_to_temp(
 
 
 def _save_db_to_output(src: str, output_dir: str, filename: str, logger: logging.Logger) -> str:
-    """Copy a SQLite file to the output folder; warn if overwriting. Returns dest path."""
+    """Copy a SQLite file to the output folder; log at DEBUG if overwriting. Returns dest path."""
     os.makedirs(output_dir, exist_ok=True)
     dest = os.path.join(output_dir, filename)
     if os.path.exists(dest):
-        logger.warning(f"Overwriting existing {dest} with extracted database.")
+        logger.debug(f"Overwriting existing {os.path.normpath(dest)} with extracted database.")
     shutil.copy2(src, dest)
     return dest
 
@@ -303,8 +344,13 @@ def extract_encrypted(
 
     logger.info("Unlocking encrypted backup...")
     try:
-        backup = EncryptedBackup(backup_directory=backup_dir, passphrase=passphrase)
-        backup.test_decryption()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            backup = EncryptedBackup(backup_directory=backup_dir, passphrase=passphrase)
+            backup.test_decryption()
+        unlock_out = buf.getvalue().strip()
+        if unlock_out:
+            logger.debug(f"iphone_backup_decrypt unlock output: {unlock_out}")
     except ValueError as e:
         logger.error(f"Failed to unlock backup: {e}\n  Check that --ios-password is correct.")
         raise SystemExit(1)
@@ -323,8 +369,12 @@ def extract_encrypted(
     tmp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
     tmp_db.close()
     try:
-        backup.extract_file(
-            relative_path="ChatStorage.sqlite", domain_like=domain_like, output_filename=tmp_db.name
+        _extract_file_safely(
+            backup=backup,
+            relative_path="ChatStorage.sqlite",
+            domain_like=domain_like,
+            output_filename=tmp_db.name,
+            logger=logger,
         )
     except FileNotFoundError:
         logger.error(
@@ -342,10 +392,12 @@ def extract_encrypted(
         tmp_contacts = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
         tmp_contacts.close()
         try:
-            backup.extract_file(
+            _extract_file_safely(
+                backup=backup,
                 relative_path="ContactsV2.sqlite",
                 domain_like=domain_like,
                 output_filename=tmp_contacts.name,
+                logger=logger,
             )
             ios_contacts_path = _save_db_to_output(
                 tmp_contacts.name, db_output_dir, "ContactsV2.sqlite", logger
@@ -373,8 +425,12 @@ def extract_encrypted(
         dest = os.path.join(tmp_media_dir, *relative_path.split("/"))
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         try:
-            backup.extract_file(
-                relative_path=relative_path, domain_like=domain_like, output_filename=dest
+            _extract_file_safely(
+                backup=backup,
+                relative_path=relative_path,
+                domain_like=domain_like,
+                output_filename=dest,
+                logger=logger,
             )
         except FileNotFoundError:
             return None
