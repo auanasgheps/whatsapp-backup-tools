@@ -5304,18 +5304,73 @@ class TestServiceMessages:
             assert "15551111111" not in chat_ids
             # Chat 2 (has real user message) must be present
             assert "15552222222" in chat_ids
-            # Chat 3 (has E2E banner) is present with formatted preview
-            assert "15553333333" in chat_ids
-            c3 = next(c for c in chats if c["id"] == "15553333333")
-            assert c3["last_msg_type"] == "service"
-            assert "Messages and calls are end-to-end encrypted" in c3["last_msg_preview"]
+            c2 = next(c for c in chats if c["id"] == "15552222222")
+            assert c2["last_msg_preview"] == "Hello from business"
+            assert c2["newest_ts"] == 1700000015000
+            # Chat 3 (has only E2E banner and 0 user messages) must be excluded from chat list
+            assert "15553333333" not in chat_ids
 
-            # Opening Chat 3 displays the E2E banner message
+            # Opening Chat 3 directly displays the E2E banner message in conversation history
             m_resp = client.get("/api/messages?chat_id=15553333333&chat_type=contact")
             msgs = m_resp.get_json()
             assert len(msgs) == 1
             assert msgs[0]["media_type"] == "service"
             assert "Messages and calls are end-to-end encrypted" in msgs[0]["text_body"]
+
+    def test_android_recents_sorting_ignores_system_messages(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER, text_data TEXT, message_type INTEGER DEFAULT 0);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE message_system (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL, action_type INTEGER NOT NULL);
+            CREATE TABLE message_system_chat_participant (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL, user_jid_row_id INTEGER NOT NULL);
+
+            INSERT INTO jid VALUES (1, '15551111111', 's.whatsapp.net', '15551111111@s.whatsapp.net');
+            INSERT INTO jid VALUES (2, '15552222222', 's.whatsapp.net', '15552222222@s.whatsapp.net');
+
+            -- Chat 1: Older real message (ts=1000), but has newer encryption notice (ts=3000) bumping sort_timestamp
+            INSERT INTO chat VALUES (1, 1, NULL, 0, 3000, 2);
+            INSERT INTO message VALUES (1, 1, 0, 1, 1000, 'Message from Chat 1', 0);
+            INSERT INTO message VALUES (2, 1, 0, 0, 3000, NULL, 7);
+            INSERT INTO message_system VALUES (1, 2, 67);
+
+            -- Chat 2: Newer real message (ts=2000), sort_timestamp=2000
+            INSERT INTO chat VALUES (2, 2, NULL, 0, 2000, 3);
+            INSERT INTO message VALUES (3, 2, 0, 2, 2000, 'Message from Chat 2', 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = sqlite3.connect(str(archive_path))
+        archive_conn.executescript("""
+            CREATE TABLE contacts (number TEXT PRIMARY KEY, display_name TEXT, folder TEXT);
+            CREATE TABLE archive_copies (original_path TEXT PRIMARY KEY, archive_path TEXT);
+        """)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 2
+            # Chat 2 (real msg ts=2000) must rank BEFORE Chat 1 (real msg ts=1000),
+            # ignoring Chat 1's system event at ts=3000
+            assert chats[0]["id"] == "15552222222"
+            assert chats[0]["newest_ts"] == 2000
+            assert chats[0]["last_msg_preview"] == "Message from Chat 2"
+
+            assert chats[1]["id"] == "15551111111"
+            assert chats[1]["newest_ts"] == 1000
+            assert chats[1]["last_msg_preview"] == "Message from Chat 1"
 
     def test_ios_e2e_event_and_empty_chat_filtering(self, tmp_path):
         ios_path = tmp_path / "ChatStorage.sqlite"
