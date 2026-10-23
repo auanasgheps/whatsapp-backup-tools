@@ -10,9 +10,10 @@ Your feedback is highly appreciated!
 
 #### **Release highlights:**
 
-> 🛡️ **Message Preservation Across Backups**:
+> 🛡️ **Message Preservation Across Backups [experimental]**:
 > Traditional WhatsApp backups only reflect the current state of your device, meaning messages or chats deleted between backup cycles vanish forever. With the new Message Preservation engine (`-P` / `--preserve-deleted`), deleted messages, revoked "Delete for Everyone" texts, and removed chats are automatically saved into a dedicated preserved history (`preserved_messages.db`). This feature compares the previous extraction with the current one, and preserves anything missing in a dedicated database.
 Preserved records remain fully searchable and browsable in the web viewer with clear badges, without modifying original WhatsApp databases. 
+⚠️ This feature is considered experimental as it requires more testing for edge cases scenarios.
 
 > 🔬 **Engineering for Protocol Fidelity & Long-Term Reliability**:
 > To ensure your archives stand the test of time, significant effort went into deeply mapping WhatsApp's internal database architectures, multi-database relationships, and binary protocols across both Android and iOS. This foundation unlocks full fidelity for complex entities, including those not yet implemented, while providing proactive resilience against WhatsApp schema changes and future updates.
