@@ -3646,6 +3646,95 @@ def create_app(output_root: Path, rescan: bool = False):
                 except sqlite3.OperationalError:
                     pass
                 try:
+                    cs_cols = {
+                        r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()
+                    }
+                    if "ZCONTACTIDENTIFIER" in cs_cols:
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                cs.ZCONTACTJID AS jid,
+                                NULLIF(cs.ZPARTNERNAME, '') AS full_name,
+                                CASE WHEN cs.ZCONTACTIDENTIFIER LIKE '%@s.whatsapp.net'
+                                     THEN SUBSTR(cs.ZCONTACTIDENTIFIER, 1, INSTR(cs.ZCONTACTIDENTIFIER, '@') - 1)
+                                END AS phone_number
+                            FROM ZWACHATSESSION cs
+                            WHERE cs.ZCONTACTJID LIKE '%@lid'
+                              AND cs.ZCONTACTIDENTIFIER LIKE '%@s.whatsapp.net'
+                            ON CONFLICT(jid) DO UPDATE SET
+                                full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                                phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                        """)
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1) AS jid,
+                                NULLIF(cs.ZPARTNERNAME, '') AS full_name,
+                                CASE WHEN cs.ZCONTACTIDENTIFIER LIKE '%@s.whatsapp.net'
+                                     THEN SUBSTR(cs.ZCONTACTIDENTIFIER, 1, INSTR(cs.ZCONTACTIDENTIFIER, '@') - 1)
+                                END AS phone_number
+                            FROM ZWACHATSESSION cs
+                            WHERE cs.ZCONTACTJID LIKE '%@lid'
+                              AND cs.ZCONTACTIDENTIFIER LIKE '%@s.whatsapp.net'
+                            ON CONFLICT(jid) DO UPDATE SET
+                                full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                                phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                        """)
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                cs.ZCONTACTIDENTIFIER AS jid,
+                                NULLIF(cs.ZPARTNERNAME, '') AS full_name,
+                                SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1) AS phone_number
+                            FROM ZWACHATSESSION cs
+                            WHERE cs.ZCONTACTJID LIKE '%@s.whatsapp.net'
+                              AND cs.ZCONTACTIDENTIFIER LIKE '%@lid'
+                            ON CONFLICT(jid) DO UPDATE SET
+                                full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                                phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                        """)
+                        conn.execute("""
+                            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                            SELECT
+                                SUBSTR(cs.ZCONTACTIDENTIFIER, 1, INSTR(cs.ZCONTACTIDENTIFIER, '@') - 1) AS jid,
+                                NULLIF(cs.ZPARTNERNAME, '') AS full_name,
+                                SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1) AS phone_number
+                            FROM ZWACHATSESSION cs
+                            WHERE cs.ZCONTACTJID LIKE '%@s.whatsapp.net'
+                              AND cs.ZCONTACTIDENTIFIER LIKE '%@lid'
+                            ON CONFLICT(jid) DO UPDATE SET
+                                full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                                phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                        """)
+                    conn.execute("""
+                        INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                        SELECT
+                            cs.ZCONTACTJID AS jid,
+                            NULLIF(cs.ZPARTNERNAME, '') AS full_name,
+                            SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1) AS phone_number
+                        FROM ZWACHATSESSION cs
+                        WHERE cs.ZCONTACTJID LIKE '%@s.whatsapp.net'
+                          AND cs.ZPARTNERNAME IS NOT NULL AND cs.ZPARTNERNAME != ''
+                        ON CONFLICT(jid) DO UPDATE SET
+                            full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                            phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                    """)
+                    conn.execute("""
+                        INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                        SELECT
+                            SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1) AS jid,
+                            NULLIF(cs.ZPARTNERNAME, '') AS full_name,
+                            SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1) AS phone_number
+                        FROM ZWACHATSESSION cs
+                        WHERE cs.ZCONTACTJID LIKE '%@s.whatsapp.net'
+                          AND cs.ZPARTNERNAME IS NOT NULL AND cs.ZPARTNERNAME != ''
+                        ON CONFLICT(jid) DO UPDATE SET
+                            full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                            phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+                    """)
+                except sqlite3.OperationalError:
+                    pass
+                try:
                     conn.execute("""
                         UPDATE _ios_contacts
                         SET full_name = (
@@ -3656,6 +3745,7 @@ def create_app(output_root: Path, rescan: bool = False):
                                OR con.number = SUBSTR(_ios_contacts.jid, 1, INSTR(_ios_contacts.jid || '@', '@') - 1))
                               AND con.display_name IS NOT NULL
                               AND con.display_name != ''
+                              AND con.display_name NOT LIKE 'Unknown%'
                             LIMIT 1
                         )
                         WHERE (full_name IS NULL OR full_name = '' OR full_name LIKE '+%')
@@ -3666,6 +3756,7 @@ def create_app(output_root: Path, rescan: bool = False):
                                  OR con.number = SUBSTR(_ios_contacts.jid, 1, INSTR(_ios_contacts.jid || '@', '@') - 1))
                                 AND con.display_name IS NOT NULL
                                 AND con.display_name != ''
+                                AND con.display_name NOT LIKE 'Unknown%'
                           )
                     """)
                 except sqlite3.OperationalError:
@@ -4703,6 +4794,18 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_ios_group_event
                 else ""
             )
+            cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+            has_cs_ident = "ZCONTACTIDENTIFIER" in cs_cols
+            cs_ident_col = "cs.ZCONTACTIDENTIFIER" if has_cs_ident else "NULL"
+            ios_phone_expr = f"""
+                COALESCE(
+                    CASE WHEN cs.ZCONTACTJID LIKE '%@s.whatsapp.net'
+                         THEN SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1) END,
+                    CASE WHEN {cs_ident_col} LIKE '%@s.whatsapp.net'
+                         THEN SUBSTR({cs_ident_col}, 1, INSTR({cs_ident_col}, '@') - 1) END,
+                    ic.phone_number
+                )
+            """
             rows = conn.execute(f"""
                 SELECT
                     CAST(cs.Z_PK AS TEXT)                               AS id,
@@ -4710,18 +4813,15 @@ def create_app(output_root: Path, rescan: bool = False):
                          ELSE 'contact' END                            AS type,
                     COALESCE(
                         NULLIF(con.display_name, ''),
-                        CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
-                                         INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) = '0'
-                            THEN 'WhatsApp' END,
-                        con.folder,
-                        grp.subject,
-                        cs.ZPARTNERNAME,
-                        CASE WHEN SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
-                                         INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1) != ''
-                            THEN '+' || SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
-                                                INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1)
-                        END,
-                        CAST(cs.Z_PK AS TEXT)
+                        NULLIF(con_lid.display_name, ''),
+                        CASE WHEN ({ios_phone_expr}) = '0' OR cs.ZCONTACTJID = '0@s.whatsapp.net' THEN 'WhatsApp' END,
+                        CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN COALESCE(NULLIF(grp.subject, ''), NULLIF(cs.ZPARTNERNAME, ''), 'Unknown Group (' || cs.Z_PK || ')') END,
+                        CASE WHEN ic.full_name IS NOT NULL AND ic.full_name != '' AND ic.full_name NOT LIKE '+%' AND ic.full_name NOT LIKE 'Unknown%' THEN ic.full_name END,
+                        NULLIF(cs.ZPARTNERNAME, ''),
+                        CASE WHEN con.folder IS NOT NULL AND con.folder != '' AND con.folder NOT LIKE 'Unknown%'
+                             THEN RTRIM(SUBSTR(con.folder, 1, INSTR(con.folder || ' (', ' (') - 1)) END,
+                        CASE WHEN ({ios_phone_expr}) IS NOT NULL AND ({ios_phone_expr}) != '' THEN '+' || ({ios_phone_expr}) END,
+                        'Unknown Contact (' || cs.Z_PK || ')'
                     )                                                   AS display_name,
                     CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS newest_ts,
                     COALESCE(m.ZTEXT, '')                              AS last_msg_preview,
@@ -4732,9 +4832,12 @@ def create_app(output_root: Path, rescan: bool = False):
                     CASE WHEN m.ZFROMJID NOT LIKE '%@g.us' THEN m.ZFROMJID END AS last_msg_sender_jid,
                     gm.ZMEMBERJID                                       AS last_msg_member_jid
                 FROM ZWACHATSESSION cs
+                LEFT JOIN _ios_contacts ic ON ic.jid = cs.ZCONTACTJID
                 LEFT JOIN arch.contacts con
-                      ON con.number = SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
-                                             INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1)
+                      ON con.number = ({ios_phone_expr})
+                LEFT JOIN arch.contacts con_lid
+                      ON con_lid.number = SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
+                                                 INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1)
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(cs.Z_PK AS TEXT)
                 JOIN (
                     SELECT msg.ZCHATSESSION, MAX(msg.Z_PK) AS last_pk
@@ -6950,21 +7053,39 @@ def create_app(output_root: Path, rescan: bool = False):
                 received = count_row["received"] or 0 if count_row else 0
 
                 if chat_type == "contact":
+                    cs_cols = {
+                        r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()
+                    }
+                    has_cs_ident = "ZCONTACTIDENTIFIER" in cs_cols
+                    cs_ident_col = "cs.ZCONTACTIDENTIFIER" if has_cs_ident else "NULL"
+                    phone_expr = f"""
+                        COALESCE(
+                            CASE WHEN cs.ZCONTACTJID LIKE '%@s.whatsapp.net'
+                                 THEN SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1) END,
+                            CASE WHEN {cs_ident_col} LIKE '%@s.whatsapp.net'
+                                 THEN SUBSTR({cs_ident_col}, 1, INSTR({cs_ident_col}, '@') - 1) END,
+                            ic.phone_number
+                        )
+                    """
                     row = conn.execute(
-                        """
+                        f"""
                         SELECT
-                            NULLIF(SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
-                                         INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '') AS user,
+                            ({phone_expr}) AS user,
                             COALESCE(
                                 NULLIF(con.display_name,''),
-                                CASE WHEN NULLIF(SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
-                                         INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '') = '0'
-                                     THEN 'WhatsApp' END,
-                                con.folder,
-                                cs.ZPARTNERNAME
+                                NULLIF(con_lid.display_name,''),
+                                CASE WHEN ({phone_expr}) = '0' OR cs.ZCONTACTJID = '0@s.whatsapp.net' THEN 'WhatsApp' END,
+                                CASE WHEN ic.full_name IS NOT NULL AND ic.full_name != '' AND ic.full_name NOT LIKE '+%' AND ic.full_name NOT LIKE 'Unknown%' THEN ic.full_name END,
+                                NULLIF(cs.ZPARTNERNAME, ''),
+                                CASE WHEN con.folder IS NOT NULL AND con.folder != '' AND con.folder NOT LIKE 'Unknown%'
+                                     THEN RTRIM(SUBSTR(con.folder, 1, INSTR(con.folder || ' (', ' (') - 1)) END,
+                                CASE WHEN ({phone_expr}) IS NOT NULL AND ({phone_expr}) != '' THEN '+' || ({phone_expr}) END,
+                                'Unknown Contact (' || cs.Z_PK || ')'
                             ) AS name
                         FROM ZWACHATSESSION cs
-                        LEFT JOIN arch.contacts con ON con.number = NULLIF(
+                        LEFT JOIN _ios_contacts ic ON ic.jid = cs.ZCONTACTJID
+                        LEFT JOIN arch.contacts con ON con.number = ({phone_expr})
+                        LEFT JOIN arch.contacts con_lid ON con_lid.number = NULLIF(
                             SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                    INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1), '')
                         WHERE cs.Z_PK = CAST(? AS INTEGER) AND cs.ZGROUPINFO IS NULL

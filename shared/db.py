@@ -21,9 +21,9 @@ def build_contact_folder_name(display_name: str, number: str) -> str:
     """Build folder name: 'Display Name (00391234567890)' or 'Unknown (00391234567890)'."""
     formatted = format_phone(number)
     if not display_name or display_name == number:
-        label = f"Unknown ({formatted})"
+        label = f"Unknown ({formatted})" if formatted else "Unknown Contact"
     else:
-        label = f"{display_name} ({formatted})"
+        label = f"{display_name} ({formatted})" if formatted else display_name
     return sanitize_filename(label)
 
 

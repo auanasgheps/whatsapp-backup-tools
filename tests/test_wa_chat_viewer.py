@@ -9545,6 +9545,209 @@ class TestAndroidHdAndMediaMatching:
             assert chats[0]["id"] == "393454408875"
             assert chats[0]["display_name"] == "Agata"
 
+    def test_ios_1_to_1_chat_resolves_partner_name_over_stale_lid_folder(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZCONTACTIDENTIFIER TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER NOT NULL,
+                ZMESSAGEDATE REAL,
+                ZTEXT TEXT,
+                ZMESSAGETYPE INTEGER DEFAULT 0,
+                ZISFROMME INTEGER DEFAULT 0,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZFROMJID TEXT,
+                ZPUSHNAME TEXT,
+                ZPARENTMESSAGE INTEGER
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZMEDIAURL TEXT,
+                ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZGROUPINFO, ZHIDDEN)
+            VALUES (10, '123456789012345@lid', '393001112223@s.whatsapp.net', 'Synthetic Contact', NULL, 0);
+
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZISFROMME)
+            VALUES (1, 10, 1000.0, 'Hello', 0, 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        # Simulate stale archiver folder with raw LID
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('123456789012345', 'Unknown (00123456789012345)', '')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            assert len(chats) == 1
+            # Never show the LID or the stale 'Unknown (00...)' folder; show the partner name!
+            assert chats[0]["display_name"] == "Synthetic Contact"
+            assert "123456789012345" not in chats[0]["display_name"]
+
+            # Check /api/chat_details for this contact chat
+            info_resp = client.get("/api/chat_info?chat_id=10&chat_type=contact")
+            assert info_resp.status_code == 200
+            info = info_resp.get_json()
+            assert info["display_name"] == "Synthetic Contact"
+            assert info["number"] == "393001112223"
+            assert "123456789012345" not in info["display_name"]
+
+    def test_ios_1_to_1_chat_resolves_phone_number_when_no_partner_name(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZCONTACTIDENTIFIER TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER NOT NULL,
+                ZMESSAGEDATE REAL,
+                ZTEXT TEXT,
+                ZMESSAGETYPE INTEGER DEFAULT 0,
+                ZISFROMME INTEGER DEFAULT 0,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZFROMJID TEXT,
+                ZPUSHNAME TEXT,
+                ZPARENTMESSAGE INTEGER
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZMEDIAURL TEXT,
+                ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZGROUPINFO, ZHIDDEN)
+            VALUES (10, '123456789012345@lid', '393001112223@s.whatsapp.net', '', NULL, 0);
+
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZISFROMME)
+            VALUES (1, 10, 1000.0, 'Hello', 0, 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            assert len(chats) == 1
+            # Displays the resolved phone number formatted with +
+            assert chats[0]["display_name"] == "+393001112223"
+            assert "123456789012345" not in chats[0]["display_name"]
+
+    def test_ios_unmapped_lid_falls_back_to_unknown_contact(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZCONTACTIDENTIFIER TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER NOT NULL,
+                ZMESSAGEDATE REAL,
+                ZTEXT TEXT,
+                ZMESSAGETYPE INTEGER DEFAULT 0,
+                ZISFROMME INTEGER DEFAULT 0,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZFROMJID TEXT,
+                ZPUSHNAME TEXT,
+                ZPARENTMESSAGE INTEGER
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZMEDIAURL TEXT,
+                ZTITLE TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+
+            -- Completely unmapped LID
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZGROUPINFO, ZHIDDEN)
+            VALUES (10, '123456789012345@lid', NULL, NULL, NULL, 0);
+
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZISFROMME)
+            VALUES (1, 10, 1000.0, 'Hello', 0, 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            assert len(chats) == 1
+            # Must never show +123456789012345; falls back to 'Unknown Contact (10)'
+            assert chats[0]["display_name"] == "Unknown Contact (10)"
+
 
 class TestQuotedMessageResolution:
     def test_android_quoted_message_resolves_quoted_msg_id_and_ts(self, tmp_path):
