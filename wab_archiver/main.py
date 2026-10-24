@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import tomllib
 import zlib
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from shared import db, hashing
 
@@ -450,6 +450,33 @@ def write_duplicate_report(
 # ---------------------------------------------------------------------------
 
 
+def _infer_media_extension(mime_type: str | None) -> str:
+    """Infer file extension from mime type string with standard fallbacks."""
+    if not mime_type:
+        return ""
+    mt = mime_type.lower()
+    if "jpeg" in mt or "jpg" in mt:
+        return ".jpg"
+    if "png" in mt:
+        return ".png"
+    if "webp" in mt:
+        return ".webp"
+    if "gif" in mt:
+        return ".gif"
+    if "mp4" in mt:
+        return ".mp4"
+    if "opus" in mt or "ogg" in mt:
+        return ".opus"
+    if "aac" in mt:
+        return ".aac"
+    if "pdf" in mt:
+        return ".pdf"
+    import mimetypes
+
+    guessed = mimetypes.guess_extension(mime_type.split(";")[0].strip())
+    return guessed or ""
+
+
 def _build_missing_row(
     msg_id,
     timestamp,
@@ -708,6 +735,56 @@ def process_rows(
         is_group = chat_subject is not None
         filename = media_name if media_name else (os.path.basename(file_path) if file_path else "")
 
+        if not filename and thumb_path:
+            base_thumb = os.path.splitext(os.path.basename(thumb_path))[0]
+            ext = _infer_media_extension(mime_type)
+            filename = f"{base_thumb}{ext}"
+        elif not filename:
+            ext = _infer_media_extension(mime_type)
+            ts_label = (
+                datetime.fromtimestamp(timestamp / 1000.0, tz=UTC).strftime("%Y%m%d")
+                if timestamp
+                else "unknown"
+            )
+            filename = f"MEDIA-{ts_label}-{msg_id}{ext}"
+
+        year = get_year(timestamp, tz) if timestamp else "Unknown"
+
+        if is_group:
+            dest_dir, dest_filename = _route_group(
+                chat_row_id,
+                chat_subject,
+                sender,
+                key_from_me,
+                contacts,
+                number_map,
+                filename,
+                year,
+                output_root,
+                updated_group_index,
+            )
+        else:
+            dest_dir, dest_filename = _route_contact(
+                sender,
+                key_from_me,
+                contacts,
+                number_map,
+                filename,
+                year,
+                output_root,
+                updated_index,
+            )
+
+        expected_dest_path = os.path.relpath(
+            os.path.join(dest_dir, dest_filename), output_root
+        ).replace(os.sep, "/")
+
+        report_file_path = (
+            expected_dest_path
+            if (file_path is None or file_path.startswith("Message/"))
+            else file_path
+        )
+
         def _extract_thumb_if_missing():
             nonlocal thumb_dir_ensured
             if thumb_path:
@@ -744,7 +821,7 @@ def process_rows(
                 _build_missing_row(
                     msg_id,
                     timestamp,
-                    None,
+                    report_file_path,
                     mime_type,
                     chat_subject,
                     sender,
@@ -777,7 +854,7 @@ def process_rows(
                 _build_missing_row(
                     msg_id,
                     timestamp,
-                    file_path,
+                    report_file_path,
                     mime_type,
                     chat_subject,
                     sender,
@@ -807,7 +884,7 @@ def process_rows(
                 _build_missing_row(
                     msg_id,
                     timestamp,
-                    file_path,
+                    report_file_path,
                     mime_type,
                     chat_subject,
                     sender,
@@ -830,33 +907,6 @@ def process_rows(
                 },
             )
             continue
-
-        year = get_year(timestamp, tz)
-
-        if is_group:
-            dest_dir, dest_filename = _route_group(
-                chat_row_id,
-                chat_subject,
-                sender,
-                key_from_me,
-                contacts,
-                number_map,
-                filename,
-                year,
-                output_root,
-                updated_group_index,
-            )
-        else:
-            dest_dir, dest_filename = _route_contact(
-                sender,
-                key_from_me,
-                contacts,
-                number_map,
-                filename,
-                year,
-                output_root,
-                updated_index,
-            )
 
         dest_path = os.path.join(dest_dir, dest_filename)
         dest_existed_before = dest_path not in written_dest_paths and os.path.exists(dest_path)
@@ -2507,8 +2557,18 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
                 hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
 
-                has_thumb = ios_handler.has_ios_thumb_support(cursor)
-                query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup, has_thumb)
+                has_thumb, has_msg_type, has_vcard, has_text = ios_handler.get_ios_schema_features(
+                    cursor
+                )
+                query = ios_handler.build_ios_query(
+                    args.limit,
+                    since_ms,
+                    hd_dedup,
+                    has_thumb,
+                    has_msg_type,
+                    has_vcard,
+                    has_text,
+                )
                 vcard_query = (
                     ios_handler.build_ios_vcard_query(args.limit, since_ms)
                     if ios_handler.has_ios_vcard_support(cursor)
