@@ -126,17 +126,37 @@ def check_ios_hd_association(
         return False
 
 
+def has_ios_column(cursor: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
+    """Return True if table_name exists and contains column_name."""
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if table_name not in tables:
+        return False
+    cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table_name})")}
+    return column_name in cols
+
+
+def get_ios_schema_features(cursor: sqlite3.Cursor) -> tuple[bool, bool, bool, bool]:
+    """Return (has_thumb, has_msg_type, has_vcard, has_text) from cursor schema."""
+    has_thumb = has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
+    has_msg_type = has_ios_column(cursor, "ZWAMESSAGE", "ZMESSAGETYPE")
+    has_vcard = has_ios_column(cursor, "ZWAMEDIAITEM", "ZVCARDSTRING")
+    has_text = has_ios_column(cursor, "ZWAMESSAGE", "ZTEXT")
+    return has_thumb, has_msg_type, has_vcard, has_text
+
+
 def has_ios_thumb_support(cursor: sqlite3.Cursor) -> bool:
     """Return True if ZWAMEDIAITEM table exists and has ZXMPPTHUMBPATH column."""
-    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if "ZWAMEDIAITEM" not in tables:
-        return False
-    cols = {row[1] for row in cursor.execute("PRAGMA table_info(ZWAMEDIAITEM)")}
-    return "ZXMPPTHUMBPATH" in cols
+    return has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
 
 
 def build_ios_query(
-    limit: int | None, since_ms: int | None, hd_dedup: bool, has_thumb: bool
+    limit: int | None,
+    since_ms: int | None,
+    hd_dedup: bool,
+    has_thumb: bool,
+    has_msg_type: bool,
+    has_vcard: bool,
+    has_text: bool,
 ) -> str:
     """
     Main iOS media extraction query. Returns the same 10 columns as the Android
@@ -146,13 +166,13 @@ def build_ios_query(
         message_id   — ZWAMESSAGE.Z_PK
         timestamp_ms — (ZMESSAGEDATE + 978307200) * 1000 as Unix epoch ms
         file_path    — 'Message/' || ZMEDIALOCALPATH  (matches Manifest.db relativePath)
-        mime_type    — NULL (ZWAMEDIAITEM has no ZMIMETYPE)
+        mime_type    — ZWAMEDIAITEM.ZVCARDSTRING or derived from ZMESSAGETYPE
         chat_row_id  — ZWACHATSESSION.Z_PK cast to text
         chat_subject — ZPARTNERNAME for groups, NULL for 1-to-1
         sender       — phone number stripped from JID
         key_from_me  — ZWAMESSAGE.ZISFROMME
         message_url  — ZWAMEDIAITEM.ZMEDIAURL
-        media_name   — ZWAMEDIAITEM.ZTITLE (original filename for documents)
+        media_name   — ZWAMESSAGE.ZTEXT / ZWAMEDIAITEM.ZTITLE (original filename for documents)
         thumb_path   — 'Message/' || ZXMPPTHUMBPATH (optional 11th column)
     """
     block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
@@ -182,11 +202,62 @@ def build_ios_query(
         else ""
     )
     thumb_filter = "OR mi.ZXMPPTHUMBPATH IS NOT NULL" if has_thumb else ""
-    file_path_expr = (
-        "CASE WHEN mi.ZMEDIALOCALPATH IS NOT NULL THEN 'Message/' || mi.ZMEDIALOCALPATH ELSE NULL END AS file_path"
-        if has_thumb
-        else "'Message/' || mi.ZMEDIALOCALPATH                               AS file_path"
-    )
+    file_path_expr = "CASE WHEN mi.ZMEDIALOCALPATH IS NOT NULL THEN 'Message/' || mi.ZMEDIALOCALPATH ELSE NULL END AS file_path"
+
+    if has_msg_type and has_vcard:
+        mime_type_expr = """CASE
+                 WHEN mi.ZVCARDSTRING IS NOT NULL AND mi.ZVCARDSTRING != '' THEN mi.ZVCARDSTRING
+                 WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image/jpeg'
+                 WHEN m.ZMESSAGETYPE = 2 THEN 'audio/ogg'
+                 WHEN m.ZMESSAGETYPE IN (3, 39, 54) THEN 'video/mp4'
+                 WHEN m.ZMESSAGETYPE = 11 THEN 'image/gif'
+                 WHEN m.ZMESSAGETYPE = 15 THEN 'image/webp'
+                 ELSE 'application/octet-stream' END AS mime_type"""
+    elif has_msg_type:
+        mime_type_expr = """CASE
+                 WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image/jpeg'
+                 WHEN m.ZMESSAGETYPE = 2 THEN 'audio/ogg'
+                 WHEN m.ZMESSAGETYPE IN (3, 39, 54) THEN 'video/mp4'
+                 WHEN m.ZMESSAGETYPE = 11 THEN 'image/gif'
+                 WHEN m.ZMESSAGETYPE = 15 THEN 'image/webp'
+                 ELSE 'application/octet-stream' END AS mime_type"""
+    elif has_vcard:
+        mime_type_expr = """CASE
+                 WHEN mi.ZVCARDSTRING IS NOT NULL AND mi.ZVCARDSTRING != '' THEN mi.ZVCARDSTRING
+                 ELSE NULL END AS mime_type"""
+    else:
+        mime_type_expr = (
+            "NULL                                                           AS mime_type"
+        )
+
+    if has_msg_type and has_text:
+        media_name_expr = """CASE
+                 WHEN m.ZMESSAGETYPE = 8 OR mi.ZMEDIALOCALPATH LIKE '%Documents%'
+                 THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))
+                 ELSE NULL END AS media_name"""
+    elif has_msg_type:
+        media_name_expr = """CASE
+                 WHEN m.ZMESSAGETYPE = 8 OR mi.ZMEDIALOCALPATH LIKE '%Documents%'
+                 THEN mi.ZTITLE
+                 ELSE NULL END AS media_name"""
+    elif has_text:
+        media_name_expr = (
+            "COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))          AS media_name"
+        )
+    else:
+        media_name_expr = (
+            "mi.ZTITLE                                                      AS media_name"
+        )
+
+    if has_msg_type:
+        msg_type_filter = "AND m.ZMESSAGETYPE IN (1, 2, 3, 8, 11, 15, 38, 39, 54)"
+        media_filter = "AND (mi.ZMEDIALOCALPATH NOT LIKE '%@status%' OR mi.ZMEDIALOCALPATH IS NULL)"
+    else:
+        msg_type_filter = ""
+        media_filter = f"""AND (
+              (mi.ZMEDIALOCALPATH IS NOT NULL AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%')
+              {thumb_filter}
+          )"""
 
     return f"""
 SELECT * FROM (
@@ -196,7 +267,7 @@ SELECT * FROM (
             m.Z_PK                                                         AS message_id,
             CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
             {file_path_expr},
-            NULL                                                           AS mime_type,
+            {mime_type_expr},
             CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
             cs.ZPARTNERNAME                                                AS chat_subject,
             CASE
@@ -207,18 +278,15 @@ SELECT * FROM (
                  ELSE m.ZPUSHNAME END                                      AS sender,
             m.ZISFROMME                                                    AS key_from_me,
             mi.ZMEDIAURL                                                   AS message_url,
-            CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
-                 THEN mi.ZTITLE END                                        AS media_name{thumb_col}
+            {media_name_expr}{thumb_col}
         FROM ZWAMESSAGE m
         JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
         JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
         LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
         WHERE cs.ZGROUPINFO IS NOT NULL
-          AND (
-              (mi.ZMEDIALOCALPATH IS NOT NULL AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%')
-              {thumb_filter}
-          )
           AND cs.ZPARTNERNAME IS NOT NULL
+          {msg_type_filter}
+          {media_filter}
           {since_clause}
           {hd_dedup_clause}
         {block_limit_clause}
@@ -232,7 +300,7 @@ SELECT * FROM (
             m.Z_PK                                                         AS message_id,
             CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
             {file_path_expr},
-            NULL                                                           AS mime_type,
+            {mime_type_expr},
             CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
             NULL                                                           AS chat_subject,
             CASE WHEN INSTR(cs.ZCONTACTJID, '@') > 0
@@ -240,16 +308,13 @@ SELECT * FROM (
                  ELSE cs.ZCONTACTJID END                                    AS sender,
             m.ZISFROMME                                                    AS key_from_me,
             mi.ZMEDIAURL                                                   AS message_url,
-            CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
-                 THEN mi.ZTITLE END                                        AS media_name{thumb_col}
+            {media_name_expr}{thumb_col}
         FROM ZWAMESSAGE m
         JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
         JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
         WHERE cs.ZGROUPINFO IS NULL
-          AND (
-              (mi.ZMEDIALOCALPATH IS NOT NULL AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%')
-              {thumb_filter}
-          )
+          {msg_type_filter}
+          {media_filter}
           {since_clause}
           {hd_dedup_clause}
         {block_limit_clause}
