@@ -25,6 +25,9 @@ from typing import Any
 
 # ---------------------------------------------------------------------------
 # Pure-Python Protobuf Decoder
+#
+# Protobuf wire tags, enums, and message structure schemas cross-referenced with
+# wppconnect-team/wa-proto (Apache-2.0) and WhiskeySockets/Baileys (MIT).
 # ---------------------------------------------------------------------------
 
 
@@ -146,6 +149,30 @@ def unwrap_message_container(msg_fields: dict, max_depth: int) -> tuple[dict, di
         # 53: documentWithCaptionMessage -> field 1: message
         if 53 in current_fields and current_fields[53]:
             payload = current_fields[53][0][1]
+            if isinstance(payload, bytes):
+                inner = parse_wire_fields(payload)
+                if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
+                    current_fields = parse_wire_fields(inner[1][0][1])
+                    continue
+        # 58: editedMessage -> field 1: message
+        if 58 in current_fields and current_fields[58]:
+            payload = current_fields[58][0][1]
+            if isinstance(payload, bytes):
+                inner = parse_wire_fields(payload)
+                if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
+                    current_fields = parse_wire_fields(inner[1][0][1])
+                    continue
+        # 62: groupMentionedMessage -> field 1: message
+        if 62 in current_fields and current_fields[62]:
+            payload = current_fields[62][0][1]
+            if isinstance(payload, bytes):
+                inner = parse_wire_fields(payload)
+                if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
+                    current_fields = parse_wire_fields(inner[1][0][1])
+                    continue
+        # 67: botInvokeMessage -> field 1: message
+        if 67 in current_fields and current_fields[67]:
+            payload = current_fields[67][0][1]
             if isinstance(payload, bytes):
                 inner = parse_wire_fields(payload)
                 if 1 in inner and inner[1] and isinstance(inner[1][0][1], bytes):
@@ -788,53 +815,93 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "sender_ts": sender_ts,
             }
 
-        # 49, 60, 64: pollCreationMessage (v1, v2, v3)
-        elif 49 in msg_fields or 60 in msg_fields or 64 in msg_fields:
+        # 49, 60, 64, 93, 111: pollCreationMessage (v1, v2, v3, v4, v5)
+        elif any(t in msg_fields for t in (49, 60, 64, 93, 111)):
             message_type = 66
-            poll_tag = 49 if 49 in msg_fields else (60 if 60 in msg_fields else 64)
-            poll_fields = parse_wire_fields(msg_fields[poll_tag][0][1])
-            name = (
-                poll_fields.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
-                if 2 in poll_fields
-                else ""
-            )
-            options = []
-            for opt_tuple in poll_fields.get(3, []):
-                if isinstance(opt_tuple[1], bytes):
-                    opt_f = parse_wire_fields(opt_tuple[1])
-                    opt_name = (
-                        opt_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
-                        if 1 in opt_f
-                        else ""
+            poll_tag = next(t for t in (49, 60, 64, 93, 111) if t in msg_fields)
+            raw_poll_payload = msg_fields[poll_tag][0][1]
+            poll_fields = parse_wire_fields(raw_poll_payload)
+
+            # Check if wrapped in FutureProofMessage (field 1 contains inner message or poll)
+            if 1 in poll_fields and isinstance(poll_fields[1][0][1], bytes):
+                try:
+                    inner_candidate = parse_wire_fields(poll_fields[1][0][1])
+                    nested_tag = next(
+                        (t for t in (49, 60, 64, 93, 111) if t in inner_candidate), None
                     )
-                    if opt_name:
-                        options.append(opt_name)
-            selectable_count = poll_fields.get(4, [(0, 0)])[0][1] if 4 in poll_fields else 0
+                    if nested_tag is not None and isinstance(
+                        inner_candidate[nested_tag][0][1], bytes
+                    ):
+                        poll_fields = parse_wire_fields(inner_candidate[nested_tag][0][1])
+                    elif 2 in inner_candidate and any(
+                        isinstance(opt[1], bytes) for opt in inner_candidate.get(2, [])
+                    ):
+                        poll_fields = inner_candidate
+                except Exception:
+                    pass
+
+            # Polymorphic field extraction:
+            # Pattern A (V1, Tag 49): 1=encKey, 2=name (str), 3=options, 4=selectableCount
+            # Pattern B (V3/V4/V5, Tag 64/93/111): 1=name (str), 2=options, 3=selectableCount
+            name = ""
+            options = []
+            selectable_count = 0
+
+            tag3_has_options = False
+            if 3 in poll_fields and poll_fields[3]:
+                first_opt = poll_fields[3][0][1]
+                if isinstance(first_opt, bytes):
+                    try:
+                        f_opt = parse_wire_fields(first_opt)
+                        if 1 in f_opt:
+                            tag3_has_options = True
+                    except Exception:
+                        pass
+
+            if tag3_has_options:
+                if 2 in poll_fields and isinstance(poll_fields[2][0][1], bytes):
+                    name = poll_fields[2][0][1].decode("utf-8", errors="replace")
+                raw_opts = poll_fields.get(3, [])
+                selectable_count = poll_fields.get(4, [(0, 0)])[0][1] if 4 in poll_fields else 0
+            else:
+                if 1 in poll_fields and isinstance(poll_fields[1][0][1], bytes):
+                    name = poll_fields[1][0][1].decode("utf-8", errors="replace")
+                raw_opts = poll_fields.get(2, [])
+                selectable_count = poll_fields.get(3, [(0, 0)])[0][1] if 3 in poll_fields else 0
+
+            for opt_tuple in raw_opts:
+                if isinstance(opt_tuple[1], bytes):
+                    try:
+                        opt_f = parse_wire_fields(opt_tuple[1])
+                        opt_name = (
+                            opt_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 1 in opt_f
+                            else ""
+                        )
+                        if opt_name:
+                            options.append(opt_name)
+                    except Exception:
+                        pass
+
             text_data = name
 
             m_secret = None
-            if 35 in msg_fields and isinstance(msg_fields[35][0][1], bytes):
-                try:
-                    ctx_f = parse_wire_fields(msg_fields[35][0][1])
-                    if (
-                        3 in ctx_f
-                        and isinstance(ctx_f[3][0][1], bytes)
-                        and len(ctx_f[3][0][1]) == 32
-                    ):
-                        m_secret = ctx_f[3][0][1]
-                except (ValueError, Exception):
-                    pass
-            if not m_secret and 35 in poll_fields and isinstance(poll_fields[35][0][1], bytes):
-                try:
-                    ctx_f = parse_wire_fields(poll_fields[35][0][1])
-                    if (
-                        3 in ctx_f
-                        and isinstance(ctx_f[3][0][1], bytes)
-                        and len(ctx_f[3][0][1]) == 32
-                    ):
-                        m_secret = ctx_f[3][0][1]
-                except (ValueError, Exception):
-                    pass
+            for container_fields in (msg_fields, poll_fields):
+                if 35 in container_fields and isinstance(container_fields[35][0][1], bytes):
+                    try:
+                        ctx_f = parse_wire_fields(container_fields[35][0][1])
+                        if (
+                            3 in ctx_f
+                            and isinstance(ctx_f[3][0][1], bytes)
+                            and len(ctx_f[3][0][1]) == 32
+                        ):
+                            m_secret = ctx_f[3][0][1]
+                            break
+                    except (ValueError, Exception):
+                        pass
+
+            if quoted_info is None:
+                quoted_info = extract_context_info(poll_fields)
 
             poll_info = {
                 "question": name,
@@ -924,8 +991,26 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "media_type": "video",
             }
 
+        # 75: eventMessage (Scheduled Calendar Event)
+        elif 75 in msg_fields:
+            message_type = 0
+            ev_fields = parse_wire_fields(msg_fields[75][0][1])
+            title = (
+                ev_fields.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 1 in ev_fields
+                else ""
+            )
+            desc = (
+                ev_fields.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 2 in ev_fields
+                else ""
+            )
+            text_data = (
+                f"📅 {title}" + (f" - {desc}" if desc else "") if title else (desc or "📅 Event")
+            )
+
         if quoted_info is None:
-            for sub_tag in (6, 3, 7, 8, 9, 20, 4, 5, 18, 42, 45):
+            for sub_tag in (6, 3, 7, 8, 9, 20, 4, 5, 18, 42, 45, 75):
                 if (
                     sub_tag in msg_fields
                     and msg_fields[sub_tag]
@@ -2166,6 +2251,24 @@ def apply_poll_creation(
                         (msg_row_id, opt_name),
                     )
 
+        # Recalculate vote totals if any votes were already recorded in message_add_on
+        vote_opt_cols = get_table_columns(
+            conn, "message_add_on_poll_vote_selected_option", schema_cache
+        )
+        if vote_opt_cols:
+            try:
+                cur.execute(
+                    "UPDATE message_poll_option SET vote_total = ("
+                    "  SELECT COUNT(DISTINCT ps.message_add_on_row_id) "
+                    "  FROM message_add_on_poll_vote_selected_option ps "
+                    "  JOIN message_add_on mao ON mao._id = ps.message_add_on_row_id "
+                    "  WHERE ps.message_poll_option_id = message_poll_option._id AND mao.parent_message_row_id = ?"
+                    ") WHERE message_row_id = ?",
+                    (msg_row_id, msg_row_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+
     embedded_votes = poll_info.get("embedded_votes", [])
     if embedded_votes:
         apply_embedded_poll_votes(
@@ -2269,7 +2372,7 @@ def apply_poll_vote(
             if s_row and s_row[0]:
                 orig_secret = s_row[0]
                 cur.execute(
-                    "SELECT m.key_id, COALESCE(NULLIF(j.raw_string, ''), j_chat.raw_string, '') "
+                    "SELECT m.key_id, COALESCE(NULLIF(j.raw_string, ''), j_chat.raw_string, ''), m.from_me "
                     "FROM message m "
                     "LEFT JOIN jid j ON j._id = m.sender_jid_row_id "
                     "LEFT JOIN chat c ON c._id = m.chat_row_id "
@@ -2280,12 +2383,36 @@ def apply_poll_vote(
                 p_info = cur.fetchone()
                 p_key_id = p_info[0] if p_info else poll_key_id
                 p_creator_jid = p_info[1] if p_info else ""
-                cur.execute(
-                    "SELECT raw_string FROM jid WHERE _id = ?",
-                    (sender_jid_row_id,),
-                )
-                v_jid_row = cur.fetchone()
-                v_jid_str = v_jid_row[0] if v_jid_row else ""
+                if p_info and p_info[2] == 1:
+                    p_c_row = cur.execute(
+                        "SELECT j.raw_string FROM chat c JOIN jid j ON j._id = c.account_jid_row_id WHERE c._id = ?",
+                        (chat_row_id,),
+                    ).fetchone()
+                    if not p_c_row:
+                        p_c_row = cur.execute(
+                            "SELECT raw_string FROM jid WHERE server IN ('s.whatsapp.net', 'lid') AND user IS NOT NULL ORDER BY _id ASC LIMIT 1"
+                        ).fetchone()
+                    if p_c_row and p_c_row[0]:
+                        p_creator_jid = p_c_row[0]
+
+                if from_me == 1 or sender_jid_row_id is None or sender_jid_row_id <= 0:
+                    v_jid_row = cur.execute(
+                        "SELECT j.raw_string FROM chat c JOIN jid j ON j._id = c.account_jid_row_id WHERE c._id = ?",
+                        (chat_row_id,),
+                    ).fetchone()
+                    if not v_jid_row:
+                        v_jid_row = cur.execute(
+                            "SELECT raw_string FROM jid WHERE server IN ('s.whatsapp.net', 'lid') AND user IS NOT NULL ORDER BY _id ASC LIMIT 1"
+                        ).fetchone()
+                    v_jid_str = v_jid_row[0] if v_jid_row else ""
+                else:
+                    cur.execute(
+                        "SELECT raw_string FROM jid WHERE _id = ?",
+                        (sender_jid_row_id,),
+                    )
+                    v_jid_row = cur.fetchone()
+                    v_jid_str = v_jid_row[0] if v_jid_row else ""
+
                 sel_hashes = decrypt_poll_vote_payload(
                     enc_payload,
                     enc_iv,
@@ -3127,12 +3254,20 @@ def apply_messages_bin(
 
     # Fast batch deletion of conflicting messages by key_id
     existing_media_paths: dict[str, str] = {}
+    existing_row_ids: dict[str, int] = {}
     if "key_id" in msg_cols:
         key_ids_to_delete = [msg["key_id"] for msg in messages if msg.get("key_id")]
         chunk_size = 500
         for i in range(0, len(key_ids_to_delete), chunk_size):
             chunk = key_ids_to_delete[i : i + chunk_size]
             placeholders = ", ".join("?" for _ in chunk)
+            try:
+                for r_id, k_id in cur.execute(
+                    f"SELECT _id, key_id FROM message WHERE key_id IN ({placeholders})", chunk
+                ).fetchall():
+                    existing_row_ids[k_id] = r_id
+            except sqlite3.OperationalError:
+                pass
             if media_cols:
                 try:
                     for k_id, f_path in cur.execute(
@@ -3143,6 +3278,23 @@ def apply_messages_bin(
                     ).fetchall():
                         if f_path:
                             existing_media_paths[k_id] = f_path
+                except sqlite3.OperationalError:
+                    pass
+            old_chunk_ids = [existing_row_ids[k] for k in chunk if k in existing_row_ids]
+            if old_chunk_ids:
+                old_ph = ", ".join("?" for _ in old_chunk_ids)
+                try:
+                    cur.execute(
+                        f"DELETE FROM message_poll_option WHERE message_row_id IN ({old_ph})",
+                        old_chunk_ids,
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cur.execute(
+                        f"DELETE FROM message_poll WHERE message_row_id IN ({old_ph})",
+                        old_chunk_ids,
+                    )
                 except sqlite3.OperationalError:
                     pass
             cur.execute(f"DELETE FROM message WHERE key_id IN ({placeholders})", chunk)
@@ -3245,6 +3397,45 @@ def apply_messages_bin(
         cur.execute(sql_insert_msg, [row_map[c] for c in target_msg_cols])
         msg_row_id = cur.lastrowid
         inserted += 1
+
+        old_id = existing_row_ids.get(msg.get("key_id", ""))
+        if old_id and msg_row_id and old_id != msg_row_id:
+            try:
+                cur.execute(
+                    "UPDATE message_add_on SET parent_message_row_id = ? WHERE parent_message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cur.execute(
+                    "UPDATE poll_name_hash_history SET poll_message_row_id = ? WHERE poll_message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cur.execute(
+                    "UPDATE reporting_info SET message_row_id = ? WHERE message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cur.execute(
+                    "UPDATE chat SET last_message_row_id = ? WHERE last_message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
+                cur.execute(
+                    "UPDATE chat SET display_message_row_id = ? WHERE display_message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
+                cur.execute(
+                    "UPDATE chat SET last_read_message_row_id = ? WHERE last_read_message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
+            except sqlite3.OperationalError:
+                pass
 
         is_add_on = bool(
             msg.get("reaction_info")
@@ -4245,6 +4436,21 @@ def merge_increments(
             raise RuntimeError(
                 f"Database integrity check failed after merging increments: {integrity}"
             )
+
+    # Invalidate viewer recent messages cache if archive database exists in output directory
+    out_parent = os.path.dirname(os.path.abspath(output_db_path))
+    for check_dir in (out_parent, os.path.dirname(out_parent)):
+        for cand_name in ("archive.db", ".wa_media_archiver.db"):
+            cand_path = os.path.join(check_dir, cand_name)
+            if os.path.isfile(cand_path):
+                try:
+                    with sqlite3.connect(cand_path) as a_conn:
+                        a_conn.execute("DELETE FROM recent_messages")
+                        a_conn.execute("DELETE FROM reactions_cache")
+                        a_conn.commit()
+                    logger.debug(f"Invalidated viewer message cache in {cand_path}")
+                except Exception:
+                    pass
 
     logger.info(
         f"Incremental merging complete: {len(increment_paths)} increment(s) folded into {output_db_path} "

@@ -260,10 +260,11 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ---
 
-## Credits
+## Credits and Thanks
 
 - Inspired by [Wa_Immich_Tagger](https://github.com/mac12m99/Wa_Immich_Tagger) by mac12m99 — provided the initial Android DB query pattern
 - iOS backup reading approach inspired by [whatsapp-chat-exporter](https://github.com/KnugiHK/whatsapp-chat-exporter) by KnugiHK
+- Protobuf schema and wire tag definitions cross-referenced with [wa-proto](https://github.com/wppconnect-team/wa-proto) by WPPConnect and [Baileys](https://github.com/WhiskeySockets/Baileys) by WhiskeySockets
 
 ---
 
@@ -272,7 +273,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 Handling personal communication archives requires high standards for data integrity and privacy. This project is built on three core engineering pillars:
 
 - **Strict Verification**: Over **570 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
-- **Domain Rigor**: Deep reverse-engineering of proprietary WhatsApp artifacts across both mobile operating systems (cryptographic pipelines, protobuf varints, and auxiliary databases).
+- **Domain Rigor**: Deep reverse-engineering of proprietary WhatsApp artifacts across both mobile operating systems (cryptographic pipelines, protobuf varints, and auxiliary databases), cross-checked against established open-source implementations to ensure structural accuracy.
 - **Developed with AI**: Modern AI coding tools were leveraged as pair programmers to accelerate implementation and broaden test coverage, strictly guided by human architectural design and verified against automated CI suites.
 
 ---

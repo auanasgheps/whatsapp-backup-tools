@@ -1287,6 +1287,48 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
     """Hydrate poll structured data for poll messages in rows."""
     if not rows or wa_conn is None:
         return
+
+    if source_type == "android":
+        tables = {
+            r[0]
+            for r in wa_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        candidate_mids = [
+            r["msg_id"] for r in rows if r.get("media_type") != "poll" and r.get("msg_id")
+        ]
+        if candidate_mids:
+            c_ph = ",".join("?" * len(candidate_mids))
+            db_poll_mids = set()
+            if "message_poll" in tables:
+                try:
+                    db_poll_mids.update(
+                        r[0]
+                        for r in wa_conn.execute(
+                            f"SELECT message_row_id FROM message_poll WHERE message_row_id IN ({c_ph})",
+                            candidate_mids,
+                        ).fetchall()
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            if "message_add_on" in tables:
+                mao_cols = {
+                    r[1] for r in wa_conn.execute("PRAGMA table_info(message_add_on)").fetchall()
+                }
+                if "message_add_on_type" in mao_cols:
+                    try:
+                        db_poll_mids.update(
+                            r[0]
+                            for r in wa_conn.execute(
+                                f"SELECT parent_message_row_id FROM message_add_on WHERE parent_message_row_id IN ({c_ph}) AND message_add_on_type = 67",
+                                candidate_mids,
+                            ).fetchall()
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+            for r in rows:
+                if r.get("msg_id") in db_poll_mids:
+                    r["media_type"] = "poll"
+
     poll_rows = [r for r in rows if r.get("media_type") == "poll"]
     if not poll_rows:
         return
@@ -1296,70 +1338,83 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
             r[0]
             for r in wa_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
-        if "message_poll" not in tables or "message_poll_option" not in tables:
-            return
         mids = [r["msg_id"] for r in poll_rows]
         ph = ",".join("?" * len(mids))
 
-        meta_rows = wa_conn.execute(
-            f"SELECT message_row_id, selectable_options_count FROM message_poll WHERE message_row_id IN ({ph})",
-            mids,
-        ).fetchall()
-        meta_map = {r["message_row_id"]: r["selectable_options_count"] for r in meta_rows}
+        meta_map = {}
+        if "message_poll" in tables:
+            try:
+                meta_rows = wa_conn.execute(
+                    f"SELECT message_row_id, selectable_options_count FROM message_poll WHERE message_row_id IN ({ph})",
+                    mids,
+                ).fetchall()
+                meta_map = {r["message_row_id"]: r["selectable_options_count"] for r in meta_rows}
+            except sqlite3.OperationalError:
+                pass
 
-        opt_rows = wa_conn.execute(
-            f"SELECT _id, message_row_id, option_name, vote_total FROM message_poll_option WHERE message_row_id IN ({ph}) ORDER BY _id ASC",
-            mids,
-        ).fetchall()
+        opt_rows = []
+        if "message_poll_option" in tables:
+            try:
+                opt_rows = wa_conn.execute(
+                    f"SELECT _id, message_row_id, option_name, vote_total FROM message_poll_option WHERE message_row_id IN ({ph}) ORDER BY _id ASC",
+                    mids,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                pass
 
         user_voted_options = set()
         voter_counts = {}
         addon_votes_by_opt = {}
-        if "message_add_on" in tables and "message_add_on_poll_vote_selected_option" in tables:
-            try:
-                user_v_rows = wa_conn.execute(
-                    f"""
-                    SELECT ps.message_poll_option_id
-                    FROM message_add_on mao
-                    JOIN message_add_on_poll_vote_selected_option ps ON ps.message_add_on_row_id = mao._id
-                    WHERE mao.parent_message_row_id IN ({ph}) AND mao.from_me = 1 AND mao.message_add_on_type = 67
-                    """,
-                    mids,
-                ).fetchall()
-                user_voted_options = {r[0] for r in user_v_rows}
-            except sqlite3.OperationalError:
-                pass
-
-            try:
-                vc_rows = wa_conn.execute(
-                    f"""
-                    SELECT parent_message_row_id, COUNT(DISTINCT _id) AS voter_cnt
-                    FROM message_add_on
-                    WHERE parent_message_row_id IN ({ph}) AND message_add_on_type = 67
-                    GROUP BY parent_message_row_id
-                    """,
-                    mids,
-                ).fetchall()
-                voter_counts = {r["parent_message_row_id"]: r["voter_cnt"] for r in vc_rows}
-            except sqlite3.OperationalError:
-                pass
-
-            try:
-                opt_ids = [opt["_id"] for opt in opt_rows]
-                if opt_ids:
-                    opt_ph = ",".join("?" * len(opt_ids))
-                    v_cnt_rows = wa_conn.execute(
+        if "message_add_on" in tables:
+            mao_cols = {
+                r[1] for r in wa_conn.execute("PRAGMA table_info(message_add_on)").fetchall()
+            }
+            if "message_add_on_type" in mao_cols:
+                try:
+                    vc_rows = wa_conn.execute(
                         f"""
-                        SELECT ps.message_poll_option_id, COUNT(DISTINCT ps.message_add_on_row_id)
-                        FROM message_add_on_poll_vote_selected_option ps
-                        WHERE ps.message_poll_option_id IN ({opt_ph})
-                        GROUP BY ps.message_poll_option_id
+                        SELECT parent_message_row_id, COUNT(DISTINCT _id) AS voter_cnt
+                        FROM message_add_on
+                        WHERE parent_message_row_id IN ({ph}) AND message_add_on_type = 67
+                        GROUP BY parent_message_row_id
                         """,
-                        opt_ids,
+                        mids,
                     ).fetchall()
-                    addon_votes_by_opt = {r[0]: r[1] for r in v_cnt_rows}
-            except sqlite3.OperationalError:
-                pass
+                    voter_counts = {r["parent_message_row_id"]: r["voter_cnt"] for r in vc_rows}
+                except sqlite3.OperationalError:
+                    pass
+
+                if "message_add_on_poll_vote_selected_option" in tables:
+                    try:
+                        user_v_rows = wa_conn.execute(
+                            f"""
+                            SELECT ps.message_poll_option_id
+                            FROM message_add_on mao
+                            JOIN message_add_on_poll_vote_selected_option ps ON ps.message_add_on_row_id = mao._id
+                            WHERE mao.parent_message_row_id IN ({ph}) AND mao.from_me = 1 AND mao.message_add_on_type = 67
+                            """,
+                            mids,
+                        ).fetchall()
+                        user_voted_options = {r[0] for r in user_v_rows}
+                    except sqlite3.OperationalError:
+                        pass
+
+                    try:
+                        opt_ids = [opt["_id"] for opt in opt_rows]
+                        if opt_ids:
+                            opt_ph = ",".join("?" * len(opt_ids))
+                            v_cnt_rows = wa_conn.execute(
+                                f"""
+                                SELECT ps.message_poll_option_id, COUNT(DISTINCT ps.message_add_on_row_id)
+                                FROM message_add_on_poll_vote_selected_option ps
+                                WHERE ps.message_poll_option_id IN ({opt_ph})
+                                GROUP BY ps.message_poll_option_id
+                                """,
+                                opt_ids,
+                            ).fetchall()
+                            addon_votes_by_opt = {r[0]: r[1] for r in v_cnt_rows}
+                    except sqlite3.OperationalError:
+                        pass
 
         options_by_mid = collections.defaultdict(list)
         for opt in opt_rows:
@@ -1378,8 +1433,10 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
             opts = options_by_mid.get(mid, [])
             total_votes = sum(o["vote_count"] for o in opts)
             total_voters = voter_counts.get(mid, total_votes)
+            question = r.get("text_body") or "Poll"
+            r["text_body"] = question
             r["poll"] = {
-                "question": r.get("text_body") or "",
+                "question": question,
                 "multiple_answers": (meta_map.get(mid, 0) == 0),
                 "total_votes": total_votes,
                 "total_voters": total_voters,
@@ -4293,6 +4350,13 @@ def create_app(output_root: Path, rescan: bool = False):
             for r in _tmp_wa.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         has_reactions = "message_add_on" in _wa_tables and "message_add_on_reaction" in _wa_tables
+        has_message_poll = "message_poll" in _wa_tables
+        _mao_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_add_on)").fetchall()}
+            if "message_add_on" in _wa_tables
+            else set()
+        )
+        has_message_add_on = "message_add_on" in _wa_tables and "message_add_on_type" in _mao_cols
         has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
         has_lid_dn = "lid_display_name" in _wa_tables
         has_message_system = "message_system" in _wa_tables
@@ -4594,6 +4658,21 @@ def create_app(output_root: Path, rescan: bool = False):
         else "(m.text_data IS NOT NULL AND m.text_data != '')"
     )
     android_hd_clause = _ANDROID_HD_DEDUP_CLAUSE if has_android_hd else ""
+
+    poll_subquery_parts = []
+    if has_message_poll:
+        poll_subquery_parts.append(
+            "EXISTS (SELECT 1 FROM message_poll mp WHERE mp.message_row_id = m._id)"
+        )
+    if has_message_add_on:
+        poll_subquery_parts.append(
+            "EXISTS (SELECT 1 FROM message_add_on mao WHERE mao.parent_message_row_id = m._id AND mao.message_add_on_type = 67)"
+        )
+    extra_poll_filter = (
+        f"\n        OR ({' OR '.join(poll_subquery_parts)})" if poll_subquery_parts else ""
+    )
+    extra_poll_select = f" OR ({' OR '.join(poll_subquery_parts)})" if poll_subquery_parts else ""
+
     globals()["_ANDROID_FILTER"] = f"""
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
@@ -4602,7 +4681,7 @@ def create_app(output_root: Path, rescan: bool = False):
         OR (m.message_type IN (15, 64))
         OR (m.message_type IN (42, 43, 82))
         OR (m.message_type = 7 AND {ms_action_clause})
-        OR (m.message_type = 66)
+        OR (m.message_type = 66){extra_poll_filter}
     )
     {android_hd_clause}
     """
@@ -4795,7 +4874,7 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.message_type = 42 THEN 'image'
             WHEN m.message_type = 43 THEN 'video'
             WHEN m.message_type = 82 THEN 'audio'
-            WHEN m.message_type = 66 THEN 'poll'
+            WHEN m.message_type = 66{extra_poll_select} THEN 'poll'
             WHEN m.message_type IS NULL OR m.message_type = 0 THEN
                 CASE WHEN m.text_data IS NOT NULL
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
@@ -4816,6 +4895,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHEN m.from_me = 1 AND m.message_type = 15 THEN 'You deleted this message'
                 WHEN m.message_type = 15 THEN 'This message was deleted'
                 WHEN m.message_type IN (4, 14) THEN m.text_data
+                WHEN m.message_type = 66{extra_poll_select} THEN 'Poll'
             END,
             ''
         )                                                            AS text_body,
@@ -5275,23 +5355,52 @@ def create_app(output_root: Path, rescan: bool = False):
                 pass
 
         android_p_map = {}
-        if source_type == "android" and has_mcp:
-            svc_mids = [
-                r["last_msg_id"]
-                for r in rows
-                if r["last_msg_type"] == 7
-                and r["last_msg_action_type"] in _SUPPORTED_ANDROID_SYSTEM_ACTIONS
-                and r["last_msg_id"]
-            ]
-            if svc_mids:
-                android_p_map = _hydrate_android_service_participants(
-                    conn,
-                    svc_mids,
-                    has_mcp,
-                    has_lid_dn,
-                    has_jid_server,
-                    has_jid_raw_string,
-                )
+        android_poll_mids = set()
+        if source_type == "android":
+            candidate_last_mids = [r["last_msg_id"] for r in rows if r["last_msg_id"]]
+            if candidate_last_mids:
+                c_ph = ",".join("?" * len(candidate_last_mids))
+                try:
+                    android_poll_mids.update(
+                        r[0]
+                        for r in conn.execute(
+                            f"SELECT message_row_id FROM message_poll WHERE message_row_id IN ({c_ph})",
+                            candidate_last_mids,
+                        ).fetchall()
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                mao_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(message_add_on)").fetchall()
+                }
+                if "message_add_on_type" in mao_cols:
+                    try:
+                        android_poll_mids.update(
+                            r[0]
+                            for r in conn.execute(
+                                f"SELECT parent_message_row_id FROM message_add_on WHERE parent_message_row_id IN ({c_ph}) AND message_add_on_type = 67",
+                                candidate_last_mids,
+                            ).fetchall()
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+            if has_mcp:
+                svc_mids = [
+                    r["last_msg_id"]
+                    for r in rows
+                    if r["last_msg_type"] == 7
+                    and r["last_msg_action_type"] in _SUPPORTED_ANDROID_SYSTEM_ACTIONS
+                    and r["last_msg_id"]
+                ]
+                if svc_mids:
+                    android_p_map = _hydrate_android_service_participants(
+                        conn,
+                        svc_mids,
+                        has_mcp,
+                        has_lid_dn,
+                        has_jid_server,
+                        has_jid_raw_string,
+                    )
 
         for r in rows:
             d = dict(r)
@@ -5382,9 +5491,10 @@ def create_app(output_root: Path, rescan: bool = False):
                 else:
                     d["last_msg_preview"] = ""
                     d["last_msg_type"] = "text"
-            elif (source_type == "android" and raw_type == 66) or (
-                source_type == "ios" and raw_type == 46
-            ):
+            elif (
+                source_type == "android"
+                and (raw_type == 66 or (last_msg_id and last_msg_id in android_poll_mids))
+            ) or (source_type == "ios" and raw_type == 46):
                 d["is_view_once"] = 0
                 d["last_msg_type"] = "poll"
                 if source_type == "android":
