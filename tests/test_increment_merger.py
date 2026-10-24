@@ -224,6 +224,68 @@ def test_decode_wmi_ephemeral_container():
     assert decoded["text_data"] == "Disappearing text message"
 
 
+def test_decode_wmi_future_proof_containers():
+    """Verify unwrap_message_container handles botInvokeMessage (67), editedMessage (58), and groupMentionedMessage (62)."""
+    inner_conv = _build_field(1, 2, b"Prompt to Meta AI")
+
+    # Bot invocation wrapper (tag 67)
+    bot_payload = _build_field(1, 2, inner_conv)
+    msg_bytes_bot = _build_field(67, 2, bot_payload)
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"BOT_KEY_1")
+    )
+    wmi_bot = _build_field(1, 2, key_bytes) + _build_field(2, 2, msg_bytes_bot)
+    decoded_bot = increment_merger.decode_wmi(wmi_bot)
+    assert decoded_bot["key_id"] == "BOT_KEY_1"
+    assert decoded_bot["text_data"] == "Prompt to Meta AI"
+
+    # Edited message wrapper (tag 58)
+    edited_inner = _build_field(1, 2, b"Corrected text via tag 58")
+    edited_payload = _build_field(1, 2, edited_inner)
+    msg_bytes_edit = _build_field(58, 2, edited_payload)
+    key_bytes_edit = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"EDIT_KEY_58")
+    )
+    wmi_edit = _build_field(1, 2, key_bytes_edit) + _build_field(2, 2, msg_bytes_edit)
+    decoded_edit = increment_merger.decode_wmi(wmi_edit)
+    assert decoded_edit["key_id"] == "EDIT_KEY_58"
+    assert decoded_edit["text_data"] == "Corrected text via tag 58"
+
+    # Group mentioned message wrapper (tag 62)
+    gm_inner = _build_field(1, 2, b"@group mention payload")
+    gm_payload = _build_field(1, 2, gm_inner)
+    msg_bytes_gm = _build_field(62, 2, gm_payload)
+    key_bytes_gm = (
+        _build_field(1, 2, b"123456@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"GM_KEY_62")
+    )
+    wmi_gm = _build_field(1, 2, key_bytes_gm) + _build_field(2, 2, msg_bytes_gm)
+    decoded_gm = increment_merger.decode_wmi(wmi_gm)
+    assert decoded_gm["key_id"] == "GM_KEY_62"
+    assert decoded_gm["text_data"] == "@group mention payload"
+
+
+def test_decode_wmi_event_message():
+    """Verify decode_wmi parses eventMessage (tag 75) into formatted text."""
+    ev_payload = _build_field(1, 2, b"Project Review") + _build_field(2, 2, b"Q3 deliverables sync")
+    msg_bytes = _build_field(75, 2, ev_payload)
+    key_bytes = (
+        _build_field(1, 2, b"123456@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"EVENT_KEY_1")
+    )
+    wmi_bytes = _build_field(1, 2, key_bytes) + _build_field(2, 2, msg_bytes)
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "EVENT_KEY_1"
+    assert decoded["message_type"] == 0
+    assert decoded["text_data"] == "📅 Project Review - Q3 deliverables sync"
+
+
 def test_decode_wmi_reaction_tag46():
     target_key = (
         _build_field(1, 2, b"5550100@s.whatsapp.net")
@@ -4545,4 +4607,137 @@ def test_apply_messages_bin_link_preview(mock_db, tmp_path):
     assert row[2] == "https://example.com"
     assert row[3] == 1
     assert row[4] == b"\xff\xd8\xff\xe0\x00"
+    conn.close()
+
+
+def test_decode_wmi_poll_creation_v4_v5_future_proof():
+    # Test Tag 93 (V4) wrapped in FutureProofMessage (field 1 is inner message)
+    opt1 = _build_field(1, 2, b"Option Alpha")
+    opt2 = _build_field(1, 2, b"Option Beta")
+    # Pattern B: 1=name, 2=options, 3=selectableCount
+    poll_inner = (
+        _build_field(1, 2, b"Which release?")
+        + _build_field(2, 2, opt1)
+        + _build_field(2, 2, opt2)
+        + _build_field(3, 0, 1)
+    )
+    # FutureProof wrapper: field 1 is the inner message (or poll payload)
+    fp_wrapper = _build_field(1, 2, poll_inner)
+    msg_bytes_v4 = _build_field(93, 2, fp_wrapper)
+
+    key_bytes_v4 = (
+        _build_field(1, 2, b"123456789@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"POLL_V4_KEY")
+    )
+    wmi_v4 = (
+        _build_field(1, 2, key_bytes_v4)
+        + _build_field(2, 2, msg_bytes_v4)
+        + _build_field(3, 0, 1729000500)
+    )
+
+    decoded_v4 = increment_merger.decode_wmi(wmi_v4)
+    assert decoded_v4["key_id"] == "POLL_V4_KEY"
+    assert decoded_v4["message_type"] == 66
+    assert decoded_v4["text_data"] == "Which release?"
+    assert decoded_v4["poll_info"] is not None
+    assert decoded_v4["poll_info"]["question"] == "Which release?"
+    assert decoded_v4["poll_info"]["options"] == ["Option Alpha", "Option Beta"]
+    assert decoded_v4["poll_info"]["selectable_count"] == 1
+
+    # Test Tag 111 (V5) direct Pattern B
+    msg_bytes_v5 = _build_field(111, 2, poll_inner)
+    key_bytes_v5 = (
+        _build_field(1, 2, b"123456789@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"POLL_V5_KEY")
+    )
+    wmi_v5 = (
+        _build_field(1, 2, key_bytes_v5)
+        + _build_field(2, 2, msg_bytes_v5)
+        + _build_field(3, 0, 1729000501)
+    )
+
+    decoded_v5 = increment_merger.decode_wmi(wmi_v5)
+    assert decoded_v5["key_id"] == "POLL_V5_KEY"
+    assert decoded_v5["message_type"] == 66
+    assert decoded_v5["text_data"] == "Which release?"
+    assert decoded_v5["poll_info"]["options"] == ["Option Alpha", "Option Beta"]
+
+
+def test_apply_messages_bin_surrogate_churn_poll(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_churn.db")
+    cur = conn.cursor()
+    logger = logging.getLogger("test")
+
+    # Add last_message_row_id column to chat table and set initial value
+    cur.execute("ALTER TABLE chat ADD COLUMN last_message_row_id INTEGER")
+    cur.execute("UPDATE chat SET last_message_row_id = 100 WHERE _id = 1")
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data, status) "
+        "VALUES (100, 1, 0, 'CHURN_POLL_KEY', 1, 1729000000000, 0, 'Old Text', 0)"
+    )
+    # Add an existing vote add-on pointing to parent 100
+    cur.execute(
+        "INSERT INTO message_add_on (_id, chat_row_id, from_me, key_id, sender_jid_row_id, parent_message_row_id, timestamp, status, message_add_on_type) "
+        "VALUES (500, 1, 0, 'VOTE_ADDON_1', 1, 100, 1729000100000, 0, 67)"
+    )
+    conn.commit()
+
+    # Replay poll message via messages.bin with Tag 93 (pollCreationMessageV4)
+    opt1 = _build_field(1, 2, b"Yes")
+    opt2 = _build_field(1, 2, b"No")
+    poll_payload = (
+        _build_field(1, 2, b"Do you agree?")
+        + _build_field(2, 2, opt1)
+        + _build_field(2, 2, opt2)
+        + _build_field(3, 0, 1)
+    )
+    msg_bytes = _build_field(93, 2, poll_payload)
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"CHURN_POLL_KEY")
+    )
+    wmi = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000000)
+    )
+
+    bin_path = str(tmp_path / "messages_churn.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi)) + wmi)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+    assert inserted == 1
+
+    # Verify the new message replaced the old one
+    new_msg = cur.execute(
+        "SELECT _id, message_type, text_data FROM message WHERE key_id = 'CHURN_POLL_KEY'"
+    ).fetchone()
+    assert new_msg is not None
+    new_id = new_msg[0]
+    assert new_id != 100  # auto-increment produced a new surrogate ID
+    assert new_msg[1] == 66
+    assert new_msg[2] == "Do you agree?"
+
+    # Verify message_add_on was re-pointed from old ID (100) to new ID
+    addon = cur.execute(
+        "SELECT parent_message_row_id FROM message_add_on WHERE _id = 500"
+    ).fetchone()
+    assert addon[0] == new_id
+
+    # Verify message_poll_option has the options under the new ID
+    options = cur.execute(
+        "SELECT option_name FROM message_poll_option WHERE message_row_id = ? ORDER BY _id ASC",
+        (new_id,),
+    ).fetchall()
+    assert [o[0] for o in options] == ["Yes", "No"]
+
+    # Verify chat.last_message_row_id was updated to new_id
+    chat_row = cur.execute("SELECT last_message_row_id FROM chat WHERE _id = 1").fetchone()
+    assert chat_row[0] == new_id
     conn.close()
