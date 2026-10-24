@@ -7780,6 +7780,87 @@ class TestStickerSupport:
             assert chats[0]["is_view_once"] == 1
             assert chats[0]["last_msg_type"] == "audio"
 
+    def test_android_view_once_media_auxiliary_table(self, tmp_path):
+        """Android messages tracked in message_view_once_media table are distinguished with is_view_once=1."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '987654321')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (20, 1, NULL, 0, 1700000003000, 12)"
+        )
+        wa_conn.executescript("""
+            CREATE TABLE message_view_once_media (
+                message_row_id INTEGER PRIMARY KEY,
+                state INTEGER NOT NULL
+            );
+            ALTER TABLE message_quoted ADD COLUMN message_type INTEGER;
+            ALTER TABLE message_quoted ADD COLUMN key_id TEXT;
+            ALTER TABLE message_quoted ADD COLUMN parent_message_chat_row_id INTEGER;
+            ALTER TABLE message_quoted ADD COLUMN chat_row_id INTEGER;
+        """)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES "
+            "(10, 20, 0, 1, 1700000001000, NULL, 1),"
+            "(11, 20, 0, 1, 1700000002000, NULL, 42),"
+            "(12, 20, 0, 1, 1700000003000, NULL, 2),"
+            "(13, 20, 0, 1, 1700000004000, 'Nice photo', 0)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_view_once_media (message_row_id, state) VALUES (10, 1), (12, 2)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_quoted (message_row_id, chat_row_id, parent_message_chat_row_id, from_me, key_id, message_type) "
+            "VALUES (13, 20, 20, 0, 'KEY_11', 42)"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('987654321', 'Bob', 'Bob')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=987654321&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert msgs[10]["is_view_once"] == 1
+            assert msgs[10]["media_type"] == "image"
+            assert msgs[10]["archive_path"] is None
+
+            assert msgs[11]["is_view_once"] == 1
+            assert msgs[12]["is_view_once"] == 1
+
+            # Quoted VO photo maps to '📷 Photo'
+            assert msgs[13]["quoted_text"] == "📷 Photo"
+
+            # /api/media/count does not count purged VO messages as missing
+            cnt_resp = client.get("/api/media/count?chat_id=987654321&chat_type=contact")
+            assert cnt_resp.status_code == 200
+            cnt = cnt_resp.get_json()
+            assert cnt["by_type"].get("image", {}).get("missing", 0) == 0
+
+            # /api/chats reflects VO status from message_view_once_media
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = [c for c in chats_resp.get_json() if c["id"] == "987654321"]
+            assert len(chats) == 1
+            assert chats[0]["is_view_once"] == 1
+
+            # /api/messages/at correctly retains is_view_once=1 for live messages
+            at_resp = client.get(
+                "/api/messages/at?chat_id=987654321&chat_type=contact&ts=1700000001000"
+            )
+            assert at_resp.status_code == 200
+            at_msgs = {m["msg_id"]: m for m in at_resp.get_json()}
+            assert at_msgs[10]["is_view_once"] == 1
+
     def test_ios_deleted_and_view_once_messages(self, tmp_path):
         """iOS deleted (type 14) and view-once (types 38, 39, 53) are handled accurately."""
         wa_path = tmp_path / "ChatStorage.sqlite"

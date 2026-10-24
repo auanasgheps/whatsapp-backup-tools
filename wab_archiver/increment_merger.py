@@ -3252,6 +3252,17 @@ def apply_messages_bin(
         if schema_cache is not None:
             schema_cache["message_thumbnail"] = {"exists"} if has_message_thumbnail_table else set()
 
+    if schema_cache is not None and "message_view_once_media" in schema_cache:
+        has_view_once_table = bool(schema_cache["message_view_once_media"])
+    else:
+        has_view_once_table = bool(
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_view_once_media'"
+            ).fetchone()
+        )
+        if schema_cache is not None:
+            schema_cache["message_view_once_media"] = {"exists"} if has_view_once_table else set()
+
     # Fast batch deletion of conflicting messages by key_id
     existing_media_paths: dict[str, str] = {}
     existing_row_ids: dict[str, int] = {}
@@ -3490,6 +3501,16 @@ def apply_messages_bin(
                 "INSERT INTO message_vcard (message_row_id, vcard) VALUES (?, ?)",
                 (msg_row_id, msg["vcard"]),
             )
+
+        # Insert view-once record if present
+        if msg.get("is_view_once") and has_view_once_table and msg_row_id:
+            try:
+                cur.execute(
+                    "INSERT OR REPLACE INTO message_view_once_media (message_row_id, state) VALUES (?, ?)",
+                    (msg_row_id, 2 if msg.get("from_me") else 1),
+                )
+            except sqlite3.OperationalError:
+                pass
 
         # Insert link preview records if present
         if msg.get("link_preview_info") and msg_row_id:

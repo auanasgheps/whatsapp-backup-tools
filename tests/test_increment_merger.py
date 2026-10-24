@@ -667,6 +667,61 @@ def test_apply_messages_bin(mock_db, tmp_path):
     conn.close()
 
 
+def test_apply_messages_bin_view_once_media(mock_db, tmp_path):
+    """Verify apply_messages_bin sets message_type=42 and inserts into message_view_once_media."""
+    img_bytes = (
+        _build_field(1, 2, b"https://example.com/vo.enc")
+        + _build_field(2, 2, b"image/jpeg")
+        + _build_field(3, 2, b"VO photo")
+        + _build_field(4, 2, b"\xbb" * 32)
+        + _build_field(5, 0, 12345)
+    )
+    inner_msg = _build_field(3, 2, img_bytes)
+    vo_payload = _build_field(1, 2, inner_msg)
+    msg_bytes_vo = _build_field(55, 2, vo_payload)  # tag 55: viewOnceMessageV2
+
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"VO_KEY_1")
+    )
+    wmi_vo = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes_vo)
+        + _build_field(3, 0, 1729000300)
+    )
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_vo])
+    bin_path = tmp_path / "messages.bin"
+    bin_path.write_bytes(frame)
+
+    conn = sqlite3.connect(mock_db)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS message_view_once_media (message_row_id INTEGER PRIMARY KEY, state INTEGER NOT NULL)"
+    )
+    conn.commit()
+
+    inserted = increment_merger.apply_messages_bin(conn, str(bin_path), logger, None, None, None)
+    conn.commit()
+    assert inserted == 1
+
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT _id, key_id, message_type FROM message WHERE key_id = 'VO_KEY_1'"
+    ).fetchone()
+    assert row is not None
+    msg_id, key_id, msg_type = row
+    assert msg_type == 42
+
+    vom = cur.execute(
+        "SELECT message_row_id, state FROM message_view_once_media WHERE message_row_id = ?",
+        (msg_id,),
+    ).fetchone()
+    assert vom is not None
+    assert vom[0] == msg_id
+    assert vom[1] == 1
+    conn.close()
+
+
 def test_apply_sequences(mock_db, tmp_path):
     seq_json = tmp_path / "sequences.json"
     seq_json.write_text(
