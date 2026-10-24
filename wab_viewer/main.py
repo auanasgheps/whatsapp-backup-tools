@@ -4342,6 +4342,7 @@ def create_app(output_root: Path, rescan: bool = False):
     has_mq_key_id = False
     has_mq_msg_type = False
     has_mq_pm_chat = False
+    has_message_view_once_media = False
     _mi_cols = set()
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
@@ -4349,6 +4350,7 @@ def create_app(output_root: Path, rescan: bool = False):
             r[0]
             for r in _tmp_wa.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
+        has_message_view_once_media = "message_view_once_media" in _wa_tables
         has_reactions = "message_add_on" in _wa_tables and "message_add_on_reaction" in _wa_tables
         has_message_poll = "message_poll" in _wa_tables
         _mao_cols = (
@@ -4672,6 +4674,7 @@ def create_app(output_root: Path, rescan: bool = False):
         f"\n        OR ({' OR '.join(poll_subquery_parts)})" if poll_subquery_parts else ""
     )
     extra_poll_select = f" OR ({' OR '.join(poll_subquery_parts)})" if poll_subquery_parts else ""
+    mvom_filter_or = " OR (mvom.message_row_id IS NOT NULL)" if has_message_view_once_media else ""
 
     globals()["_ANDROID_FILTER"] = f"""
     AND (
@@ -4679,7 +4682,7 @@ def create_app(output_root: Path, rescan: bool = False):
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND (mm.file_path IS NOT NULL OR mm.message_row_id IS NOT NULL OR m.message_type IN (1, 2, 3, 5, 9, 13, 16, 20, 28)))
         OR (m.message_type IN (4, 14))
         OR (m.message_type IN (15, 64))
-        OR (m.message_type IN (42, 43, 82))
+        OR (m.message_type IN (42, 43, 82){mvom_filter_or})
         OR (m.message_type = 7 AND {ms_action_clause})
         OR (m.message_type = 66){extra_poll_filter}
     )
@@ -4807,9 +4810,9 @@ def create_app(output_root: Path, rescan: bool = False):
         quoted_text_expr = """COALESCE(
             NULLIF(mq.text_data, ''),
             CASE
-                WHEN mq.message_type = 1 THEN '📷 Photo'
-                WHEN mq.message_type = 2 THEN '🎵 Audio'
-                WHEN mq.message_type = 3 THEN '🎥 Video'
+                WHEN mq.message_type IN (1, 42) THEN '📷 Photo'
+                WHEN mq.message_type IN (2, 82) THEN '🎵 Audio'
+                WHEN mq.message_type IN (3, 43) THEN '🎥 Video'
                 WHEN mq.message_type = 20 THEN 'Sticker'
                 WHEN mq.message_type = 66 THEN 'Poll'
             END,
@@ -4847,6 +4850,12 @@ def create_app(output_root: Path, rescan: bool = False):
     mt_desc_col = "NULLIF(mtxt.description, '')" if has_mt_desc else "NULL"
     mt_url_col = "NULLIF(mtxt.url, '')" if has_mt_url else "NULL"
     mt_preview_type_col = "COALESCE(mtxt.preview_type, 0)" if has_mt_preview_type else "0"
+    mvom_join = (
+        "    LEFT JOIN message_view_once_media mvom ON mvom.message_row_id = m._id\n"
+        if has_message_view_once_media
+        else ""
+    )
+    mvom_or = " OR mvom.message_row_id IS NOT NULL" if has_message_view_once_media else ""
 
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
@@ -4913,7 +4922,7 @@ def create_app(output_root: Path, rescan: bool = False):
         {quoted_stanza_id_col}                                       AS quoted_stanza_id,
         {edit_is_edited_col}                                         AS is_edited,
         {edit_ts_col}                                                AS edited_ts,
-        CASE WHEN m.message_type IN (42, 43, 82) THEN 1 ELSE 0 END   AS is_view_once,
+        CASE WHEN m.message_type IN (42, 43, 82){mvom_or} THEN 1 ELSE 0 END   AS is_view_once,
         {ms_col}                                                     AS action_type,
         ''                                                           AS participant_name,
         {mm_width_col}                                               AS media_width,
@@ -4928,7 +4937,7 @@ def create_app(output_root: Path, rescan: bool = False):
         {mt_preview_type_col}                                        AS link_preview_type
     FROM message m
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
-{android_thumb_joins}{android_text_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
+{android_thumb_joins}{android_text_join}{mvom_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
     LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
     LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
     LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
@@ -5401,6 +5410,21 @@ def create_app(output_root: Path, rescan: bool = False):
                         has_jid_server,
                         has_jid_raw_string,
                     )
+            android_vom_mids = set()
+            if has_message_view_once_media:
+                candidate_mids = [r["last_msg_id"] for r in rows if r["last_msg_id"]]
+                if candidate_mids:
+                    c_ph = ",".join("?" * len(candidate_mids))
+                    try:
+                        android_vom_mids = {
+                            r[0]
+                            for r in conn.execute(
+                                f"SELECT message_row_id FROM message_view_once_media WHERE message_row_id IN ({c_ph})",
+                                candidate_mids,
+                            ).fetchall()
+                        }
+                    except sqlite3.OperationalError:
+                        pass
 
         for r in rows:
             d = dict(r)
@@ -5430,19 +5454,20 @@ def create_app(output_root: Path, rescan: bool = False):
                 else:
                     d["last_msg_preview"] = "This message was deleted"
                 d["is_view_once"] = 0
-            elif (source_type == "android" and raw_type in (42, 43, 82)) or (
-                source_type == "ios" and raw_type in (38, 39, 53)
-            ):
+            elif (
+                source_type == "android"
+                and (raw_type in (42, 43, 82) or last_msg_id in android_vom_mids)
+            ) or (source_type == "ios" and raw_type in (38, 39, 53)):
                 d["is_view_once"] = 1
                 if media_path:
                     path = media_path if source_type == "android" else f"Message/{media_path}"
                     d["last_msg_type"] = _media_type_from_path(path)
                 else:
-                    if (source_type == "android" and raw_type == 43) or (
+                    if (source_type == "android" and raw_type in (3, 43)) or (
                         source_type == "ios" and raw_type == 39
                     ):
                         d["last_msg_type"] = "video"
-                    elif (source_type == "android" and raw_type == 82) or (
+                    elif (source_type == "android" and raw_type in (2, 82)) or (
                         source_type == "ios" and raw_type == 53
                     ):
                         d["last_msg_type"] = "audio"
@@ -6099,7 +6124,8 @@ def create_app(output_root: Path, rescan: bool = False):
             t = r["media_type"]
             by_type.setdefault(t, {"count": 0, "missing": 0})
             by_type[t]["count"] += 1
-            if not r["archive_path"]:
+            is_vo = r["is_view_once"] if "is_view_once" in r.keys() else 0
+            if not r["archive_path"] and not is_vo:
                 by_type[t]["missing"] += 1
         for r in list(doc_rows) + list(link_rows):
             t = r["media_type"]
@@ -6197,7 +6223,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     d["msg_id"] = -int(d["rowid"])
                     d["sort_id"] = -int(d["rowid"])
                     d["is_preserved"] = 1
-                    d["is_view_once"] = 0
+                    d["is_view_once"] = int(d.get("is_view_once") or 0)
                     d.pop("rowid", None)
                     d.pop("action_type", None)
                     d.pop("participant_name", None)
