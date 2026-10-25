@@ -9419,6 +9419,152 @@ class TestLidAndContactResolution:
             assert chat["type"] == "group"
             assert chat["id"] == "20"
 
+    def test_api_chats_excludes_1to1_shadow_chat_with_null_text(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            -- 1-to-1 contact chat with a phantom message (type = 0, text_data = NULL, no media)
+            INSERT INTO jid VALUES (1, '393926739354', 's.whatsapp.net', '393926739354@s.whatsapp.net');
+            INSERT INTO chat VALUES (10, 1, NULL, 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, NULL, 0);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 0
+
+    def test_api_chats_excludes_1to1_shadow_chat_with_system_messages_only(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 1,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 7
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+
+            -- 1-to-1 contact chat with only system message (type = 7)
+            INSERT INTO jid VALUES (1, '393926739354', 's.whatsapp.net', '393926739354@s.whatsapp.net');
+            INSERT INTO chat VALUES (10, 1, NULL, 1, 1700000000000, NULL);
+            INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, NULL, 7);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 0
+
+    def test_api_chats_masked_lid_display_name_ignored(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY,
+                jid_row_id INTEGER,
+                subject TEXT,
+                hidden INTEGER DEFAULT 0,
+                sort_timestamp INTEGER,
+                display_message_row_id INTEGER
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE lid_display_name (lid_row_id INTEGER NOT NULL PRIMARY KEY, display_name TEXT NOT NULL, username TEXT);
+
+            -- Unmapped LID chat with masked phone string in lid_display_name
+            INSERT INTO jid VALUES (1, '47386424570094', 'lid', '47386424570094@lid');
+            INSERT INTO chat VALUES (3879, 1, NULL, 0, 1700000000000, 1);
+            INSERT INTO message VALUES (1, 3879, 0, 1, 1700000000000, 'Valid conversational message', 0);
+            INSERT INTO lid_display_name VALUES (1, '+39\u2219\u2219\u2219\u2219\u2219\u2219\u2219\u221995', NULL);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            chats = resp.get_json()
+            assert len(chats) == 1
+            chat = chats[0]
+            assert "\u2219" not in chat["display_name"]
+            assert chat["display_name"] == "Unknown Contact (3879)"
+
 
 class TestAndroidHdAndMediaMatching:
     def test_android_hd_media_dedup_and_clean_sender(self, tmp_path):

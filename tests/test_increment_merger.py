@@ -4796,3 +4796,306 @@ def test_apply_messages_bin_surrogate_churn_poll(tmp_path):
     chat_row = cur.execute("SELECT last_message_row_id FROM chat WHERE _id = 1").fetchone()
     assert chat_row[0] == new_id
     conn.close()
+
+
+def test_decode_wmi_stub_type():
+    # Test wire Tag 24 (messageStubType) and Tag 25 (messageStubParameters)
+    key_bytes = (
+        _build_field(1, 2, b"393926739354@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"STUB_KEY_123")
+    )
+    # Tag 24: stub_type = 67 (E2E_IDENTITY_CHANGED)
+    # Tag 25: repeated stub_param = "param1"
+    wmi = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(3, 0, 1729000000)
+        + _build_field(24, 0, 67)
+        + _build_field(25, 2, b"param1")
+    )
+    decoded = increment_merger.decode_wmi(wmi)
+    assert decoded["key_id"] == "STUB_KEY_123"
+    assert decoded["message_type"] == 7
+    assert decoded["text_data"] is None
+    assert decoded["stub_type"] == 67
+    assert decoded["stub_params"] == ["param1"]
+    assert decoded["has_content"] is True
+
+
+def test_decode_wmi_empty_frame():
+    # Frame with only key and timestamp, no message payload and no stub
+    key_bytes = (
+        _build_field(1, 2, b"393926739354@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"EMPTY_KEY_123")
+    )
+    wmi = _build_field(1, 2, key_bytes) + _build_field(3, 0, 1729000000)
+    decoded = increment_merger.decode_wmi(wmi)
+    assert decoded["key_id"] == "EMPTY_KEY_123"
+    assert decoded["message_type"] == 0
+    assert decoded["text_data"] is None
+    assert decoded["stub_type"] is None
+    assert decoded["has_content"] is False
+
+
+def test_apply_messages_bin_skips_empty_control_frames(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_empty_skip.db")
+    cur = conn.cursor()
+    logger = logging.getLogger("test")
+
+    # Add empty frame to messages.bin
+    key_bytes = (
+        _build_field(1, 2, b"393926739354@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"EMPTY_CONTROL_KEY")
+    )
+    wmi = _build_field(1, 2, key_bytes) + _build_field(3, 0, 1729000000)
+
+    bin_path = str(tmp_path / "messages_empty.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi)) + wmi)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 0
+    msg_count = cur.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+    assert msg_count == 0
+    conn.close()
+
+
+def test_apply_messages_bin_stub_system_message_no_unhide(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_stub_no_unhide.db")
+    cur = conn.cursor()
+    logger = logging.getLogger("test")
+
+    # Create message_system table
+    cur.execute(
+        "CREATE TABLE message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER NOT NULL)"
+    )
+    cur.execute("ALTER TABLE chat ADD COLUMN display_message_row_id INTEGER")
+    conn.commit()
+
+    # Pre-seed a shadow 1-to-1 chat with hidden = 1
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (10, '393926739354', 's.whatsapp.net', '393926739354@s.whatsapp.net')"
+    )
+    cur.execute(
+        "INSERT INTO chat (_id, jid_row_id, hidden, sort_timestamp, display_message_row_id) VALUES (5, 10, 1, 1000, NULL)"
+    )
+    conn.commit()
+
+    # Replay a stub message (wire tag 24 = 67)
+    key_bytes = (
+        _build_field(1, 2, b"393926739354@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"STUB_SYS_KEY")
+    )
+    wmi = _build_field(1, 2, key_bytes) + _build_field(3, 0, 1729000500) + _build_field(24, 0, 67)
+
+    bin_path = str(tmp_path / "messages_stub.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi)) + wmi)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 1
+    msg_row = cur.execute(
+        "SELECT _id, message_type, text_data FROM message WHERE key_id = 'STUB_SYS_KEY'"
+    ).fetchone()
+    assert msg_row is not None
+    assert msg_row[1] == 7
+    assert msg_row[2] is None
+
+    # message_system must have recorded action_type 67
+    sys_row = cur.execute(
+        "SELECT action_type FROM message_system WHERE message_row_id = ?", (msg_row[0],)
+    ).fetchone()
+    assert sys_row is not None
+    assert sys_row[0] == 67
+
+    # 1-to-1 chat MUST remain hidden = 1 and display_message_row_id must remain NULL
+    chat_row = cur.execute(
+        "SELECT hidden, display_message_row_id FROM chat WHERE _id = 5"
+    ).fetchone()
+    assert chat_row[0] == 1
+    assert chat_row[1] is None
+    conn.close()
+
+
+def test_resolve_or_create_chat_no_premature_unhide(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_chat_unhide.db")
+    cur = conn.cursor()
+    logger = logging.getLogger("test")
+
+    # 1. Existing shadow chat with hidden = 1
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (10, '393926739354', 's.whatsapp.net', '393926739354@s.whatsapp.net')"
+    )
+    cur.execute("INSERT INTO chat (_id, jid_row_id, hidden) VALUES (5, 10, 1)")
+    conn.commit()
+
+    # Calling resolve_or_create_chat on existing shadow chat MUST NOT unhide it
+    cid = increment_merger.resolve_or_create_chat(conn, 10, logger, {})
+    assert cid == 5
+    chat_hidden = cur.execute("SELECT hidden FROM chat WHERE _id = 5").fetchone()[0]
+    assert chat_hidden == 1
+
+    # 2. Brand new chat insertion defaults to hidden = 0 per overrides.md rule
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (20, '15551234567', 's.whatsapp.net', '15551234567@s.whatsapp.net')"
+    )
+    conn.commit()
+    new_cid = increment_merger.resolve_or_create_chat(conn, 20, logger, {})
+    new_hidden = cur.execute("SELECT hidden FROM chat WHERE _id = ?", (new_cid,)).fetchone()[0]
+    assert new_hidden == 0
+
+    # 3. Brand new group chat insertion defaults to hidden = 0
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (30, '120363123456', 'g.us', '120363123456@g.us')"
+    )
+    conn.commit()
+    grp_cid = increment_merger.resolve_or_create_chat(conn, 30, logger, {})
+    grp_hidden = cur.execute("SELECT hidden FROM chat WHERE _id = ?", (grp_cid,)).fetchone()[0]
+    assert grp_hidden == 0
+    conn.close()
+
+
+def test_step6b_phantom_and_shadow_cleanup(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_cleanup.db")
+    cur = conn.cursor()
+
+    # 1. Shadow chat 10 with hidden = 0 and a phantom message (type = 0, text_data = NULL)
+    cur.execute("ALTER TABLE chat ADD COLUMN display_message_row_id INTEGER")
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (10, '393926739354', 's.whatsapp.net', '393926739354@s.whatsapp.net')"
+    )
+    cur.execute(
+        "INSERT INTO chat (_id, jid_row_id, hidden, sort_timestamp, display_message_row_id) VALUES (5, 10, 0, 1000, 1)"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) VALUES (1, 5, 0, 'PHANTOM_KEY', 1000, 0, NULL, 0)"
+    )
+
+    # 2. Group chat 20 with hidden = 0 and a system message (type = 7) - must NOT be hidden
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (20, '120363123456', 'g.us', '120363123456@g.us')"
+    )
+    cur.execute(
+        "INSERT INTO chat (_id, jid_row_id, hidden, sort_timestamp, display_message_row_id) VALUES (6, 20, 0, 2000, 2)"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) VALUES (2, 6, 0, 'GRP_SYS_KEY', 2000, 7, NULL, 0)"
+    )
+
+    # 3. Valid conversational chat 30 with hidden = 0 and valid text message - must NOT be hidden
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (30, '15551234567', 's.whatsapp.net', '15551234567@s.whatsapp.net')"
+    )
+    cur.execute(
+        "INSERT INTO chat (_id, jid_row_id, hidden, sort_timestamp, display_message_row_id) VALUES (7, 30, 0, 3000, 3)"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) VALUES (3, 7, 0, 'VALID_KEY', 3000, 0, 'Hello!', 0)"
+    )
+    conn.commit()
+
+    # Run the Step 6b cleanup SQL commands directly on conn
+    has_mm = bool(
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_media'"
+        ).fetchone()
+    )
+    has_mv = bool(
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_vcard'"
+        ).fetchone()
+    )
+    del_clauses = ["message_type = 0", "text_data IS NULL"]
+    if has_mm:
+        del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_media)")
+    if has_mv:
+        del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_vcard)")
+    cur.execute(f"DELETE FROM message WHERE {' AND '.join(del_clauses)}")
+
+    has_chat_hidden = bool(
+        cur.execute("SELECT 1 FROM pragma_table_info('chat') WHERE name='hidden'").fetchone()
+    )
+    if has_chat_hidden:
+        mm_clause = (
+            "OR EXISTS (SELECT 1 FROM message_media mm WHERE mm.message_row_id = m._id)"
+            if has_mm
+            else ""
+        )
+        cur.execute(
+            f"""
+            UPDATE chat
+            SET hidden = 1
+            WHERE (hidden = 0 OR hidden IS NULL)
+              AND jid_row_id IN (
+                  SELECT _id FROM jid WHERE server != 'g.us'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM message m
+                  WHERE m.chat_row_id = chat._id
+                    AND (
+                        (m.message_type = 0 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
+                        OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 25, 42, 43, 81, 82)
+                        {mm_clause}
+                    )
+              )
+            """
+        )
+        has_display_col = bool(
+            cur.execute(
+                "SELECT 1 FROM pragma_table_info('chat') WHERE name='display_message_row_id'"
+            ).fetchone()
+        )
+        if has_display_col:
+            cur.execute(
+                f"""
+                UPDATE chat
+                SET display_message_row_id = NULL
+                WHERE hidden = 1
+                  AND display_message_row_id IS NOT NULL
+                  AND jid_row_id IN (SELECT _id FROM jid WHERE server != 'g.us')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM message m
+                      WHERE m.chat_row_id = chat._id
+                        AND (
+                            (m.message_type = 0 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
+                            OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 25, 42, 43, 81, 82)
+                            {mm_clause}
+                        )
+                  )
+                """
+            )
+    conn.commit()
+
+    # Chat 5 (1-to-1 with phantom message):
+    # Phantom message deleted
+    assert cur.execute("SELECT 1 FROM message WHERE _id = 1").fetchone() is None
+    # Chat re-hidden and display_message_row_id cleared
+    c5 = cur.execute("SELECT hidden, display_message_row_id FROM chat WHERE _id = 5").fetchone()
+    assert c5[0] == 1
+    assert c5[1] is None
+
+    # Chat 6 (group chat):
+    # Message 2 remains
+    assert cur.execute("SELECT 1 FROM message WHERE _id = 2").fetchone() is not None
+    # Chat remains hidden = 0
+    c6 = cur.execute("SELECT hidden, display_message_row_id FROM chat WHERE _id = 6").fetchone()
+    assert c6[0] == 0
+    assert c6[1] == 2
+
+    # Chat 7 (valid conversational 1-to-1 chat):
+    # Message 3 remains
+    assert cur.execute("SELECT 1 FROM message WHERE _id = 3").fetchone() is not None
+    # Chat remains hidden = 0
+    c7 = cur.execute("SELECT hidden, display_message_row_id FROM chat WHERE _id = 7").fetchone()
+    assert c7[0] == 0
+    assert c7[1] == 3
+    conn.close()
