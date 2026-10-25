@@ -371,7 +371,19 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 except (ValueError, Exception):
                     pass
 
-    message_type = 0
+    # Field 24: messageStubType
+    stub_type = None
+    if 24 in fields and fields[24]:
+        stub_type = fields[24][0][1]
+
+    # Field 25: messageStubParameters
+    stub_params: list[str] = []
+    if 25 in fields and fields[25]:
+        for sp in fields[25]:
+            if isinstance(sp[1], bytes):
+                stub_params.append(sp[1].decode("utf-8", errors="replace"))
+
+    message_type = 7 if stub_type is not None else 0
     text_data = None
     media_info = None
     vcard = None
@@ -1028,6 +1040,22 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     if media_info is not None and local_path:
         media_info["file_path"] = local_path
 
+    has_content = bool(
+        (text_data is not None and text_data != "")
+        or media_info is not None
+        or vcard is not None
+        or poll_info is not None
+        or poll_vote_info is not None
+        or reaction_info is not None
+        or pin_info is not None
+        or location_info is not None
+        or revoke_info is not None
+        or edit_info is not None
+        or link_preview_info is not None
+        or embedded_poll_votes
+        or stub_type is not None
+    )
+
     return {
         "key_id": key_id,
         "from_me": from_me,
@@ -1055,6 +1083,9 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         "push_name": push_name,
         "embedded_poll_votes": embedded_poll_votes,
         "link_preview_info": link_preview_info,
+        "stub_type": stub_type,
+        "stub_params": stub_params,
+        "has_content": has_content,
     }
 
 
@@ -3076,8 +3107,6 @@ def resolve_or_create_chat(
             match = cur.fetchone()
             if match is not None:
                 chat_id = int(match[0])
-                if has_hidden:
-                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
 
         # 3. Check lid_display_name matching to an existing chat with phone JID
         if chat_id is None:
@@ -3103,10 +3132,6 @@ def resolve_or_create_chat(
                             match = cur.fetchone()
                             if match is not None:
                                 chat_id = int(match[0])
-                                if has_hidden:
-                                    cur.execute(
-                                        "UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,)
-                                    )
                                 if has_account_jid:
                                     cur.execute(
                                         "UPDATE chat SET account_jid_row_id = ? WHERE _id = ? AND (account_jid_row_id IS NULL OR account_jid_row_id = 0)",
@@ -3129,8 +3154,6 @@ def resolve_or_create_chat(
             match = cur.fetchone()
             if match is not None:
                 chat_id = int(match[0])
-                if has_hidden:
-                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
 
     else:
         # Incoming JID is phone JID or group JID or other
@@ -3139,8 +3162,6 @@ def resolve_or_create_chat(
         match = cur.fetchone()
         if match is not None:
             chat_id = int(match[0])
-            if has_hidden:
-                cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
 
         # 2. Natural identity match: check if chat exists for (user, server)
         if chat_id is None and jid_user and jid_server:
@@ -3157,8 +3178,6 @@ def resolve_or_create_chat(
             match = cur.fetchone()
             if match is not None:
                 chat_id = int(match[0])
-                if has_hidden:
-                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
 
         # 3. If phone JID, check if chat exists mapped via jid_map to account_jid_row_id or shadow chat
         if chat_id is None and jid_server == "s.whatsapp.net" and has_jid_map:
@@ -3175,8 +3194,6 @@ def resolve_or_create_chat(
             match = cur.fetchone()
             if match is not None:
                 chat_id = int(match[0])
-                if has_hidden:
-                    cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (chat_id,))
 
     # 5. If still no chat found, insert a new chat row
     if chat_id is None:
@@ -3262,6 +3279,17 @@ def apply_messages_bin(
         )
         if schema_cache is not None:
             schema_cache["message_view_once_media"] = {"exists"} if has_view_once_table else set()
+
+    if schema_cache is not None and "message_system" in schema_cache:
+        has_message_system_table = bool(schema_cache["message_system"])
+    else:
+        has_message_system_table = bool(
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_system'"
+            ).fetchone()
+        )
+        if schema_cache is not None:
+            schema_cache["message_system"] = {"exists"} if has_message_system_table else set()
 
     # Fast batch deletion of conflicting messages by key_id
     existing_media_paths: dict[str, str] = {}
@@ -3356,19 +3384,79 @@ def apply_messages_bin(
     pending_quotes: list[tuple[int, str]] = []
     max_ts_per_chat: dict[int, int] = {}
     max_display_msg_per_chat: dict[int, int] = {}
+    chats_to_unhide: set[int] = set()
     for msg in messages:
         remote_jid = msg["remote_jid"]
-        if not remote_jid:
+        if not remote_jid or not msg.get("has_content", True):
             continue
-
-        chat_jid_row_id = resolve_or_create_jid(conn, remote_jid, logger, jid_cache)
-        chat_row_id = resolve_or_create_chat(conn, chat_jid_row_id, logger, chat_cache)
 
         is_group = bool(
             remote_jid.endswith("@g.us")
             or remote_jid.endswith("@temp")
             or ("@" in remote_jid and remote_jid.split("@", 1)[1] == "g.us")
         )
+
+        is_stub = msg.get("stub_type") is not None
+        is_add_on = bool(
+            msg.get("reaction_info")
+            or msg.get("pin_info")
+            or msg.get("poll_vote_info")
+            or msg.get("revoke_info")
+            or msg.get("edit_info")
+            or msg["message_type"] in (25, 67, 74, 79)
+        )
+        is_conversational = bool(
+            msg["message_type"] != 7
+            and (
+                (msg.get("text_data") and msg["text_data"].strip())
+                or msg.get("media_info")
+                or msg.get("vcard")
+                or msg.get("location_info")
+                or msg.get("poll_info")
+                or msg.get("link_preview_info")
+            )
+        )
+
+        if not is_conversational and not is_stub and not is_add_on:
+            # Control / empty / status frame without conversational message or system stub.
+            # If user receipts are present on an existing message, attach them without inserting a blank message.
+            if msg.get("user_receipts") and msg.get("key_id"):
+                existing_id = key_cache.get(msg["key_id"]) or find_message_row_id(
+                    conn, msg["key_id"], key_cache
+                )
+                if existing_id:
+                    ru_cols = get_table_columns(conn, "receipt_user", schema_cache)
+                    if ru_cols:
+                        for ur in msg["user_receipts"]:
+                            ur_jid = ur.get("user_jid", "")
+                            if ur_jid and not is_valid_jid_string(ur_jid):
+                                continue
+                            try:
+                                ur_jid_id = (
+                                    resolve_or_create_jid(conn, ur_jid, logger, jid_cache)
+                                    if ur_jid
+                                    else resolve_or_create_jid(conn, remote_jid, logger, jid_cache)
+                                )
+                            except ValueError:
+                                continue
+                            cur.execute(
+                                "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (
+                                    existing_id,
+                                    ur_jid_id,
+                                    ur.get("receipt_timestamp"),
+                                    ur.get("read_timestamp"),
+                                    ur.get("played_timestamp"),
+                                ),
+                            )
+            continue
+
+        chat_jid_row_id = resolve_or_create_jid(conn, remote_jid, logger, jid_cache)
+        chat_row_id = resolve_or_create_chat(conn, chat_jid_row_id, logger, chat_cache)
+
+        if is_conversational or is_group:
+            chats_to_unhide.add(chat_row_id)
 
         # Resolve sender: In Android WhatsApp, 1-on-1 messages always have sender_jid_row_id = 0
         if not is_group or msg["from_me"] == 1:
@@ -3409,6 +3497,15 @@ def apply_messages_bin(
         msg_row_id = cur.lastrowid
         inserted += 1
 
+        if is_stub and has_message_system_table and msg_row_id:
+            try:
+                cur.execute(
+                    "INSERT OR REPLACE INTO message_system (message_row_id, action_type) VALUES (?, ?)",
+                    (msg_row_id, int(msg["stub_type"])),
+                )
+            except sqlite3.OperationalError:
+                pass
+
         old_id = existing_row_ids.get(msg.get("key_id", ""))
         if old_id and msg_row_id and old_id != msg_row_id:
             try:
@@ -3448,15 +3545,12 @@ def apply_messages_bin(
             except sqlite3.OperationalError:
                 pass
 
-        is_add_on = bool(
-            msg.get("reaction_info")
-            or msg.get("pin_info")
-            or msg.get("poll_vote_info")
-            or msg.get("revoke_info")
-            or msg.get("edit_info")
-            or msg["message_type"] in (25, 67, 74, 79)
-        )
-        if not is_add_on and msg["timestamp"] >= max_ts_per_chat.get(chat_row_id, 0):
+        is_displayable = is_conversational or (is_group and msg["message_type"] == 7)
+        if (
+            is_displayable
+            and not is_add_on
+            and msg["timestamp"] >= max_ts_per_chat.get(chat_row_id, 0)
+        ):
             max_ts_per_chat[chat_row_id] = msg["timestamp"]
             if msg_row_id:
                 max_display_msg_per_chat[chat_row_id] = msg_row_id
@@ -3853,6 +3947,18 @@ def apply_messages_bin(
                 f"Two-pass quote reconciliation resolved {recovered_quotes} out-of-order quoted timestamp(s)."
             )
 
+    if chats_to_unhide:
+        chat_cols = schema_cache.get("chat") if schema_cache is not None else None
+        if chat_cols is None:
+            chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+            if schema_cache is not None:
+                schema_cache["chat"] = chat_cols
+        if "hidden" in chat_cols:
+            cur.executemany(
+                "UPDATE chat SET hidden = 0 WHERE _id = ? AND (hidden IS NULL OR hidden = 1)",
+                [(cid,) for cid in chats_to_unhide],
+            )
+
     if max_ts_per_chat:
         chat_cols = schema_cache.get("chat") if schema_cache is not None else None
         if chat_cols is None:
@@ -3863,11 +3969,6 @@ def apply_messages_bin(
             cur.executemany(
                 "UPDATE chat SET sort_timestamp = MAX(COALESCE(sort_timestamp, 0), ?) WHERE _id = ?",
                 [(ts, cid) for cid, ts in max_ts_per_chat.items()],
-            )
-        if "hidden" in chat_cols:
-            cur.executemany(
-                "UPDATE chat SET hidden = 0 WHERE _id = ? AND (hidden IS NULL OR hidden = 1)",
-                [(cid,) for cid in max_ts_per_chat.keys()],
             )
         if "display_message_row_id" in chat_cols and max_display_msg_per_chat:
             cur.executemany(
@@ -4446,9 +4547,93 @@ def merge_increments(
         # Step 6: Post-restore LID migration, matching vendor RestoredBackupLidMigrationHelper
         migrate_restored_backup_to_lid(conn, logger)
 
+        # Step 6b: Post-merge shadow chat and phantom message cleanup
+        try:
+            has_mm = bool(
+                cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_media'"
+                ).fetchone()
+            )
+            has_mv = bool(
+                cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_vcard'"
+                ).fetchone()
+            )
+            del_clauses = ["message_type = 0", "text_data IS NULL"]
+            if has_mm:
+                del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_media)")
+            if has_mv:
+                del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_vcard)")
+            cur.execute(f"DELETE FROM message WHERE {' AND '.join(del_clauses)}")
+            deleted_phantoms = cur.rowcount
+            if deleted_phantoms > 0:
+                logger.info(
+                    f"Purged {deleted_phantoms} phantom empty message(s) from message table."
+                )
+
+            has_chat_hidden = bool(
+                cur.execute(
+                    "SELECT 1 FROM pragma_table_info('chat') WHERE name='hidden'"
+                ).fetchone()
+            )
+            if has_chat_hidden:
+                mm_clause = (
+                    "OR EXISTS (SELECT 1 FROM message_media mm WHERE mm.message_row_id = m._id)"
+                    if has_mm
+                    else ""
+                )
+                cur.execute(
+                    f"""
+                    UPDATE chat
+                    SET hidden = 1
+                    WHERE (hidden = 0 OR hidden IS NULL)
+                      AND jid_row_id IN (
+                          SELECT _id FROM jid WHERE server != 'g.us'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM message m
+                          WHERE m.chat_row_id = chat._id
+                            AND (
+                                (m.message_type = 0 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
+                                OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 25, 42, 43, 81, 82)
+                                {mm_clause}
+                            )
+                      )
+                    """
+                )
+                has_display_col = bool(
+                    cur.execute(
+                        "SELECT 1 FROM pragma_table_info('chat') WHERE name='display_message_row_id'"
+                    ).fetchone()
+                )
+                if has_display_col:
+                    cur.execute(
+                        f"""
+                        UPDATE chat
+                        SET display_message_row_id = NULL
+                        WHERE hidden = 1
+                          AND display_message_row_id IS NOT NULL
+                          AND jid_row_id IN (SELECT _id FROM jid WHERE server != 'g.us')
+                          AND NOT EXISTS (
+                              SELECT 1 FROM message m
+                              WHERE m.chat_row_id = chat._id
+                                AND (
+                                    (m.message_type = 0 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
+                                    OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 25, 42, 43, 81, 82)
+                                    {mm_clause}
+                                )
+                          )
+                        """
+                    )
+        except sqlite3.OperationalError:
+            pass
+
         # Step 7: Rebuild database indexes after all increments are applied, matching vendor MessageStoreBackupUtils/reindex
         logger.info("Rebuilding database indexes...")
         conn.execute("REINDEX")
+
+        # Commit all pending transactions before changing PRAGMA synchronous
+        conn.commit()
 
         # Restore synchronous mode and execute quick integrity check
         conn.execute("PRAGMA synchronous = NORMAL")

@@ -566,6 +566,61 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                         "CREATE INDEX IF NOT EXISTS idx_message_quoted_media_row_id "
                         "ON message_quoted_media(message_row_id)"
                     )
+
+        # Database self-healing for Android: sanitize empty phantom messages and re-hide empty shadow chats
+        has_android_msg = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
+        ).fetchone()
+        has_android_chat = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat'"
+        ).fetchone()
+        if has_android_msg and has_android_chat:
+            try:
+                has_mm = bool(
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_media'"
+                    ).fetchone()
+                )
+                has_mv = bool(
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_vcard'"
+                    ).fetchone()
+                )
+                del_clauses = ["message_type = 0", "(text_data IS NULL OR text_data = '')"]
+                if has_mm:
+                    del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_media)")
+                if has_mv:
+                    del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_vcard)")
+                conn.execute(f"DELETE FROM message WHERE {' AND '.join(del_clauses)}")
+                chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
+                if "hidden" in chat_cols:
+                    conn.execute("""
+                        UPDATE chat
+                        SET hidden = 1
+                        WHERE (hidden = 0 OR hidden IS NULL)
+                          AND (subject IS NULL OR subject = '')
+                          AND jid_row_id NOT IN (
+                              SELECT _id FROM jid WHERE server = 'g.us' OR raw_string LIKE '%@g.us'
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM message m
+                              WHERE m.chat_row_id = chat._id
+                                AND (
+                                    (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
+                                    OR m.message_type IN (1, 2, 3, 4, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82)
+                                )
+                          )
+                    """)
+                if "display_message_row_id" in chat_cols:
+                    conn.execute("""
+                        UPDATE chat
+                        SET display_message_row_id = NULL
+                        WHERE display_message_row_id IS NOT NULL
+                          AND display_message_row_id NOT IN (SELECT _id FROM message)
+                    """)
+            except sqlite3.OperationalError:
+                pass
+
         conn.commit()
     except sqlite3.OperationalError as e:
         if "readonly" in str(e).lower():
@@ -5067,7 +5122,11 @@ def create_app(output_root: Path, rescan: bool = False):
             )
             con_ldn_arm = "NULLIF(con_ldn.display_name, '')," if has_lid_dn else ""
             con_ldn_folder_arm = "con_ldn.folder," if has_lid_dn else ""
-            ldn_chat_name_arm = "NULLIF(ldn_c.display_name, '')," if has_lid_dn else ""
+            ldn_chat_name_arm = (
+                "CASE WHEN ldn_c.display_name NOT LIKE '%∙%' AND ldn_c.display_name NOT LIKE '%\u2219%' THEN NULLIF(ldn_c.display_name, '') END,"
+                if has_lid_dn
+                else ""
+            )
             ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if has_lid_dn else ""
             rows = conn.execute(f"""
                 SELECT
@@ -5173,7 +5232,15 @@ def create_app(output_root: Path, rescan: bool = False):
                     ({is_group_chat} AND (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))))
                     OR
                     (NOT ({is_group_chat}) AND (
-                        EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))
+                        EXISTS (
+                            SELECT 1 FROM message m
+                            WHERE m.chat_row_id = c._id
+                              AND m.message_type NOT IN (25, 67, 74, 79, 90)
+                              AND (
+                                  (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
+                                  OR (m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                              )
+                        )
                     ))
                 )
                 ORDER BY newest_ts DESC
@@ -8004,7 +8071,15 @@ def create_app(output_root: Path, rescan: bool = False):
                         ({bulk_is_group} AND (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))))
                         OR
                         (NOT ({bulk_is_group}) AND (
-                            EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))
+                            EXISTS (
+                                SELECT 1 FROM message m
+                                WHERE m.chat_row_id = c._id
+                                  AND m.message_type NOT IN (25, 67, 74, 79, 90)
+                                  AND (
+                                      (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
+                                      OR (m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                                  )
+                            )
                         ))
                     )
                 """).fetchall()
