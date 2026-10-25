@@ -2044,6 +2044,72 @@ class TestProcessRows:
         assert stats["copied"] == 0
         assert len(missing) == 1
 
+    def test_missing_source_file_with_thumbnail_logs_viewer_notice(self, tmp_path, caplog):
+        out = str(tmp_path / "out")
+        os.makedirs(out)
+        thumb_src = tmp_path / "thumb.jpg"
+        thumb_src.write_bytes(b"THUMB")
+
+        log = logging.getLogger("test_thumb_warn")
+        row = self._row(msg_id=42, file_path="deep/path/missing_photo.jpg") + (str(thumb_src),)
+
+        def resolver(fp):
+            if fp == str(thumb_src):
+                return str(thumb_src)
+            return None
+
+        with caplog.at_level(logging.WARNING, logger="test_thumb_warn"):
+            wa.process_rows(
+                [row],
+                1,
+                {},
+                {},
+                {},
+                {},
+                resolver,
+                out,
+                log,
+                False,
+                None,
+                None,
+                False,
+                {},
+            )
+        assert any(
+            "MISSING source file 'missing_photo.jpg' (message_id=42) — A thumbnail has been found and will be used as backup in the Viewer"
+            in r.message
+            for r in caplog.records
+        )
+
+    def test_missing_source_file_without_thumbnail_logs_compact_warning(self, tmp_path, caplog):
+        out = str(tmp_path / "out")
+        os.makedirs(out)
+        log = logging.getLogger("test_no_thumb_warn")
+        row = self._row(msg_id=42, file_path="deep/path/missing_photo.jpg")
+
+        with caplog.at_level(logging.WARNING, logger="test_no_thumb_warn"):
+            wa.process_rows(
+                [row],
+                1,
+                {},
+                {},
+                {},
+                {},
+                lambda fp: None,
+                out,
+                log,
+                False,
+                None,
+                None,
+                False,
+                {},
+            )
+        assert any(
+            "MISSING source file 'missing_photo.jpg' (message_id=42)" in r.message
+            for r in caplog.records
+        )
+        assert not any("A thumbnail has been found" in r.message for r in caplog.records)
+
     def test_null_file_path_added_to_missing_rows(self, tmp_path, logger):
         out = str(tmp_path / "out")
         os.makedirs(out)
