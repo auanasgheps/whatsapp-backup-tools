@@ -785,7 +785,7 @@ def process_rows(
             else file_path
         )
 
-        def _extract_thumb_if_missing():
+        def _extract_thumb_if_missing() -> bool:
             nonlocal thumb_dir_ensured
             if thumb_path:
                 src_thumb = media_resolver(thumb_path)
@@ -813,6 +813,8 @@ def process_rows(
                                 )
                         except OSError:
                             pass
+                    return True
+            return False
 
         if not file_path:
             logger.debug(f"SKIP (no file_path): message_id={msg_id}")
@@ -848,8 +850,19 @@ def process_rows(
         src = media_resolver(file_path)
 
         if src is None or not os.path.isfile(src):
-            logger.warning(f"MISSING source file (message_id={msg_id}): {file_path}")
-            _extract_thumb_if_missing()
+            thumb_found = _extract_thumb_if_missing()
+            short_name = (
+                os.path.basename(file_path)
+                if (file_path and os.path.basename(file_path))
+                else (filename or f"msg_{msg_id}")
+            )
+            if thumb_found:
+                logger.warning(
+                    f"MISSING source file '{short_name}' (message_id={msg_id}) — "
+                    "A thumbnail has been found and will be used as backup in the Viewer"
+                )
+            else:
+                logger.warning(f"MISSING source file '{short_name}' (message_id={msg_id})")
             missing_rows.append(
                 _build_missing_row(
                     msg_id,
