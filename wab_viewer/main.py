@@ -4867,6 +4867,12 @@ def create_app(output_root: Path, rescan: bool = False):
         else "0"
     )
 
+    android_quoted_has_thumb_expr = (
+        "CASE WHEN (mqm.message_row_id IS NOT NULL AND mqm.thumbnail IS NOT NULL) THEN 1 ELSE 0 END"
+        if has_message_quoted_media
+        else "0"
+    )
+
     quoted_msg_id_col = "NULL"
     quoted_stanza_id_col = "NULL"
     quoted_ts_col = "COALESCE(mq.timestamp, 0)"
@@ -4882,10 +4888,15 @@ def create_app(output_root: Path, rescan: bool = False):
         quoted_stanza_id_col = "mq.key_id"
         quoted_ts_col = "COALESCE(NULLIF(mq.timestamp, 0), m_orig.timestamp, 0)"
 
+    orig_text_arm = (
+        "NULLIF(m_orig.text_data, ''),\n            "
+        if (has_android_key_id and has_mq_key_id)
+        else ""
+    )
     if has_mq_msg_type:
-        quoted_text_expr = """COALESCE(
+        quoted_text_expr = f"""COALESCE(
             NULLIF(mq.text_data, ''),
-            CASE
+            {orig_text_arm}CASE
                 WHEN mq.message_type IN (1, 42) THEN '📷 Photo'
                 WHEN mq.message_type IN (2, 82) THEN '🎵 Audio'
                 WHEN mq.message_type IN (3, 43) THEN '🎥 Video'
@@ -4895,7 +4906,7 @@ def create_app(output_root: Path, rescan: bool = False):
             ''
         )"""
     else:
-        quoted_text_expr = "COALESCE(mq.text_data, '')"
+        quoted_text_expr = f"COALESCE(NULLIF(mq.text_data, ''), {orig_text_arm}'')"
 
     group_cond_parts = ["c.subject IS NOT NULL"]
     if has_jid_server:
@@ -4997,6 +5008,7 @@ def create_app(output_root: Path, rescan: bool = False):
         {quoted_ts_col}                                              AS quoted_ts,
         {quoted_msg_id_col}                                          AS quoted_msg_id,
         {quoted_stanza_id_col}                                       AS quoted_stanza_id,
+        {android_quoted_has_thumb_expr}                              AS quoted_has_thumb,
         {edit_is_edited_col}                                         AS is_edited,
         {edit_ts_col}                                                AS edited_ts,
         CASE WHEN m.message_type IN (42, 43, 82){mvom_or} THEN 1 ELSE 0 END   AS is_view_once,
