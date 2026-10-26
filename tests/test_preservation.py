@@ -2100,6 +2100,84 @@ def test_preserve_deleted_messages_logging_no_messages(tmp_path: Path, caplog) -
     )
 
 
+def test_preserve_deleted_messages_logging_calls_only(tmp_path: Path, caplog) -> None:
+    old_db = tmp_path / "old_calls.db"
+    new_db = tmp_path / "new_calls.db"
+    for db_p in (old_db, new_db):
+        with sqlite3.connect(db_p) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER, message_type INTEGER, text_data TEXT);
+                INSERT INTO jid VALUES (1, '15557777', 's.whatsapp.net', '15557777@s.whatsapp.net');
+                INSERT INTO chat VALUES (1, 1, 'Chat A');
+                INSERT INTO message VALUES (1, 1, 'k1', 0, 1, 1000, 0, 'Same');
+            """)
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE call_log (
+                _id INTEGER PRIMARY KEY,
+                call_id TEXT,
+                jid_row_id INTEGER,
+                from_me INTEGER,
+                timestamp INTEGER,
+                video_call INTEGER,
+                duration INTEGER,
+                call_result INTEGER,
+                bytes_transferred INTEGER,
+                group_jid_row_id INTEGER
+            );
+            INSERT INTO call_log VALUES (1, 'call_del_1', 1, 0, 1600000000, 0, 60, 5, 1000, 0);
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE call_log (
+                _id INTEGER PRIMARY KEY,
+                call_id TEXT,
+                jid_row_id INTEGER,
+                from_me INTEGER,
+                timestamp INTEGER,
+                video_call INTEGER,
+                duration INTEGER,
+                call_result INTEGER,
+                bytes_transferred INTEGER,
+                group_jid_row_id INTEGER
+            );
+        """)
+
+    arch_db = tmp_path / ".wa_media_archiver.db"
+    sqlite3.connect(arch_db).close()
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        res = preservation.preserve_deleted_messages(
+            old_db_path=str(old_db),
+            new_db_path=str(new_db),
+            output_root=str(tmp_path),
+            archive_db_path=str(arch_db),
+            platform="android",
+            logger=_TEST_LOGGER,
+        )
+
+    assert res == (0, 0)
+    assert res.messages == 0
+    assert res.chats == 0
+    assert (
+        "No deleted or revoked messages detected (0 messages preserved across 0 chats)."
+        in caplog.text
+    )
+    assert "new call(s) preserved" not in caplog.text
+
+    pres_db_path = Path(preservation.get_preserved_db_path(str(tmp_path)))
+    assert pres_db_path.is_file()
+    with sqlite3.connect(pres_db_path) as pconn:
+        calls = pconn.execute("SELECT call_id FROM preserved_calls").fetchall()
+        assert len(calls) == 1
+        assert calls[0][0] == "call_del_1"
+
+
 def test_forward_mode_preservation_summary_logging(tmp_path: Path, caplog) -> None:
     import argparse
 
