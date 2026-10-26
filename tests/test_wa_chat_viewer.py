@@ -10004,3 +10004,148 @@ class TestRichLinkPreviews:
             resp_thumb = client.get("/api/thumbnail/100")
             assert resp_thumb.status_code == 200
             assert resp_thumb.data == fake_jpeg
+
+    def test_ios_quoted_photo_reply_older_jump_and_missing_media_redirection(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMETADATA BLOB,
+                ZMEDIAURL TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCREATIONDATE REAL,
+                ZCREATORJID TEXT,
+                ZPICTUREID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 0, '15559876543@s.whatsapp.net', 'Alice');
+        """)
+
+        def encode_varint(v):
+            res = bytearray()
+            while v > 0x7F:
+                res.append((v & 0x7F) | 0x80)
+                v >>= 7
+            res.append(v & 0x7F)
+            return bytes(res)
+
+        stanza_bytes = b"STANZA_OLDER_PHOTO_50"
+        sender_bytes = b"15559876543@s.whatsapp.net"
+        caption_bytes = b"Stunning sunset in the mountains"
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+
+        # Protobuf submessage for image (field 3) containing thumbnail and caption (subfield 3)
+        t3_caption = encode_varint((3 << 3) | 2) + encode_varint(len(caption_bytes)) + caption_bytes
+        im_payload = (
+            encode_varint((16 << 3) | 2) + encode_varint(len(fake_jpeg)) + fake_jpeg + t3_caption
+        )
+        t19_sub3 = encode_varint((3 << 3) | 2) + encode_varint(len(im_payload)) + im_payload
+
+        reply_metadata = (
+            encode_varint((5 << 3) | 2)
+            + encode_varint(len(stanza_bytes))
+            + stanza_bytes
+            + encode_varint((6 << 3) | 2)
+            + encode_varint(len(sender_bytes))
+            + sender_bytes
+            + encode_varint((19 << 3) | 2)
+            + encode_varint(len(t19_sub3))
+            + t19_sub3
+        )
+
+        # Message 50: Photo with caption whose local media file is missing on device (ZMEDIALOCALPATH is NULL)
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA, ZMEDIAURL) VALUES (50, NULL, 'Stunning sunset in the mountains', NULL, 'https://mmg.whatsapp.net/mms/photo50.enc')"
+        )
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (50, 1, 0, 700000000.0, 'STANZA_OLDER_PHOTO_50', 1, 50, NULL, NULL, 'Alice', NULL, '15559876543@s.whatsapp.net')
+        """)
+
+        # Add 60 intervening text messages so Message 50 is older than the default 50-message window
+        for i in range(1, 61):
+            conn.execute(f"""
+                INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+                VALUES ({100 + i}, 1, 0, {700000000.0 + i * 10}, 'STANZA_{100 + i}', 0, NULL, NULL, NULL, 'Alice', 'Intervening message {i}', '15559876543@s.whatsapp.net')
+            """)
+
+        # Message 200: Recent reply quoting the older photo (Message 50)
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA, ZMEDIAURL) VALUES (200, NULL, NULL, ?, 'https://mmg.whatsapp.net/mms/reply.enc')",
+            (reply_metadata,),
+        )
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (200, 1, 1, 700001000.0, 'STANZA_REPLY_200', 0, 200, NULL, NULL, 'Me', 'Where was this taken?', '15551234567@s.whatsapp.net')
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # 1. Fetch recent messages (Message 50 is older and thus not in the initial 50 window)
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact&limit=50")
+            assert resp.status_code == 200
+            recent_msgs = resp.get_json()
+            assert len(recent_msgs) == 50
+            assert not any(m["msg_id"] == 50 for m in recent_msgs)
+
+            reply_msg = next(m for m in recent_msgs if m["msg_id"] == 200)
+            assert reply_msg["quoted_msg_id"] == 50
+            assert reply_msg["quoted_has_thumb"] == 1
+            assert "Stunning sunset in the mountains" in reply_msg["quoted_text"]
+            assert reply_msg["quoted_ts"] == int((700000000.0 + 978307200) * 1000)
+
+            # 2. Redirect/jump via /api/messages/at at the quoted message timestamp
+            target_ts = reply_msg["quoted_ts"]
+            resp_at = client.get(f"/api/messages/at?chat_id=1&chat_type=contact&ts={target_ts}")
+            assert resp_at.status_code == 200
+            at_msgs = resp_at.get_json()
+
+            # Message 50 must NOT be dropped by _BASE_IOS_FILTER despite ZMEDIALOCALPATH being NULL
+            target_msg = next((m for m in at_msgs if m["msg_id"] == 50), None)
+            assert target_msg is not None
+            assert target_msg["media_type"] == "image"
+            assert target_msg["text_body"] == "Stunning sunset in the mountains"
+            assert target_msg["archive_path"] is None

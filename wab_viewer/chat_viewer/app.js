@@ -744,14 +744,7 @@
       flashHighlightRow(inWin);
       return inWin;
     }
-    await jumpToTimestamp(msg.timestamp_ms, msg.msg_id, true);
-    const row = rowForMsgId(msg.msg_id);
-    if (row) {
-      suppressScroll = true;
-      row.scrollIntoView({ behavior: 'instant', block: 'center' });
-      suppressScroll = false;
-      flashHighlightRow(row);
-    }
+    const row = await jumpToTimestamp(msg.timestamp_ms, msg.msg_id, true);
     return row;
   }
 
@@ -1352,6 +1345,14 @@
     const path = msg.archive_path;
     const src = '/media/' + path;
     const mt = msg.media_type;
+
+    let ratio = msg.aspect_ratio || 0;
+    if (!ratio && msg.media_width > 0 && msg.media_height > 0) {
+      ratio = msg.media_width / msg.media_height;
+    }
+    if (ratio > 0) {
+      wrap.style.aspectRatio = ratio.toFixed(3);
+    }
 
     if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
       if (mt === 'sticker') wrap.classList.add('sticker');
@@ -3053,25 +3054,78 @@
   }
 
   // Center targetEl and hold it there as lazy media above it loads and shifts layout.
-  // Re-centers each animation frame until the position holds steady (3 stable frames)
-  // or 1500 ms have passed. Bails immediately if a newer load superseded this one.
+  // Re-centers whenever images finish loading or layout dimensions change,
+  // until layout holds steady or 1500 ms have passed. Bails immediately if a newer load superseded this one.
   async function _pinToMsg(targetEl, gen) {
     const scroll = document.getElementById('message-scroll');
+    if (!scroll || !targetEl) return;
+
     const recenter = () => {
       suppressScroll = true;
       targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
       suppressScroll = false;
     };
     recenter();
-    const deadline = performance.now() + 1500;
-    let stable = 0;
-    while (performance.now() < deadline && stable < 3) {
-      await new Promise(r => requestAnimationFrame(r));
-      if (gen !== _loadGen) return;
-      const before = scroll.scrollTop;
+
+    let done = false;
+    let ro = null;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      if (ro) ro.disconnect();
+      scroll.removeEventListener('wheel', onUserScroll, { capture: true });
+      scroll.removeEventListener('touchstart', onUserScroll, { capture: true });
+      scroll.removeEventListener('pointerdown', onUserScroll, { capture: true });
+      pendingImgs.forEach(img => {
+        img.removeEventListener('load', onMediaLoad);
+        img.removeEventListener('error', onMediaLoad);
+      });
+    };
+
+    const onUserScroll = () => {
+      cleanup();
+    };
+
+    const onMediaLoad = () => {
+      if (done || gen !== _loadGen) return;
       recenter();
-      stable = Math.abs(scroll.scrollTop - before) < 2 ? stable + 1 : 0;
+    };
+
+    scroll.addEventListener('wheel', onUserScroll, { capture: true, passive: true });
+    scroll.addEventListener('touchstart', onUserScroll, { capture: true, passive: true });
+    scroll.addEventListener('pointerdown', onUserScroll, { capture: true, passive: true });
+
+    const pendingImgs = Array.from(scroll.querySelectorAll('img')).filter(img => !img.complete);
+    pendingImgs.forEach(img => {
+      img.addEventListener('load', onMediaLoad, { once: true });
+      img.addEventListener('error', onMediaLoad, { once: true });
+    });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        if (done || gen !== _loadGen) return;
+        recenter();
+      });
+      ro.observe(scroll);
+      if (targetEl) ro.observe(targetEl);
     }
+
+    const deadline = performance.now() + 1500;
+    while (!done && performance.now() < deadline) {
+      await new Promise(r => requestAnimationFrame(r));
+      if (gen !== _loadGen) {
+        cleanup();
+        return;
+      }
+      if (pendingImgs.length === 0 || pendingImgs.every(img => img.complete)) {
+        if (performance.now() > deadline - 1000) {
+          recenter();
+          break;
+        }
+      }
+    }
+    cleanup();
+    recenter();
   }
 
   // exactMsgId: when the caller needs a specific message in the DOM (e.g. jumpToMessage,
@@ -3114,8 +3168,11 @@
       mergePage(msgs);
       renderWindow();
 
-      const target = exactMsgId != null ? { msg_id: exactMsgId } : nearestMsgToTs(ts);
-      const targetEl = target && rowForMsgId(target.msg_id);
+      let targetEl = exactMsgId != null ? rowForMsgId(exactMsgId) : null;
+      if (!targetEl) {
+        const near = nearestMsgToTs(ts);
+        targetEl = near ? rowForMsgId(near.msg_id) : null;
+      }
       if (targetEl) {
         await _pinToMsg(targetEl, gen);
         if (isExactTarget) flashHighlightRow(targetEl);
