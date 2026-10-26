@@ -4559,7 +4559,7 @@ def merge_increments(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_vcard'"
                 ).fetchone()
             )
-            del_clauses = ["message_type = 0", "text_data IS NULL"]
+            del_clauses = ["message_type = 0", "(text_data IS NULL OR TRIM(text_data) = '')"]
             if has_mm:
                 del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_media)")
             if has_mv:
@@ -4571,12 +4571,11 @@ def merge_increments(
                     f"Purged {deleted_phantoms} phantom empty message(s) from message table."
                 )
 
-            has_chat_hidden = bool(
-                cur.execute(
-                    "SELECT 1 FROM pragma_table_info('chat') WHERE name='hidden'"
-                ).fetchone()
-            )
-            if has_chat_hidden:
+            chat_cols = {r[1] for r in cur.execute("PRAGMA table_info('chat')").fetchall()}
+            if "hidden" in chat_cols:
+                subj_clause = (
+                    "AND (subject IS NULL OR subject = '')" if "subject" in chat_cols else ""
+                )
                 mm_clause = (
                     "OR EXISTS (SELECT 1 FROM message_media mm WHERE mm.message_row_id = m._id)"
                     if has_mm
@@ -4587,39 +4586,38 @@ def merge_increments(
                     UPDATE chat
                     SET hidden = 1
                     WHERE (hidden = 0 OR hidden IS NULL)
-                      AND jid_row_id IN (
-                          SELECT _id FROM jid WHERE server != 'g.us'
+                      {subj_clause}
+                      AND jid_row_id NOT IN (
+                          SELECT _id FROM jid WHERE server = 'g.us' OR raw_string LIKE '%@g.us'
                       )
                       AND NOT EXISTS (
                           SELECT 1 FROM message m
                           WHERE m.chat_row_id = chat._id
                             AND (
                                 (m.message_type = 0 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
-                                OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 25, 42, 43, 81, 82)
+                                OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 25, 28, 42, 43, 64, 66, 81, 82)
                                 {mm_clause}
                             )
                       )
                     """
                 )
-                has_display_col = bool(
-                    cur.execute(
-                        "SELECT 1 FROM pragma_table_info('chat') WHERE name='display_message_row_id'"
-                    ).fetchone()
-                )
-                if has_display_col:
+                if "display_message_row_id" in chat_cols:
                     cur.execute(
                         f"""
                         UPDATE chat
                         SET display_message_row_id = NULL
                         WHERE hidden = 1
                           AND display_message_row_id IS NOT NULL
-                          AND jid_row_id IN (SELECT _id FROM jid WHERE server != 'g.us')
+                          {subj_clause}
+                          AND jid_row_id NOT IN (
+                              SELECT _id FROM jid WHERE server = 'g.us' OR raw_string LIKE '%@g.us'
+                          )
                           AND NOT EXISTS (
                               SELECT 1 FROM message m
                               WHERE m.chat_row_id = chat._id
                                 AND (
                                     (m.message_type = 0 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
-                                    OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 25, 42, 43, 81, 82)
+                                    OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 25, 28, 42, 43, 64, 66, 81, 82)
                                     {mm_clause}
                                 )
                           )

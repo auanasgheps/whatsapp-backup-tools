@@ -4974,6 +4974,28 @@ def test_step6b_phantom_and_shadow_cleanup(tmp_path):
     cur.execute(
         "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) VALUES (3, 7, 0, 'VALID_KEY', 3000, 0, 'Hello!', 0)"
     )
+
+    # 4. Valid 1-to-1 chat with poll (type = 66) - must NOT be hidden
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (40, '15559876543', 's.whatsapp.net', '15559876543@s.whatsapp.net')"
+    )
+    cur.execute(
+        "INSERT INTO chat (_id, jid_row_id, hidden, sort_timestamp, display_message_row_id) VALUES (8, 40, 0, 4000, 4)"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) VALUES (4, 8, 0, 'POLL_KEY', 4000, 66, 'What to eat?', 0)"
+    )
+
+    # 5. Valid 1-to-1 chat with sticker (type = 20) - must NOT be hidden
+    cur.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (50, '15551112233', 's.whatsapp.net', '15551112233@s.whatsapp.net')"
+    )
+    cur.execute(
+        "INSERT INTO chat (_id, jid_row_id, hidden, sort_timestamp, display_message_row_id) VALUES (9, 50, 0, 5000, 5)"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) VALUES (5, 9, 0, 'STICKER_KEY', 5000, 20, NULL, 0)"
+    )
     conn.commit()
 
     # Run the Step 6b cleanup SQL commands directly on conn
@@ -4987,17 +5009,16 @@ def test_step6b_phantom_and_shadow_cleanup(tmp_path):
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_vcard'"
         ).fetchone()
     )
-    del_clauses = ["message_type = 0", "text_data IS NULL"]
+    del_clauses = ["message_type = 0", "(text_data IS NULL OR TRIM(text_data) = '')"]
     if has_mm:
         del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_media)")
     if has_mv:
         del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_vcard)")
     cur.execute(f"DELETE FROM message WHERE {' AND '.join(del_clauses)}")
 
-    has_chat_hidden = bool(
-        cur.execute("SELECT 1 FROM pragma_table_info('chat') WHERE name='hidden'").fetchone()
-    )
-    if has_chat_hidden:
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info('chat')").fetchall()}
+    if "hidden" in chat_cols:
+        subj_clause = "AND (subject IS NULL OR subject = '')" if "subject" in chat_cols else ""
         mm_clause = (
             "OR EXISTS (SELECT 1 FROM message_media mm WHERE mm.message_row_id = m._id)"
             if has_mm
@@ -5008,39 +5029,38 @@ def test_step6b_phantom_and_shadow_cleanup(tmp_path):
             UPDATE chat
             SET hidden = 1
             WHERE (hidden = 0 OR hidden IS NULL)
-              AND jid_row_id IN (
-                  SELECT _id FROM jid WHERE server != 'g.us'
+              {subj_clause}
+              AND jid_row_id NOT IN (
+                  SELECT _id FROM jid WHERE server = 'g.us' OR raw_string LIKE '%@g.us'
               )
               AND NOT EXISTS (
                   SELECT 1 FROM message m
                   WHERE m.chat_row_id = chat._id
                     AND (
                         (m.message_type = 0 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
-                        OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 25, 42, 43, 81, 82)
+                        OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 25, 28, 42, 43, 64, 66, 81, 82)
                         {mm_clause}
                     )
               )
             """
         )
-        has_display_col = bool(
-            cur.execute(
-                "SELECT 1 FROM pragma_table_info('chat') WHERE name='display_message_row_id'"
-            ).fetchone()
-        )
-        if has_display_col:
+        if "display_message_row_id" in chat_cols:
             cur.execute(
                 f"""
                 UPDATE chat
                 SET display_message_row_id = NULL
                 WHERE hidden = 1
                   AND display_message_row_id IS NOT NULL
-                  AND jid_row_id IN (SELECT _id FROM jid WHERE server != 'g.us')
+                  {subj_clause}
+                  AND jid_row_id NOT IN (
+                      SELECT _id FROM jid WHERE server = 'g.us' OR raw_string LIKE '%@g.us'
+                  )
                   AND NOT EXISTS (
                       SELECT 1 FROM message m
                       WHERE m.chat_row_id = chat._id
                         AND (
                             (m.message_type = 0 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
-                            OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 25, 42, 43, 81, 82)
+                            OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 25, 28, 42, 43, 64, 66, 81, 82)
                             {mm_clause}
                         )
                   )
@@ -5071,4 +5091,16 @@ def test_step6b_phantom_and_shadow_cleanup(tmp_path):
     c7 = cur.execute("SELECT hidden, display_message_row_id FROM chat WHERE _id = 7").fetchone()
     assert c7[0] == 0
     assert c7[1] == 3
+
+    # Chat 8 (1-to-1 with poll):
+    assert cur.execute("SELECT 1 FROM message WHERE _id = 4").fetchone() is not None
+    c8 = cur.execute("SELECT hidden, display_message_row_id FROM chat WHERE _id = 8").fetchone()
+    assert c8[0] == 0
+    assert c8[1] == 4
+
+    # Chat 9 (1-to-1 with sticker):
+    assert cur.execute("SELECT 1 FROM message WHERE _id = 5").fetchone() is not None
+    c9 = cur.execute("SELECT hidden, display_message_row_id FROM chat WHERE _id = 9").fetchone()
+    assert c9[0] == 0
+    assert c9[1] == 5
     conn.close()
