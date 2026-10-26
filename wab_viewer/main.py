@@ -5039,9 +5039,13 @@ def create_app(output_root: Path, rescan: bool = False):
 
         if source_type == "android":
             j_s_is_lid = "j_s.server = 'lid'" if has_jid_server else "0"
+            j_s_is_lid = (
+                "(j_s.server IS NOT NULL AND j_s.server = 'lid')" if has_jid_server else "0"
+            )
             lid_c_parts = []
             if has_jid_server:
                 lid_c_parts.append("j_chat.server = 'lid'")
+                lid_c_parts.append("(j_chat.server IS NOT NULL AND j_chat.server = 'lid')")
             if has_jid_raw_string:
                 lid_c_parts.append(
                     "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@lid')"
@@ -5051,6 +5055,7 @@ def create_app(output_root: Path, rescan: bool = False):
             group_c_parts = ["c.subject IS NOT NULL"]
             if has_jid_server:
                 group_c_parts.append("j_chat.server = 'g.us'")
+                group_c_parts.append("(j_chat.server IS NOT NULL AND j_chat.server = 'g.us')")
             if has_jid_raw_string:
                 group_c_parts.append(
                     "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us')"

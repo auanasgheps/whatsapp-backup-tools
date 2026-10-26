@@ -13,6 +13,9 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tests.conftest import make_android_db, make_ios_db
+
+from tests.conftest import make_android_db, make_archive_db, make_ios_db
 
 # ---------------------------------------------------------------------------
 # Import the modules from their new package locations.
@@ -2247,6 +2250,31 @@ class TestProcessRows:
         finally:
             archive_conn.close()
 
+    def test_progress_logged_at_1000_rows(self, tmp_path):
+        rows = [
+            (i, 1705276800000, None, None, "42", "Group", "111", 0, None, None) for i in range(1001)
+        ]
+        mock_logger = MagicMock()
+        info_calls = []
+        mock_logger.info.side_effect = lambda msg, *a, **kw: info_calls.append(str(msg))
+        wa.process_rows(
+            rows,
+            total=1001,
+            contacts={},
+            number_map={},
+            folder_index={},
+            group_index={},
+            media_resolver=lambda fp: fp,
+            output_root=str(tmp_path),
+            logger=mock_logger,
+            dry_run=True,
+            conn=None,
+            tz=None,
+            link_duplicates=False,
+            hash_to_canonical={},
+        )
+        assert any("Progress: 1000/" in m for m in info_calls)
+
 
 # ===========================================================================
 # Filesystem: resolve_unique_dest
@@ -2397,8 +2425,8 @@ class TestWriteConflictReport:
 # ===========================================================================
 
 
-class TestContactPersistence:
-    def test_save_and_load_round_trip(self, tmp_path):
+class TestContactAndGroupPersistence:
+    def test_save_and_load_contacts_round_trip(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         index = {"391234567890": ("Alice (00391234567890)", "Alice")}
         arc.save_contacts_to_db(conn, index)
@@ -2416,9 +2444,7 @@ class TestContactPersistence:
         conn.close()
         assert loaded["111"] == ("New Name (00111)", "New Name")
 
-
-class TestGroupPersistence:
-    def test_save_and_load_round_trip(self, tmp_path):
+    def test_save_and_load_groups_round_trip(self, tmp_path):
         conn = arc.open_archive_db(str(tmp_path))
         index = {"42": {"folder": "Family Chat", "subject": "Family Chat"}}
         arc.save_groups_to_db(conn, index)
@@ -2823,34 +2849,29 @@ class TestCheckDeviceConnected:
             assert "No Android device detected" in err_msg
             assert "USB debugging is enabled" in err_msg
 
-    def test_unauthorized_non_tty(self, logger):
+    @pytest.mark.parametrize(
+        "is_tty, user_input",
+        [
+            (False, None),
+            (True, "n"),
+        ],
+    )
+    def test_unauthorized_device_exit(self, logger, is_tty, user_input):
         output = "List of devices attached\n98abc123\tunauthorized\n"
         with (
             patch(
                 "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
             ),
-            patch("sys.stdin.isatty", return_value=False),
+            patch("sys.stdin.isatty", return_value=is_tty),
+            patch("builtins.input", return_value=user_input),
             patch.object(logger, "error") as mock_err,
             patch.object(logger, "warning") as mock_warn,
         ):
             assert adb.check_device_connected(logger) is False
-            assert "unauthorized" in mock_warn.call_args[0][0]
             assert "98abc123" in mock_err.call_args[0][0]
             assert "Unlock your phone" in mock_err.call_args[0][0]
-
-    def test_unauthorized_user_declines_restart(self, logger):
-        output = "List of devices attached\n98abc123\tunauthorized\n"
-        with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
-            ),
-            patch("sys.stdin.isatty", return_value=True),
-            patch("builtins.input", return_value="n"),
-            patch.object(logger, "error") as mock_err,
-        ):
-            assert adb.check_device_connected(logger) is False
-            assert "98abc123" in mock_err.call_args[0][0]
-            assert "Unlock your phone" in mock_err.call_args[0][0]
+            if not is_tty:
+                assert "unauthorized" in mock_warn.call_args[0][0]
 
     def test_unauthorized_user_confirms_restart_success(self, logger):
         unauth_out = self._make_result("List of devices attached\n98abc123\tunauthorized\n")
@@ -3118,6 +3139,15 @@ class TestCheckDependencies:
         assert "adb" in errors[0]
         assert "wa-crypt-tools" in errors[0]
 
+    def test_tzdata_missing_on_windows_raises(self, logger):
+        args = self._args(timezone="Europe/Berlin")
+        with (
+            patch("wab_archiver.main.sys.platform", "win32"),
+            patch("importlib.util.find_spec", return_value=None),
+        ):
+            with pytest.raises(SystemExit):
+                wa.check_dependencies(args, logger)
+
 
 # ===========================================================================
 # Config file
@@ -3363,6 +3393,164 @@ link_duplicates = true
         with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path)]):
             with pytest.raises(SystemExit):
                 wa.parse_args()
+
+    def test_non_toml_config_exits(self, capsys):
+        with patch("sys.argv", ["wa", "--config=cfg.json"]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+        assert "toml" in capsys.readouterr().err.lower()
+
+    def test_since_native_date_normalised(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes(b'output = "/tmp"\nwa_root = "/wa"\nsince = 2024-01-01\n')
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            args = wa.parse_args()
+        assert args.since == "2024-01-01"
+
+    def test_wa_root_wrong_type_exits(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        out = self._toml_path(tmp_path)
+        cfg.write_text(f'output = "{out}"\nwa_root = 42\n', encoding="utf-8")
+        with patch("sys.argv", ["wa", "--config", str(cfg)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_config_command_exits(self):
+        with patch("wab_archiver.main._generate_config", side_effect=SystemExit(0)) as mock_gen:
+            with patch("sys.argv", ["wa", "config", "generate"]):
+                with pytest.raises(SystemExit):
+                    wa.parse_args()
+            mock_gen.assert_called_once_with(os.path.dirname(os.path.abspath(wa.__file__)))
+
+    def test_restore_without_output_exits(self):
+        with patch("sys.argv", ["wa", "restore"]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_contacts_with_ios_backup_exits(self, tmp_path):
+        with patch(
+            "sys.argv",
+            [
+                "wa",
+                "archive",
+                "-o",
+                str(tmp_path),
+                "--ios-backup",
+                "/backup",
+                "--contacts",
+                "/contacts",
+            ],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_pull_media_without_staging_exits(self, tmp_path):
+        with patch(
+            "sys.argv", ["wa", "archive", "-o", str(tmp_path), "--from-adb", "--pull-media"]
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_wa_root_with_from_adb_allowed(self, tmp_path):
+        with patch(
+            "sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", "/wa", "--from-adb"]
+        ):
+            args = wa.parse_args()
+        assert args.from_adb is True
+        assert args.wa_roots == ["/wa"]
+
+    def test_pull_media_with_wa_root_exits(self, tmp_path):
+        with patch(
+            "sys.argv",
+            [
+                "wa",
+                "archive",
+                "-o",
+                str(tmp_path),
+                "--from-adb",
+                "--pull-media",
+                "--staging",
+                "/stage",
+                "--wa-root",
+                "/wa",
+            ],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_from_adb_with_ios_backup_exits(self, tmp_path):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--ios-backup", "/backup", "--from-adb"],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_pull_media_without_from_adb_exits(self, tmp_path):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--pull-media", "--staging", "/stage"],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_no_media_source_exits(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--from-adb"]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_restore_with_output_returns_args(self, tmp_path):
+        with patch("sys.argv", ["wa", "restore", "-o", str(tmp_path)]):
+            args = wa.parse_args()
+        assert args.command == "restore"
+        assert args.output == str(tmp_path)
+        assert args.debug is False
+
+    @pytest.mark.parametrize(
+        "cmd,flags,expected_debug",
+        [
+            ("archive", [], False),
+            ("archive", ["-v"], True),
+            ("archive", ["--debug"], True),
+            ("archive", ["--verbose"], True),
+            ("restore", ["-v"], True),
+        ],
+    )
+    def test_debug_flags(self, tmp_path, cmd, flags, expected_debug):
+        base = ["wa", cmd, "-o", str(tmp_path)]
+        if cmd == "archive":
+            base.extend(["--wa-root", str(tmp_path)])
+        with patch("sys.argv", [*base, *flags]):
+            args = wa.parse_args()
+        assert args.debug is expected_debug
+
+    def test_archive_without_output_exits(self, tmp_path):
+        with patch("sys.argv", ["wa", "archive", "--wa-root", str(tmp_path)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_wa_root_and_ios_backup_mutual_exclusion(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('output = "/tmp"\nios_backup = "/backup"\n', encoding="utf-8")
+        with patch("sys.argv", ["wa", "--config", str(cfg), "--wa-root", str(tmp_path)]):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_pull_media_and_ios_backup_mutual_exclusion(self, tmp_path):
+        with patch(
+            "sys.argv",
+            ["wa", "archive", "-o", str(tmp_path), "--pull-media", "--ios-backup", "/backup"],
+        ):
+            with pytest.raises(SystemExit):
+                wa.parse_args()
+
+    def test_config_command_returns_args_when_mocked(self):
+        with (
+            patch("sys.argv", ["wa", "config", "generate"]),
+            patch("wab_archiver.main._generate_config", return_value=None),
+        ):
+            args = wa.parse_args()
+            assert args.command == "config"
 
 
 class TestConfigNormalise:
@@ -4027,38 +4215,6 @@ class TestCopyOrSkip:
 
 
 # ===========================================================================
-# wab_archiver.main: process_rows progress log
-# ===========================================================================
-
-
-class TestProcessRowsProgress:
-    def test_progress_logged_at_1000_rows(self, tmp_path):
-        rows = [
-            (i, 1705276800000, None, None, "42", "Group", "111", 0, None, None) for i in range(1001)
-        ]
-        mock_logger = MagicMock()
-        info_calls = []
-        mock_logger.info.side_effect = lambda msg, *a, **kw: info_calls.append(str(msg))
-        wa.process_rows(
-            rows,
-            total=1001,
-            contacts={},
-            number_map={},
-            folder_index={},
-            group_index={},
-            media_resolver=lambda fp: fp,
-            output_root=str(tmp_path),
-            logger=mock_logger,
-            dry_run=True,
-            conn=None,
-            tz=None,
-            link_duplicates=False,
-            hash_to_canonical={},
-        )
-        assert any("Progress: 1000/" in m for m in info_calls)
-
-
-# ===========================================================================
 # wab_archiver.progress: ProgressReporter
 # ===========================================================================
 
@@ -4278,191 +4434,6 @@ class TestInjectDefaultArchiveCommand:
 
 
 # ===========================================================================
-# wab_archiver.main: parse_args — uncovered validation branches
-# ===========================================================================
-
-
-class TestParseArgsValidationExtra:
-    @staticmethod
-    def _toml_path(p):
-        return str(p).replace("\\", "/")
-
-    def test_non_toml_config_exits(self, capsys):
-        with patch("sys.argv", ["wa", "--config=cfg.json"]):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-        assert "toml" in capsys.readouterr().err.lower()
-
-    def test_since_native_date_normalised(self, tmp_path):
-        cfg = tmp_path / "config.toml"
-        out = self._toml_path(tmp_path)
-        cfg.write_bytes(b'output = "/tmp"\nwa_root = "/wa"\nsince = 2024-01-01\n')
-        with patch("sys.argv", ["wa", "--config", str(cfg)]):
-            args = wa.parse_args()
-        assert args.since == "2024-01-01"
-
-    def test_wa_root_wrong_type_exits(self, tmp_path):
-        cfg = tmp_path / "config.toml"
-        out = self._toml_path(tmp_path)
-        cfg.write_text(f'output = "{out}"\nwa_root = 42\n', encoding="utf-8")
-        with patch("sys.argv", ["wa", "--config", str(cfg)]):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_config_command_exits(self):
-        with patch("wab_archiver.main._generate_config", side_effect=SystemExit(0)) as mock_gen:
-            with patch("sys.argv", ["wa", "config", "generate"]):
-                with pytest.raises(SystemExit):
-                    wa.parse_args()
-            mock_gen.assert_called_once_with(os.path.dirname(os.path.abspath(wa.__file__)))
-
-    def test_restore_without_output_exits(self):
-        with patch("sys.argv", ["wa", "restore"]):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_contacts_with_ios_backup_exits(self, tmp_path):
-        with patch(
-            "sys.argv",
-            [
-                "wa",
-                "archive",
-                "-o",
-                str(tmp_path),
-                "--ios-backup",
-                "/backup",
-                "--contacts",
-                "/contacts",
-            ],
-        ):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_pull_media_without_staging_exits(self, tmp_path):
-        with patch(
-            "sys.argv", ["wa", "archive", "-o", str(tmp_path), "--from-adb", "--pull-media"]
-        ):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_wa_root_with_from_adb_allowed(self, tmp_path):
-        with patch(
-            "sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", "/wa", "--from-adb"]
-        ):
-            args = wa.parse_args()
-        assert args.from_adb is True
-        assert args.wa_roots == ["/wa"]
-
-    def test_pull_media_with_wa_root_exits(self, tmp_path):
-        with patch(
-            "sys.argv",
-            [
-                "wa",
-                "archive",
-                "-o",
-                str(tmp_path),
-                "--from-adb",
-                "--pull-media",
-                "--staging",
-                "/stage",
-                "--wa-root",
-                "/wa",
-            ],
-        ):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_from_adb_with_ios_backup_exits(self, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wa", "archive", "-o", str(tmp_path), "--ios-backup", "/backup", "--from-adb"],
-        ):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_pull_media_without_from_adb_exits(self, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wa", "archive", "-o", str(tmp_path), "--pull-media", "--staging", "/stage"],
-        ):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_no_media_source_exits(self, tmp_path):
-        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--from-adb"]):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_restore_with_output_returns_args(self, tmp_path):
-        with patch("sys.argv", ["wa", "restore", "-o", str(tmp_path)]):
-            args = wa.parse_args()
-        assert args.command == "restore"
-        assert args.output == str(tmp_path)
-        assert args.debug is False
-
-    def test_archive_debug_flag_default_false(self, tmp_path):
-        with patch("sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path)]):
-            args = wa.parse_args()
-        assert args.debug is False
-
-    def test_archive_debug_flag_short_v(self, tmp_path):
-        with patch(
-            "sys.argv", ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "-v"]
-        ):
-            args = wa.parse_args()
-        assert args.debug is True
-
-    def test_archive_debug_flag_long_debug(self, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "--debug"],
-        ):
-            args = wa.parse_args()
-        assert args.debug is True
-
-    def test_archive_debug_flag_verbose(self, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wa", "archive", "-o", str(tmp_path), "--wa-root", str(tmp_path), "--verbose"],
-        ):
-            args = wa.parse_args()
-        assert args.debug is True
-
-    def test_restore_debug_flag_short_v(self, tmp_path):
-        with patch("sys.argv", ["wa", "restore", "-o", str(tmp_path), "-v"]):
-            args = wa.parse_args()
-        assert args.debug is True
-
-    def test_archive_without_output_exits(self, tmp_path):
-        with patch("sys.argv", ["wa", "archive", "--wa-root", str(tmp_path)]):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_wa_root_and_ios_backup_mutual_exclusion(self, tmp_path):
-        cfg = tmp_path / "config.toml"
-        cfg.write_text('output = "/tmp"\nios_backup = "/backup"\n', encoding="utf-8")
-        with patch("sys.argv", ["wa", "--config", str(cfg), "--wa-root", str(tmp_path)]):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_pull_media_and_ios_backup_mutual_exclusion(self, tmp_path):
-        with patch(
-            "sys.argv",
-            ["wa", "archive", "-o", str(tmp_path), "--pull-media", "--ios-backup", "/backup"],
-        ):
-            with pytest.raises(SystemExit):
-                wa.parse_args()
-
-    def test_config_command_returns_args_when_mocked(self):
-        with (
-            patch("sys.argv", ["wa", "config", "generate"]),
-            patch("wab_archiver.main._generate_config", return_value=None),
-        ):
-            args = wa.parse_args()
-            assert args.command == "config"
-
-
-# ===========================================================================
 # wab_archiver.main: _warn_network_paths
 # ===========================================================================
 
@@ -4485,27 +4456,6 @@ class TestWarnNetworkPaths:
         mock_logger = MagicMock()
         wa._warn_network_paths(args, mock_logger)
         mock_logger.warning.assert_not_called()
-
-
-# ===========================================================================
-# wab_archiver.main: check_dependencies — tzdata (Windows-only)
-# ===========================================================================
-
-
-class TestCheckDependenciesTzdata:
-    def test_tzdata_missing_on_windows_raises(self, logger):
-        args = argparse.Namespace(
-            from_adb=False,
-            e2e_key=None,
-            ios_password=None,
-            timezone="Europe/Berlin",
-        )
-        with (
-            patch("wab_archiver.main.sys.platform", "win32"),
-            patch("importlib.util.find_spec", return_value=None),
-        ):
-            with pytest.raises(SystemExit):
-                wa.check_dependencies(args, logger)
 
 
 # ===========================================================================
@@ -4920,25 +4870,18 @@ class TestIosHdDeduplication:
     def test_ios_hd_dedup_execution(self, tmp_path):
         from wab_archiver import ios_handler as ios
 
-        main_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        main_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
         main_conn.executescript("""
-            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZPARTNERNAME TEXT, ZCONTACTJID TEXT);
-            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT);
-            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
-            CREATE TABLE ZWAMESSAGE (
-                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
-                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
-                ZPUSHNAME TEXT, ZSTANZAID TEXT
-            );
-
-            INSERT INTO ZWACHATSESSION VALUES (1, 1, 'Group 1', NULL);
+            INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO, ZPARTNERNAME, ZCONTACTJID) VALUES (1, 1, 'Group 1', NULL);
             -- Parent message (LQ)
-            INSERT INTO ZWAMEDIAITEM VALUES (10, 'lq.jpg', NULL, NULL);
-            INSERT INTO ZWAMESSAGE VALUES (100, 1000.0, 0, 1, 10, NULL, 'User1', 'STANZA_LQ');
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE) VALUES (10, 'lq.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID)
+            VALUES (100, 1000.0, 0, 1, 10, NULL, 'User1', 'STANZA_LQ');
 
             -- Child message (HD)
-            INSERT INTO ZWAMEDIAITEM VALUES (11, 'hd.jpg', NULL, NULL);
-            INSERT INTO ZWAMESSAGE VALUES (101, 1001.0, 0, 1, 11, NULL, 'User1', 'STANZA_HD');
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE) VALUES (11, 'hd.jpg', NULL, NULL);
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID)
+            VALUES (101, 1001.0, 0, 1, 11, NULL, 'User1', 'STANZA_HD');
         """)
 
         ext_conn = sqlite3.connect(str(tmp_path / "ExtChatDatabase.sqlite"))
@@ -4970,23 +4913,7 @@ class TestIosHdDeduplication:
         from wab_archiver.main import parse_args, run_forward_mode
 
         db_path = tmp_path / "ChatStorage.sqlite"
-        conn = sqlite3.connect(str(db_path))
-        conn.executescript("""
-            CREATE TABLE ZWACHATSESSION (
-                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
-                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
-            );
-            CREATE TABLE ZWAMEDIAITEM (
-                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT
-            );
-            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
-            CREATE TABLE ZWAMESSAGE (
-                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
-                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
-                ZPUSHNAME TEXT, ZSTANZAID TEXT
-            );
-            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
-        """)
+        conn = make_ios_db(db_path)
         conn.close()
 
         wa_root = tmp_path / "AppDomainGroup"
@@ -5016,23 +4943,7 @@ class TestIosHdDeduplication:
         from wab_archiver.main import parse_args, run_forward_mode
 
         db_path = tmp_path / "ChatStorage.sqlite"
-        conn = sqlite3.connect(str(db_path))
-        conn.executescript("""
-            CREATE TABLE ZWACHATSESSION (
-                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
-                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
-            );
-            CREATE TABLE ZWAMEDIAITEM (
-                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT
-            );
-            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
-            CREATE TABLE ZWAMESSAGE (
-                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
-                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
-                ZPUSHNAME TEXT, ZSTANZAID TEXT
-            );
-            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
-        """)
+        conn = make_ios_db(db_path)
         conn.close()
 
         ext_db = tmp_path / "ExtChatDatabase.sqlite"
@@ -5096,31 +5007,21 @@ class TestIosThumbnailExtraction:
         from wab_archiver.main import parse_args, run_forward_mode
 
         db_path = tmp_path / "ChatStorage.sqlite"
-        conn = sqlite3.connect(str(db_path))
+        conn = make_ios_db(db_path)
         conn.executescript("""
-            CREATE TABLE ZWACHATSESSION (
-                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
-                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
-            );
-            CREATE TABLE ZWAMEDIAITEM (
-                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT, ZXMPPTHUMBPATH TEXT
-            );
-            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
-            CREATE TABLE ZWAMESSAGE (
-                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
-                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
-                ZPUSHNAME TEXT, ZSTANZAID TEXT
-            );
-            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
-
-            INSERT INTO ZWACHATSESSION VALUES (1, '123456@s.whatsapp.net', 0, 'Alice', 1, 1000.0);
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME, ZCONTACTABID, ZLASTMESSAGEDATE)
+            VALUES (1, '123456@s.whatsapp.net', NULL, 'Alice', 1, 1000.0);
             -- Row 1: media exists, thumb exists
-            INSERT INTO ZWAMEDIAITEM VALUES (1, 'media1.jpg', NULL, NULL, 'thumb1.thumb');
-            INSERT INTO ZWAMESSAGE VALUES (10, 1000.0, 0, 1, 1, NULL, 'Alice', 'STANZA1');
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE, ZXMPPTHUMBPATH)
+            VALUES (1, 'media1.jpg', NULL, NULL, 'thumb1.thumb');
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZMESSAGETYPE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID)
+            VALUES (10, 1000.0, 1, 0, 1, 1, NULL, 'Alice', 'STANZA1');
 
             -- Row 2: media missing, thumb exists
-            INSERT INTO ZWAMEDIAITEM VALUES (2, 'missing.jpg', NULL, NULL, 'thumb2.thumb');
-            INSERT INTO ZWAMESSAGE VALUES (11, 1001.0, 0, 1, 2, NULL, 'Alice', 'STANZA2');
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE, ZXMPPTHUMBPATH)
+            VALUES (2, 'missing.jpg', NULL, NULL, 'thumb2.thumb');
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZMESSAGETYPE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID)
+            VALUES (11, 1001.0, 1, 0, 1, 2, NULL, 'Alice', 'STANZA2');
         """)
         conn.close()
 
@@ -5182,26 +5083,14 @@ class TestIosThumbnailExtraction:
         from wab_archiver.main import parse_args, run_forward_mode
 
         db_path = tmp_path / "ChatStorage.sqlite"
-        conn = sqlite3.connect(str(db_path))
+        conn = make_ios_db(db_path)
         conn.executescript("""
-            CREATE TABLE ZWACHATSESSION (
-                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
-                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
-            );
-            CREATE TABLE ZWAMEDIAITEM (
-                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT, ZTITLE TEXT, ZXMPPTHUMBPATH TEXT
-            );
-            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
-            CREATE TABLE ZWAMESSAGE (
-                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZISFROMME INTEGER,
-                ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER,
-                ZPUSHNAME TEXT, ZSTANZAID TEXT
-            );
-            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
-
-            INSERT INTO ZWACHATSESSION VALUES (1, '123456@s.whatsapp.net', 0, 'Alice', 1, 1000.0);
-            INSERT INTO ZWAMEDIAITEM VALUES (1, 'missing.jpg', NULL, NULL, 'thumb.thumb');
-            INSERT INTO ZWAMESSAGE VALUES (10, 1000.0, 0, 1, 1, NULL, 'Alice', 'STANZA1');
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME, ZCONTACTABID, ZLASTMESSAGEDATE)
+            VALUES (1, '123456@s.whatsapp.net', NULL, 'Alice', 1, 1000.0);
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE, ZXMPPTHUMBPATH)
+            VALUES (1, 'missing.jpg', NULL, NULL, 'thumb.thumb');
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZMESSAGETYPE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID)
+            VALUES (10, 1000.0, 1, 0, 1, 1, NULL, 'Alice', 'STANZA1');
         """)
         conn.close()
 
@@ -5242,48 +5131,44 @@ class TestIosMissingMediaReport:
         from wab_archiver.main import parse_args, run_forward_mode
 
         db_path = tmp_path / "ChatStorage.sqlite"
-        conn = sqlite3.connect(str(db_path))
+        conn = make_ios_db(db_path)
         conn.executescript("""
-            CREATE TABLE ZWACHATSESSION (
-                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZGROUPINFO INTEGER,
-                ZPARTNERNAME TEXT, ZCONTACTABID INTEGER, ZLASTMESSAGEDATE REAL
-            );
-            CREATE TABLE ZWAMEDIAITEM (
-                Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZMEDIAURL TEXT,
-                ZTITLE TEXT, ZXMPPTHUMBPATH TEXT, ZVCARDNAME TEXT, ZVCARDSTRING TEXT
-            );
-            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
-            CREATE TABLE ZWAMESSAGE (
-                Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZMESSAGETYPE INTEGER,
-                ZISFROMME INTEGER, ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER,
-                ZGROUPMEMBER INTEGER, ZPUSHNAME TEXT, ZSTANZAID TEXT, ZTEXT TEXT
-            );
-            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
-
             -- Chat 1: 1-to-1 with Alice
-            INSERT INTO ZWACHATSESSION VALUES (1, '390000000001@s.whatsapp.net', NULL, NULL, 1, 1000.0);
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME, ZCONTACTABID, ZLASTMESSAGEDATE)
+            VALUES (1, '390000000001@s.whatsapp.net', NULL, NULL, 1, 1000.0);
             -- Chat 2: Group 'Vacation Group'
-            INSERT INTO ZWACHATSESSION VALUES (2, '120363000000001@g.us', 1, 'Vacation Group', NULL, 1000.0);
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME, ZCONTACTABID, ZLASTMESSAGEDATE)
+            VALUES (2, '120363000000001@g.us', 1, 'Vacation Group', NULL, 1000.0);
 
             -- Message 1: Photo on disk missing (ZMEDIALOCALPATH set but file missing from root)
-            INSERT INTO ZWAMEDIAITEM VALUES (1, 'Media/390000000001@s.whatsapp.net/1/photo1.jpg', 'https://mmg.whatsapp.net/photo1', NULL, NULL, NULL, 'image/jpeg');
-            INSERT INTO ZWAMESSAGE VALUES (101, 1000.0, 1, 0, 1, 1, NULL, 'Alice', 'STANZA101', NULL);
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE, ZXMPPTHUMBPATH, ZVCARDNAME, ZVCARDSTRING)
+            VALUES (1, 'Media/390000000001@s.whatsapp.net/1/photo1.jpg', 'https://mmg.whatsapp.net/photo1', NULL, NULL, NULL, 'image/jpeg');
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZMESSAGETYPE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID, ZTEXT)
+            VALUES (101, 1000.0, 1, 0, 1, 1, NULL, 'Alice', 'STANZA101', NULL);
 
             -- Message 2: Photo purged from device (ZMEDIALOCALPATH is NULL, thumb exists)
-            INSERT INTO ZWAMEDIAITEM VALUES (2, NULL, 'https://mmg.whatsapp.net/photo2', 'Sunset caption', 'Media/120363000000001@g.us/2/sunset_uuid.thumb', NULL, 'image/jpeg');
-            INSERT INTO ZWAMESSAGE VALUES (102, 1001.0, 1, 1, 2, 2, NULL, 'Me', 'STANZA102', NULL);
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE, ZXMPPTHUMBPATH, ZVCARDNAME, ZVCARDSTRING)
+            VALUES (2, NULL, 'https://mmg.whatsapp.net/photo2', 'Sunset caption', 'Media/120363000000001@g.us/2/sunset_uuid.thumb', NULL, 'image/jpeg');
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZMESSAGETYPE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID, ZTEXT)
+            VALUES (102, 1001.0, 1, 1, 2, 2, NULL, 'Me', 'STANZA102', NULL);
 
             -- Message 3: Document (ZMESSAGETYPE = 8, ZMEDIALOCALPATH is NULL, title and text set)
-            INSERT INTO ZWAMEDIAITEM VALUES (3, NULL, 'https://mmg.whatsapp.net/doc3', 'Invoice caption', NULL, NULL, 'application/pdf');
-            INSERT INTO ZWAMESSAGE VALUES (103, 1002.0, 8, 0, 1, 3, NULL, 'Alice', 'STANZA103', 'Invoice_2026.pdf');
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE, ZXMPPTHUMBPATH, ZVCARDNAME, ZVCARDSTRING)
+            VALUES (3, NULL, 'https://mmg.whatsapp.net/doc3', 'Invoice caption', NULL, NULL, 'application/pdf');
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZMESSAGETYPE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID, ZTEXT)
+            VALUES (103, 1002.0, 8, 0, 1, 3, NULL, 'Alice', 'STANZA103', 'Invoice_2026.pdf');
 
             -- Message 4: Link preview (ZMESSAGETYPE = 7, should NOT be in missing report)
-            INSERT INTO ZWAMEDIAITEM VALUES (4, NULL, 'https://example.com/article', 'News Headline', 'Media/thumb_link.thumb', NULL, NULL);
-            INSERT INTO ZWAMESSAGE VALUES (104, 1003.0, 7, 0, 1, 4, NULL, 'Alice', 'STANZA104', 'Check this article: https://example.com/article');
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE, ZXMPPTHUMBPATH, ZVCARDNAME, ZVCARDSTRING)
+            VALUES (4, NULL, 'https://example.com/article', 'News Headline', 'Media/thumb_link.thumb', NULL, NULL);
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZMESSAGETYPE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID, ZTEXT)
+            VALUES (104, 1003.0, 7, 0, 1, 4, NULL, 'Alice', 'STANZA104', 'Check this article: https://example.com/article');
 
             -- Message 5: Location (ZMESSAGETYPE = 5, should NOT be in missing report)
-            INSERT INTO ZWAMEDIAITEM VALUES (5, NULL, NULL, NULL, 'Media/thumb_loc.thumb', NULL, NULL);
-            INSERT INTO ZWAMESSAGE VALUES (105, 1004.0, 5, 0, 1, 5, NULL, 'Alice', 'STANZA105', NULL);
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAURL, ZTITLE, ZXMPPTHUMBPATH, ZVCARDNAME, ZVCARDSTRING)
+            VALUES (5, NULL, NULL, NULL, 'Media/thumb_loc.thumb', NULL, NULL);
+            INSERT INTO ZWAMESSAGE (Z_PK, ZMESSAGEDATE, ZMESSAGETYPE, ZISFROMME, ZCHATSESSION, ZMEDIAITEM, ZGROUPMEMBER, ZPUSHNAME, ZSTANZAID, ZTEXT)
+            VALUES (105, 1004.0, 5, 0, 1, 5, NULL, 'Alice', 'STANZA105', NULL);
         """)
         conn.close()
 
@@ -6396,51 +6281,28 @@ class TestRunForwardModeFilters:
 class TestRunForwardModeAndroid:
     def test_run_forward_mode_android_full_pipeline(self, tmp_path, logger):
         db_path = tmp_path / "msgstore.db"
-        conn = sqlite3.connect(str(db_path))
+        conn = make_android_db(db_path)
         conn.executescript("""
-            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
-            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
-            CREATE TABLE chat (_id INTEGER PRIMARY KEY, subject TEXT, jid_row_id INTEGER);
-            CREATE TABLE message (
-                _id INTEGER PRIMARY KEY,
-                timestamp INTEGER,
-                sender_jid_row_id INTEGER,
-                from_me INTEGER
-            );
-            CREATE TABLE message_media (
-                _id INTEGER PRIMARY KEY,
-                file_path TEXT,
-                mime_type TEXT,
-                chat_row_id INTEGER,
-                message_row_id INTEGER,
-                message_url TEXT,
-                media_name TEXT
-            );
+            INSERT INTO jid (_id, user) VALUES (1, '390111222');
+            INSERT INTO jid (_id, user) VALUES (2, '390333444');
+            INSERT INTO chat (_id, subject, jid_row_id) VALUES (1, NULL, 1);
+            INSERT INTO chat (_id, subject, jid_row_id) VALUES (2, 'Family Group', 2);
 
-            INSERT INTO jid VALUES (1, '390111222');
-            INSERT INTO jid VALUES (2, '390333444');
-            INSERT INTO chat VALUES (1, NULL, 1);
-            INSERT INTO chat VALUES (2, 'Family Group', 2);
+            INSERT INTO message (_id, timestamp, sender_jid_row_id, from_me, chat_row_id) VALUES (1, 1718000000000, 1, 0, 1);
+            INSERT INTO message_media (_id, file_path, mime_type, chat_row_id, message_row_id, message_url, media_name)
+            VALUES (1, 'Media/WhatsApp Images/IMG-001.jpg', 'image/jpeg', 1, 1, 'http://example.com/1', 'IMG-001.jpg');
 
-            INSERT INTO message VALUES (1, 1718000000000, 1, 0);
-            INSERT INTO message_media VALUES (
-                1, 'Media/WhatsApp Images/IMG-001.jpg', 'image/jpeg', 1, 1, 'http://example.com/1', 'IMG-001.jpg'
-            );
+            INSERT INTO message (_id, timestamp, sender_jid_row_id, from_me, chat_row_id) VALUES (2, 1718001000000, 1, 0, 1);
+            INSERT INTO message_media (_id, file_path, mime_type, chat_row_id, message_row_id, message_url, media_name)
+            VALUES (2, 'Media/WhatsApp Images/IMG-002.jpg', 'image/jpeg', 1, 2, 'http://example.com/2', 'IMG-002.jpg');
 
-            INSERT INTO message VALUES (2, 1718001000000, 1, 0);
-            INSERT INTO message_media VALUES (
-                2, 'Media/WhatsApp Images/IMG-002.jpg', 'image/jpeg', 1, 2, 'http://example.com/2', 'IMG-002.jpg'
-            );
+            INSERT INTO message (_id, timestamp, sender_jid_row_id, from_me, chat_row_id) VALUES (3, 1718002000000, 2, 0, 2);
+            INSERT INTO message_media (_id, file_path, mime_type, chat_row_id, message_row_id, message_url, media_name)
+            VALUES (3, 'Media/WhatsApp Images/IMG-003.jpg', 'image/jpeg', 2, 3, 'http://example.com/3', 'IMG-003.jpg');
 
-            INSERT INTO message VALUES (3, 1718002000000, 2, 0);
-            INSERT INTO message_media VALUES (
-                3, 'Media/WhatsApp Images/IMG-003.jpg', 'image/jpeg', 2, 3, 'http://example.com/3', 'IMG-003.jpg'
-            );
-
-            INSERT INTO message VALUES (4, 1718003000000, 1, 0);
-            INSERT INTO message_media VALUES (
-                4, 'Media/WhatsApp Images/MISSING.jpg', 'image/jpeg', 1, 4, 'http://example.com/4', 'MISSING.jpg'
-            );
+            INSERT INTO message (_id, timestamp, sender_jid_row_id, from_me, chat_row_id) VALUES (4, 1718003000000, 1, 0, 1);
+            INSERT INTO message_media (_id, file_path, mime_type, chat_row_id, message_row_id, message_url, media_name)
+            VALUES (4, 'Media/WhatsApp Images/MISSING.jpg', 'image/jpeg', 1, 4, 'http://example.com/4', 'MISSING.jpg');
         """)
         conn.close()
 
@@ -6499,33 +6361,11 @@ class TestRunForwardModeAndroid:
     def test_run_forward_mode_preserve_deleted_baseline_and_incremental(self, tmp_path, logger):
         # 1. Setup source db 1 with 2 messages
         db_path1 = tmp_path / "src1_msgstore.db"
-        conn1 = sqlite3.connect(str(db_path1))
+        conn1 = make_android_db(db_path1)
         conn1.executescript("""
-            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
-            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
-            CREATE TABLE chat (_id INTEGER PRIMARY KEY, subject TEXT, jid_row_id INTEGER);
-            CREATE TABLE message (
-                _id INTEGER PRIMARY KEY,
-                chat_row_id INTEGER,
-                timestamp INTEGER,
-                sender_jid_row_id INTEGER,
-                from_me INTEGER,
-                key_id TEXT,
-                message_type INTEGER,
-                text_data TEXT
-            );
-            CREATE TABLE message_media (
-                _id INTEGER PRIMARY KEY,
-                file_path TEXT,
-                mime_type TEXT,
-                chat_row_id INTEGER,
-                message_row_id INTEGER,
-                message_url TEXT,
-                media_name TEXT
-            );
-            INSERT INTO jid VALUES (1, '390111222'), (2, '390333444');
-            INSERT INTO chat VALUES (1, NULL, 1);
-            INSERT INTO message VALUES
+            INSERT INTO jid (_id, user) VALUES (1, '390111222'), (2, '390333444');
+            INSERT INTO chat (_id, subject, jid_row_id) VALUES (1, NULL, 1);
+            INSERT INTO message (_id, chat_row_id, timestamp, sender_jid_row_id, from_me, key_id, message_type, text_data) VALUES
                 (1, 1, 1718000000000, 2, 0, 'k1', 0, 'First message'),
                 (2, 1, 1718001000000, 2, 0, 'k2', 0, 'Message to be deleted');
         """)
@@ -6563,33 +6403,11 @@ class TestRunForwardModeAndroid:
 
         # 2. Setup source db 2 where message 2 ('k2') was deleted
         db_path2 = tmp_path / "src2_msgstore.db"
-        conn2 = sqlite3.connect(str(db_path2))
+        conn2 = make_android_db(db_path2)
         conn2.executescript("""
-            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
-            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
-            CREATE TABLE chat (_id INTEGER PRIMARY KEY, subject TEXT, jid_row_id INTEGER);
-            CREATE TABLE message (
-                _id INTEGER PRIMARY KEY,
-                chat_row_id INTEGER,
-                timestamp INTEGER,
-                sender_jid_row_id INTEGER,
-                from_me INTEGER,
-                key_id TEXT,
-                message_type INTEGER,
-                text_data TEXT
-            );
-            CREATE TABLE message_media (
-                _id INTEGER PRIMARY KEY,
-                file_path TEXT,
-                mime_type TEXT,
-                chat_row_id INTEGER,
-                message_row_id INTEGER,
-                message_url TEXT,
-                media_name TEXT
-            );
-            INSERT INTO jid VALUES (1, '390111222'), (2, '390333444');
-            INSERT INTO chat VALUES (1, NULL, 1);
-            INSERT INTO message VALUES
+            INSERT INTO jid (_id, user) VALUES (1, '390111222'), (2, '390333444');
+            INSERT INTO chat (_id, subject, jid_row_id) VALUES (1, NULL, 1);
+            INSERT INTO message (_id, chat_row_id, timestamp, sender_jid_row_id, from_me, key_id, message_type, text_data) VALUES
                 (1, 1, 1718000000000, 2, 0, 'k1', 0, 'First message');
         """)
         conn2.close()
