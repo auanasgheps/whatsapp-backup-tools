@@ -2745,7 +2745,7 @@ def record_preserved_calls(
             ),
         )
         pres_conn.commit()
-        logger.info(f"Preservation complete: {newly_inserted} new call(s) preserved.")
+        logger.debug(f"Preservation complete: {newly_inserted} new call(s) preserved.")
         return newly_inserted
     except Exception as e:
         pres_conn.rollback()
@@ -2798,11 +2798,12 @@ def preserve_deleted_messages(
         logger.warning(f"Unsupported platform '{platform}' for preservation diff; skipping.")
         return PreservationResult(messages=0, chats=0)
 
-    if not extracted and not extracted_calls:
+    if not extracted:
         logger.info(
             "No deleted or revoked messages detected (0 messages preserved across 0 chats)."
         )
-        return PreservationResult(messages=0, chats=0)
+        if not extracted_calls:
+            return PreservationResult(messages=0, chats=0)
 
     with contextlib.closing(open_preservation_db(output_root)) as pres_conn:
         res = (
