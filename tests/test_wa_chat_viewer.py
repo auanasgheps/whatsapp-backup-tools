@@ -2803,6 +2803,7 @@ class TestRecentMessagesRouting:
             "quoted_sender",
             "quoted_ts",
             "quoted_msg_id",
+            "quoted_has_thumb",
             "reactions",
             "is_edited",
             "edited_ts",
@@ -10149,3 +10150,128 @@ class TestRichLinkPreviews:
             assert target_msg["media_type"] == "image"
             assert target_msg["text_body"] == "Stunning sunset in the mountains"
             assert target_msg["archive_path"] is None
+
+    def test_android_quoted_photo_reply_thumbnail_and_caption_jump(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                jid_row_id INTEGER NOT NULL,
+                hidden INTEGER DEFAULT 0,
+                subject TEXT
+            );
+            CREATE TABLE jid (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user TEXT NOT NULL,
+                server TEXT NOT NULL,
+                raw_string TEXT
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                key_id TEXT NOT NULL,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            CREATE TABLE message_quoted (
+                message_row_id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                parent_message_chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                sender_jid_row_id INTEGER,
+                key_id TEXT NOT NULL,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            CREATE TABLE message_quoted_media (
+                message_row_id INTEGER PRIMARY KEY,
+                thumbnail BLOB
+            );
+            CREATE TABLE message_media (
+                message_row_id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                file_path TEXT,
+                file_size INTEGER,
+                media_name TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15551234567', 's.whatsapp.net', '15551234567@s.whatsapp.net')"
+        )
+        conn.execute("INSERT INTO chat (_id, jid_row_id, hidden, subject) VALUES (1, 1, 0, NULL)")
+
+        # Original photo from contact with caption
+        conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data)
+            VALUES (10, 1, 0, 'PHOTO_STANZA_10', 1, 1000000, 1, 'Beautiful lake view')
+        """)
+
+        # Generate 55 subsequent messages to push message 10 out of initial 50-message paging window
+        for i in range(11, 66):
+            conn.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data) "
+                "VALUES (?, 1, 0, ?, 1, ?, 0, ?)",
+                (i, f"STANZA_{i}", 1000000 + i * 1000, f"Chat message {i}"),
+            )
+
+        # Replying message quoting the photo
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xdb\x00C\x00\xff\xd9"
+        conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data)
+            VALUES (100, 1, 1, 'STANZA_REPLY_100', NULL, 2000000, 0, 'Where was this lake?')
+        """)
+        conn.execute("""
+            INSERT INTO message_quoted (message_row_id, chat_row_id, parent_message_chat_row_id, from_me, sender_jid_row_id, key_id, timestamp, message_type, text_data)
+            VALUES (100, 1, 1, 0, 1, 'PHOTO_STANZA_10', 1000000, 1, NULL)
+        """)
+        conn.execute(
+            "INSERT INTO message_quoted_media (message_row_id, thumbnail) VALUES (100, ?)",
+            (fake_jpeg,),
+        )
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # 1. Fetch recent messages
+            resp = client.get("/api/messages?chat_id=15551234567&chat_type=contact&limit=50")
+            assert resp.status_code == 200
+            recent_msgs = resp.get_json()
+            assert not any(m["msg_id"] == 10 for m in recent_msgs)
+
+            reply_msg = next(m for m in recent_msgs if m["msg_id"] == 100)
+            assert reply_msg["quoted_msg_id"] == 10
+            assert reply_msg["quoted_has_thumb"] == 1
+            assert "Beautiful lake view" in reply_msg["quoted_text"]
+            assert reply_msg["quoted_ts"] == 1000000
+
+            # 2. Thumbnail endpoint verification
+            # Direct hit on replying message holding message_quoted_media
+            thumb_reply = client.get("/api/thumbnail/100")
+            assert thumb_reply.status_code == 200
+            assert thumb_reply.data == fake_jpeg
+            # Hit on quoted message bridged via reply
+            thumb_orig = client.get("/api/thumbnail/10")
+            assert thumb_orig.status_code == 200
+            assert thumb_orig.data == fake_jpeg
+
+            # 3. Jump to target timestamp via /api/messages/at
+            resp_at = client.get(
+                "/api/messages/at?chat_id=15551234567&chat_type=contact&ts=1000000"
+            )
+            assert resp_at.status_code == 200
+            at_msgs = resp_at.get_json()
+            target_msg = next((m for m in at_msgs if m["msg_id"] == 10), None)
+            assert target_msg is not None
+            assert target_msg["media_type"] == "image"
+            assert target_msg["text_body"] == "Beautiful lake view"
