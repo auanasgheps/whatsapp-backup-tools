@@ -1021,8 +1021,8 @@
       badge.textContent = 'You';
       meta.appendChild(badge);
     }
-    const showInfo = (msg.from_me && !msg.is_preserved && !!msg.msg_id) ||
-                     !!msg.archive_path ||
+    const showInfo = (msg.from_me && !msg.is_preserved && !!msg.msg_id && msg.media_type !== 'deleted') ||
+                     (!!msg.archive_path && msg.media_type !== 'deleted') ||
                      !!msg.is_preserved ||
                      (msg.is_edited && !!msg.original_text_body);
     if (showInfo) {

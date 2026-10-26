@@ -224,50 +224,26 @@ def test_decode_wmi_ephemeral_container():
     assert decoded["text_data"] == "Disappearing text message"
 
 
-def test_decode_wmi_future_proof_containers():
+@pytest.mark.parametrize(
+    "tag, inner_text, jid, from_me, key_id",
+    [
+        (67, b"Prompt to Meta AI", b"5550100@s.whatsapp.net", 1, "BOT_KEY_1"),
+        (58, b"Corrected text via tag 58", b"5550100@s.whatsapp.net", 1, "EDIT_KEY_58"),
+        (62, b"@group mention payload", b"123456@g.us", 0, "GM_KEY_62"),
+    ],
+)
+def test_decode_wmi_future_proof_containers(tag, inner_text, jid, from_me, key_id):
     """Verify unwrap_message_container handles botInvokeMessage (67), editedMessage (58), and groupMentionedMessage (62)."""
-    inner_conv = _build_field(1, 2, b"Prompt to Meta AI")
-
-    # Bot invocation wrapper (tag 67)
-    bot_payload = _build_field(1, 2, inner_conv)
-    msg_bytes_bot = _build_field(67, 2, bot_payload)
+    inner_conv = _build_field(1, 2, inner_text)
+    payload = _build_field(1, 2, inner_conv)
+    msg_bytes = _build_field(tag, 2, payload)
     key_bytes = (
-        _build_field(1, 2, b"5550100@s.whatsapp.net")
-        + _build_field(2, 0, 1)
-        + _build_field(3, 2, b"BOT_KEY_1")
+        _build_field(1, 2, jid) + _build_field(2, 0, from_me) + _build_field(3, 2, key_id.encode())
     )
-    wmi_bot = _build_field(1, 2, key_bytes) + _build_field(2, 2, msg_bytes_bot)
-    decoded_bot = increment_merger.decode_wmi(wmi_bot)
-    assert decoded_bot["key_id"] == "BOT_KEY_1"
-    assert decoded_bot["text_data"] == "Prompt to Meta AI"
-
-    # Edited message wrapper (tag 58)
-    edited_inner = _build_field(1, 2, b"Corrected text via tag 58")
-    edited_payload = _build_field(1, 2, edited_inner)
-    msg_bytes_edit = _build_field(58, 2, edited_payload)
-    key_bytes_edit = (
-        _build_field(1, 2, b"5550100@s.whatsapp.net")
-        + _build_field(2, 0, 1)
-        + _build_field(3, 2, b"EDIT_KEY_58")
-    )
-    wmi_edit = _build_field(1, 2, key_bytes_edit) + _build_field(2, 2, msg_bytes_edit)
-    decoded_edit = increment_merger.decode_wmi(wmi_edit)
-    assert decoded_edit["key_id"] == "EDIT_KEY_58"
-    assert decoded_edit["text_data"] == "Corrected text via tag 58"
-
-    # Group mentioned message wrapper (tag 62)
-    gm_inner = _build_field(1, 2, b"@group mention payload")
-    gm_payload = _build_field(1, 2, gm_inner)
-    msg_bytes_gm = _build_field(62, 2, gm_payload)
-    key_bytes_gm = (
-        _build_field(1, 2, b"123456@g.us")
-        + _build_field(2, 0, 0)
-        + _build_field(3, 2, b"GM_KEY_62")
-    )
-    wmi_gm = _build_field(1, 2, key_bytes_gm) + _build_field(2, 2, msg_bytes_gm)
-    decoded_gm = increment_merger.decode_wmi(wmi_gm)
-    assert decoded_gm["key_id"] == "GM_KEY_62"
-    assert decoded_gm["text_data"] == "@group mention payload"
+    wmi_bytes = _build_field(1, 2, key_bytes) + _build_field(2, 2, msg_bytes)
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == key_id
+    assert decoded["text_data"] == inner_text.decode()
 
 
 def test_decode_wmi_event_message():
@@ -3122,40 +3098,37 @@ def _build_image_wmi_with_media_data(
     return base + _build_field(38, 2, media_data)
 
 
-def test_decode_wmi_extracts_tag38_local_path():
+@pytest.mark.parametrize(
+    "key_id, raw_path, expected_path",
+    [
+        (
+            "KEY_IMG_38",
+            "Media/WhatsApp Images/IMG-20261016-WA0005.jpg",
+            "Media/WhatsApp Images/IMG-20261016-WA0005.jpg",
+        ),
+        (
+            "KEY_IMG_NORM",
+            ".\\Media\\WhatsApp Images\\IMG-20261016-WA0006.jpg",
+            "Media/WhatsApp Images/IMG-20261016-WA0006.jpg",
+        ),
+    ],
+)
+def test_decode_wmi_extracts_and_normalizes_tag38_local_path(key_id, raw_path, expected_path):
     wmi_bytes = _build_image_wmi_with_media_data(
         "123456789@s.whatsapp.net",
-        "KEY_IMG_38",
+        key_id,
         "Test caption",
         "image/jpeg",
         b"\x01" * 32,
         45000,
         0,
         1729000000000,
-        "Media/WhatsApp Images/IMG-20261016-WA0005.jpg",
+        raw_path,
     )
     msg = increment_merger.decode_wmi(wmi_bytes)
-    assert msg["local_path"] == "Media/WhatsApp Images/IMG-20261016-WA0005.jpg"
+    assert msg["local_path"] == expected_path
     assert msg["media_info"] is not None
-    assert msg["media_info"]["file_path"] == "Media/WhatsApp Images/IMG-20261016-WA0005.jpg"
-
-
-def test_decode_wmi_normalizes_tag38_separators_and_prefixes():
-    wmi_bytes = _build_image_wmi_with_media_data(
-        "123456789@s.whatsapp.net",
-        "KEY_IMG_NORM",
-        "Test caption",
-        "image/jpeg",
-        b"\x02" * 32,
-        35000,
-        0,
-        1729000000000,
-        ".\\Media\\WhatsApp Images\\IMG-20261016-WA0006.jpg",
-    )
-    msg = increment_merger.decode_wmi(wmi_bytes)
-    assert msg["local_path"] == "Media/WhatsApp Images/IMG-20261016-WA0006.jpg"
-    assert msg["media_info"] is not None
-    assert msg["media_info"]["file_path"] == "Media/WhatsApp Images/IMG-20261016-WA0006.jpg"
+    assert msg["media_info"]["file_path"] == expected_path
 
 
 def test_apply_messages_bin_populates_media_file_path_from_tag38(mock_db, tmp_path):
