@@ -15,8 +15,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from tests.conftest import make_android_db, make_ios_db
 
-from tests.conftest import make_android_db, make_archive_db, make_ios_db
-
 # ---------------------------------------------------------------------------
 # Import the modules from their new package locations.
 # ---------------------------------------------------------------------------

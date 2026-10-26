@@ -2858,7 +2858,7 @@ def _fts_android_chat(
     has_j_raw = "raw_string" in jid_cols
     fts_group_parts = ["c.subject IS NOT NULL"]
     if has_j_server:
-        fts_group_parts.append("j_chat.server = 'g.us'")
+        fts_group_parts.append("(j_chat.server IS NOT NULL AND j_chat.server = 'g.us')")
     if has_j_raw:
         fts_group_parts.append(
             "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us')"
@@ -3132,19 +3132,6 @@ _ANDROID_JID_MAP = """
     LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = m.sender_jid_row_id
     LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
 """
-
-_ANDROID_CHAT_ID = f"""
-    CASE
-        WHEN (j_chat.server = 'g.us' OR (j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us') OR c.subject IS NOT NULL) THEN CAST(m.chat_row_id AS TEXT)
-        ELSE COALESCE(
-            {_clean_user_sql("j_chat_real.user")},
-            {_clean_user_sql("j_chat.user")},
-            CAST(m.chat_row_id AS TEXT)
-        )
-    END
-"""
-
-_ANDROID_CHAT_TYPE = "CASE WHEN (j_chat.server = 'g.us' OR (j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us') OR c.subject IS NOT NULL) THEN 'group' ELSE 'contact' END"
 
 _ANDROID_SELECT = None
 
@@ -4878,12 +4865,13 @@ def create_app(output_root: Path, rescan: bool = False):
 
     group_cond_parts = ["c.subject IS NOT NULL"]
     if has_jid_server:
-        group_cond_parts.append("j_chat.server = 'g.us'")
+        group_cond_parts.append("(j_chat.server IS NOT NULL AND j_chat.server = 'g.us')")
     if has_jid_raw_string:
         group_cond_parts.append(
             "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us')"
         )
     is_group_chat_select = " OR ".join(group_cond_parts)
+
     android_chat_id = f"""
         CASE
             WHEN ({is_group_chat_select}) THEN CAST(m.chat_row_id AS TEXT)
@@ -5038,13 +5026,11 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify(result)
 
         if source_type == "android":
-            j_s_is_lid = "j_s.server = 'lid'" if has_jid_server else "0"
             j_s_is_lid = (
                 "(j_s.server IS NOT NULL AND j_s.server = 'lid')" if has_jid_server else "0"
             )
             lid_c_parts = []
             if has_jid_server:
-                lid_c_parts.append("j_chat.server = 'lid'")
                 lid_c_parts.append("(j_chat.server IS NOT NULL AND j_chat.server = 'lid')")
             if has_jid_raw_string:
                 lid_c_parts.append(
@@ -5054,7 +5040,6 @@ def create_app(output_root: Path, rescan: bool = False):
 
             group_c_parts = ["c.subject IS NOT NULL"]
             if has_jid_server:
-                group_c_parts.append("j_chat.server = 'g.us'")
                 group_c_parts.append("(j_chat.server IS NOT NULL AND j_chat.server = 'g.us')")
             if has_jid_raw_string:
                 group_c_parts.append(
@@ -8052,6 +8037,7 @@ def create_app(output_root: Path, rescan: bool = False):
             wa_conn_bulk = sqlite3.connect(wa_db_path)
             wa_conn_bulk.row_factory = sqlite3.Row
             if source_type == "android":
+                _ensure_jid_map_resolved(wa_conn_bulk, None)
                 bulk_jid_cols = {
                     r["name"] if isinstance(r, sqlite3.Row) else r[1]
                     for r in wa_conn_bulk.execute("PRAGMA table_info(jid)").fetchall()
@@ -8060,17 +8046,24 @@ def create_app(output_root: Path, rescan: bool = False):
                 has_b_raw = "raw_string" in bulk_jid_cols
                 bulk_g_parts = ["c.subject IS NOT NULL"]
                 if has_b_server:
-                    bulk_g_parts.append("j.server = 'g.us'")
+                    bulk_g_parts.append("(j.server IS NOT NULL AND j.server = 'g.us')")
                 if has_b_raw:
                     bulk_g_parts.append("(j.raw_string IS NOT NULL AND j.raw_string LIKE '%@g.us')")
                 bulk_is_group = " OR ".join(bulk_g_parts)
+
                 chat_rows = wa_conn_bulk.execute(f"""
                     SELECT
                         CASE WHEN ({bulk_is_group}) THEN CAST(c._id AS TEXT)
-                             ELSE COALESCE(j.user, CAST(c._id AS TEXT))
+                             ELSE COALESCE(
+                                 {_clean_user_sql("j_real.user")},
+                                 {_clean_user_sql("j.user")},
+                                 CAST(c._id AS TEXT)
+                             )
                         END AS id,
                         CASE WHEN ({bulk_is_group}) THEN 'group' ELSE 'contact' END AS type
                     FROM chat c
+                    LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id
+                    LEFT JOIN jid j_real ON j_real._id = jm_c.jid_row_id
                     LEFT JOIN jid j ON j._id = c.jid_row_id
                     WHERE (
                         ({bulk_is_group} AND (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))))

@@ -8747,9 +8747,16 @@ class TestLidAndContactResolution:
             assert len(chats) == 1
             chat = chats[0]
             assert chat["type"] == "contact"
+            assert chat["id"] == "108394829384729"
             # Must NOT be formatted as fake phone "+108394829384729"
             assert not chat["display_name"].startswith("+108394829384729")
             assert "Unknown Contact (5)" in chat["display_name"]
+
+            msg_resp = client.get("/api/messages?chat_id=108394829384729&chat_type=contact")
+            msgs = msg_resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["chat_id"] == "108394829384729"
+            assert msgs[0]["text_body"] == "Hey there"
 
     def test_api_chats_group_with_null_subject_retains_group_type(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
