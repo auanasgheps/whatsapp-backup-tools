@@ -4899,6 +4899,113 @@ def test_apply_messages_bin_stub_system_message_no_unhide(tmp_path):
     conn.close()
 
 
+def test_decode_wmi_stub_revoke():
+    # Protobuf StubType.REVOKE (1) must decode to message_type = 15 (deleted), not system message (7)
+    key_bytes = (
+        _build_field(1, 2, b"393926739354@s.whatsapp.net")
+        + _build_field(2, 0, 1)  # from_me = 1
+        + _build_field(3, 2, b"REVOKE_KEY_999")
+    )
+    wmi = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(3, 0, 1729000888)
+        + _build_field(24, 0, 1)  # REVOKE = 1
+    )
+    decoded = increment_merger.decode_wmi(wmi)
+    assert decoded["key_id"] == "REVOKE_KEY_999"
+    assert decoded["message_type"] == 15
+    assert decoded["text_data"] is None
+    assert decoded["stub_type"] is None
+    assert decoded["has_content"] is True
+
+
+def test_decode_wmi_stub_translation():
+    # Group stub types in Protobuf must translate to Android SystemActionType
+    key_bytes = (
+        _build_field(1, 2, b"123456-789@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"STUB_TRANS_KEY")
+    )
+    # 21 = GROUP_CHANGE_SUBJECT in Protobuf -> 1 in Android (SUBJECT_CHANGE)
+    wmi_sub = _build_field(1, 2, key_bytes) + _build_field(3, 0, 100) + _build_field(24, 0, 21)
+    dec_sub = increment_merger.decode_wmi(wmi_sub)
+    assert dec_sub["message_type"] == 7
+    assert dec_sub["stub_type"] == 1
+
+    # 22 = GROUP_CHANGE_ICON in Protobuf -> 6 in Android (ICON_CHANGED)
+    wmi_ico = _build_field(1, 2, key_bytes) + _build_field(3, 0, 100) + _build_field(24, 0, 22)
+    dec_ico = increment_merger.decode_wmi(wmi_ico)
+    assert dec_ico["message_type"] == 7
+    assert dec_ico["stub_type"] == 6
+
+    # 20 = GROUP_CREATE in Protobuf -> 11 in Android (GROUP_CREATED)
+    wmi_cr = _build_field(1, 2, key_bytes) + _build_field(3, 0, 100) + _build_field(24, 0, 20)
+    dec_cr = increment_merger.decode_wmi(wmi_cr)
+    assert dec_cr["message_type"] == 7
+    assert dec_cr["stub_type"] == 11
+
+
+def test_apply_messages_bin_stub_revoke(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_stub_revoke.db")
+    cur = conn.cursor()
+    logger = logging.getLogger("test")
+
+    # Create message_system and message_revoked tables
+    cur.execute(
+        "CREATE TABLE message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER NOT NULL)"
+    )
+    cur.execute(
+        "CREATE TABLE message_revoked (message_row_id INTEGER PRIMARY KEY, revoked_key_id TEXT NOT NULL, admin_jid_row_id INTEGER, revoke_timestamp INTEGER)"
+    )
+    cur.execute("CREATE TABLE message_media (message_row_id INTEGER PRIMARY KEY, file_path TEXT)")
+    conn.commit()
+
+    key_bytes = (
+        _build_field(1, 2, b"393926739354@s.whatsapp.net")
+        + _build_field(2, 0, 1)  # from_me = 1
+        + _build_field(3, 2, b"REVOKED_MSG_123")
+    )
+    wmi = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(3, 0, 1729000999)
+        + _build_field(24, 0, 1)  # REVOKE = 1
+    )
+
+    bin_path = str(tmp_path / "messages_revoke.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi)) + wmi)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 1
+    msg_row = cur.execute(
+        "SELECT _id, message_type, text_data, from_me FROM message WHERE key_id = 'REVOKED_MSG_123'"
+    ).fetchone()
+    assert msg_row is not None
+    assert msg_row[1] == 15  # message_type 15 (revoked), NOT 7
+    assert msg_row[2] is None
+    assert msg_row[3] == 1
+
+    # message_system must have 0 rows for this message
+    sys_count = cur.execute(
+        "SELECT COUNT(*) FROM message_system WHERE message_row_id = ?", (msg_row[0],)
+    ).fetchone()[0]
+    assert sys_count == 0
+
+    # message_revoked must record the revocation
+    rev_row = cur.execute(
+        "SELECT message_row_id, revoked_key_id, revoke_timestamp FROM message_revoked WHERE message_row_id = ?",
+        (msg_row[0],),
+    ).fetchone()
+    assert rev_row is not None
+    assert rev_row[1] == "REVOKED_MSG_123"
+    assert rev_row[2] == 1729000999000
+
+    conn.close()
+
+
 def test_resolve_or_create_chat_no_premature_unhide(tmp_path):
     conn = _make_two_pass_test_db(tmp_path / "test_chat_unhide.db")
     cur = conn.cursor()

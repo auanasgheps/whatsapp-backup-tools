@@ -7090,6 +7090,57 @@ class TestStickerSupport:
             assert chats[0]["last_msg_preview"] == "This message was deleted by an admin"
             assert chats[0]["is_view_once"] == 0
 
+    def test_android_legacy_mislabeled_deleted_messages_self_healing(self, tmp_path):
+        """Historical deltas with message_type=7 and action_type=1 in 1-to-1 chats self-heal to deleted messages."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '123456789')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (10, 1, NULL, 0, 1700000002000, 2)"
+        )
+        wa_conn.execute(
+            "CREATE TABLE IF NOT EXISTS message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER NOT NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES "
+            "(1, 10, 0, 0, 1700000001000, 'Hello', 0),"
+            "(2, 10, 1, 0, 1700000002000, NULL, 7)"
+        )
+        wa_conn.execute("INSERT INTO message_system (message_row_id, action_type) VALUES (2, 1)")
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('123456789', 'Alice', 'Alice')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            assert len(msgs) == 2
+
+            # Message 2 in 1:1 chat must self-heal to deleted, never 'You changed the group subject'
+            assert msgs[2]["media_type"] == "deleted"
+            assert msgs[2]["text_body"] == "You deleted this message"
+            assert "group subject" not in msgs[2]["text_body"]
+
+            # /api/chats reflects deleted preview rather than group subject
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats = [c for c in chats_resp.get_json() if c["id"] == "123456789"]
+            assert len(chats) == 1
+            assert chats[0]["last_msg_type"] == "deleted"
+            assert chats[0]["last_msg_preview"] == "You deleted this message"
+            assert "group subject" not in chats[0]["last_msg_preview"]
+
     def test_android_view_once_messages(self, tmp_path):
         """Android view-once messages (types 42, 43, 82) are distinguished with is_view_once=1."""
         wa_path = tmp_path / "msgstore.db"

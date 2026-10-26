@@ -730,6 +730,8 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
         return format_ios_system_event(ev, actor, [], subj, is_from_me)
 
     if ev in (1, 3, 10):  # Subject, icon, or description changed
+        if row.get("chat_type") == "contact":
+            return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
         actor = (
             "You"
             if from_me == 1
@@ -837,6 +839,12 @@ def _format_android_service_row(row: dict) -> str:
     targets = row.get("participant_names")
     if targets is None:
         targets = [part_name] if part_name else []
+
+    # Guard: In a 1-to-1 chat, group actions must never emit group labels
+    if row.get("chat_type") == "contact" and act in ALLOWED_GROUP_SYSTEM_ACTIONS:
+        if act == 1:
+            return "You deleted this message" if from_me == 1 else "This message was deleted"
+        return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
 
     actor = sender if sender else ("You" if from_me == 1 else "Someone")
     if not targets and act in (4, 5, 13, 79, 123):
@@ -4965,6 +4973,7 @@ def create_app(output_root: Path, rescan: bool = False):
         ac.archive_path,
         CASE
             WHEN m.message_type IN (15, 64) THEN 'deleted'
+            WHEN m.message_type = 7 AND {ms_col} = 1 AND NOT ({is_group_chat_select}) THEN 'deleted'
             WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IN (4, 14) THEN 'vcard'
             WHEN m.message_type = 20 THEN 'sticker'
@@ -4989,8 +4998,8 @@ def create_app(output_root: Path, rescan: bool = False):
             m.text_data,
             CASE
                 WHEN m.message_type = 64 THEN 'This message was deleted by an admin'
-                WHEN m.from_me = 1 AND m.message_type = 15 THEN 'You deleted this message'
-                WHEN m.message_type = 15 THEN 'This message was deleted'
+                WHEN (m.from_me = 1 AND m.message_type = 15) OR (m.from_me = 1 AND m.message_type = 7 AND {ms_col} = 1 AND NOT ({is_group_chat_select})) THEN 'You deleted this message'
+                WHEN m.message_type = 15 OR (m.message_type = 7 AND {ms_col} = 1 AND NOT ({is_group_chat_select})) THEN 'This message was deleted'
                 WHEN m.message_type IN (4, 14) THEN m.text_data
                 WHEN m.message_type = 66{extra_poll_select} THEN 'Poll'
             END,
@@ -5109,6 +5118,9 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_message_system
                 else ""
             )
+            ms_disp_col = "ms_disp.action_type" if has_message_system else "NULL"
+            ms_sub_col = "ms_sub.action_type" if has_message_system else "NULL"
+            ms_ts_col = "ms_ts.action_type" if has_message_system else "NULL"
             ms_disp_allowed_clause = (
                 f"AND ms_disp.action_type IN {ms_allowed_actions_tuple}"
                 if has_message_system
@@ -5200,6 +5212,7 @@ def create_app(output_root: Path, rescan: bool = False):
                               AND (
                                   (m_ts.text_data IS NOT NULL AND m_ts.text_data != '' AND (m_ts.message_type IS NULL OR m_ts.message_type = 0 OR m_ts.message_type IN (5, 16)))
                                   OR (m_ts.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                                  OR (m_ts.message_type = 7 AND {ms_ts_col} = 1 AND NOT ({is_group_chat}))
                                   OR ({is_group_chat} AND m_ts.message_type = 7 {ms_ts_allowed_clause})
                               )
                         ),
@@ -5240,6 +5253,7 @@ def create_app(output_root: Path, rescan: bool = False):
                           AND (
                               (m_disp.text_data IS NOT NULL AND m_disp.text_data != '' AND (m_disp.message_type IS NULL OR m_disp.message_type = 0 OR m_disp.message_type IN (5, 16)))
                               OR (m_disp.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                              OR (m_disp.message_type = 7 AND {ms_disp_col} = 1 AND NOT ({is_group_chat}))
                               OR ({is_group_chat} AND m_disp.message_type = 7 {ms_disp_allowed_clause})
                           )
                     ),
@@ -5252,6 +5266,7 @@ def create_app(output_root: Path, rescan: bool = False):
                           AND (
                               (m_sub.text_data IS NOT NULL AND m_sub.text_data != '' AND (m_sub.message_type IS NULL OR m_sub.message_type = 0 OR m_sub.message_type IN (5, 16)))
                               OR (m_sub.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                              OR (m_sub.message_type = 7 AND {ms_sub_col} = 1 AND NOT ({is_group_chat}))
                               OR ({is_group_chat} AND m_sub.message_type = 7 {ms_sub_allowed_clause})
                           )
                         ORDER BY m_sub.timestamp DESC, m_sub._id DESC
@@ -5578,7 +5593,13 @@ def create_app(output_root: Path, rescan: bool = False):
                         d["last_msg_type"] = "image"
             elif source_type == "android" and raw_type == 7:
                 d["is_view_once"] = 0
-                if last_msg_action_type in _SUPPORTED_ANDROID_SYSTEM_ACTIONS:
+                if d.get("type") == "contact" and last_msg_action_type == 1:
+                    d["last_msg_type"] = "deleted"
+                    if d.get("last_msg_from_me"):
+                        d["last_msg_preview"] = "You deleted this message"
+                    else:
+                        d["last_msg_preview"] = "This message was deleted"
+                elif last_msg_action_type in _SUPPORTED_ANDROID_SYSTEM_ACTIONS:
                     s_row = {
                         "action_type": last_msg_action_type,
                         "text_body": d.get("last_msg_preview", ""),

@@ -49,6 +49,24 @@ def parse_varint(stream: io.BytesIO) -> int | None:
     return res
 
 
+# Mapping from Protobuf WebMessageInfo.StubType enum integers to Android message_system.action_type
+PROTO_STUB_TO_ANDROID_ACTION: dict[int, int] = {
+    20: 11,  # GROUP_CREATE -> GROUP_CREATED
+    21: 1,  # GROUP_CHANGE_SUBJECT -> SUBJECT_CHANGE
+    22: 6,  # GROUP_CHANGE_ICON -> ICON_CHANGED
+    24: 27,  # GROUP_CHANGE_DESCRIPTION -> DESCRIPTION_CHANGED
+    25: 58,  # GROUP_CHANGE_RESTRICT -> ANNOUNCEMENT_MODE
+    26: 58,  # GROUP_CHANGE_ANNOUNCE -> ANNOUNCEMENT_MODE
+    27: 12,  # GROUP_PARTICIPANT_ADD -> PARTICIPANT_ADDED
+    28: 14,  # GROUP_PARTICIPANT_REMOVE -> PARTICIPANT_REMOVED
+    29: 15,  # GROUP_PARTICIPANT_PROMOTE -> ADMIN_PROMOTED
+    30: 20,  # GROUP_PARTICIPANT_DEMOTE -> ADMIN_DEMOTED
+    31: 79,  # GROUP_PARTICIPANT_INVITE -> JOINED_VIA_INVITE_LINK
+    32: 13,  # GROUP_PARTICIPANT_LEAVE -> PARTICIPANT_LEFT
+    67: 67,  # E2E_IDENTITY_CHANGED / EPHEMERAL_TIMER
+}
+
+
 def parse_wire_fields(data: bytes) -> dict[int, list[tuple[int, bytes | int]]]:
     """Parse raw protobuf wire bytes into a mapping of field_number -> list of (wire_type, value)."""
     stream = io.BytesIO(data)
@@ -374,7 +392,16 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     # Field 24: messageStubType
     stub_type = None
     if 24 in fields and fields[24]:
-        stub_type = fields[24][0][1]
+        raw_stub = fields[24][0][1]
+        if raw_stub == 1:
+            # Protobuf StubType.REVOKE (1): message deleted by sender, maps to Android message_type = 15
+            message_type = 15
+            stub_type = None
+        else:
+            stub_type = PROTO_STUB_TO_ANDROID_ACTION.get(raw_stub, raw_stub)
+            message_type = 7
+    else:
+        message_type = 0
 
     # Field 25: messageStubParameters
     stub_params: list[str] = []
@@ -382,8 +409,6 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         for sp in fields[25]:
             if isinstance(sp[1], bytes):
                 stub_params.append(sp[1].decode("utf-8", errors="replace"))
-
-    message_type = 7 if stub_type is not None else 0
     text_data = None
     media_info = None
     vcard = None
@@ -1054,6 +1079,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         or link_preview_info is not None
         or embedded_poll_votes
         or stub_type is not None
+        or message_type in (15, 64)
     )
 
     return {
@@ -3291,6 +3317,17 @@ def apply_messages_bin(
         if schema_cache is not None:
             schema_cache["message_system"] = {"exists"} if has_message_system_table else set()
 
+    if schema_cache is not None and "message_revoked" in schema_cache:
+        has_message_revoked_table = bool(schema_cache["message_revoked"])
+    else:
+        has_message_revoked_table = bool(
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_revoked'"
+            ).fetchone()
+        )
+        if schema_cache is not None:
+            schema_cache["message_revoked"] = {"exists"} if has_message_revoked_table else set()
+
     # Fast batch deletion of conflicting messages by key_id
     existing_media_paths: dict[str, str] = {}
     existing_row_ids: dict[str, int] = {}
@@ -3397,6 +3434,7 @@ def apply_messages_bin(
         )
 
         is_stub = msg.get("stub_type") is not None
+        is_revoked = msg["message_type"] in (15, 64)
         is_add_on = bool(
             msg.get("reaction_info")
             or msg.get("pin_info")
@@ -3407,6 +3445,7 @@ def apply_messages_bin(
         )
         is_conversational = bool(
             msg["message_type"] != 7
+            and not is_revoked
             and (
                 (msg.get("text_data") and msg["text_data"].strip())
                 or msg.get("media_info")
@@ -3417,7 +3456,7 @@ def apply_messages_bin(
             )
         )
 
-        if not is_conversational and not is_stub and not is_add_on:
+        if not is_conversational and not is_stub and not is_add_on and not is_revoked:
             # Control / empty / status frame without conversational message or system stub.
             # If user receipts are present on an existing message, attach them without inserting a blank message.
             if msg.get("user_receipts") and msg.get("key_id"):
@@ -3455,7 +3494,7 @@ def apply_messages_bin(
         chat_jid_row_id = resolve_or_create_jid(conn, remote_jid, logger, jid_cache)
         chat_row_id = resolve_or_create_chat(conn, chat_jid_row_id, logger, chat_cache)
 
-        if is_conversational or is_group:
+        if is_conversational or is_group or is_revoked:
             chats_to_unhide.add(chat_row_id)
 
         # Resolve sender: In Android WhatsApp, 1-on-1 messages always have sender_jid_row_id = 0
@@ -3497,7 +3536,21 @@ def apply_messages_bin(
         msg_row_id = cur.lastrowid
         inserted += 1
 
-        if is_stub and has_message_system_table and msg_row_id:
+        if is_revoked:
+            if has_message_revoked_table and msg_row_id and msg.get("key_id"):
+                try:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES (?, ?, ?, ?)",
+                        (msg_row_id, msg["key_id"], 0, msg["timestamp"]),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            if msg_row_id:
+                try:
+                    cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (msg_row_id,))
+                except sqlite3.OperationalError:
+                    pass
+        elif is_stub and has_message_system_table and msg_row_id and msg["message_type"] == 7:
             try:
                 cur.execute(
                     "INSERT OR REPLACE INTO message_system (message_row_id, action_type) VALUES (?, ?)",
