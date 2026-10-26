@@ -554,6 +554,10 @@
       width: fit-content;
       position: relative;
     }
+    .msg-media:not(.sticker):not(.audio):not(.vcard) {
+      min-width: 140px;
+      min-height: 100px;
+    }
     .msg-media img, .msg-media video {
       display: block;
       max-width: 100%;

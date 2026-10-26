@@ -1850,81 +1850,108 @@ def _hydrate_link_preview_rows(rows: list[dict], source_type: str) -> None:
                 row["link_url"] = m.group(0).rstrip(".,;:!?)'\"")
 
 
-def _backfill_recent_messages(archive_conn: sqlite3.Connection, rows: list) -> None:
-    if not rows:
+def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: list) -> None:
+    if not rows or not archive_target:
         return
-    cur_cols = {r[1] for r in archive_conn.execute("PRAGMA table_info(recent_messages)").fetchall()}
-    has_qmid = "quoted_msg_id" in cur_cols
-    has_lp = "link_title" in cur_cols and "has_thumbnail" in cur_cols
-    if has_lp:
-        sql = """
-            INSERT OR REPLACE INTO recent_messages
-                (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
-                 archive_path, media_type, media_name, text_body,
-                 quoted_text, quoted_sender, quoted_ts, quoted_msg_id, reactions,
-                 is_edited, edited_ts, is_view_once, link_title, link_desc, link_url,
-                 link_preview_type, has_thumbnail)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-    elif has_qmid:
-        sql = """
-            INSERT OR REPLACE INTO recent_messages
-                (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
-                 archive_path, media_type, media_name, text_body,
-                 quoted_text, quoted_sender, quoted_ts, quoted_msg_id, reactions,
-                 is_edited, edited_ts, is_view_once)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-    else:
-        sql = """
-            INSERT OR REPLACE INTO recent_messages
-                (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
-                 archive_path, media_type, media_name, text_body,
-                 quoted_text, quoted_sender, quoted_ts, reactions,
-                 is_edited, edited_ts, is_view_once)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-    keys = rows[0].keys()
-    params = []
-    for r in rows:
-        row_vals = [
-            r["chat_id"],
-            r["chat_type"],
-            r["msg_id"],
-            r["timestamp_ms"],
-            r["sender"],
-            r["from_me"],
-            r["archive_path"] if "archive_path" in keys else None,
-            r["media_type"],
-            r["media_name"] if "media_name" in keys else None,
-            r["text_body"],
-            r["quoted_text"] if "quoted_text" in keys else None,
-            r["quoted_sender"] if "quoted_sender" in keys else None,
-            r["quoted_ts"] if "quoted_ts" in keys else None,
-        ]
-        if has_qmid or has_lp:
-            row_vals.append(r["quoted_msg_id"] if "quoted_msg_id" in keys else None)
-        row_vals.extend(
-            [
-                r["reactions"] if "reactions" in keys else None,
-                r["is_edited"] if "is_edited" in keys else 0,
-                r["edited_ts"] if "edited_ts" in keys else None,
-                r["is_view_once"] if "is_view_once" in keys else 0,
-            ]
-        )
+    conn = None
+    should_close = False
+    try:
+        if isinstance(archive_target, (str, Path)):
+            p = Path(archive_target)
+            if not p.exists():
+                return
+            conn = sqlite3.connect(str(p), timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            should_close = True
+        else:
+            conn = archive_target
+        cur_cols = {r[1] for r in conn.execute("PRAGMA table_info(recent_messages)").fetchall()}
+        has_qmid = "quoted_msg_id" in cur_cols
+        has_lp = "link_title" in cur_cols and "has_thumbnail" in cur_cols
+        has_qthumb = "quoted_has_thumb" in cur_cols
         if has_lp:
+            qthumb_col = ", quoted_has_thumb" if has_qthumb else ""
+            qthumb_val = ", ?" if has_qthumb else ""
+            sql = f"""
+                INSERT OR REPLACE INTO recent_messages
+                    (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                     archive_path, media_type, media_name, text_body,
+                     quoted_text, quoted_sender, quoted_ts, quoted_msg_id{qthumb_col}, reactions,
+                     is_edited, edited_ts, is_view_once, link_title, link_desc, link_url,
+                     link_preview_type, has_thumbnail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        elif has_qmid:
+            qthumb_col = ", quoted_has_thumb" if has_qthumb else ""
+            qthumb_val = ", ?" if has_qthumb else ""
+            sql = f"""
+                INSERT OR REPLACE INTO recent_messages
+                    (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                     archive_path, media_type, media_name, text_body,
+                     quoted_text, quoted_sender, quoted_ts, quoted_msg_id{qthumb_col}, reactions,
+                     is_edited, edited_ts, is_view_once)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?)
+            """
+        else:
+            sql = """
+                INSERT OR REPLACE INTO recent_messages
+                    (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                     archive_path, media_type, media_name, text_body,
+                     quoted_text, quoted_sender, quoted_ts, reactions,
+                     is_edited, edited_ts, is_view_once)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        keys = rows[0].keys()
+        params = []
+        for r in rows:
+            row_vals = [
+                r["chat_id"],
+                r["chat_type"],
+                r["msg_id"],
+                r["timestamp_ms"],
+                r["sender"],
+                r["from_me"],
+                r["archive_path"] if "archive_path" in keys else None,
+                r["media_type"],
+                r["media_name"] if "media_name" in keys else None,
+                r["text_body"],
+                r["quoted_text"] if "quoted_text" in keys else None,
+                r["quoted_sender"] if "quoted_sender" in keys else None,
+                r["quoted_ts"] if "quoted_ts" in keys else None,
+            ]
+            if has_qmid or has_lp:
+                row_vals.append(r["quoted_msg_id"] if "quoted_msg_id" in keys else None)
+            if has_qthumb and (has_qmid or has_lp):
+                row_vals.append(r.get("quoted_has_thumb", 0) or 0)
             row_vals.extend(
                 [
-                    r["link_title"] if "link_title" in keys else None,
-                    r["link_desc"] if "link_desc" in keys else None,
-                    r["link_url"] if "link_url" in keys else None,
-                    r["link_preview_type"] if "link_preview_type" in keys else 0,
-                    r["has_thumbnail"] if "has_thumbnail" in keys else 0,
+                    r["reactions"] if "reactions" in keys else None,
+                    r["is_edited"] if "is_edited" in keys else 0,
+                    r["edited_ts"] if "edited_ts" in keys else None,
+                    r["is_view_once"] if "is_view_once" in keys else 0,
                 ]
             )
-        params.append(tuple(row_vals))
-    archive_conn.executemany(sql, params)
-    archive_conn.commit()
+            if has_lp:
+                row_vals.extend(
+                    [
+                        r["link_title"] if "link_title" in keys else None,
+                        r["link_desc"] if "link_desc" in keys else None,
+                        r["link_url"] if "link_url" in keys else None,
+                        r["link_preview_type"] if "link_preview_type" in keys else 0,
+                        r["has_thumbnail"] if "has_thumbnail" in keys else 0,
+                    ]
+                )
+            params.append(tuple(row_vals))
+        conn.executemany(sql, params)
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        if should_close and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _media_type_from_path(path: str) -> str:
@@ -3228,10 +3255,13 @@ _IOS_SELECT = f"""
             WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
             WHEN m.ZMESSAGETYPE IN (6, 10) THEN 'service'
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+            WHEN m.ZMESSAGETYPE = 5 THEN 'location'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
-            WHEN m.ZMESSAGETYPE = 38 THEN 'image'
-            WHEN m.ZMESSAGETYPE = 39 THEN 'video'
-            WHEN m.ZMESSAGETYPE = 53 THEN 'audio'
+            WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
+            WHEN m.ZMESSAGETYPE IN (3, 39) THEN 'video'
+            WHEN m.ZMESSAGETYPE IN (2, 53) THEN 'audio'
+            WHEN m.ZMESSAGETYPE = 8 THEN 'document'
+            WHEN m.ZMESSAGETYPE = 11 THEN 'gif'
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
             WHEN m.ZMESSAGETYPE = 7 THEN 'link'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
@@ -3327,11 +3357,12 @@ _IOS_SELECT = f"""
 _BASE_IOS_FILTER = """
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND (mi.ZMEDIALOCALPATH IS NOT NULL OR m.ZMESSAGETYPE IN (1, 2, 3, 5, 8, 11, 15, 23, 38, 39, 54) OR mi.ZTITLE IS NOT NULL))
         OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
         OR (m.ZMESSAGETYPE = 46)
+        OR (m.ZMESSAGETYPE = 7)
         OR (m.ZMESSAGETYPE IN (6, 10))
     )
 """
@@ -4541,7 +4572,7 @@ def create_app(output_root: Path, rescan: bool = False):
         globals()["_BASE_IOS_FILTER"] = f"""
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND mi.ZMEDIALOCALPATH IS NOT NULL)
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND (mi.ZMEDIALOCALPATH IS NOT NULL OR m.ZMESSAGETYPE IN (1, 2, 3, 5, 8, 11, 15, 23, 38, 39, 54) OR mi.ZTITLE IS NOT NULL))
         OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
@@ -4593,10 +4624,13 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
             {ios_service_case}
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+            WHEN m.ZMESSAGETYPE = 5 THEN 'location'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
-            WHEN m.ZMESSAGETYPE = 38 THEN 'image'
-            WHEN m.ZMESSAGETYPE = 39 THEN 'video'
-            WHEN m.ZMESSAGETYPE = 53 THEN 'audio'
+            WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
+            WHEN m.ZMESSAGETYPE IN (3, 39) THEN 'video'
+            WHEN m.ZMESSAGETYPE IN (2, 53) THEN 'audio'
+            WHEN m.ZMESSAGETYPE = 8 THEN 'document'
+            WHEN m.ZMESSAGETYPE = 11 THEN 'gif'
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
             WHEN m.ZMESSAGETYPE = 7 THEN 'link'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
@@ -5859,13 +5893,6 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("raw_msg_type", None)
             row.pop("member_jid", None)
 
-        if not before and not after:
-            threading.Thread(
-                target=_backfill_recent_messages,
-                args=(get_archive(), rows),
-                daemon=True,
-            ).start()
-
         _hydrate_poll_rows(rows, source_type, conn)
         _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
@@ -5878,6 +5905,14 @@ def create_app(output_root: Path, rescan: bool = False):
                 descending = after is None
                 rows = _merge_messages(rows, pres_rows, descending, limit)
         _resolve_quoted_msg_ids(rows, source_type, conn, pres)
+
+        if not before and not after:
+            threading.Thread(
+                target=_backfill_recent_messages,
+                args=(archive_db_path, [dict(r) for r in rows]),
+                daemon=True,
+            ).start()
+
         return jsonify(rows)
 
     # ---- API: messages around a timestamp ----------------------------------
