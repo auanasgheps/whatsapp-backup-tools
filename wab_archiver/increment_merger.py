@@ -424,6 +424,51 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
     is_view_once = 0
     is_ephemeral = 0
 
+    # Field 41: Embedded reactions (repeated Reaction in WMI)
+    embedded_reactions: list[ReactionRecord] = []
+    if 41 in fields and fields[41]:
+        for entry in fields[41]:
+            if not isinstance(entry[1], bytes):
+                continue
+            try:
+                rx_fields = parse_wire_fields(entry[1])
+                target_key = (
+                    parse_message_key(rx_fields[1][0][1])
+                    if 1 in rx_fields and isinstance(rx_fields[1][0][1], bytes)
+                    else {}
+                )
+                rx_emoji = (
+                    rx_fields.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                    if 2 in rx_fields and isinstance(rx_fields[2][0][1], bytes)
+                    else ""
+                )
+                rx_ts_raw = (
+                    rx_fields.get(4, [(0, 0)])[0][1]
+                    if 4 in rx_fields
+                    else (rx_fields.get(3, [(0, 0)])[0][1] if 3 in rx_fields else 0)
+                )
+                rx_sender_ts = (
+                    rx_ts_raw * 1000
+                    if 0 < rx_ts_raw < 10000000000
+                    else (rx_ts_raw if rx_ts_raw else timestamp_ms)
+                )
+                unread = rx_fields.get(5, [(0, 0)])[0][1] if 5 in rx_fields else 0
+                embedded_reactions.append(
+                    ReactionRecord(
+                        target_key_id=target_key.get("key_id", ""),
+                        target_remote_jid=target_key.get("remote_jid", ""),
+                        target_from_me=target_key.get("from_me", 0),
+                        reaction_key_id=target_key.get("key_id", ""),
+                        reactor_jid=target_key.get("participant", ""),
+                        emoji=rx_emoji,
+                        sender_ts=rx_sender_ts,
+                        is_revocation=(not rx_emoji),
+                        unread=unread,
+                    )
+                )
+            except (ValueError, Exception):
+                pass
+
     # Field 45: Embedded poll votes (in poll creation/update WMI envelope)
     embedded_poll_votes: list[dict[str, Any]] = []
     if 45 in fields and fields[45]:
@@ -828,10 +873,11 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                     else None
                 )
 
-        # 46 or 48: reactionMessage (Tag 46 official, 48 backwards-compat)
-        elif 46 in msg_fields or 48 in msg_fields:
+        # 16, 46, 48, 56: reactionMessage (Tag 16 standard, 46 official, 48 backwards-compat, 56 encReactionMessage)
+        elif any(t in msg_fields for t in (16, 46, 48, 56)):
             message_type = 25
-            react_payload = msg_fields[46][0][1] if 46 in msg_fields else msg_fields[48][0][1]
+            rx_tag = next(t for t in (16, 46, 48, 56) if t in msg_fields)
+            react_payload = msg_fields[rx_tag][0][1]
             react_fields = parse_wire_fields(react_payload)
             target_key = (
                 parse_message_key(react_fields[1][0][1])
@@ -840,14 +886,24 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
             )
             text_data = (
                 react_fields.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
-                if 2 in react_fields
+                if 2 in react_fields and isinstance(react_fields[2][0][1], bytes)
                 else ""
             )
-            sender_ts = react_fields.get(4, [(0, 0)])[0][1] if 4 in react_fields else timestamp_ms
+            sender_ts_raw = (
+                react_fields.get(4, [(0, 0)])[0][1]
+                if 4 in react_fields
+                else (react_fields.get(3, [(0, 0)])[0][1] if 3 in react_fields else 0)
+            )
+            sender_ts = (
+                sender_ts_raw * 1000
+                if 0 < sender_ts_raw < 10000000000
+                else (sender_ts_raw if sender_ts_raw else timestamp_ms)
+            )
             reaction_info = {
                 "target_key_id": target_key.get("key_id", ""),
                 "target_remote_jid": target_key.get("remote_jid", ""),
                 "target_from_me": target_key.get("from_me", 0),
+                "target_participant": target_key.get("participant", ""),
                 "emoji": text_data,
                 "sender_ts": sender_ts,
             }
@@ -1078,6 +1134,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         or edit_info is not None
         or link_preview_info is not None
         or embedded_poll_votes
+        or embedded_reactions
         or stub_type is not None
         or message_type in (15, 64)
     )
@@ -1096,6 +1153,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         "local_path": local_path,
         "vcard": vcard,
         "reaction_info": reaction_info,
+        "embedded_reactions": embedded_reactions,
         "poll_info": poll_info,
         "poll_vote_info": poll_vote_info,
         "pin_info": pin_info,
@@ -1997,6 +2055,32 @@ def find_message_row_id(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class ReactionRecord:
+    target_key_id: str
+    target_remote_jid: str
+    target_from_me: int
+    reaction_key_id: str
+    reactor_jid: str
+    emoji: str
+    sender_ts: int
+    is_revocation: bool
+    unread: int
+
+    def __getitem__(self, item: str) -> Any:
+        if item == "from_me":
+            return self.target_from_me
+        if item == "participant":
+            return self.reactor_jid
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        try:
+            return self[item]
+        except AttributeError:
+            return default
+
+
 @dataclass(slots=True)
 class PendingAddOn:
     add_on_type: str
@@ -2007,6 +2091,45 @@ class PendingAddOn:
     timestamp: int
     key_id: str
     chat_row_id: int | None
+
+
+def get_reaction_add_on_type(
+    conn: sqlite3.Connection,
+    schema_cache: dict[str, set[str]] | None,
+) -> int:
+    """Introspect host schema to find native message_add_on_type for reactions (56 or 1)."""
+    if schema_cache is not None and "_reaction_add_on_type" in schema_cache:
+        return schema_cache["_reaction_add_on_type"]
+
+    detected = 1
+    try:
+        row = conn.execute(
+            """
+            SELECT ao.message_add_on_type
+            FROM message_add_on ao
+            JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+            WHERE ao.message_add_on_type IS NOT NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        if row and row[0] is not None:
+            detected = int(row[0])
+        else:
+            props_row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'props'"
+            ).fetchone()
+            if props_row:
+                ver_row = conn.execute(
+                    "SELECT 1 FROM props WHERE key = 'msgtore_db_schema_version' LIMIT 1"
+                ).fetchone()
+                if ver_row:
+                    detected = 56
+    except sqlite3.OperationalError:
+        detected = 1
+
+    if schema_cache is not None:
+        schema_cache["_reaction_add_on_type"] = detected
+    return detected
 
 
 def apply_reaction_record(
@@ -2034,37 +2157,34 @@ def apply_reaction_record(
     if not add_on_cols:
         return False
 
+    target_type = get_reaction_add_on_type(conn, schema_cache)
     cur = conn.cursor()
     emoji = reaction_info.get("emoji", "")
     sender_ts = reaction_info.get("sender_ts", timestamp)
 
-    # If reaction is empty string, reaction was revoked/cleared
-    if not emoji:
-        cur.execute(
-            "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 1",
-            (parent_row_id, sender_jid_row_id),
-        )
-        return True
-
-    # Delete any prior reaction by this sender on this message
+    # Delete any prior reaction or revocation by this sender on this message
     reaction_cols = get_table_columns(conn, "message_add_on_reaction", schema_cache)
     if reaction_cols:
         cur.execute(
             "DELETE FROM message_add_on_reaction WHERE message_add_on_row_id IN ("
-            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 1)",
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1))",
             (parent_row_id, sender_jid_row_id),
         )
     cur.execute(
-        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 1",
+        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1)",
         (parent_row_id, sender_jid_row_id),
     )
+
+    # If reaction is empty string, reaction was revoked/cleared
+    if not emoji:
+        return True
 
     row_map = {
         "parent_message_row_id": parent_row_id,
         "from_me": from_me,
         "sender_jid_row_id": sender_jid_row_id,
-        "status": 0,
-        "message_add_on_type": 1,
+        "status": 4 if from_me else 17,
+        "message_add_on_type": target_type,
         "timestamp": timestamp,
         "key_id": key_id or "",
         "chat_row_id": chat_row_id,
@@ -2081,6 +2201,81 @@ def apply_reaction_record(
             (add_on_id, emoji, sender_ts),
         )
     return True
+
+
+def apply_embedded_reactions(
+    conn: sqlite3.Connection,
+    parent_row_id: int,
+    chat_row_id: int | None,
+    is_group: bool,
+    embedded_reactions: list[ReactionRecord | dict],
+    schema_cache: dict[str, set[str]] | None,
+    logger: logging.Logger,
+    jid_cache: dict[str, int],
+) -> int:
+    """Apply embedded reactions from WMI Tag 41 to message_add_on and message_add_on_reaction."""
+    add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
+    if not add_on_cols:
+        return 0
+    reaction_cols = get_table_columns(conn, "message_add_on_reaction", schema_cache)
+    target_type = get_reaction_add_on_type(conn, schema_cache)
+
+    applied_count = 0
+    cur = conn.cursor()
+    for rx in embedded_reactions:
+        from_me = int(rx.get("from_me", 0) or rx.get("target_from_me", 0))
+        part = rx.get("participant", "")
+        if from_me == 1 or not is_group:
+            rx_sender_id = -1
+        elif part:
+            rx_sender_id = resolve_or_create_jid(conn, part, logger, jid_cache)
+        else:
+            rx_sender_id = -1
+
+        emoji = rx.get("emoji", "")
+        sender_ts = rx.get("sender_ts", 0)
+        rx_key_id = rx.get("reaction_key_id") or rx.get("target_key_id") or ""
+
+        # Clean prior reaction or revocation
+        if reaction_cols:
+            cur.execute(
+                "DELETE FROM message_add_on_reaction WHERE message_add_on_row_id IN ("
+                "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1))",
+                (parent_row_id, rx_sender_id),
+            )
+        cur.execute(
+            "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1)",
+            (parent_row_id, rx_sender_id),
+        )
+
+        if not emoji:
+            applied_count += 1
+            continue
+
+        row_map = {
+            "parent_message_row_id": parent_row_id,
+            "from_me": from_me,
+            "sender_jid_row_id": rx_sender_id,
+            "status": 4 if from_me else 17,
+            "message_add_on_type": target_type,
+            "timestamp": sender_ts,
+            "key_id": rx_key_id,
+            "chat_row_id": chat_row_id,
+        }
+        valid_cols = [c for c in row_map if c in add_on_cols]
+        cur.execute(
+            f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
+            [row_map[c] for c in valid_cols],
+        )
+        add_on_id = cur.lastrowid
+        if reaction_cols and add_on_id:
+            cur.execute(
+                "INSERT INTO message_add_on_reaction (message_add_on_row_id, reaction, sender_timestamp) VALUES (?, ?, ?)",
+                (add_on_id, emoji, sender_ts),
+            )
+        applied_count += 1
+
+    return applied_count
 
 
 def decrypt_poll_vote_payload(
@@ -3514,6 +3709,36 @@ def apply_messages_bin(
         else:
             add_on_sender_id = -1
 
+        # Standalone reaction message: apply add-on directly without inserting phantom message row
+        if msg.get("reaction_info"):
+            applied = apply_reaction_record(
+                conn,
+                msg["reaction_info"],
+                add_on_sender_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
+                msg.get("key_id", ""),
+                chat_row_id,
+            )
+            if not applied and msg["reaction_info"].get("target_key_id"):
+                pending_add_ons.append(
+                    PendingAddOn(
+                        add_on_type="reaction",
+                        target_key_id=msg["reaction_info"]["target_key_id"],
+                        msg=msg,
+                        sender_jid_row_id=add_on_sender_id,
+                        from_me=msg["from_me"],
+                        timestamp=msg["timestamp"],
+                        key_id=msg.get("key_id", ""),
+                        chat_row_id=chat_row_id,
+                    )
+                )
+            inserted += 1
+            continue
+
         # Fallback delete for messages without key_id
         if not msg.get("key_id") and "chat_row_id" in msg_cols:
             cur.execute(
@@ -3559,7 +3784,9 @@ def apply_messages_bin(
             except sqlite3.OperationalError:
                 pass
 
-        old_id = existing_row_ids.get(msg.get("key_id", ""))
+        old_id = existing_row_ids.get(msg.get("key_id", "")) or (
+            key_cache.get(msg["key_id"]) if msg.get("key_id") else None
+        )
         if old_id and msg_row_id and old_id != msg_row_id:
             try:
                 cur.execute(
@@ -3568,6 +3795,11 @@ def apply_messages_bin(
                 )
             except sqlite3.OperationalError:
                 pass
+            if msg.get("key_id") and key_cache.get(msg["key_id"]) == old_id:
+                try:
+                    cur.execute("DELETE FROM message WHERE _id = ?", (old_id,))
+                except sqlite3.OperationalError:
+                    pass
             try:
                 cur.execute(
                     "UPDATE poll_name_hash_history SET poll_message_row_id = ? WHERE poll_message_row_id = ?",
@@ -3818,6 +4050,47 @@ def apply_messages_bin(
                     )
                 )
 
+        # Apply embedded reactions from WMI Tag 41 if present
+        if msg.get("embedded_reactions") and msg_row_id:
+            apply_embedded_reactions(
+                conn,
+                msg_row_id,
+                chat_row_id,
+                is_group,
+                msg["embedded_reactions"],
+                schema_cache,
+                logger,
+                jid_cache,
+            )
+        elif msg.get("embedded_reactions") and msg.get("key_id"):
+            parent_id = key_cache.get(msg["key_id"]) or find_message_row_id(
+                conn, msg["key_id"], key_cache
+            )
+            if parent_id:
+                apply_embedded_reactions(
+                    conn,
+                    parent_id,
+                    chat_row_id,
+                    is_group,
+                    msg["embedded_reactions"],
+                    schema_cache,
+                    logger,
+                    jid_cache,
+                )
+            else:
+                pending_add_ons.append(
+                    PendingAddOn(
+                        add_on_type="embedded_reactions",
+                        target_key_id=msg["key_id"],
+                        msg=msg,
+                        sender_jid_row_id=None,
+                        from_me=msg["from_me"],
+                        timestamp=msg["timestamp"],
+                        key_id=msg.get("key_id", ""),
+                        chat_row_id=chat_row_id,
+                    )
+                )
+
         # Apply pin-in-chat add-on if present (Pass 1)
         if msg.get("pin_info"):
             applied = apply_pin_in_chat(
@@ -3925,6 +4198,29 @@ def apply_messages_bin(
                     pending.key_id,
                     pending.chat_row_id,
                 )
+            elif pending.add_on_type == "embedded_reactions":
+                p_id = key_cache.get(pending.target_key_id) or find_message_row_id(
+                    conn, pending.target_key_id, key_cache
+                )
+                if p_id:
+                    p_remote_jid = pending.msg.get("remote_jid", "")
+                    p_is_group = bool(
+                        p_remote_jid.endswith("@g.us")
+                        or p_remote_jid.endswith("@temp")
+                        or ("@" in p_remote_jid and p_remote_jid.split("@", 1)[1] == "g.us")
+                    )
+                    applied = bool(
+                        apply_embedded_reactions(
+                            conn,
+                            p_id,
+                            pending.chat_row_id,
+                            p_is_group,
+                            pending.msg.get("embedded_reactions", []),
+                            schema_cache,
+                            logger,
+                            jid_cache,
+                        )
+                    )
             elif pending.add_on_type == "pin":
                 applied = apply_pin_in_chat(
                     conn,

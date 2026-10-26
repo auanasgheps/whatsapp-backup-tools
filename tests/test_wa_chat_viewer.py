@@ -1443,6 +1443,49 @@ class TestAndroidReactions:
         wa_conn.close()
         arc_conn.close()
 
+    def test_recent_messages_self_healing_reactions(self, tmp_path):
+        """When recent_messages has null reactions and reactions_cache is empty, fallback to wa_conn self-heals."""
+        app = self._setup(tmp_path)
+        app.config["TESTING"] = True
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        # Prime recent_messages with null reactions and ensure reactions_cache is wiped
+        arc_conn = sqlite3.connect(str(archive_path))
+        arc_conn.execute("DELETE FROM reactions_cache")
+        arc_conn.execute("DELETE FROM recent_messages")
+        arc_conn.execute("""
+            INSERT INTO recent_messages (
+                chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, media_type, text_body, reactions
+            ) VALUES ('123456789', 'contact', 1, 1700000000000, '+123456789', 0, 'text', 'Hello from cached', NULL)
+        """)
+        arc_conn.commit()
+        arc_conn.close()
+
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            data = resp.get_json()
+
+        assert len(data) == 1
+        msg = data[0]
+        assert msg["msg_id"] == 1
+        # Must be self-healed from wa_conn (message 1 has two thumbs up in _setup)
+        assert msg["reactions"] == "👍,👍"
+
+        # Verify write-through persistence to reactions_cache and recent_messages
+        arc_conn = sqlite3.connect(str(archive_path))
+        cached = arc_conn.execute(
+            "SELECT reactions FROM reactions_cache WHERE msg_id = 1"
+        ).fetchone()
+        assert cached is not None
+        assert cached[0] == "👍,👍"
+
+        recent = arc_conn.execute(
+            "SELECT reactions FROM recent_messages WHERE msg_id = 1"
+        ).fetchone()
+        assert recent is not None
+        assert recent[0] == "👍,👍"
+        arc_conn.close()
+
 
 def _encode_varint(value: int) -> bytes:
     """Encode a non-negative integer as a protobuf varint."""

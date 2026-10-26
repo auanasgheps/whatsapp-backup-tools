@@ -5801,9 +5801,38 @@ def create_app(output_root: Path, rescan: bool = False):
                             .fetchall()
                         )
                         rx_map = {r["msg_id"]: r["reactions"] for r in rx_cache}
+                        still_missing = [mid for mid in missing_rx if mid not in rx_map]
+                        if still_missing and get_wa() is not None and has_reactions:
+                            wa_rows = (
+                                get_wa()
+                                .execute(
+                                    f"""
+                                    SELECT ao.parent_message_row_id AS msg_id,
+                                           GROUP_CONCAT(r.reaction) AS reactions
+                                    FROM message_add_on ao
+                                    JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+                                    WHERE ao.parent_message_row_id IN ({",".join("?" * len(still_missing))})
+                                    GROUP BY ao.parent_message_row_id
+                                """,
+                                    still_missing,
+                                )
+                                .fetchall()
+                            )
+                            for wr in wa_rows:
+                                rx_map[wr["msg_id"]] = wr["reactions"]
+                            if wa_rows:
+                                get_archive().executemany(
+                                    "INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions) VALUES (?, ?, ?)",
+                                    [(chat_id, wr["msg_id"], wr["reactions"]) for wr in wa_rows],
+                                )
                         for row in rows:
                             if row["msg_id"] in rx_map:
                                 row["reactions"] = rx_map[row["msg_id"]]
+                                get_archive().execute(
+                                    "UPDATE recent_messages SET reactions = ? WHERE chat_id = ? AND msg_id = ?",
+                                    (row["reactions"], chat_id, row["msg_id"]),
+                                )
+                        get_archive().commit()
                     _hydrate_poll_rows(rows, source_type, get_wa())
                     _hydrate_quoted_rows(rows, source_type, get_wa())
                     _hydrate_link_preview_rows(rows, source_type)
