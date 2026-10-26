@@ -5211,3 +5211,352 @@ def test_step6b_phantom_and_shadow_cleanup(tmp_path):
     assert c9[0] == 0
     assert c9[1] == 5
     conn.close()
+
+
+def test_decode_wmi_embedded_reactions_tag41():
+    """Verify decode_wmi extracts repeated reactions from WMI Tag 41."""
+    # Build reaction 1 (incoming from participant in group)
+    rx1_key = (
+        _build_field(1, 2, b"12345678@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"RX_KEY_1")
+        + _build_field(4, 2, b"5550200@s.whatsapp.net")
+    )
+    rx1_bytes = (
+        _build_field(1, 2, rx1_key)
+        + _build_field(2, 2, "👍".encode())
+        + _build_field(4, 0, 1729000150000)
+    )
+
+    # Build reaction 2 (outgoing from local user)
+    rx2_key = (
+        _build_field(1, 2, b"12345678@g.us")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"RX_KEY_2")
+    )
+    rx2_bytes = (
+        _build_field(1, 2, rx2_key)
+        + _build_field(2, 2, "❤️".encode())
+        + _build_field(4, 0, 1729000160000)
+    )
+
+    # Outer message carrying tag 41
+    key_bytes = (
+        _build_field(1, 2, b"12345678@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"PARENT_KEY_WMI")
+        + _build_field(4, 2, b"5550100@s.whatsapp.net")
+    )
+    msg_bytes = _build_field(1, 2, b"Parent message text")
+    wmi_bytes = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000100)
+        + _build_field(41, 2, rx1_bytes)
+        + _build_field(41, 2, rx2_bytes)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_bytes)
+    assert decoded["key_id"] == "PARENT_KEY_WMI"
+    assert decoded["text_data"] == "Parent message text"
+    assert len(decoded["embedded_reactions"]) == 2
+
+    rx1 = decoded["embedded_reactions"][0]
+    assert isinstance(rx1, increment_merger.ReactionRecord)
+    assert rx1.reaction_key_id == "RX_KEY_1"
+    assert rx1.emoji == "👍"
+    assert rx1.is_revocation is False
+    assert rx1["reaction_key_id"] == "RX_KEY_1"
+    assert rx1["emoji"] == "👍"
+    assert rx1["from_me"] == 0
+    assert rx1["participant"] == "5550200@s.whatsapp.net"
+    assert rx1["sender_ts"] == 1729000150000
+
+    rx2 = decoded["embedded_reactions"][1]
+    assert isinstance(rx2, increment_merger.ReactionRecord)
+    assert rx2.reaction_key_id == "RX_KEY_2"
+    assert rx2.emoji == "❤️"
+    assert rx2.is_revocation is False
+    assert rx2["reaction_key_id"] == "RX_KEY_2"
+    assert rx2["emoji"] == "❤️"
+    assert rx2["from_me"] == 1
+    assert rx2["sender_ts"] == 1729000160000
+
+
+def test_decode_wmi_reaction_tags_16_and_56():
+    """Verify decode_wmi supports reactionMessage tags 16 and 56."""
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"TARGET_MSG_123")
+    )
+    rx_payload = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 2, "🔥".encode())
+        + _build_field(3, 0, 1729000200000)
+    )
+
+    # Test Tag 16
+    wmi_tag16 = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"REACT_16"),
+        )
+        + _build_field(2, 2, _build_field(16, 2, rx_payload))
+        + _build_field(3, 0, 1729000200)
+    )
+    dec16 = increment_merger.decode_wmi(wmi_tag16)
+    assert dec16["reaction_info"] is not None
+    assert dec16["reaction_info"]["target_key_id"] == "TARGET_MSG_123"
+    assert dec16["reaction_info"]["emoji"] == "🔥"
+    assert dec16["reaction_info"]["sender_ts"] == 1729000200000
+
+    # Test Tag 56 (encReactionMessage)
+    wmi_tag56 = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"REACT_56"),
+        )
+        + _build_field(2, 2, _build_field(56, 2, rx_payload))
+        + _build_field(3, 0, 1729000200)
+    )
+    dec56 = increment_merger.decode_wmi(wmi_tag56)
+    assert dec56["reaction_info"] is not None
+    assert dec56["reaction_info"]["target_key_id"] == "TARGET_MSG_123"
+    assert dec56["reaction_info"]["emoji"] == "🔥"
+
+
+def test_apply_messages_bin_embedded_reactions_replay(tmp_path):
+    """Verify apply_messages_bin applies Tag 41 embedded reactions into message_add_on."""
+    conn = _make_two_pass_test_db(tmp_path / "test_embedded_rx.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    rx_key = (
+        _build_field(1, 2, b"120363000@g.us")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"RX_KEY_STANZA")
+        + _build_field(4, 2, b"5550300@s.whatsapp.net")
+    )
+    rx_bytes = (
+        _build_field(1, 2, rx_key)
+        + _build_field(2, 2, "🎉".encode())
+        + _build_field(4, 0, 1729000120000)
+    )
+    wmi_parent = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"120363000@g.us")
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, b"MSG_WITH_REACTION")
+            + _build_field(4, 2, b"5550100@s.whatsapp.net"),
+        )
+        + _build_field(2, 2, _build_field(1, 2, b"Hooray!"))
+        + _build_field(3, 0, 1729000100)
+        + _build_field(41, 2, rx_bytes)
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 1
+
+    cur = conn.cursor()
+    parent_id = cur.execute(
+        "SELECT _id FROM message WHERE key_id = 'MSG_WITH_REACTION'"
+    ).fetchone()[0]
+
+    rx_rows = cur.execute(
+        """
+        SELECT ao.parent_message_row_id, r.reaction, r.sender_timestamp, ao.key_id, ao.from_me
+        FROM message_add_on ao
+        JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+        WHERE ao.parent_message_row_id = ?
+        """,
+        (parent_id,),
+    ).fetchall()
+
+    assert len(rx_rows) == 1
+    assert rx_rows[0][0] == parent_id
+    assert rx_rows[0][1] == "🎉"
+    assert rx_rows[0][2] == 1729000120000
+    assert rx_rows[0][3] == "RX_KEY_STANZA"
+    assert rx_rows[0][4] == 0
+    conn.close()
+
+
+def test_apply_messages_bin_embedded_reactions_native_type_56(tmp_path):
+    """Verify apply_messages_bin writes message_add_on_type = 56 when host is real WhatsApp DB."""
+    conn = _make_two_pass_test_db(tmp_path / "test_native_56.db")
+    # Simulate real WhatsApp DB props
+    conn.execute("CREATE TABLE props (_id INTEGER PRIMARY KEY, key TEXT UNIQUE, value TEXT)")
+    conn.execute(
+        "INSERT INTO props (key, value) VALUES ('msgtore_db_schema_version', '1050680913')"
+    )
+    conn.commit()
+
+    bin_path = str(tmp_path / "messages.bin")
+    rx_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"RX_56_KEY")
+    )
+    rx_bytes = (
+        _build_field(1, 2, rx_key)
+        + _build_field(2, 2, "👏".encode())
+        + _build_field(4, 0, 1729000110000)
+    )
+    wmi = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"MSG_TYPE_56"),
+        )
+        + _build_field(2, 2, _build_field(1, 2, b"Great job!"))
+        + _build_field(3, 0, 1729000100)
+        + _build_field(41, 2, rx_bytes)
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi)) + wmi)
+
+    schema_cache = {}
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    row = cur.execute(
+        """
+        SELECT ao.message_add_on_type, r.reaction
+        FROM message_add_on ao
+        JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+        WHERE ao.key_id = 'RX_56_KEY'
+        """
+    ).fetchone()
+
+    assert row is not None
+    assert row[0] == 56
+    assert row[1] == "👏"
+    conn.close()
+
+
+def test_apply_messages_bin_embedded_reaction_revocation(tmp_path):
+    """Verify that an embedded reaction with empty string revokes previously added reaction."""
+    conn = _make_two_pass_test_db(tmp_path / "test_revocation.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 1: message with thumbs up reaction
+    rx_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"RX_REVOKE_KEY")
+    )
+    rx_add = (
+        _build_field(1, 2, rx_key)
+        + _build_field(2, 2, "👍".encode())
+        + _build_field(4, 0, 1729000100000)
+    )
+    wmi_add = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"MSG_REVOKE_PARENT"),
+        )
+        + _build_field(2, 2, _build_field(1, 2, b"Message to react and revoke"))
+        + _build_field(3, 0, 1729000100)
+        + _build_field(41, 2, rx_add)
+    )
+
+    # Frame 2: message with empty string reaction (revocation)
+    rx_clear = (
+        _build_field(1, 2, rx_key) + _build_field(2, 2, b"") + _build_field(4, 0, 1729000150000)
+    )
+    wmi_clear = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"MSG_REVOKE_PARENT"),
+        )
+        + _build_field(2, 2, _build_field(1, 2, b"Message to react and revoke"))
+        + _build_field(3, 0, 1729000100)
+        + _build_field(41, 2, rx_clear)
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_add)) + wmi_add)
+        f.write(_encode_varint(len(wmi_clear)) + wmi_clear)
+
+    schema_cache = {}
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    # Reactions must be cleared
+    count = cur.execute("SELECT COUNT(*) FROM message_add_on_reaction").fetchone()[0]
+    assert count == 0
+    count_ao = cur.execute("SELECT COUNT(*) FROM message_add_on").fetchone()[0]
+    assert count_ao == 0
+    conn.close()
+
+
+def test_standalone_reaction_does_not_insert_dummy_message(tmp_path):
+    """Verify that standalone reaction messages do not insert fake text bubbles into message table."""
+    conn = _make_two_pass_test_db(tmp_path / "test_no_dummy_msg.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Parent message
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "PARENT_NO_DUMMY", "Authentic chat message", 0, 1729000100
+    )
+    # Frame 1: Standalone reaction message
+    wmi_react = _build_reaction_wmi(
+        "5550100@s.whatsapp.net", "REACT_STANDALONE", "PARENT_NO_DUMMY", "🔥", 1729000200
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+        f.write(_encode_varint(len(wmi_react)) + wmi_react)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 2
+
+    cur = conn.cursor()
+    # Parent message must exist
+    parent_row = cur.execute(
+        "SELECT _id, text_data FROM message WHERE key_id = 'PARENT_NO_DUMMY'"
+    ).fetchone()
+    assert parent_row is not None
+    assert parent_row[1] == "Authentic chat message"
+
+    # Reaction must exist in message_add_on
+    rx_row = cur.execute(
+        "SELECT r.reaction FROM message_add_on ao JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id WHERE ao.parent_message_row_id = ?",
+        (parent_row[0],),
+    ).fetchone()
+    assert rx_row is not None
+    assert rx_row[0] == "🔥"
+
+    # Standalone reaction key REACT_STANDALONE must NOT exist in message table
+    assert cur.execute("SELECT 1 FROM message WHERE key_id = 'REACT_STANDALONE'").fetchone() is None
+    # Only 1 authentic message exists in the message table
+    assert cur.execute("SELECT COUNT(*) FROM message").fetchone()[0] == 1
+    conn.close()
