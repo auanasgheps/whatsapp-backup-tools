@@ -2162,17 +2162,17 @@ def apply_reaction_record(
     emoji = reaction_info.get("emoji", "")
     sender_ts = reaction_info.get("sender_ts", timestamp)
 
-    # Delete any prior reaction or revocation by this sender on this message
+    # Delete any prior reaction or revocation by this sender and from_me on this message
     reaction_cols = get_table_columns(conn, "message_add_on_reaction", schema_cache)
     if reaction_cols:
         cur.execute(
             "DELETE FROM message_add_on_reaction WHERE message_add_on_row_id IN ("
-            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1))",
-            (parent_row_id, sender_jid_row_id),
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1))",
+            (parent_row_id, from_me, sender_jid_row_id),
         )
     cur.execute(
-        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1)",
-        (parent_row_id, sender_jid_row_id),
+        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1)",
+        (parent_row_id, from_me, sender_jid_row_id),
     )
 
     # If reaction is empty string, reaction was revoked/cleared
@@ -2228,7 +2228,10 @@ def apply_embedded_reactions(
         if from_me == 1 or not is_group:
             rx_sender_id = -1
         elif part:
-            rx_sender_id = resolve_or_create_jid(conn, part, logger, jid_cache)
+            try:
+                rx_sender_id = resolve_or_create_jid(conn, part, logger, jid_cache)
+            except (ValueError, Exception):
+                rx_sender_id = -1
         else:
             rx_sender_id = -1
 
@@ -2236,16 +2239,16 @@ def apply_embedded_reactions(
         sender_ts = rx.get("sender_ts", 0)
         rx_key_id = rx.get("reaction_key_id") or rx.get("target_key_id") or ""
 
-        # Clean prior reaction or revocation
+        # Clean prior reaction or revocation for this specific reactor and from_me state
         if reaction_cols:
             cur.execute(
                 "DELETE FROM message_add_on_reaction WHERE message_add_on_row_id IN ("
-                "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1))",
-                (parent_row_id, rx_sender_id),
+                "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1))",
+                (parent_row_id, from_me, rx_sender_id),
             )
         cur.execute(
-            "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1)",
-            (parent_row_id, rx_sender_id),
+            "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type IN (56, 1)",
+            (parent_row_id, from_me, rx_sender_id),
         )
 
         if not emoji:
@@ -2382,28 +2385,31 @@ def apply_embedded_poll_votes(
         if not is_group or from_me == 1:
             s_jid_id = -1
         elif part:
-            s_jid_id = resolve_or_create_jid(conn, part, logger, jid_cache)
+            try:
+                s_jid_id = resolve_or_create_jid(conn, part, logger, jid_cache)
+            except (ValueError, Exception):
+                s_jid_id = -1
         else:
             s_jid_id = -1
 
         v_ts = v.get("sender_ts", 0)
         sel_hashes = v.get("selected_option_hashes", [])
 
-        # Delete prior vote for this sender on this poll
+        # Delete prior vote for this sender and from_me on this poll
         cur.execute(
             "DELETE FROM message_add_on_poll_vote_selected_option WHERE message_add_on_row_id IN ("
-            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
-            (parent_row_id, s_jid_id),
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
+            (parent_row_id, from_me, s_jid_id),
         )
         if vote_cols:
             cur.execute(
                 "DELETE FROM message_add_on_poll_vote WHERE message_add_on_row_id IN ("
-                "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
-                (parent_row_id, s_jid_id),
+                "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
+                (parent_row_id, from_me, s_jid_id),
             )
         cur.execute(
-            "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67",
-            (parent_row_id, s_jid_id),
+            "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67",
+            (parent_row_id, from_me, s_jid_id),
         )
 
         row_map = {
@@ -2572,18 +2578,18 @@ def apply_poll_vote(
     if vote_opt_cols:
         cur.execute(
             "DELETE FROM message_add_on_poll_vote_selected_option WHERE message_add_on_row_id IN ("
-            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
-            (parent_row_id, sender_jid_row_id),
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
+            (parent_row_id, from_me, sender_jid_row_id),
         )
     if vote_cols:
         cur.execute(
             "DELETE FROM message_add_on_poll_vote WHERE message_add_on_row_id IN ("
-            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
-            (parent_row_id, sender_jid_row_id),
+            "SELECT _id FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67)",
+            (parent_row_id, from_me, sender_jid_row_id),
         )
     cur.execute(
-        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67",
-        (parent_row_id, sender_jid_row_id),
+        "DELETE FROM message_add_on WHERE parent_message_row_id = ? AND from_me = ? AND sender_jid_row_id IS ? AND message_add_on_type = 67",
+        (parent_row_id, from_me, sender_jid_row_id),
     )
 
     row_map = {
@@ -3072,6 +3078,11 @@ def apply_message_deletions(
     has_quoted = bool(get_table_columns(conn, "message_quoted", schema_cache))
     has_receipt_user = bool(get_table_columns(conn, "receipt_user", schema_cache))
     has_secret = bool(get_table_columns(conn, "message_secret", schema_cache))
+    has_text = bool(get_table_columns(conn, "message_text", schema_cache))
+    has_thumb = bool(get_table_columns(conn, "message_thumbnail", schema_cache))
+    has_view_once = bool(get_table_columns(conn, "message_view_once_media", schema_cache))
+    has_revoked = bool(get_table_columns(conn, "message_revoked", schema_cache))
+    has_system = bool(get_table_columns(conn, "message_system", schema_cache))
 
     for i in range(0, len(verified_ids), chunk_size):
         chunk = verified_ids[i : i + chunk_size]
@@ -3149,6 +3160,31 @@ def apply_message_deletions(
         if has_receipt_user:
             cur.execute(
                 f"DELETE FROM receipt_user WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_text:
+            cur.execute(
+                f"DELETE FROM message_text WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_thumb:
+            cur.execute(
+                f"DELETE FROM message_thumbnail WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_view_once:
+            cur.execute(
+                f"DELETE FROM message_view_once_media WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_revoked:
+            cur.execute(
+                f"DELETE FROM message_revoked WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_system:
+            cur.execute(
+                f"DELETE FROM message_system WHERE message_row_id IN ({placeholders})",
                 chunk,
             )
 
@@ -3696,7 +3732,10 @@ def apply_messages_bin(
         if not is_group or msg["from_me"] == 1:
             sender_jid_row_id = 0
         elif msg.get("participant"):
-            sender_jid_row_id = resolve_or_create_jid(conn, msg["participant"], logger, jid_cache)
+            try:
+                sender_jid_row_id = resolve_or_create_jid(conn, msg["participant"], logger, jid_cache)
+            except (ValueError, Exception):
+                sender_jid_row_id = 0
         else:
             sender_jid_row_id = 0
 
@@ -3705,7 +3744,10 @@ def apply_messages_bin(
         if not is_group or msg["from_me"] == 1:
             add_on_sender_id = -1
         elif msg.get("participant"):
-            add_on_sender_id = resolve_or_create_jid(conn, msg["participant"], logger, jid_cache)
+            try:
+                add_on_sender_id = resolve_or_create_jid(conn, msg["participant"], logger, jid_cache)
+            except (ValueError, Exception):
+                add_on_sender_id = -1
         else:
             add_on_sender_id = -1
 
@@ -3736,6 +3778,128 @@ def apply_messages_bin(
                         chat_row_id=chat_row_id,
                     )
                 )
+            inserted += 1
+            continue
+
+        # Standalone pin message: apply add-on directly without inserting phantom message row
+        if msg.get("pin_info"):
+            applied = apply_pin_in_chat(
+                conn,
+                msg["pin_info"],
+                add_on_sender_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
+                msg.get("key_id", ""),
+                chat_row_id,
+            )
+            if not applied and msg["pin_info"].get("target_key_id"):
+                pending_add_ons.append(
+                    PendingAddOn(
+                        add_on_type="pin",
+                        target_key_id=msg["pin_info"]["target_key_id"],
+                        msg=msg,
+                        sender_jid_row_id=add_on_sender_id,
+                        from_me=msg["from_me"],
+                        timestamp=msg["timestamp"],
+                        key_id=msg.get("key_id", ""),
+                        chat_row_id=chat_row_id,
+                    )
+                )
+            inserted += 1
+            continue
+
+        # Standalone poll vote message: apply add-on directly without inserting phantom message row
+        if msg.get("poll_vote_info"):
+            applied = apply_poll_vote(
+                conn,
+                msg["poll_vote_info"],
+                add_on_sender_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
+                msg.get("key_id", ""),
+                chat_row_id,
+            )
+            if not applied and msg["poll_vote_info"].get("poll_key_id"):
+                pending_add_ons.append(
+                    PendingAddOn(
+                        add_on_type="poll_vote",
+                        target_key_id=msg["poll_vote_info"]["poll_key_id"],
+                        msg=msg,
+                        sender_jid_row_id=add_on_sender_id,
+                        from_me=msg["from_me"],
+                        timestamp=msg["timestamp"],
+                        key_id=msg.get("key_id", ""),
+                        chat_row_id=chat_row_id,
+                    )
+                )
+            inserted += 1
+            continue
+
+        # Standalone edit protocol message: apply edit directly without inserting phantom message row
+        if msg.get("edit_info"):
+            applied = apply_protocol_record(
+                conn,
+                msg,
+                add_on_sender_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
+                chat_row_id,
+            )
+            if not applied:
+                target_k = msg["edit_info"].get("target_key_id", "")
+                if target_k:
+                    pending_add_ons.append(
+                        PendingAddOn(
+                            add_on_type="edit",
+                            target_key_id=target_k,
+                            msg=msg,
+                            sender_jid_row_id=add_on_sender_id,
+                            from_me=msg["from_me"],
+                            timestamp=msg["timestamp"],
+                            key_id=msg.get("key_id", ""),
+                            chat_row_id=chat_row_id,
+                        )
+                    )
+            inserted += 1
+            continue
+
+        # Standalone protocol revoke message: apply revoke directly without inserting phantom message row
+        if msg.get("revoke_info") and not is_revoked:
+            applied = apply_protocol_record(
+                conn,
+                msg,
+                add_on_sender_id,
+                msg["from_me"],
+                msg["timestamp"],
+                key_cache,
+                schema_cache,
+                logger,
+                chat_row_id,
+            )
+            if not applied:
+                target_k = msg["revoke_info"].get("target_key_id", "")
+                if target_k:
+                    pending_add_ons.append(
+                        PendingAddOn(
+                            add_on_type="revoke",
+                            target_key_id=target_k,
+                            msg=msg,
+                            sender_jid_row_id=add_on_sender_id,
+                            from_me=msg["from_me"],
+                            timestamp=msg["timestamp"],
+                            key_id=msg.get("key_id", ""),
+                            chat_row_id=chat_row_id,
+                        )
+                    )
             inserted += 1
             continue
 
@@ -3829,6 +3993,70 @@ def apply_messages_bin(
                 )
             except sqlite3.OperationalError:
                 pass
+
+            # Cascade surrogate ID re-parenting across all auxiliary tables
+            try:
+                cur.execute("UPDATE receipt_user SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cur.execute("UPDATE message_edit_info SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cur.execute("UPDATE message_view_once_media SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cur.execute("UPDATE message_secret SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cur.execute("UPDATE message_association SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                cur.execute("UPDATE message_association SET parent_message_row_id = ? WHERE parent_message_row_id = ?", (msg_row_id, old_id))
+            except sqlite3.OperationalError:
+                pass
+
+            if not msg.get("quoted_info"):
+                try:
+                    cur.execute("UPDATE message_quoted SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                except sqlite3.OperationalError:
+                    pass
+            else:
+                try:
+                    cur.execute("DELETE FROM message_quoted WHERE message_row_id = ?", (old_id,))
+                except sqlite3.OperationalError:
+                    pass
+
+            if not msg.get("media_info"):
+                try:
+                    cur.execute("UPDATE message_media SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                except sqlite3.OperationalError:
+                    pass
+            else:
+                try:
+                    cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (old_id,))
+                except sqlite3.OperationalError:
+                    pass
+
+            if not msg.get("location_info"):
+                try:
+                    cur.execute("UPDATE message_location SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                except sqlite3.OperationalError:
+                    pass
+
+            if not msg.get("vcard"):
+                try:
+                    cur.execute("UPDATE message_vcard SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                except sqlite3.OperationalError:
+                    pass
+
+            if not msg.get("link_preview_info"):
+                try:
+                    cur.execute("UPDATE message_text SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                    cur.execute("UPDATE message_thumbnail SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                except sqlite3.OperationalError:
+                    pass
 
         is_displayable = is_conversational or (is_group and msg["message_type"] == 7)
         if (
@@ -3964,7 +4192,10 @@ def apply_messages_bin(
                 qi = msg["quoted_info"]
                 q_part = qi.get("participant", "")
                 if is_group and q_part and qi.get("from_me") != 1:
-                    q_sender_id = resolve_or_create_jid(conn, q_part, logger, jid_cache)
+                    try:
+                        q_sender_id = resolve_or_create_jid(conn, q_part, logger, jid_cache)
+                    except (ValueError, Exception):
+                        q_sender_id = 0
                 else:
                     q_sender_id = 0
                 q_stanza_id = qi.get("stanza_id") or msg.get("key_id", "") or ""
@@ -4022,34 +4253,6 @@ def apply_messages_bin(
                         ),
                     )
 
-        # Apply reaction add-on if present (Pass 1: speculative immediate application)
-        if msg.get("reaction_info"):
-            applied = apply_reaction_record(
-                conn,
-                msg["reaction_info"],
-                add_on_sender_id,
-                msg["from_me"],
-                msg["timestamp"],
-                key_cache,
-                schema_cache,
-                logger,
-                msg.get("key_id", ""),
-                chat_row_id,
-            )
-            if not applied and msg["reaction_info"].get("target_key_id"):
-                pending_add_ons.append(
-                    PendingAddOn(
-                        add_on_type="reaction",
-                        target_key_id=msg["reaction_info"]["target_key_id"],
-                        msg=msg,
-                        sender_jid_row_id=add_on_sender_id,
-                        from_me=msg["from_me"],
-                        timestamp=msg["timestamp"],
-                        key_id=msg.get("key_id", ""),
-                        chat_row_id=chat_row_id,
-                    )
-                )
-
         # Apply embedded reactions from WMI Tag 41 if present
         if msg.get("embedded_reactions") and msg_row_id:
             apply_embedded_reactions(
@@ -4090,93 +4293,6 @@ def apply_messages_bin(
                         chat_row_id=chat_row_id,
                     )
                 )
-
-        # Apply pin-in-chat add-on if present (Pass 1)
-        if msg.get("pin_info"):
-            applied = apply_pin_in_chat(
-                conn,
-                msg["pin_info"],
-                add_on_sender_id,
-                msg["from_me"],
-                msg["timestamp"],
-                key_cache,
-                schema_cache,
-                logger,
-                msg.get("key_id", ""),
-                chat_row_id,
-            )
-            if not applied and msg["pin_info"].get("target_key_id"):
-                pending_add_ons.append(
-                    PendingAddOn(
-                        add_on_type="pin",
-                        target_key_id=msg["pin_info"]["target_key_id"],
-                        msg=msg,
-                        sender_jid_row_id=add_on_sender_id,
-                        from_me=msg["from_me"],
-                        timestamp=msg["timestamp"],
-                        key_id=msg.get("key_id", ""),
-                        chat_row_id=chat_row_id,
-                    )
-                )
-
-        # Apply poll vote add-on if present (Pass 1)
-        if msg.get("poll_vote_info"):
-            applied = apply_poll_vote(
-                conn,
-                msg["poll_vote_info"],
-                add_on_sender_id,
-                msg["from_me"],
-                msg["timestamp"],
-                key_cache,
-                schema_cache,
-                logger,
-                msg.get("key_id", ""),
-                chat_row_id,
-            )
-            if not applied and msg["poll_vote_info"].get("poll_key_id"):
-                pending_add_ons.append(
-                    PendingAddOn(
-                        add_on_type="poll_vote",
-                        target_key_id=msg["poll_vote_info"]["poll_key_id"],
-                        msg=msg,
-                        sender_jid_row_id=add_on_sender_id,
-                        from_me=msg["from_me"],
-                        timestamp=msg["timestamp"],
-                        key_id=msg.get("key_id", ""),
-                        chat_row_id=chat_row_id,
-                    )
-                )
-
-        # Apply protocol revoke or edit updates if present (Pass 1)
-        if msg.get("revoke_info") or msg.get("edit_info"):
-            applied = apply_protocol_record(
-                conn,
-                msg,
-                add_on_sender_id,
-                msg["from_me"],
-                msg["timestamp"],
-                key_cache,
-                schema_cache,
-                logger,
-                chat_row_id,
-            )
-            if not applied:
-                target_k = (msg.get("revoke_info") or msg.get("edit_info", {})).get(
-                    "target_key_id", ""
-                )
-                if target_k:
-                    pending_add_ons.append(
-                        PendingAddOn(
-                            add_on_type="revoke" if msg.get("revoke_info") else "edit",
-                            target_key_id=target_k,
-                            msg=msg,
-                            sender_jid_row_id=add_on_sender_id,
-                            from_me=msg["from_me"],
-                            timestamp=msg["timestamp"],
-                            key_id=msg.get("key_id", ""),
-                            chat_row_id=chat_row_id,
-                        )
-                    )
 
     if pending_add_ons:
         # Pass 2: Deferred resolution of unlinked add-ons now that all base messages are indexed
@@ -4571,6 +4687,22 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
                 except sqlite3.OperationalError:
                     pass
 
+                try:
+                    cur.execute(
+                        "UPDATE message_add_on SET chat_row_id = ? WHERE chat_row_id = ?",
+                        (phone_chat_id, lid_chat_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+                try:
+                    cur.execute(
+                        "UPDATE message_location SET chat_row_id = ? WHERE chat_row_id = ?",
+                        (phone_chat_id, lid_chat_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
             if has_hidden:
                 cur.execute("UPDATE chat SET hidden = 0 WHERE _id = ?", (phone_chat_id,))
                 cur.execute("UPDATE chat SET hidden = 1 WHERE _id = ?", (lid_chat_id,))
@@ -4659,6 +4791,22 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
                     cur.execute(
                         "UPDATE message_quoted SET chat_row_id = ?, parent_message_chat_row_id = ? WHERE chat_row_id = ?",
                         (c1_id, c1_id, c2_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+                try:
+                    cur.execute(
+                        "UPDATE message_add_on SET chat_row_id = ? WHERE chat_row_id = ?",
+                        (c1_id, c2_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+                try:
+                    cur.execute(
+                        "UPDATE message_location SET chat_row_id = ? WHERE chat_row_id = ?",
+                        (c1_id, c2_id),
                     )
                 except sqlite3.OperationalError:
                     pass
@@ -4759,9 +4907,29 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
                         )
                         WHERE sender_jid_row_id IN (SELECT comp_id FROM _comp_to_pri)
                     """)
+                    try:
+                        cur.execute("""
+                            UPDATE message_add_on
+                            SET sender_jid_row_id = (
+                                SELECT pri_id FROM _comp_to_pri WHERE comp_id = message_add_on.sender_jid_row_id
+                            )
+                            WHERE sender_jid_row_id IN (SELECT comp_id FROM _comp_to_pri)
+                        """)
+                    except sqlite3.OperationalError:
+                        pass
+                    try:
+                        cur.execute("""
+                            UPDATE receipt_user
+                            SET receipt_user_jid_row_id = (
+                                SELECT pri_id FROM _comp_to_pri WHERE comp_id = receipt_user.receipt_user_jid_row_id
+                            )
+                            WHERE receipt_user_jid_row_id IN (SELECT comp_id FROM _comp_to_pri)
+                        """)
+                    except sqlite3.OperationalError:
+                        pass
                     if cur.rowcount > 0:
                         logger.debug(
-                            f"Re-pointed {cur.rowcount} message sender JIDs from companion devices to primary canonical JIDs."
+                            f"Re-pointed message, add-on, and receipt sender JIDs from companion devices to primary canonical JIDs."
                         )
                 cur.execute("DROP TABLE IF EXISTS _comp_to_pri")
     except sqlite3.OperationalError:
@@ -4803,6 +4971,17 @@ def merge_increments(
         conn.execute("PRAGMA temp_store = MEMORY")
         conn.execute("PRAGMA cache_size = -64000")
         conn.execute("PRAGMA mmap_size = 268435456")
+
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_key_id ON message(key_id)")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_add_on_parent ON message_add_on(parent_message_row_id, message_add_on_type)"
+            )
+        except sqlite3.OperationalError:
+            pass
 
         # Pre-warm JID and chat caches upfront to avoid N+1 queries during delta folding
         cur = conn.cursor()

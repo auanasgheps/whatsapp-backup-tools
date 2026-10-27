@@ -5560,3 +5560,526 @@ def test_standalone_reaction_does_not_insert_dummy_message(tmp_path):
     # Only 1 authentic message exists in the message table
     assert cur.execute("SELECT COUNT(*) FROM message").fetchone()[0] == 1
     conn.close()
+
+
+def _build_reaction_wmi_with_from_me(
+    remote_jid: str,
+    react_key_id: str,
+    target_key_id: str,
+    emoji: str,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    target_key = (
+        _build_field(1, 2, remote_jid.encode("utf-8"))
+        + _build_field(2, 0, 1 - from_me)
+        + _build_field(3, 2, target_key_id.encode("utf-8"))
+    )
+    reaction_bytes = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 2, emoji.encode("utf-8"))
+        + _build_field(4, 0, timestamp * 1000)
+    )
+    return (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, remote_jid.encode("utf-8"))
+            + _build_field(2, 0, from_me)
+            + _build_field(3, 2, react_key_id.encode("utf-8")),
+        )
+        + _build_field(2, 2, _build_field(46, 2, reaction_bytes))
+        + _build_field(3, 0, timestamp)
+    )
+
+
+def _build_poll_vote_wmi_with_from_me(
+    remote_jid: str,
+    vote_key_id: str,
+    poll_key_id: str,
+    timestamp: int,
+    sender_ts_ms: int,
+    from_me: int,
+) -> bytes:
+    target_key = (
+        _build_field(1, 2, remote_jid.encode("utf-8"))
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, poll_key_id.encode("utf-8"))
+    )
+    vote_bytes = _build_field(1, 2, target_key) + _build_field(3, 0, sender_ts_ms)
+    return (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, remote_jid.encode("utf-8"))
+            + _build_field(2, 0, from_me)
+            + _build_field(3, 2, vote_key_id.encode("utf-8")),
+        )
+        + _build_field(2, 2, _build_field(50, 2, vote_bytes))
+        + _build_field(3, 0, timestamp)
+    )
+
+
+def test_1on1_bidirectional_reactions_preserved(tmp_path):
+    """Verify that contact and local user reactions in 1-on-1 chats coexist and do not overwrite each other."""
+    conn = _make_two_pass_test_db(tmp_path / "test_1on1_rx.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Parent message
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "PARENT_1ON1_RX", "Chatting 1-on-1", 0, 1729000100
+    )
+    # Frame 1: Contact reaction (from_me = 0)
+    wmi_contact_rx = _build_reaction_wmi_with_from_me(
+        "5550100@s.whatsapp.net", "RX_CONTACT_1", "PARENT_1ON1_RX", "👍", 0, 1729000200
+    )
+    # Frame 2: Local user reaction (from_me = 1)
+    wmi_local_rx = _build_reaction_wmi_with_from_me(
+        "5550100@s.whatsapp.net", "RX_LOCAL_1", "PARENT_1ON1_RX", "❤️", 1, 1729000250
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+        f.write(_encode_varint(len(wmi_contact_rx)) + wmi_contact_rx)
+        f.write(_encode_varint(len(wmi_local_rx)) + wmi_local_rx)
+
+    schema_cache = {}
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    parent_id = cur.execute("SELECT _id FROM message WHERE key_id = 'PARENT_1ON1_RX'").fetchone()[0]
+
+    rows = cur.execute(
+        "SELECT ao.from_me, ao.sender_jid_row_id, r.reaction "
+        "FROM message_add_on ao "
+        "JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id "
+        "WHERE ao.parent_message_row_id = ? "
+        "ORDER BY ao.from_me",
+        (parent_id,),
+    ).fetchall()
+
+    assert len(rows) == 2
+    assert rows[0][0] == 0
+    assert rows[0][1] == -1
+    assert rows[0][2] == "👍"
+    assert rows[1][0] == 1
+    assert rows[1][1] == -1
+    assert rows[1][2] == "❤️"
+
+    # Step B: Contact updates reaction to fire emoji
+    bin_path_2 = str(tmp_path / "messages_2.bin")
+    wmi_contact_rx_update = _build_reaction_wmi_with_from_me(
+        "5550100@s.whatsapp.net", "RX_CONTACT_2", "PARENT_1ON1_RX", "🔥", 0, 1729000300
+    )
+    with open(bin_path_2, "wb") as f:
+        f.write(_encode_varint(len(wmi_contact_rx_update)) + wmi_contact_rx_update)
+
+    increment_merger.apply_messages_bin(conn, bin_path_2, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    rows2 = cur.execute(
+        "SELECT ao.from_me, r.reaction "
+        "FROM message_add_on ao "
+        "JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id "
+        "WHERE ao.parent_message_row_id = ? "
+        "ORDER BY ao.from_me",
+        (parent_id,),
+    ).fetchall()
+
+    assert len(rows2) == 2
+    assert rows2[0][0] == 0
+    assert rows2[0][1] == "🔥"
+    assert rows2[1][0] == 1
+    assert rows2[1][1] == "❤️"
+
+    # Step C: Contact revokes reaction (empty emoji)
+    bin_path_3 = str(tmp_path / "messages_3.bin")
+    wmi_contact_revoke = _build_reaction_wmi_with_from_me(
+        "5550100@s.whatsapp.net", "RX_CONTACT_3", "PARENT_1ON1_RX", "", 0, 1729000350
+    )
+    with open(bin_path_3, "wb") as f:
+        f.write(_encode_varint(len(wmi_contact_revoke)) + wmi_contact_revoke)
+
+    increment_merger.apply_messages_bin(conn, bin_path_3, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    rows3 = cur.execute(
+        "SELECT ao.from_me, r.reaction "
+        "FROM message_add_on ao "
+        "JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id "
+        "WHERE ao.parent_message_row_id = ?",
+        (parent_id,),
+    ).fetchall()
+
+    assert len(rows3) == 1
+    assert rows3[0][0] == 1
+    assert rows3[0][1] == "❤️"
+    conn.close()
+
+
+def test_1on1_bidirectional_poll_votes_preserved(tmp_path):
+    """Verify that contact and local user poll votes in 1-on-1 chats coexist."""
+    conn = _make_two_pass_test_db(tmp_path / "test_1on1_poll_votes.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Poll creation message
+    wmi_poll = _build_poll_creation_wmi(
+        "5550100@s.whatsapp.net", "POLL_1ON1_MSG", "Dinner plans?", ["Pasta", "Steak"], 1729000100
+    )
+    # Frame 1: Contact vote (from_me = 0)
+    wmi_contact_vote = _build_poll_vote_wmi_with_from_me(
+        "5550100@s.whatsapp.net", "VOTE_1ON1_CONTACT", "POLL_1ON1_MSG", 1729000200, 1729000200000, 0
+    )
+    # Frame 2: Local user vote (from_me = 1)
+    wmi_local_vote = _build_poll_vote_wmi_with_from_me(
+        "5550100@s.whatsapp.net", "VOTE_1ON1_LOCAL", "POLL_1ON1_MSG", 1729000250, 1729000250000, 1
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+        f.write(_encode_varint(len(wmi_contact_vote)) + wmi_contact_vote)
+        f.write(_encode_varint(len(wmi_local_vote)) + wmi_local_vote)
+
+    schema_cache = {}
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    cur = conn.cursor()
+    poll_id = cur.execute("SELECT _id FROM message WHERE key_id = 'POLL_1ON1_MSG'").fetchone()[0]
+
+    votes = cur.execute(
+        "SELECT ao.from_me, ao.sender_jid_row_id, ao.key_id "
+        "FROM message_add_on ao "
+        "JOIN message_add_on_poll_vote v ON v.message_add_on_row_id = ao._id "
+        "WHERE ao.parent_message_row_id = ? "
+        "ORDER BY ao.from_me",
+        (poll_id,),
+    ).fetchall()
+
+    assert len(votes) == 2
+    assert votes[0][0] == 0
+    assert votes[0][1] == -1
+    assert votes[0][2] == "VOTE_1ON1_CONTACT"
+    assert votes[1][0] == 1
+    assert votes[1][1] == -1
+    assert votes[1][2] == "VOTE_1ON1_LOCAL"
+    conn.close()
+
+
+def test_standalone_addons_zero_phantom_messages(tmp_path):
+    """Verify that standalone pin, poll vote, and edit frames do not insert phantom messages."""
+    conn = _make_two_pass_test_db(tmp_path / "test_no_phantoms.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Parent message
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "PARENT_CLEAN", "Authentic parent message", 0, 1729000100
+    )
+    # Frame 1: Standalone pin (tag 63)
+    wmi_pin = _build_pin_wmi(
+        "5550100@s.whatsapp.net", "PIN_STANDALONE", "PARENT_CLEAN", 1, 1729000200
+    )
+    # Frame 2: Standalone poll creation
+    wmi_poll = _build_poll_creation_wmi(
+        "5550100@s.whatsapp.net", "POLL_CLEAN", "Meeting time?", ["10am", "2pm"], 1729000250
+    )
+    # Frame 3: Standalone poll vote (tag 50)
+    wmi_vote = _build_poll_vote_wmi(
+        "5550100@s.whatsapp.net", "VOTE_STANDALONE", "POLL_CLEAN", 1729000300, 1729000300000
+    )
+    # Frame 4: Standalone edit (tag 12)
+    wmi_edit = _build_edit_wmi(
+        "5550100@s.whatsapp.net", "EDIT_STANDALONE", "PARENT_CLEAN", "Edited authentic message", 1729000350
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+        f.write(_encode_varint(len(wmi_pin)) + wmi_pin)
+        f.write(_encode_varint(len(wmi_poll)) + wmi_poll)
+        f.write(_encode_varint(len(wmi_vote)) + wmi_vote)
+        f.write(_encode_varint(len(wmi_edit)) + wmi_edit)
+
+    schema_cache = {}
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    try:
+        cur = conn.cursor()
+        msg_rows = cur.execute("SELECT _id, key_id, message_type FROM message").fetchall()
+        # Exactly 2 authentic messages exist in message table: parent message and poll creation
+        assert len(msg_rows) == 2, f"Expected 2 messages, found {len(msg_rows)}: {msg_rows}"
+
+        # None of the standalone add-on keys exist in message table
+        assert cur.execute("SELECT 1 FROM message WHERE key_id = 'PIN_STANDALONE'").fetchone() is None
+        assert cur.execute("SELECT 1 FROM message WHERE key_id = 'VOTE_STANDALONE'").fetchone() is None
+        assert cur.execute("SELECT 1 FROM message WHERE key_id = 'EDIT_STANDALONE'").fetchone() is None
+
+        # Add-on tables are populated
+        assert cur.execute("SELECT COUNT(*) FROM message_add_on_pin_in_chat").fetchone()[0] == 1
+        assert cur.execute("SELECT COUNT(*) FROM message_add_on_poll_vote").fetchone()[0] == 1
+        assert cur.execute("SELECT COUNT(*) FROM message_edit_info").fetchone()[0] == 1
+
+        # Edited text is reflected on parent
+        edited_text = cur.execute("SELECT text_data FROM message WHERE key_id = 'PARENT_CLEAN'").fetchone()[0]
+        assert edited_text == "Edited authentic message"
+    finally:
+        conn.close()
+
+
+def test_surrogate_churn_reparents_auxiliary_tables(tmp_path):
+    """Verify that surrogate ID changes cascade re-parenting across auxiliary tables."""
+    conn = _make_two_pass_test_db(tmp_path / "test_churn.db")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_media (
+            message_row_id INTEGER PRIMARY KEY,
+            chat_row_id INTEGER,
+            from_me INTEGER,
+            key_id TEXT,
+            sender_jid_row_id INTEGER,
+            file_path TEXT,
+            file_size INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS message_quoted (
+            message_row_id INTEGER PRIMARY KEY,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER,
+            message_type INTEGER,
+            text_data TEXT
+        );
+        CREATE TABLE IF NOT EXISTS receipt_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            receipt_user_jid_row_id INTEGER NOT NULL,
+            receipt_timestamp INTEGER,
+            read_timestamp INTEGER,
+            played_timestamp INTEGER
+        );
+    """)
+
+    cur = conn.cursor()
+    # Insert existing message row
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type, status) "
+        "VALUES (10, 1, 1, 'MSG_CHURN_TARGET', -1, 1729000100, 'Existing chat text', 0, 4)"
+    )
+    # Insert auxiliary records referencing _id = 10
+    cur.execute(
+        "INSERT INTO message_media (message_row_id, chat_row_id, from_me, key_id, sender_jid_row_id, file_path, file_size) "
+        "VALUES (10, 1, 1, 'MSG_CHURN_TARGET', -1, 'Media/WhatsApp Images/photo.jpg', 12345)"
+    )
+    cur.execute(
+        "INSERT INTO message_quoted (message_row_id, chat_row_id, parent_message_chat_row_id, from_me, key_id, text_data) "
+        "VALUES (10, 1, 1, 0, 'QUOTED_STUB', 'Quoted snippet')"
+    )
+    cur.execute(
+        "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, read_timestamp) "
+        "VALUES (10, 1, 1729000555)"
+    )
+    conn.commit()
+
+    # Replay updated WMI frame with updated status
+    bin_path = str(tmp_path / "messages.bin")
+    wmi_update = _build_text_wmi(
+        "5550100@s.whatsapp.net", "MSG_CHURN_TARGET", "Existing chat text", 1, 1729000100
+    )
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_update)) + wmi_update)
+
+    schema_cache = {}
+    increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    new_row = cur.execute("SELECT _id FROM message WHERE key_id = 'MSG_CHURN_TARGET'").fetchone()
+    assert new_row is not None
+    new_id = new_row[0]
+    assert new_id != 10
+
+    # Auxiliary tables re-pointed to new_id
+    media_path = cur.execute("SELECT file_path FROM message_media WHERE message_row_id = ?", (new_id,)).fetchone()
+    assert media_path is not None
+    assert media_path[0] == "Media/WhatsApp Images/photo.jpg"
+
+    quoted_key = cur.execute("SELECT key_id FROM message_quoted WHERE message_row_id = ?", (new_id,)).fetchone()
+    assert quoted_key is not None
+    assert quoted_key[0] == "QUOTED_STUB"
+
+    read_ts = cur.execute("SELECT read_timestamp FROM receipt_user WHERE message_row_id = ?", (new_id,)).fetchone()
+    assert read_ts is not None
+    assert read_ts[0] == 1729000555
+
+    # No orphaned records pointing to old id 10
+    assert cur.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 10").fetchone()[0] == 0
+    assert cur.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 10").fetchone()[0] == 0
+    assert cur.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 10").fetchone()[0] == 0
+    conn.close()
+
+
+def test_chat_consolidation_reparents_add_ons(mock_db):
+    """Verify that chat consolidation and step D re-point message_add_on chat and sender IDs."""
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    chat_cols = {r[1] for r in cur.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+    if "sort_timestamp" not in chat_cols:
+        conn.execute("ALTER TABLE chat ADD COLUMN sort_timestamp INTEGER")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS jid_map (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
+    )
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
+    if "device" not in cols:
+        conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
+
+    # Primary phone JID and chat
+    cur.execute("INSERT INTO jid (user, server, device, raw_string) VALUES ('5550888', 's.whatsapp.net', 0, '5550888@s.whatsapp.net')")
+    phone_jid = cur.lastrowid
+    cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 0)", (phone_jid,))
+    phone_chat = cur.lastrowid
+
+    # Shadow duplicate chat for same natural identity
+    cur.execute("INSERT INTO jid (user, server, device, raw_string) VALUES ('5550888', 's.whatsapp.net', 0, '5550888.0:0@s.whatsapp.net')")
+    dup_jid = cur.lastrowid
+    cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 1)", (dup_jid,))
+    dup_chat = cur.lastrowid
+
+    # Primary and companion LID senders
+    cur.execute("INSERT INTO jid (user, server, device, raw_string) VALUES ('999000888', 'lid', 0, '999000888@lid')")
+    primary_lid = cur.lastrowid
+    cur.execute("INSERT INTO jid (user, server, device, raw_string) VALUES ('999000888', 'lid', 1, '999000888.1:0@lid')")
+    comp_lid = cur.lastrowid
+
+    # Messages in chats
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+        "VALUES (80, ?, 0, 'BASE_MSG', ?, 1700000000, 'base', 0)",
+        (phone_chat, phone_jid),
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+        "VALUES (81, ?, 0, 'DUP_MSG', ?, 1700000100, 'dup', 0)",
+        (dup_chat, dup_jid),
+    )
+
+    # Add-on pointing to shadow duplicate chat and companion sender
+    cur.execute(
+        "INSERT INTO message_add_on (_id, chat_row_id, from_me, key_id, sender_jid_row_id, parent_message_row_id, message_add_on_type, timestamp) "
+        "VALUES (100, ?, 0, 'AO_KEY', ?, 80, 56, 1700000200)",
+        (dup_chat, comp_lid),
+    )
+    conn.commit()
+
+    increment_merger.migrate_restored_backup_to_lid(conn, logger)
+
+    ao = cur.execute("SELECT chat_row_id, sender_jid_row_id FROM message_add_on WHERE _id = 100").fetchone()
+    assert ao is not None
+    # chat_row_id re-pointed to phone_chat
+    assert ao[0] == phone_chat
+    # sender_jid_row_id re-pointed to primary_lid
+    assert ao[1] == primary_lid
+    conn.close()
+
+
+def test_malformed_wire_jid_safe_fallback(tmp_path):
+    """Verify that corrupt JID wire strings do not abort incremental merging."""
+    conn = _make_two_pass_test_db(tmp_path / "test_malformed_jid.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "PARENT_JID_SAFE", "Text message", 0, 1729000100
+    )
+
+    # Embedded reaction with invalid participant wire bytes
+    rx_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"RX_CORRUPT_KEY")
+    )
+    corrupt_participant = b"\xff\xfe\x00\x01\x80\x00\x12"
+    rx_bytes = (
+        _build_field(1, 2, rx_key)
+        + _build_field(2, 2, "👍".encode("utf-8"))
+        + _build_field(3, 2, corrupt_participant)
+        + _build_field(4, 0, 1729000100000)
+    )
+    wmi_with_corrupt_rx = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"MSG_PARENT_WITH_RX"),
+        )
+        + _build_field(2, 2, _build_field(1, 2, b"Parent with corrupt reaction"))
+        + _build_field(3, 0, 1729000100)
+        + _build_field(41, 2, rx_bytes)
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_parent)) + wmi_parent)
+        f.write(_encode_varint(len(wmi_with_corrupt_rx)) + wmi_with_corrupt_rx)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted >= 1
+    cur = conn.cursor()
+    # Reaction was safely recorded with fallback sender_jid_row_id = -1
+    rx_row = cur.execute(
+        "SELECT ao.sender_jid_row_id, r.reaction "
+        "FROM message_add_on ao "
+        "JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id "
+        "WHERE ao.key_id = 'RX_CORRUPT_KEY'"
+    ).fetchone()
+    assert rx_row is not None
+    assert rx_row[0] == -1
+    assert rx_row[1] == "👍"
+    conn.close()
+
+
+def test_message_deletions_full_cascade(tmp_path):
+    """Verify that apply_message_deletions purges all auxiliary tables."""
+    conn = _make_two_pass_test_db(tmp_path / "test_del_cascade.db")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_text (message_row_id INTEGER PRIMARY KEY, text_data TEXT);
+        CREATE TABLE IF NOT EXISTS message_thumbnail (message_row_id INTEGER PRIMARY KEY, thumbnail BLOB);
+        CREATE TABLE IF NOT EXISTS message_view_once_media (message_row_id INTEGER PRIMARY KEY, state INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS message_revoked (message_row_id INTEGER PRIMARY KEY, revoked_key_id TEXT NOT NULL, admin_jid_row_id INTEGER, revoke_timestamp INTEGER);
+        CREATE TABLE IF NOT EXISTS message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER NOT NULL);
+    """)
+
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+        "VALUES (99, 1, 0, 'DEL_TEST_KEY', -1, 1729000100, 'To be deleted', 0)"
+    )
+    cur.execute("INSERT INTO message_text (message_row_id, text_data) VALUES (99, 'To be deleted')")
+    cur.execute("INSERT INTO message_thumbnail (message_row_id, thumbnail) VALUES (99, X'89504E47')")
+    cur.execute("INSERT INTO message_view_once_media (message_row_id, state) VALUES (99, 1)")
+    cur.execute("INSERT INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES (99, 'REVOKED_KEY', 1, 1729000200)")
+    cur.execute("INSERT INTO message_system (message_row_id, action_type) VALUES (99, 5)")
+    conn.commit()
+
+    deleted_json = tmp_path / "deletedMessages_1.json"
+    deleted_json.write_text(json.dumps({"deleted_ids": [99]}), encoding="utf-8")
+
+    schema_cache = {}
+    deleted_count = increment_merger.apply_message_deletions(
+        conn, str(deleted_json), logger, schema_cache, None, None
+    )
+    conn.commit()
+
+    assert deleted_count == 1
+    assert cur.execute("SELECT 1 FROM message WHERE _id = 99").fetchone() is None
+    assert cur.execute("SELECT 1 FROM message_text WHERE message_row_id = 99").fetchone() is None
+    assert cur.execute("SELECT 1 FROM message_thumbnail WHERE message_row_id = 99").fetchone() is None
+    assert cur.execute("SELECT 1 FROM message_view_once_media WHERE message_row_id = 99").fetchone() is None
+    assert cur.execute("SELECT 1 FROM message_revoked WHERE message_row_id = 99").fetchone() is None
+    assert cur.execute("SELECT 1 FROM message_system WHERE message_row_id = 99").fetchone() is None
+    conn.close()
+
