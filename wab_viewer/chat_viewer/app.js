@@ -455,6 +455,7 @@
     msgList = [];
     noMoreOlder = false;
     noMoreNewer = true;
+    isUserAtBottom = true;
 
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
@@ -483,8 +484,6 @@
       suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
       suppressScroll = false;
-      await _awaitImagesSettled(scroll, 1500);
-      if (gen !== _loadGen) return;
     } catch (err) {
       console.error('Failed to load chat messages:', err);
     } finally {
@@ -506,6 +505,7 @@
   let _loadGen = 0;
   let noMoreOlder = false;
   let noMoreNewer = false;
+  let isUserAtBottom = true;
 
   function showSpinner(position) {
     const el = document.createElement('div');
@@ -751,13 +751,10 @@
   function _attachMediaScrollAnchor(mediaEl) {
     mediaEl.addEventListener('load', () => {
       const scroll = document.getElementById('message-scroll');
-      if (!scroll) return;
-      const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
-      if (distFromBottom < 40) {
-        suppressScroll = true;
-        scroll.scrollTop = scroll.scrollHeight;
-        suppressScroll = false;
-      }
+      if (!scroll || !isUserAtBottom) return;
+      suppressScroll = true;
+      scroll.scrollTop = scroll.scrollHeight;
+      suppressScroll = false;
     });
   }
 
@@ -802,7 +799,7 @@
           vid.poster = canvas.toDataURL('image/jpeg', 0.8);
           probe.src = '';
           const scroll = document.getElementById('message-scroll');
-          if (scroll && (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40)) {
+          if (scroll && isUserAtBottom) {
             suppressScroll = true;
             scroll.scrollTop = scroll.scrollHeight;
             suppressScroll = false;
@@ -841,6 +838,7 @@
       if (suppressScroll) return;
       hideMsgDetails();
       const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
+      isUserAtBottom = atBottom;
       btn.classList.toggle('visible', !atBottom);
       if (scroll.scrollTop < 100) {
         if (loading) return;
@@ -851,6 +849,7 @@
       }
     });
     btn.addEventListener('click', async () => {
+      isUserAtBottom = true;
       if (noMoreNewer) {
         await _pinToBottom(_loadGen);
         return;
@@ -864,7 +863,6 @@
       suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
       suppressScroll = false;
-      await _awaitImagesSettled(scroll, 1500);
       if (gen !== _loadGen) return;
       await _pinToBottom(gen);
     });
@@ -1398,7 +1396,7 @@
         vid.poster = canvas.toDataURL('image/jpeg', 0.8);
         probe.src = '';
         const scroll = document.getElementById('message-scroll');
-        if (scroll && (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40)) {
+        if (scroll && isUserAtBottom) {
           suppressScroll = true;
           scroll.scrollTop = scroll.scrollHeight;
           suppressScroll = false;
@@ -3034,39 +3032,72 @@
     document.getElementById('date-clear-btn').style.display = 'none';
   });
 
-  // Resolve once every <img> in container has finished loading (or errored),
-  // capped by timeoutMs so slow or broken sources never stall indefinitely.
-  function _awaitImagesSettled(container, timeoutMs) {
-    const pending = [...container.querySelectorAll('img')].filter(img => !img.complete);
-    if (!pending.length) return Promise.resolve();
-    return Promise.all(pending.map(img => new Promise(resolve => {
-      const done = () => resolve();
-      img.addEventListener('load', done, { once: true });
-      img.addEventListener('error', done, { once: true });
-      setTimeout(done, timeoutMs);
-    })));
-  }
-
-  // Scroll to bottom and hold it there as media loads and layout stabilizes.
-  // Snaps each animation frame until the position holds steady (3 stable frames)
-  // or 1000 ms have passed. Bails immediately if a newer load superseded this one.
+  // Scroll to bottom and hold it there as lazy media loads and shifts layout.
+  // Re-snaps whenever images finish loading or layout dimensions change,
+  // until layout holds steady or 1500 ms have passed. Bails immediately if a newer load superseded this one
+  // or if the user manually initiates scrolling.
   async function _pinToBottom(gen) {
     const scroll = document.getElementById('message-scroll');
+    if (!scroll) return;
+
     const snap = () => {
       suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
       suppressScroll = false;
     };
     snap();
-    const deadline = performance.now() + 1000;
-    let stable = 0;
-    while (performance.now() < deadline && stable < 3) {
-      await new Promise(r => requestAnimationFrame(r));
-      if (gen !== _loadGen) return;
-      const before = scroll.scrollTop;
+
+    let done = false;
+    let ro = null;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      if (ro) ro.disconnect();
+      scroll.removeEventListener('wheel', onUserScroll, { capture: true });
+      scroll.removeEventListener('touchstart', onUserScroll, { capture: true });
+      scroll.removeEventListener('pointerdown', onUserScroll, { capture: true });
+      pendingImgs.forEach(img => {
+        img.removeEventListener('load', onMediaLoad);
+        img.removeEventListener('error', onMediaLoad);
+      });
+    };
+
+    const onUserScroll = () => {
+      isUserAtBottom = (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight) < 100;
+      cleanup();
+    };
+
+    scroll.addEventListener('wheel', onUserScroll, { capture: true, passive: true });
+    scroll.addEventListener('touchstart', onUserScroll, { capture: true, passive: true });
+    scroll.addEventListener('pointerdown', onUserScroll, { capture: true, passive: true });
+
+    const pendingImgs = [...scroll.querySelectorAll('img')].filter(img => !img.complete);
+    const onMediaLoad = () => {
+      if (done || gen !== _loadGen) return;
       snap();
-      stable = Math.abs(scroll.scrollTop - before) < 2 ? stable + 1 : 0;
+    };
+    pendingImgs.forEach(img => {
+      img.addEventListener('load', onMediaLoad, { once: true });
+      img.addEventListener('error', onMediaLoad, { once: true });
+    });
+
+    if (window.ResizeObserver) {
+      ro = new ResizeObserver(() => {
+        if (done || gen !== _loadGen) return;
+        snap();
+      });
+      ro.observe(scroll);
     }
+
+    const start = performance.now();
+    while (!done && performance.now() - start < 1500) {
+      if (gen !== _loadGen) {
+        cleanup();
+        return;
+      }
+      await new Promise(r => requestAnimationFrame(r));
+    }
+    cleanup();
   }
 
   // Center targetEl and hold it there as lazy media above it loads and shifts layout.
