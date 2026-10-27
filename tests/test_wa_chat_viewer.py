@@ -4472,6 +4472,95 @@ class TestGroupMembersLidResolution:
             assert r_data["reactors"][0]["name"] == "+15550004444"
             assert r_data["reactors"][0]["emoji"] == "👍"
 
+    def test_android_1on1_reaction_details_shows_contact_name(self, tmp_path):
+        """1-on-1 contact reactions with sender_jid_row_id = -1 resolve contact name."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (
+                _id        INTEGER PRIMARY KEY,
+                user       TEXT,
+                server     TEXT,
+                raw_string TEXT
+            );
+            CREATE TABLE chat (
+                _id                     INTEGER PRIMARY KEY,
+                jid_row_id              INTEGER,
+                subject                 TEXT,
+                hidden                  INTEGER DEFAULT 0,
+                sort_timestamp          INTEGER,
+                display_message_row_id  INTEGER
+            );
+            CREATE TABLE message (
+                _id               INTEGER PRIMARY KEY,
+                chat_row_id       INTEGER NOT NULL,
+                from_me           INTEGER NOT NULL DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp         INTEGER,
+                text_data         TEXT,
+                message_type      INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE message_add_on (
+                _id                    INTEGER PRIMARY KEY,
+                chat_row_id            INTEGER,
+                parent_message_row_id  INTEGER,
+                sender_jid_row_id      INTEGER,
+                from_me                INTEGER DEFAULT 0
+            );
+            CREATE TABLE message_add_on_reaction (
+                _id                   INTEGER PRIMARY KEY,
+                message_add_on_row_id INTEGER,
+                reaction              TEXT
+            );
+
+            INSERT INTO jid VALUES (1, '15550007777', 's.whatsapp.net', '15550007777@s.whatsapp.net');
+            INSERT INTO chat VALUES (11, 1, NULL, 0, 1700000000000, 2);
+            -- Message 2: outgoing message in 1-on-1 chat
+            INSERT INTO message VALUES (2, 11, 1, 0, 1700000000000, 'Hey Diana', 0);
+            -- Message 3: message without reactions to test negative caching
+            INSERT INTO message VALUES (3, 11, 0, 1, 1700000001000, 'No reactions here', 0);
+            -- Incoming reaction from contact in 1-on-1 chat
+            INSERT INTO message_add_on VALUES (20, 11, 2, -1, 0);
+            INSERT INTO message_add_on_reaction VALUES (1, 20, '❤️');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550007777', 'Diana', 'Diana Contact')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # 1. Test reaction details popup resolves 1-on-1 contact display name
+            r_resp = client.get("/api/reaction_details/2")
+            r_data = r_resp.get_json()
+            assert r_data["available"] is True
+            assert r_data["total"] == 1
+            assert r_data["reactors"][0]["name"] == "Diana Contact"
+            assert r_data["reactors"][0]["emoji"] == "❤️"
+            assert r_data["reactors"][0]["from_me"] == 0
+
+            # 2. Test negative caching in /api/messages for message 3 (0 reactions)
+            m_resp = client.get("/api/messages?chat_id=11&chat_type=contact")
+            msgs = m_resp.get_json()
+            assert len(msgs) == 2
+
+        # Verify negative caching in reactions_cache for message 3
+        arc_conn = sqlite3.connect(str(archive_path))
+        cached = arc_conn.execute("SELECT reactions FROM reactions_cache WHERE msg_id = 3").fetchone()
+        assert cached is not None
+        assert cached[0] == ""
+        arc_conn.close()
+
 
 class TestServiceMessages:
     """Tests for WhatsApp service messages and group events (iOS & Android)."""

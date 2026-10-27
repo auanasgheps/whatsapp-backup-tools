@@ -1323,13 +1323,11 @@ def _resolve_and_cache_reactions(
         msg_ids,
     ).fetchall()
 
-    if not reaction_rows:
-        return
-
     reaction_map = {row["msg_id"]: row["reactions"] for row in reaction_rows}
 
     for row in rows:
-        row["reactions"] = reaction_map.get(row["msg_id"])
+        rx = reaction_map.get(row["msg_id"])
+        row["reactions"] = rx
 
     cache_sql = """
         INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions)
@@ -1338,9 +1336,9 @@ def _resolve_and_cache_reactions(
     archive_conn.executemany(
         cache_sql,
         [
-            (row["chat_id"], row["msg_id"], row["reactions"])
+            (row.get("chat_id", ""), row["msg_id"], reaction_map.get(row["msg_id"], ""))
             for row in rows
-            if row["msg_id"] in reaction_map
+            if row.get("msg_id") is not None
         ],
     )
     archive_conn.commit()
@@ -5818,16 +5816,25 @@ def create_app(output_root: Path, rescan: bool = False):
                                 )
                                 .fetchall()
                             )
+                            found_ids = set()
+                            cache_inserts = []
                             for wr in wa_rows:
                                 rx_map[wr["msg_id"]] = wr["reactions"]
-                            if wa_rows:
+                                found_ids.add(wr["msg_id"])
+                                cache_inserts.append((chat_id, wr["msg_id"], wr["reactions"]))
+                            for mid in still_missing:
+                                if mid not in found_ids:
+                                    rx_map[mid] = ""
+                                    cache_inserts.append((chat_id, mid, ""))
+                            if cache_inserts:
                                 get_archive().executemany(
                                     "INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions) VALUES (?, ?, ?)",
-                                    [(chat_id, wr["msg_id"], wr["reactions"]) for wr in wa_rows],
+                                    cache_inserts,
                                 )
                         for row in rows:
                             if row["msg_id"] in rx_map:
-                                row["reactions"] = rx_map[row["msg_id"]]
+                                val = rx_map[row["msg_id"]]
+                                row["reactions"] = val if val else None
                                 get_archive().execute(
                                     "UPDATE recent_messages SET reactions = ? WHERE chat_id = ? AND msg_id = ?",
                                     (row["reactions"], chat_id, row["msg_id"]),
@@ -5924,16 +5931,21 @@ def create_app(output_root: Path, rescan: bool = False):
                     missing,
                 ).fetchall()
                 wa_map = {r["msg_id"]: r["reactions"] for r in from_wa}
-                if from_wa:
+                cache_inserts = [
+                    (chat_id, mid, wa_map.get(mid, ""))
+                    for mid in missing
+                ]
+                if cache_inserts:
                     get_archive().executemany(
                         "INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions) "
                         "VALUES (?, ?, ?)",
-                        [(chat_id, r["msg_id"], r["reactions"]) for r in from_wa],
+                        cache_inserts,
                     )
                     get_archive().commit()
-                cached_map.update(wa_map)
+                cached_map.update({mid: wa_map.get(mid, "") for mid in missing})
             for row in rows:
-                row["reactions"] = cached_map.get(row["msg_id"])
+                rx_val = cached_map.get(row["msg_id"])
+                row["reactions"] = rx_val if rx_val else None
         elif source_type == "ios" and rows and has_ios_reactions:
             msg_ids = [r["msg_id"] for r in rows]
             ios_rx = _ios_reactions(conn, chat_id, msg_ids)
@@ -6654,6 +6666,7 @@ def create_app(output_root: Path, rescan: bool = False):
             }
             if "message_add_on" not in tables:
                 return jsonify({"available": False})
+            _ensure_jid_map_resolved(conn, _archive_conn)
             has_lid_dn = "lid_display_name" in tables
             ldn_rx_join = (
                 """
@@ -6672,6 +6685,23 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_lid_dn
                 else ""
             )
+            ldn_c_join = (
+                """
+                LEFT JOIN _lid_map_resolved jm_lid_c ON jm_lid_c.jid_row_id = c.jid_row_id
+                LEFT JOIN lid_display_name ldn_c_direct ON ldn_c_direct.lid_row_id = c.jid_row_id
+                LEFT JOIN lid_display_name ldn_c_mapped ON ldn_c_mapped.lid_row_id = jm_lid_c.lid_row_id
+            """
+                if has_lid_dn
+                else ""
+            )
+            ldn_c_arm = (
+                """
+                                   NULLIF(ldn_c_direct.display_name, ''),
+                                   NULLIF(ldn_c_mapped.display_name, ''),
+            """
+                if has_lid_dn
+                else ""
+            )
             rows = conn.execute(
                 f"""
                 SELECT r.reaction AS emoji,
@@ -6682,6 +6712,17 @@ def create_app(output_root: Path, rescan: bool = False):
                            CASE WHEN COALESCE(j2.user, j.user) IS NOT NULL
                                 THEN '+' || {_clean_user_sql("COALESCE(j2.user, j.user)")} END,
                            {ldn_rx_arm}
+                           CASE WHEN ao.from_me = 0 AND (ao.sender_jid_row_id <= 0 OR ao.sender_jid_row_id IS NULL)
+                                THEN COALESCE(
+                                    NULLIF(con_c.display_name, ''),
+                                    NULLIF(c.subject, ''),
+                                    CASE WHEN COALESCE(j2_c.user, j_c.user) = '0' THEN 'WhatsApp' END,
+                                    CASE WHEN COALESCE(j2_c.user, j_c.user) IS NOT NULL
+                                         THEN '+' || {_clean_user_sql("COALESCE(j2_c.user, j_c.user)")} END,
+                                    {ldn_c_arm}
+                                    ''
+                                )
+                           END,
                            ''
                        ) AS name
                 FROM message_add_on ao
@@ -6691,6 +6732,12 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
                 {ldn_rx_join}
                 LEFT JOIN arch.contacts con_s ON con_s.number = {_clean_user_sql("COALESCE(j2.user, j.user)")}
+                LEFT JOIN chat c ON c._id = ao.chat_row_id
+                LEFT JOIN jid j_c ON j_c._id = c.jid_row_id
+                LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id
+                LEFT JOIN jid j2_c ON j2_c._id = jm_c.jid_row_id
+                {ldn_c_join}
+                LEFT JOIN arch.contacts con_c ON con_c.number = {_clean_user_sql("COALESCE(j2_c.user, j_c.user)")}
                 WHERE ao.parent_message_row_id = ?
             """,
                 (message_id,),
