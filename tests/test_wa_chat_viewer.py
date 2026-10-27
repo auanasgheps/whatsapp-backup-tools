@@ -7322,10 +7322,14 @@ class TestStickerSupport:
 
         app = viewer.create_app(tmp_path, rescan=False)
 
-        # Verify startup cleaned up the empty service row (msg_id 99)
+        # Verify startup healed the empty service row (msg_id 99) to deleted instead of purging it
         arch_chk = sqlite3.connect(archive_path)
-        r99 = arch_chk.execute("SELECT * FROM recent_messages WHERE msg_id = 99").fetchone()
-        assert r99 is None, "Empty service message must be purged from recent_messages on startup"
+        r99 = arch_chk.execute(
+            "SELECT media_type, text_body FROM recent_messages WHERE msg_id = 99"
+        ).fetchone()
+        assert r99 is not None, "Message 99 must be preserved in recent_messages"
+        assert r99[0] == "deleted"
+        assert r99[1] == "This message was deleted"
         arch_chk.close()
 
         with app.test_client() as client:
@@ -7336,6 +7340,10 @@ class TestStickerSupport:
             # Message 2 (from_me=1) in recent_messages / live DB is returned as deleted
             assert msgs[2]["media_type"] == "deleted"
             assert msgs[2]["text_body"] == "You deleted this message"
+
+            # Message 99 (from_me=0) in recent_messages is returned as deleted
+            assert msgs[99]["media_type"] == "deleted"
+            assert msgs[99]["text_body"] == "This message was deleted"
 
             # Query with before to bypass recent_messages and exercise live DB _ANDROID_SELECT
             resp_live = client.get(
@@ -7355,6 +7363,60 @@ class TestStickerSupport:
             assert len(chats) == 1
             assert chats[0]["last_msg_type"] == "deleted"
             assert chats[0]["last_msg_preview"] == "This message was deleted"
+
+    def test_android_recent_messages_missing_revoked_cache_hole_self_healing(self, tmp_path):
+        """When a revoked message was missing from recent_messages, live DB query heals the cache hole."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '555666777')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (30, 1, NULL, 0, 1700000003000, 3)"
+        )
+        wa_conn.execute(
+            "CREATE TABLE IF NOT EXISTS message_revoked ("
+            "message_row_id INTEGER PRIMARY KEY, "
+            "revoked_key_id TEXT, "
+            "admin_jid_row_id INTEGER, "
+            "revoke_timestamp INTEGER)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES "
+            "(1, 30, 0, 0, 1700000001000, 'First message', 0),"
+            "(2, 30, 1, 0, 1700000002000, NULL, 15),"
+            "(3, 30, 0, 0, 1700000003000, 'Third message', 0)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES "
+            "(2, 'REVOKEKEY_HOLE', 0, 1700000002000)"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('555666777', 'Carol', 'Carol')"
+        )
+        # Pre-seed recent_messages with ONLY message 1 and message 3 (message 2 is a missing hole)
+        archive_conn.execute(
+            "INSERT OR REPLACE INTO recent_messages (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, media_type, text_body) VALUES "
+            "('555666777', 'contact', 1, 1700000001000, '', 0, 'text', 'First message'),"
+            "('555666777', 'contact', 3, 1700000003000, '', 0, 'text', 'Third message')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=555666777&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = {m["msg_id"]: m for m in resp.get_json()}
+            # Cache hole detected: live query returned message 2 as deleted
+            assert 2 in msgs, "Missing revoked message must be restored into chat response"
+            assert msgs[2]["media_type"] == "deleted"
+            assert msgs[2]["text_body"] == "You deleted this message"
 
     def test_android_view_once_messages(self, tmp_path):
         """Android view-once messages (types 42, 43, 82) are distinguished with is_view_once=1."""

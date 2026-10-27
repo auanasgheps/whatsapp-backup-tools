@@ -937,6 +937,18 @@
     }
 
     const msg = unit.msg;
+    if (currentChat && currentChat.type === 'contact' && msg.media_type === 'service') {
+      if (
+        !msg.text_body ||
+        !msg.text_body.trim() ||
+        msg.text_body.includes('subject') ||
+        msg.text_body.includes('description') ||
+        msg.text_body.includes('deleted')
+      ) {
+        msg.media_type = 'deleted';
+        msg.text_body = msg.from_me ? 'You deleted this message' : 'This message was deleted';
+      }
+    }
     if (msg.media_type === 'service') {
       if (!msg.text_body || !msg.text_body.trim()) {
         return document.createDocumentFragment();

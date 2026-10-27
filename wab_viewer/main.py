@@ -4397,10 +4397,15 @@ def create_app(output_root: Path, rescan: bool = False):
             pass
     try:
         _archive_conn.execute(
-            "DELETE FROM recent_messages WHERE media_type = 'service' AND (text_body IS NULL OR TRIM(text_body) = '')"
-        )
-        _archive_conn.execute(
-            "UPDATE recent_messages SET media_type = 'deleted' WHERE chat_type = 'contact' AND media_type = 'service' AND text_body IN ('You deleted this message', 'This message was deleted')"
+            """UPDATE recent_messages
+               SET media_type = 'deleted',
+                   text_body = CASE WHEN from_me = 1 THEN 'You deleted this message' ELSE 'This message was deleted' END
+               WHERE chat_type = 'contact'
+                 AND (
+                     media_type = 'service'
+                     OR text_body LIKE '%group subject%'
+                     OR text_body LIKE '%group description%'
+                 )"""
         )
     except sqlite3.OperationalError:
         pass
@@ -5796,148 +5801,166 @@ def create_app(output_root: Path, rescan: bool = False):
                     rows = [dict(r) for r in rows]
                     for r in rows:
                         if r.get("chat_type") == "contact" and r.get("media_type") == "service":
-                            txt = (r.get("text_body") or "").strip()
-                            if (
-                                txt in ("You deleted this message", "This message was deleted")
-                                or not txt
-                            ):
-                                r["media_type"] = "deleted"
-                                r["text_body"] = (
-                                    "You deleted this message"
-                                    if r.get("from_me") == 1
-                                    else "This message was deleted"
-                                )
-                    if has_android_hd and get_wa() is not None:
-                        mids = [r["msg_id"] for r in rows]
-                        placeholders = ",".join("?" * len(mids))
-                        try:
-                            hd_parents = {
-                                r[0]
-                                for r in get_wa()
-                                .execute(
-                                    f"""SELECT ma.parent_message_row_id FROM message_association ma
-                                       JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
-                                       WHERE ma.parent_message_row_id IN ({placeholders})
-                                         AND ma.association_type IN (12, 7)
-                                         AND mm_hd.file_path IS NOT NULL""",
-                                    mids,
-                                )
-                                .fetchall()
-                            }
-                            if hd_parents:
-                                rows = [r for r in rows if r["msg_id"] not in hd_parents]
-                        except sqlite3.OperationalError:
-                            pass
-                    unresolved_media = [
-                        r
-                        for r in rows
-                        if r.get("media_type") not in ("text", "link", "deleted", "service")
-                        and not r.get("archive_path")
-                    ]
-                    if unresolved_media and get_wa() is not None:
-                        wa = get_wa()
-                        mids = [r["msg_id"] for r in unresolved_media]
-                        placeholders = ",".join("?" * len(mids))
-                        try:
-                            found_copies = wa.execute(
-                                f"""SELECT m._id, ac.archive_path
-                                   FROM message m
-                                   JOIN message_media mm ON mm.message_row_id = m._id
-                                   JOIN arch.archive_copies ac ON ac.original_path IN (
-                                       COALESCE(mm.file_path, 'vcard:' || m._id),
-                                       REPLACE(COALESCE(mm.file_path, ''), '\\', '/'),
-                                       REPLACE(COALESCE(mm.file_path, ''), '/', '\\'),
-                                       CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
-                                            THEN SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10) END,
-                                       CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
-                                            THEN REPLACE(SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10), '/', '\\') END,
-                                       CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
-                                            THEN 'WhatsApp/' || REPLACE(mm.file_path, '\\', '/') END,
-                                       CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
-                                            THEN 'WhatsApp\\' || REPLACE(mm.file_path, '/', '\\') END
-                                   )
-                                   WHERE m._id IN ({placeholders}) AND ac.archive_path IS NOT NULL""",
-                                mids,
-                            ).fetchall()
-                            if found_copies:
-                                copy_map = {r[0]: r[1] for r in found_copies}
-                                for r in rows:
-                                    if r["msg_id"] in copy_map:
-                                        r["archive_path"] = copy_map[r["msg_id"]]
-                                        get_archive().execute(
-                                            "UPDATE recent_messages SET archive_path = ? WHERE msg_id = ?",
-                                            (copy_map[r["msg_id"]], r["msg_id"]),
-                                        )
-                                get_archive().commit()
-                        except sqlite3.OperationalError:
-                            pass
-                    missing_rx = [r["msg_id"] for r in rows if r.get("reactions") is None]
-                    if missing_rx:
-                        rx_cache = (
-                            get_archive()
-                            .execute(
-                                """SELECT msg_id, reactions FROM reactions_cache
-                               WHERE chat_id = ? AND msg_id IN ("""
-                                + ",".join("?" * len(missing_rx))
-                                + """)""",
-                                [chat_id] + missing_rx,
+                            r["media_type"] = "deleted"
+                            r["text_body"] = (
+                                "You deleted this message"
+                                if r.get("from_me") == 1
+                                else "This message was deleted"
                             )
-                            .fetchall()
-                        )
-                        rx_map = {r["msg_id"]: r["reactions"] for r in rx_cache}
-                        still_missing = [mid for mid in missing_rx if mid not in rx_map]
-                        if still_missing and get_wa() is not None and has_reactions:
-                            wa_rows = (
+                    needs_refresh = False
+                    if get_wa() is not None and has_message_revoked and rows:
+                        cached_mids = {r["msg_id"] for r in rows}
+                        min_ts = rows[-1]["timestamp_ms"]
+                        max_ts = rows[0]["timestamp_ms"]
+                        chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+                        try:
+                            missing_rev = (
                                 get_wa()
                                 .execute(
-                                    f"""
-                                    SELECT ao.parent_message_row_id AS msg_id,
-                                           GROUP_CONCAT(r.reaction) AS reactions
-                                    FROM message_add_on ao
-                                    JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
-                                    WHERE ao.parent_message_row_id IN ({",".join("?" * len(still_missing))})
-                                    GROUP BY ao.parent_message_row_id
-                                """,
-                                    still_missing,
+                                    f"""SELECT m._id FROM message m
+                                       JOIN message_revoked mr ON mr.message_row_id = m._id
+                                       WHERE {chat_pred} AND m.timestamp >= ? AND m.timestamp <= ?
+                                       LIMIT 1""",
+                                    chat_params + [min_ts, max_ts],
+                                )
+                                .fetchone()
+                            )
+                            if missing_rev and missing_rev[0] not in cached_mids:
+                                needs_refresh = True
+                        except sqlite3.OperationalError:
+                            pass
+                    if not needs_refresh:
+                        if has_android_hd and get_wa() is not None:
+                            mids = [r["msg_id"] for r in rows]
+                            placeholders = ",".join("?" * len(mids))
+                            try:
+                                hd_parents = {
+                                    r[0]
+                                    for r in get_wa()
+                                    .execute(
+                                        f"""SELECT ma.parent_message_row_id FROM message_association ma
+                                           JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
+                                           WHERE ma.parent_message_row_id IN ({placeholders})
+                                             AND ma.association_type IN (12, 7)
+                                             AND mm_hd.file_path IS NOT NULL""",
+                                        mids,
+                                    )
+                                    .fetchall()
+                                }
+                                if hd_parents:
+                                    rows = [r for r in rows if r["msg_id"] not in hd_parents]
+                            except sqlite3.OperationalError:
+                                pass
+                        unresolved_media = [
+                            r
+                            for r in rows
+                            if r.get("media_type") not in ("text", "link", "deleted", "service")
+                            and not r.get("archive_path")
+                        ]
+                        if unresolved_media and get_wa() is not None:
+                            wa = get_wa()
+                            mids = [r["msg_id"] for r in unresolved_media]
+                            placeholders = ",".join("?" * len(mids))
+                            try:
+                                found_copies = wa.execute(
+                                    f"""SELECT m._id, ac.archive_path
+                                       FROM message m
+                                       JOIN message_media mm ON mm.message_row_id = m._id
+                                       JOIN arch.archive_copies ac ON ac.original_path IN (
+                                           COALESCE(mm.file_path, 'vcard:' || m._id),
+                                           REPLACE(COALESCE(mm.file_path, ''), '\\', '/'),
+                                           REPLACE(COALESCE(mm.file_path, ''), '/', '\\'),
+                                           CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
+                                                THEN SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10) END,
+                                           CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
+                                                THEN REPLACE(SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10), '/', '\\') END,
+                                           CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
+                                                THEN 'WhatsApp/' || REPLACE(mm.file_path, '\\', '/') END,
+                                           CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
+                                                THEN 'WhatsApp\\' || REPLACE(mm.file_path, '/', '\\') END
+                                       )
+                                       WHERE m._id IN ({placeholders}) AND ac.archive_path IS NOT NULL""",
+                                    mids,
+                                ).fetchall()
+                                if found_copies:
+                                    copy_map = {r[0]: r[1] for r in found_copies}
+                                    for r in rows:
+                                        if r["msg_id"] in copy_map:
+                                            r["archive_path"] = copy_map[r["msg_id"]]
+                                            get_archive().execute(
+                                                "UPDATE recent_messages SET archive_path = ? WHERE msg_id = ?",
+                                                (copy_map[r["msg_id"]], r["msg_id"]),
+                                            )
+                                    get_archive().commit()
+                            except sqlite3.OperationalError:
+                                pass
+                        missing_rx = [r["msg_id"] for r in rows if r.get("reactions") is None]
+                        if missing_rx:
+                            rx_cache = (
+                                get_archive()
+                                .execute(
+                                    """SELECT msg_id, reactions FROM reactions_cache
+                                   WHERE chat_id = ? AND msg_id IN ("""
+                                    + ",".join("?" * len(missing_rx))
+                                    + """)""",
+                                    [chat_id] + missing_rx,
                                 )
                                 .fetchall()
                             )
-                            found_ids = set()
-                            cache_inserts = []
-                            for wr in wa_rows:
-                                rx_map[wr["msg_id"]] = wr["reactions"]
-                                found_ids.add(wr["msg_id"])
-                                cache_inserts.append((chat_id, wr["msg_id"], wr["reactions"]))
-                            for mid in still_missing:
-                                if mid not in found_ids:
-                                    rx_map[mid] = ""
-                                    cache_inserts.append((chat_id, mid, ""))
-                            if cache_inserts:
-                                get_archive().executemany(
-                                    "INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions) VALUES (?, ?, ?)",
-                                    cache_inserts,
+                            rx_map = {r["msg_id"]: r["reactions"] for r in rx_cache}
+                            still_missing = [mid for mid in missing_rx if mid not in rx_map]
+                            if still_missing and get_wa() is not None and has_reactions:
+                                wa_rows = (
+                                    get_wa()
+                                    .execute(
+                                        f"""
+                                        SELECT ao.parent_message_row_id AS msg_id,
+                                               GROUP_CONCAT(r.reaction) AS reactions
+                                        FROM message_add_on ao
+                                        JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+                                        WHERE ao.parent_message_row_id IN ({",".join("?" * len(still_missing))})
+                                        GROUP BY ao.parent_message_row_id
+                                    """,
+                                        still_missing,
+                                    )
+                                    .fetchall()
                                 )
-                        for row in rows:
-                            if row["msg_id"] in rx_map:
-                                val = rx_map[row["msg_id"]]
-                                row["reactions"] = val if val else None
-                                get_archive().execute(
-                                    "UPDATE recent_messages SET reactions = ? WHERE chat_id = ? AND msg_id = ?",
-                                    (row["reactions"], chat_id, row["msg_id"]),
-                                )
-                        get_archive().commit()
-                    _hydrate_poll_rows(rows, source_type, get_wa())
-                    _hydrate_quoted_rows(rows, source_type, get_wa())
-                    _hydrate_link_preview_rows(rows, source_type)
-                    pres = get_preserved()
-                    if pres is not None:
-                        pres_rows = _query_preserved_messages(
-                            pres, chat_id, chat_type, None, None, limit
-                        )
-                        if pres_rows:
-                            rows = _merge_messages(rows, pres_rows, True, limit)
-                    _resolve_quoted_msg_ids(rows, source_type, get_wa(), pres)
-                return jsonify(rows)
+                                found_ids = set()
+                                cache_inserts = []
+                                for wr in wa_rows:
+                                    rx_map[wr["msg_id"]] = wr["reactions"]
+                                    found_ids.add(wr["msg_id"])
+                                    cache_inserts.append((chat_id, wr["msg_id"], wr["reactions"]))
+                                for mid in still_missing:
+                                    if mid not in found_ids:
+                                        rx_map[mid] = ""
+                                        cache_inserts.append((chat_id, mid, ""))
+                                if cache_inserts:
+                                    get_archive().executemany(
+                                        "INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions) VALUES (?, ?, ?)",
+                                        cache_inserts,
+                                    )
+                            for row in rows:
+                                if row["msg_id"] in rx_map:
+                                    val = rx_map[row["msg_id"]]
+                                    row["reactions"] = val if val else None
+                                    get_archive().execute(
+                                        "UPDATE recent_messages SET reactions = ? WHERE chat_id = ? AND msg_id = ?",
+                                        (row["reactions"], chat_id, row["msg_id"]),
+                                    )
+                            get_archive().commit()
+                        _hydrate_poll_rows(rows, source_type, get_wa())
+                        _hydrate_quoted_rows(rows, source_type, get_wa())
+                        _hydrate_link_preview_rows(rows, source_type)
+                        pres = get_preserved()
+                        if pres is not None:
+                            pres_rows = _query_preserved_messages(
+                                pres, chat_id, chat_type, None, None, limit
+                            )
+                            if pres_rows:
+                                rows = _merge_messages(rows, pres_rows, True, limit)
+                        _resolve_quoted_msg_ids(rows, source_type, get_wa(), pres)
+                        return jsonify(rows)
 
         conn = get_wa()
         if conn is None:
