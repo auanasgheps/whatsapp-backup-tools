@@ -1082,7 +1082,21 @@ def _format_service_rows(
                 r["participant_name"] = format_participant_names(names) if names else ""
             if r.get("msg_id") in meta_map:
                 r.setdefault("service_metadata", {}).update(meta_map[r["msg_id"]])
-            r["text_body"] = _format_android_service_row(r)
+            act = r.get("service_action_type") or r.get("action_type")
+            if r.get("chat_type") == "contact" and act == 1:
+                r["media_type"] = "deleted"
+                r["text_body"] = (
+                    "You deleted this message"
+                    if r.get("from_me") == 1
+                    else "This message was deleted"
+                )
+            else:
+                r["text_body"] = _format_android_service_row(r)
+                if r.get("chat_type") == "contact" and r["text_body"] in (
+                    "You deleted this message",
+                    "This message was deleted",
+                ):
+                    r["media_type"] = "deleted"
 
 
 # ---------------------------------------------------------------------------
@@ -4381,6 +4395,15 @@ def create_app(output_root: Path, rescan: bool = False):
             _archive_conn.execute("DELETE FROM reactions_cache")
         except sqlite3.OperationalError:
             pass
+    try:
+        _archive_conn.execute(
+            "DELETE FROM recent_messages WHERE media_type = 'service' AND (text_body IS NULL OR TRIM(text_body) = '')"
+        )
+        _archive_conn.execute(
+            "UPDATE recent_messages SET media_type = 'deleted' WHERE chat_type = 'contact' AND media_type = 'service' AND text_body IN ('You deleted this message', 'This message was deleted')"
+        )
+    except sqlite3.OperationalError:
+        pass
     _archive_conn.commit()
 
     _run_db_maintenance(cache_conn, _archive_conn)
@@ -4422,6 +4445,7 @@ def create_app(output_root: Path, rescan: bool = False):
     has_mq_msg_type = False
     has_mq_pm_chat = False
     has_message_view_once_media = False
+    has_message_revoked = False
     _mi_cols = set()
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
@@ -4430,6 +4454,7 @@ def create_app(output_root: Path, rescan: bool = False):
             for r in _tmp_wa.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         has_message_view_once_media = "message_view_once_media" in _wa_tables
+        has_message_revoked = "message_revoked" in _wa_tables
         has_reactions = "message_add_on" in _wa_tables and "message_add_on_reaction" in _wa_tables
         has_message_poll = "message_poll" in _wa_tables
         _mao_cols = (
@@ -4735,6 +4760,12 @@ def create_app(output_root: Path, rescan: bool = False):
         "LEFT JOIN message_system ms ON ms.message_row_id = m._id" if has_message_system else ""
     )
     ms_col = "ms.action_type" if has_message_system else "NULL"
+    mrev_join = (
+        "    LEFT JOIN message_revoked mrev ON mrev.message_row_id = m._id\n"
+        if has_message_revoked
+        else ""
+    )
+    mrev_pred = "mrev.message_row_id IS NOT NULL" if has_message_revoked else "0"
 
     ms_action_clause = (
         f"ms.action_type IN {tuple(_SUPPORTED_ANDROID_SYSTEM_ACTIONS)}"
@@ -4757,13 +4788,18 @@ def create_app(output_root: Path, rescan: bool = False):
     )
     extra_poll_select = f" OR ({' OR '.join(poll_subquery_parts)})" if poll_subquery_parts else ""
     mvom_filter_or = " OR (mvom.message_row_id IS NOT NULL)" if has_message_view_once_media else ""
+    extra_mrev_filter = (
+        "\n        OR (EXISTS (SELECT 1 FROM message_revoked mrev_f WHERE mrev_f.message_row_id = m._id))"
+        if has_message_revoked
+        else ""
+    )
 
     globals()["_ANDROID_FILTER"] = f"""
     AND (
         (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
         OR (m.message_type IS NOT NULL AND m.message_type != 0 AND m.message_type != 7 AND (mm.file_path IS NOT NULL OR mm.message_row_id IS NOT NULL OR m.message_type IN (1, 2, 3, 5, 9, 13, 16, 20, 28)))
         OR (m.message_type IN (4, 14))
-        OR (m.message_type IN (15, 64))
+        OR (m.message_type IN (15, 64){extra_mrev_filter})
         OR (m.message_type IN (42, 43, 82){mvom_filter_or})
         OR (m.message_type = 7 AND {ms_action_clause})
         OR (m.message_type = 66){extra_poll_filter}
@@ -4970,8 +5006,8 @@ def create_app(output_root: Path, rescan: bool = False):
         m.from_me,
         ac.archive_path,
         CASE
-            WHEN m.message_type IN (15, 64) THEN 'deleted'
-            WHEN m.message_type = 7 AND {ms_col} = 1 AND NOT ({is_group_chat_select}) THEN 'deleted'
+            WHEN m.message_type IN (15, 64) OR {mrev_pred} THEN 'deleted'
+            WHEN m.message_type = 7 AND ({ms_col} = 1 OR {ms_col} IS NULL) AND NOT ({is_group_chat_select}) THEN 'deleted'
             WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IN (4, 14) THEN 'vcard'
             WHEN m.message_type = 20 THEN 'sticker'
@@ -4996,8 +5032,8 @@ def create_app(output_root: Path, rescan: bool = False):
             m.text_data,
             CASE
                 WHEN m.message_type = 64 THEN 'This message was deleted by an admin'
-                WHEN (m.from_me = 1 AND m.message_type = 15) OR (m.from_me = 1 AND m.message_type = 7 AND {ms_col} = 1 AND NOT ({is_group_chat_select})) THEN 'You deleted this message'
-                WHEN m.message_type = 15 OR (m.message_type = 7 AND {ms_col} = 1 AND NOT ({is_group_chat_select})) THEN 'This message was deleted'
+                WHEN (m.from_me = 1 AND (m.message_type = 15 OR {mrev_pred})) OR (m.from_me = 1 AND m.message_type = 7 AND ({ms_col} = 1 OR {ms_col} IS NULL) AND NOT ({is_group_chat_select})) THEN 'You deleted this message'
+                WHEN m.message_type = 15 OR {mrev_pred} OR (m.message_type = 7 AND ({ms_col} = 1 OR {ms_col} IS NULL) AND NOT ({is_group_chat_select})) THEN 'This message was deleted'
                 WHEN m.message_type IN (4, 14) THEN m.text_data
                 WHEN m.message_type = 66{extra_poll_select} THEN 'Poll'
             END,
@@ -5045,6 +5081,7 @@ def create_app(output_root: Path, rescan: bool = False):
     LEFT JOIN jid jq2 ON jq2._id = jmq.jid_row_id
     {ldn_select_joins}
     {ms_join}
+    {mrev_join}
     {edit_join}
     LEFT JOIN _contacts_resolved con_s  ON con_s.clean_number  = {_clean_user_sql("COALESCE(j2.user, j.user)")}
     LEFT JOIN _contacts_resolved con_sq ON con_sq.clean_number = {_clean_user_sql("COALESCE(jq2.user, jq.user)")}
@@ -5139,6 +5176,26 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_message_system
                 else "AND 0"
             )
+            mrev_ts_filter = (
+                "OR EXISTS (SELECT 1 FROM message_revoked mrev_ts WHERE mrev_ts.message_row_id = m_ts._id)"
+                if has_message_revoked
+                else ""
+            )
+            mrev_disp_filter = (
+                "OR EXISTS (SELECT 1 FROM message_revoked mrev_disp WHERE mrev_disp.message_row_id = m_disp._id)"
+                if has_message_revoked
+                else ""
+            )
+            mrev_sub_filter = (
+                "OR EXISTS (SELECT 1 FROM message_revoked mrev_sub WHERE mrev_sub.message_row_id = m_sub._id)"
+                if has_message_revoked
+                else ""
+            )
+            mrev_exist_filter = (
+                "OR EXISTS (SELECT 1 FROM message_revoked mrev_ex WHERE mrev_ex.message_row_id = m._id)"
+                if has_message_revoked
+                else ""
+            )
             ldn_s_join = (
                 """
                 LEFT JOIN _lid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id
@@ -5209,7 +5266,7 @@ def create_app(output_root: Path, rescan: bool = False):
                               AND m_ts.message_type NOT IN (25, 67, 74, 79, 90)
                               AND (
                                   (m_ts.text_data IS NOT NULL AND m_ts.text_data != '' AND (m_ts.message_type IS NULL OR m_ts.message_type = 0 OR m_ts.message_type IN (5, 16)))
-                                  OR (m_ts.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                                  OR (m_ts.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_ts_filter})
                                   OR (m_ts.message_type = 7 AND {ms_ts_col} = 1 AND NOT ({is_group_chat}))
                                   OR ({is_group_chat} AND m_ts.message_type = 7 {ms_ts_allowed_clause})
                               )
@@ -5250,7 +5307,7 @@ def create_app(output_root: Path, rescan: bool = False):
                           AND m_disp.message_type NOT IN (25, 67, 74, 79, 90)
                           AND (
                               (m_disp.text_data IS NOT NULL AND m_disp.text_data != '' AND (m_disp.message_type IS NULL OR m_disp.message_type = 0 OR m_disp.message_type IN (5, 16)))
-                              OR (m_disp.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                              OR (m_disp.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_disp_filter})
                               OR (m_disp.message_type = 7 AND {ms_disp_col} = 1 AND NOT ({is_group_chat}))
                               OR ({is_group_chat} AND m_disp.message_type = 7 {ms_disp_allowed_clause})
                           )
@@ -5263,7 +5320,7 @@ def create_app(output_root: Path, rescan: bool = False):
                           AND m_sub.message_type NOT IN (25, 67, 74, 79, 90)
                           AND (
                               (m_sub.text_data IS NOT NULL AND m_sub.text_data != '' AND (m_sub.message_type IS NULL OR m_sub.message_type = 0 OR m_sub.message_type IN (5, 16)))
-                              OR (m_sub.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                              OR (m_sub.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_sub_filter})
                               OR (m_sub.message_type = 7 AND {ms_sub_col} = 1 AND NOT ({is_group_chat}))
                               OR ({is_group_chat} AND m_sub.message_type = 7 {ms_sub_allowed_clause})
                           )
@@ -5287,7 +5344,7 @@ def create_app(output_root: Path, rescan: bool = False):
                               AND m.message_type NOT IN (25, 67, 74, 79, 90)
                               AND (
                                   (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
-                                  OR (m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82))
+                                  OR (m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_exist_filter})
                               )
                         )
                     ))
@@ -5541,6 +5598,21 @@ def create_app(output_root: Path, rescan: bool = False):
                         }
                     except sqlite3.OperationalError:
                         pass
+            android_revoked_mids = set()
+            if has_message_revoked:
+                candidate_mids = [r["last_msg_id"] for r in rows if r["last_msg_id"]]
+                if candidate_mids:
+                    c_ph = ",".join("?" * len(candidate_mids))
+                    try:
+                        android_revoked_mids = {
+                            r[0]
+                            for r in conn.execute(
+                                f"SELECT message_row_id FROM message_revoked WHERE message_row_id IN ({c_ph})",
+                                candidate_mids,
+                            ).fetchall()
+                        }
+                    except sqlite3.OperationalError:
+                        pass
 
         for r in rows:
             d = dict(r)
@@ -5559,9 +5631,10 @@ def create_app(output_root: Path, rescan: bool = False):
             last_msg_sender_jid = d.pop("last_msg_sender_jid", None)
             last_msg_member_jid = d.pop("last_msg_member_jid", None)
 
-            if (source_type == "android" and raw_type in (15, 64)) or (
-                source_type == "ios" and raw_type == 14
-            ):
+            if (
+                source_type == "android"
+                and (raw_type in (15, 64) or last_msg_id in android_revoked_mids)
+            ) or (source_type == "ios" and raw_type == 14):
                 d["last_msg_type"] = "deleted"
                 if source_type == "android" and raw_type == 64:
                     d["last_msg_preview"] = "This message was deleted by an admin"
@@ -5721,6 +5794,19 @@ def create_app(output_root: Path, rescan: bool = False):
                 )
                 if source_type == "android" and rows:
                     rows = [dict(r) for r in rows]
+                    for r in rows:
+                        if r.get("chat_type") == "contact" and r.get("media_type") == "service":
+                            txt = (r.get("text_body") or "").strip()
+                            if (
+                                txt in ("You deleted this message", "This message was deleted")
+                                or not txt
+                            ):
+                                r["media_type"] = "deleted"
+                                r["text_body"] = (
+                                    "You deleted this message"
+                                    if r.get("from_me") == 1
+                                    else "This message was deleted"
+                                )
                     if has_android_hd and get_wa() is not None:
                         mids = [r["msg_id"] for r in rows]
                         placeholders = ",".join("?" * len(mids))
@@ -5931,10 +6017,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     missing,
                 ).fetchall()
                 wa_map = {r["msg_id"]: r["reactions"] for r in from_wa}
-                cache_inserts = [
-                    (chat_id, mid, wa_map.get(mid, ""))
-                    for mid in missing
-                ]
+                cache_inserts = [(chat_id, mid, wa_map.get(mid, "")) for mid in missing]
                 if cache_inserts:
                     get_archive().executemany(
                         "INSERT OR REPLACE INTO reactions_cache (chat_id, msg_id, reactions) "
@@ -6667,6 +6750,12 @@ def create_app(output_root: Path, rescan: bool = False):
             if "message_add_on" not in tables:
                 return jsonify({"available": False})
             _ensure_jid_map_resolved(conn, _archive_conn)
+            mao_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_add_on)").fetchall()}
+            chat_join_expr = (
+                "COALESCE(ao.chat_row_id, m.chat_row_id)"
+                if "chat_row_id" in mao_cols
+                else "m.chat_row_id"
+            )
             has_lid_dn = "lid_display_name" in tables
             ldn_rx_join = (
                 """
@@ -6732,7 +6821,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN jid j2 ON j2._id = jm.jid_row_id
                 {ldn_rx_join}
                 LEFT JOIN arch.contacts con_s ON con_s.number = {_clean_user_sql("COALESCE(j2.user, j.user)")}
-                LEFT JOIN chat c ON c._id = ao.chat_row_id
+                LEFT JOIN message m ON m._id = ao.parent_message_row_id
+                LEFT JOIN chat c ON c._id = {chat_join_expr}
                 LEFT JOIN jid j_c ON j_c._id = c.jid_row_id
                 LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id
                 LEFT JOIN jid j2_c ON j2_c._id = jm_c.jid_row_id

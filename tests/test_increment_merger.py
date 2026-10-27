@@ -4009,6 +4009,19 @@ def test_migrate_restored_backup_to_lid_repoints_companion_senders(mock_db):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS jid_map (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS message_add_on (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER,
+            parent_message_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER NOT NULL,
+            status INTEGER DEFAULT 0,
+            message_add_on_type INTEGER NOT NULL
+        )
+    """)
     cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
     if "device" not in cols:
         conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
@@ -4049,6 +4062,19 @@ def test_ensure_jid_map_resolved_bridges_companion_lids(mock_db):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS jid_map (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS message_add_on (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER,
+            parent_message_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER NOT NULL,
+            status INTEGER DEFAULT 0,
+            message_add_on_type INTEGER NOT NULL
+        )
+    """)
     cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
     if "device" not in cols:
         conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
@@ -5790,7 +5816,11 @@ def test_standalone_addons_zero_phantom_messages(tmp_path):
     )
     # Frame 4: Standalone edit (tag 12)
     wmi_edit = _build_edit_wmi(
-        "5550100@s.whatsapp.net", "EDIT_STANDALONE", "PARENT_CLEAN", "Edited authentic message", 1729000350
+        "5550100@s.whatsapp.net",
+        "EDIT_STANDALONE",
+        "PARENT_CLEAN",
+        "Edited authentic message",
+        1729000350,
     )
 
     with open(bin_path, "wb") as f:
@@ -5811,9 +5841,15 @@ def test_standalone_addons_zero_phantom_messages(tmp_path):
         assert len(msg_rows) == 2, f"Expected 2 messages, found {len(msg_rows)}: {msg_rows}"
 
         # None of the standalone add-on keys exist in message table
-        assert cur.execute("SELECT 1 FROM message WHERE key_id = 'PIN_STANDALONE'").fetchone() is None
-        assert cur.execute("SELECT 1 FROM message WHERE key_id = 'VOTE_STANDALONE'").fetchone() is None
-        assert cur.execute("SELECT 1 FROM message WHERE key_id = 'EDIT_STANDALONE'").fetchone() is None
+        assert (
+            cur.execute("SELECT 1 FROM message WHERE key_id = 'PIN_STANDALONE'").fetchone() is None
+        )
+        assert (
+            cur.execute("SELECT 1 FROM message WHERE key_id = 'VOTE_STANDALONE'").fetchone() is None
+        )
+        assert (
+            cur.execute("SELECT 1 FROM message WHERE key_id = 'EDIT_STANDALONE'").fetchone() is None
+        )
 
         # Add-on tables are populated
         assert cur.execute("SELECT COUNT(*) FROM message_add_on_pin_in_chat").fetchone()[0] == 1
@@ -5821,7 +5857,9 @@ def test_standalone_addons_zero_phantom_messages(tmp_path):
         assert cur.execute("SELECT COUNT(*) FROM message_edit_info").fetchone()[0] == 1
 
         # Edited text is reflected on parent
-        edited_text = cur.execute("SELECT text_data FROM message WHERE key_id = 'PARENT_CLEAN'").fetchone()[0]
+        edited_text = cur.execute(
+            "SELECT text_data FROM message WHERE key_id = 'PARENT_CLEAN'"
+        ).fetchone()[0]
         assert edited_text == "Edited authentic message"
     finally:
         conn.close()
@@ -5900,22 +5938,37 @@ def test_surrogate_churn_reparents_auxiliary_tables(tmp_path):
     assert new_id != 10
 
     # Auxiliary tables re-pointed to new_id
-    media_path = cur.execute("SELECT file_path FROM message_media WHERE message_row_id = ?", (new_id,)).fetchone()
+    media_path = cur.execute(
+        "SELECT file_path FROM message_media WHERE message_row_id = ?", (new_id,)
+    ).fetchone()
     assert media_path is not None
     assert media_path[0] == "Media/WhatsApp Images/photo.jpg"
 
-    quoted_key = cur.execute("SELECT key_id FROM message_quoted WHERE message_row_id = ?", (new_id,)).fetchone()
+    quoted_key = cur.execute(
+        "SELECT key_id FROM message_quoted WHERE message_row_id = ?", (new_id,)
+    ).fetchone()
     assert quoted_key is not None
     assert quoted_key[0] == "QUOTED_STUB"
 
-    read_ts = cur.execute("SELECT read_timestamp FROM receipt_user WHERE message_row_id = ?", (new_id,)).fetchone()
+    read_ts = cur.execute(
+        "SELECT read_timestamp FROM receipt_user WHERE message_row_id = ?", (new_id,)
+    ).fetchone()
     assert read_ts is not None
     assert read_ts[0] == 1729000555
 
     # No orphaned records pointing to old id 10
-    assert cur.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 10").fetchone()[0] == 0
-    assert cur.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 10").fetchone()[0] == 0
-    assert cur.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 10").fetchone()[0] == 0
+    assert (
+        cur.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 10").fetchone()[0]
+        == 0
+    )
+    assert (
+        cur.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 10").fetchone()[0]
+        == 0
+    )
+    assert (
+        cur.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 10").fetchone()[0]
+        == 0
+    )
     conn.close()
 
 
@@ -5931,26 +5984,47 @@ def test_chat_consolidation_reparents_add_ons(mock_db):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS jid_map (jid_row_id INTEGER PRIMARY KEY, lid_row_id INTEGER)"
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS message_add_on (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER,
+            parent_message_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER NOT NULL,
+            status INTEGER DEFAULT 0,
+            message_add_on_type INTEGER NOT NULL
+        )
+    """)
     cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
     if "device" not in cols:
         conn.execute("ALTER TABLE jid ADD COLUMN device INTEGER DEFAULT 0")
 
     # Primary phone JID and chat
-    cur.execute("INSERT INTO jid (user, server, device, raw_string) VALUES ('5550888', 's.whatsapp.net', 0, '5550888@s.whatsapp.net')")
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('5550888', 's.whatsapp.net', 0, '5550888@s.whatsapp.net')"
+    )
     phone_jid = cur.lastrowid
     cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 0)", (phone_jid,))
     phone_chat = cur.lastrowid
 
     # Shadow duplicate chat for same natural identity
-    cur.execute("INSERT INTO jid (user, server, device, raw_string) VALUES ('5550888', 's.whatsapp.net', 0, '5550888.0:0@s.whatsapp.net')")
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('5550888', 's.whatsapp.net', 0, '5550888.0:0@s.whatsapp.net')"
+    )
     dup_jid = cur.lastrowid
     cur.execute("INSERT INTO chat (jid_row_id, hidden) VALUES (?, 1)", (dup_jid,))
     dup_chat = cur.lastrowid
 
     # Primary and companion LID senders
-    cur.execute("INSERT INTO jid (user, server, device, raw_string) VALUES ('999000888', 'lid', 0, '999000888@lid')")
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('999000888', 'lid', 0, '999000888@lid')"
+    )
     primary_lid = cur.lastrowid
-    cur.execute("INSERT INTO jid (user, server, device, raw_string) VALUES ('999000888', 'lid', 1, '999000888.1:0@lid')")
+    cur.execute(
+        "INSERT INTO jid (user, server, device, raw_string) VALUES ('999000888', 'lid', 1, '999000888.1:0@lid')"
+    )
     comp_lid = cur.lastrowid
 
     # Messages in chats
@@ -5975,7 +6049,9 @@ def test_chat_consolidation_reparents_add_ons(mock_db):
 
     increment_merger.migrate_restored_backup_to_lid(conn, logger)
 
-    ao = cur.execute("SELECT chat_row_id, sender_jid_row_id FROM message_add_on WHERE _id = 100").fetchone()
+    ao = cur.execute(
+        "SELECT chat_row_id, sender_jid_row_id FROM message_add_on WHERE _id = 100"
+    ).fetchone()
     assert ao is not None
     # chat_row_id re-pointed to phone_chat
     assert ao[0] == phone_chat
@@ -6002,7 +6078,7 @@ def test_malformed_wire_jid_safe_fallback(tmp_path):
     corrupt_participant = b"\xff\xfe\x00\x01\x80\x00\x12"
     rx_bytes = (
         _build_field(1, 2, rx_key)
-        + _build_field(2, 2, "👍".encode("utf-8"))
+        + _build_field(2, 2, "👍".encode())
         + _build_field(3, 2, corrupt_participant)
         + _build_field(4, 0, 1729000100000)
     )
@@ -6059,9 +6135,13 @@ def test_message_deletions_full_cascade(tmp_path):
         "VALUES (99, 1, 0, 'DEL_TEST_KEY', -1, 1729000100, 'To be deleted', 0)"
     )
     cur.execute("INSERT INTO message_text (message_row_id, text_data) VALUES (99, 'To be deleted')")
-    cur.execute("INSERT INTO message_thumbnail (message_row_id, thumbnail) VALUES (99, X'89504E47')")
+    cur.execute(
+        "INSERT INTO message_thumbnail (message_row_id, thumbnail) VALUES (99, X'89504E47')"
+    )
     cur.execute("INSERT INTO message_view_once_media (message_row_id, state) VALUES (99, 1)")
-    cur.execute("INSERT INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES (99, 'REVOKED_KEY', 1, 1729000200)")
+    cur.execute(
+        "INSERT INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES (99, 'REVOKED_KEY', 1, 1729000200)"
+    )
     cur.execute("INSERT INTO message_system (message_row_id, action_type) VALUES (99, 5)")
     conn.commit()
 
@@ -6077,9 +6157,13 @@ def test_message_deletions_full_cascade(tmp_path):
     assert deleted_count == 1
     assert cur.execute("SELECT 1 FROM message WHERE _id = 99").fetchone() is None
     assert cur.execute("SELECT 1 FROM message_text WHERE message_row_id = 99").fetchone() is None
-    assert cur.execute("SELECT 1 FROM message_thumbnail WHERE message_row_id = 99").fetchone() is None
-    assert cur.execute("SELECT 1 FROM message_view_once_media WHERE message_row_id = 99").fetchone() is None
+    assert (
+        cur.execute("SELECT 1 FROM message_thumbnail WHERE message_row_id = 99").fetchone() is None
+    )
+    assert (
+        cur.execute("SELECT 1 FROM message_view_once_media WHERE message_row_id = 99").fetchone()
+        is None
+    )
     assert cur.execute("SELECT 1 FROM message_revoked WHERE message_row_id = 99").fetchone() is None
     assert cur.execute("SELECT 1 FROM message_system WHERE message_row_id = 99").fetchone() is None
     conn.close()
-
