@@ -2959,23 +2959,7 @@ def _fts_android_chat(
     hd_clause: str,
 ):
     _ensure_jid_map_resolved(wa_conn, None)
-
-    if chat_type == "group":
-        where = "WHERE CAST(m.chat_row_id AS TEXT) = ?"
-        params = (chat_id,)
-    else:
-        clean_id = chat_id.split(":")[0] if ":" in chat_id else chat_id
-        where = (
-            "WHERE m.chat_row_id IN ("
-            "SELECT c._id FROM chat c "
-            "LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id "
-            "LEFT JOIN jid j_real ON j_real._id = jm_c.jid_row_id "
-            "LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id "
-            "WHERE ? IN ("
-            f"j_real.user, j_chat.user, {_clean_user_sql('j_real.user')}, {_clean_user_sql('j_chat.user')}, CAST(c._id AS TEXT)"
-            "))"
-        )
-        params = (clean_id,)
+    chat_pred, chat_params = _resolve_android_chat_filter(wa_conn, chat_id, chat_type)
     has_poll_opt = wa_conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_poll_option'"
     ).fetchone()
@@ -2984,34 +2968,13 @@ def _fts_android_chat(
         if has_poll_opt
         else ""
     )
-    jid_cols = {
-        r["name"] if isinstance(r, sqlite3.Row) else r[1]
-        for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()
-    }
-    has_j_server = "server" in jid_cols
-    has_j_raw = "raw_string" in jid_cols
-    fts_group_parts = ["c.subject IS NOT NULL"]
-    if has_j_server:
-        fts_group_parts.append("(j_chat.server IS NOT NULL AND j_chat.server = 'g.us')")
-    if has_j_raw:
-        fts_group_parts.append(
-            "(j_chat.raw_string IS NOT NULL AND j_chat.raw_string LIKE '%@g.us')"
-        )
-    fts_is_group = " OR ".join(fts_group_parts)
 
     cursor = wa_conn.execute(
         f"""
         SELECT
             m._id                                                    AS rowid,
-            CASE
-                WHEN ({fts_is_group}) THEN CAST(m.chat_row_id AS TEXT)
-                ELSE COALESCE(
-                    {_clean_user_sql("j_chat_real.user")},
-                    {_clean_user_sql("j_chat.user")},
-                    CAST(m.chat_row_id AS TEXT)
-                )
-            END                                                      AS chat_id,
-            CASE WHEN ({fts_is_group}) THEN 'group' ELSE 'contact' END AS chat_type,
+            ?                                                        AS chat_id,
+            ?                                                        AS chat_type,
             COALESCE(m.timestamp, 0)                                AS timestamp_ms,
             COALESCE(
                 CASE WHEN m.message_type = 66 THEN m.text_data {poll_opt_sql}
@@ -3022,16 +2985,12 @@ def _fts_android_chat(
             m.message_type,
             mm.file_path                                            AS media_file
         FROM message m
-        LEFT JOIN chat c ON c._id = m.chat_row_id
-        LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
-        LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
-        LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
         LEFT JOIN message_media mm ON mm.message_row_id = m._id
-        {where}
+        WHERE {chat_pred}
         {hd_clause}
         ORDER BY m.timestamp ASC
     """,
-        params,
+        [chat_id, chat_type] + chat_params,
     )
     _stream_fts_rows(cursor, cache_conn, on_progress=on_progress)
 
@@ -3479,7 +3438,7 @@ _BASE_IOS_FILTER_TS = _BASE_IOS_FILTER
 _IOS_FILTER = _BASE_IOS_FILTER
 _IOS_FILTER_TS = _BASE_IOS_FILTER_TS
 
-_ANDROID_TS = "COALESCE(m.timestamp, 0)"
+_ANDROID_TS = "m.timestamp"
 _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
 
 _ANDROID_FILTER_TS = _ANDROID_FILTER
@@ -3527,6 +3486,71 @@ def _android_chat_filter(chat_id: str, chat_type: str) -> tuple[str, list]:
         "))"
     )
     return pred, [clean_id]
+
+
+_android_chat_row_ids_cache: dict[tuple[str, str], list[int]] = {}
+
+
+def _resolve_android_chat_row_ids(
+    conn: sqlite3.Connection, chat_id: str, chat_type: str
+) -> list[int]:
+    """Resolve a chat ID and chat type to physical chat row IDs using in-memory cache."""
+    cache_key = (chat_id, chat_type)
+    cached = _android_chat_row_ids_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if chat_type == "group":
+        try:
+            row_ids = [int(chat_id)]
+            _android_chat_row_ids_cache[cache_key] = row_ids
+            return row_ids
+        except ValueError:
+            return []
+
+    clean_id = chat_id.split(":")[0] if ":" in chat_id else chat_id
+    try:
+        conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
+        )
+        rows = conn.execute(
+            """
+            SELECT c._id FROM chat c
+            LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id
+            LEFT JOIN jid j_real ON j_real._id = jm_c.jid_row_id
+            LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+            WHERE ? IN (
+                j_real.user, j_chat.user,
+                """
+            + _clean_user_sql("j_real.user")
+            + ", "
+            + _clean_user_sql("j_chat.user")
+            + """,
+                CAST(c._id AS TEXT)
+            )
+        """,
+            (clean_id,),
+        ).fetchall()
+        row_ids = [r[0] for r in rows if r[0] is not None]
+    except sqlite3.OperationalError:
+        row_ids = []
+
+    if row_ids:
+        _android_chat_row_ids_cache[cache_key] = row_ids
+    return row_ids
+
+
+def _resolve_android_chat_filter(
+    conn: sqlite3.Connection, chat_id: str, chat_type: str
+) -> tuple[str, list]:
+    """Return physical column predicate and parameters for an Android chat."""
+    row_ids = _resolve_android_chat_row_ids(conn, chat_id, chat_type)
+    if len(row_ids) == 1:
+        return "m.chat_row_id = ?", [row_ids[0]]
+    if row_ids:
+        placeholders = ",".join("?" * len(row_ids))
+        return f"m.chat_row_id IN ({placeholders})", list(row_ids)
+    return _android_chat_filter(chat_id, chat_type)
 
 
 def _ios_chat_filter(chat_id: str) -> tuple[str, list]:
@@ -4479,6 +4503,7 @@ def create_app(output_root: Path, rescan: bool = False):
         )
     if rescan or (source_is_changed and has_prior_stamp):
         _archive_conn.execute("DELETE FROM recent_messages")
+        _android_chat_row_ids_cache.clear()
         try:
             _archive_conn.execute("DELETE FROM reactions_cache")
         except sqlite3.OperationalError:
@@ -5368,6 +5393,7 @@ def create_app(output_root: Path, rescan: bool = False):
             ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if has_lid_dn else ""
             rows = conn.execute(f"""
                 SELECT
+                    c._id                                               AS chat_row_id,
                     CASE WHEN {is_group_chat} THEN CAST(c._id AS TEXT)
                          ELSE COALESCE(
                              {_clean_user_sql("j_chat_real.user")},
@@ -5751,6 +5777,14 @@ def create_app(output_root: Path, rescan: bool = False):
 
         for r in rows:
             d = dict(r)
+            c_row_id = d.pop("chat_row_id", None)
+            if source_type == "android" and c_row_id is not None:
+                c_key = (d["id"], d["type"])
+                existing_c = _android_chat_row_ids_cache.get(c_key)
+                if existing_c is None:
+                    _android_chat_row_ids_cache[c_key] = [c_row_id]
+                elif c_row_id not in existing_c:
+                    existing_c.append(c_row_id)
             raw_type = d.pop("last_msg_type", 0)
             media_path = d.pop("last_msg_media_path", None)
             last_msg_id = d.pop("last_msg_id", None)
@@ -5942,7 +5976,9 @@ def create_app(output_root: Path, rescan: bool = False):
                         cached_mids = {r["msg_id"] for r in rows}
                         min_ts = rows[-1]["timestamp_ms"]
                         max_ts = rows[0]["timestamp_ms"]
-                        chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+                        chat_pred, chat_params = _resolve_android_chat_filter(
+                            get_wa(), chat_id, chat_type
+                        )
                         try:
                             missing_rev = (
                                 get_wa()
@@ -6119,7 +6155,7 @@ def create_app(output_root: Path, rescan: bool = False):
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
 
         if source_type == "android":
-            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
             ts_col = _ANDROID_TS
             sort_phys_col = "m._id"
         else:
@@ -6258,7 +6294,7 @@ def create_app(output_root: Path, rescan: bool = False):
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
 
         if source_type == "android":
-            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
             ts_col = _ANDROID_TS
             sort_phys_col = "m._id"
         else:
@@ -6326,7 +6362,7 @@ def create_app(output_root: Path, rescan: bool = False):
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
         if source_type == "android":
-            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
             is_media, ts_col = _ANDROID_IS_MEDIA, _ANDROID_TS
             is_link = _ANDROID_IS_LINK
             is_doc = _ANDROID_IS_DOCUMENT_UNDOWNLOADED
@@ -6453,7 +6489,7 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify([])
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         if source_type == "android":
-            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
             is_link = _ANDROID_IS_LINK
             ts_col = _ANDROID_TS
         else:
@@ -6475,7 +6511,7 @@ def create_app(output_root: Path, rescan: bool = False):
             return jsonify([])
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         if source_type == "android":
-            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
             is_doc = _ANDROID_IS_DOCUMENT_UNDOWNLOADED
             ts_col = _ANDROID_TS
         else:
@@ -6500,7 +6536,7 @@ def create_app(output_root: Path, rescan: bool = False):
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
         if source_type == "android":
-            chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+            chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
             is_media = _ANDROID_IS_MEDIA
             is_link = _ANDROID_IS_LINK
             is_doc_undownloaded = _ANDROID_IS_DOCUMENT_UNDOWNLOADED
@@ -7719,7 +7755,7 @@ def create_app(output_root: Path, rescan: bool = False):
 
         if conn is not None:
             if source_type == "android":
-                chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+                chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
                 live = conn.execute(
                     f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts"
                     f" FROM ({_ANDROID_SELECT} WHERE {chat_pred} {_ANDROID_FILTER_TS})",
@@ -7748,7 +7784,7 @@ def create_app(output_root: Path, rescan: bool = False):
 
         if conn is not None:
             if source_type == "android":
-                chat_pred, chat_params = _android_chat_filter(chat_id, chat_type)
+                chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
                 extra = _ANDROID_FILTER
                 select = _ANDROID_SELECT
 
