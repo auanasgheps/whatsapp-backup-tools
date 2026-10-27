@@ -938,6 +938,9 @@
 
     const msg = unit.msg;
     if (msg.media_type === 'service') {
+      if (!msg.text_body || !msg.text_body.trim()) {
+        return document.createDocumentFragment();
+      }
       const row = document.createElement('div');
       row.className = 'msg-row service';
       row.dataset.msgId = String(msg.msg_id);

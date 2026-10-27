@@ -3733,7 +3733,9 @@ def apply_messages_bin(
             sender_jid_row_id = 0
         elif msg.get("participant"):
             try:
-                sender_jid_row_id = resolve_or_create_jid(conn, msg["participant"], logger, jid_cache)
+                sender_jid_row_id = resolve_or_create_jid(
+                    conn, msg["participant"], logger, jid_cache
+                )
             except (ValueError, Exception):
                 sender_jid_row_id = 0
         else:
@@ -3745,7 +3747,9 @@ def apply_messages_bin(
             add_on_sender_id = -1
         elif msg.get("participant"):
             try:
-                add_on_sender_id = resolve_or_create_jid(conn, msg["participant"], logger, jid_cache)
+                add_on_sender_id = resolve_or_create_jid(
+                    conn, msg["participant"], logger, jid_cache
+                )
             except (ValueError, Exception):
                 add_on_sender_id = -1
         else:
@@ -3996,30 +4000,51 @@ def apply_messages_bin(
 
             # Cascade surrogate ID re-parenting across all auxiliary tables
             try:
-                cur.execute("UPDATE receipt_user SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                cur.execute(
+                    "UPDATE receipt_user SET message_row_id = ? WHERE message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
             except sqlite3.OperationalError:
                 pass
             try:
-                cur.execute("UPDATE message_edit_info SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                cur.execute(
+                    "UPDATE message_edit_info SET message_row_id = ? WHERE message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
             except sqlite3.OperationalError:
                 pass
             try:
-                cur.execute("UPDATE message_view_once_media SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                cur.execute(
+                    "UPDATE message_view_once_media SET message_row_id = ? WHERE message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
             except sqlite3.OperationalError:
                 pass
             try:
-                cur.execute("UPDATE message_secret SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                cur.execute(
+                    "UPDATE message_secret SET message_row_id = ? WHERE message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
             except sqlite3.OperationalError:
                 pass
             try:
-                cur.execute("UPDATE message_association SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
-                cur.execute("UPDATE message_association SET parent_message_row_id = ? WHERE parent_message_row_id = ?", (msg_row_id, old_id))
+                cur.execute(
+                    "UPDATE message_association SET message_row_id = ? WHERE message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
+                cur.execute(
+                    "UPDATE message_association SET parent_message_row_id = ? WHERE parent_message_row_id = ?",
+                    (msg_row_id, old_id),
+                )
             except sqlite3.OperationalError:
                 pass
 
             if not msg.get("quoted_info"):
                 try:
-                    cur.execute("UPDATE message_quoted SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                    cur.execute(
+                        "UPDATE message_quoted SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
                 except sqlite3.OperationalError:
                     pass
             else:
@@ -4030,7 +4055,10 @@ def apply_messages_bin(
 
             if not msg.get("media_info"):
                 try:
-                    cur.execute("UPDATE message_media SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                    cur.execute(
+                        "UPDATE message_media SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
                 except sqlite3.OperationalError:
                     pass
             else:
@@ -4041,20 +4069,32 @@ def apply_messages_bin(
 
             if not msg.get("location_info"):
                 try:
-                    cur.execute("UPDATE message_location SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                    cur.execute(
+                        "UPDATE message_location SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
                 except sqlite3.OperationalError:
                     pass
 
             if not msg.get("vcard"):
                 try:
-                    cur.execute("UPDATE message_vcard SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                    cur.execute(
+                        "UPDATE message_vcard SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
                 except sqlite3.OperationalError:
                     pass
 
             if not msg.get("link_preview_info"):
                 try:
-                    cur.execute("UPDATE message_text SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
-                    cur.execute("UPDATE message_thumbnail SET message_row_id = ? WHERE message_row_id = ?", (msg_row_id, old_id))
+                    cur.execute(
+                        "UPDATE message_text SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
+                    cur.execute(
+                        "UPDATE message_thumbnail SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
                 except sqlite3.OperationalError:
                     pass
 
@@ -4929,7 +4969,7 @@ def migrate_restored_backup_to_lid(conn: sqlite3.Connection, logger: logging.Log
                         pass
                     if cur.rowcount > 0:
                         logger.debug(
-                            f"Re-pointed message, add-on, and receipt sender JIDs from companion devices to primary canonical JIDs."
+                            "Re-pointed message, add-on, and receipt sender JIDs from companion devices to primary canonical JIDs."
                         )
                 cur.execute("DROP TABLE IF EXISTS _comp_to_pri")
     except sqlite3.OperationalError:
