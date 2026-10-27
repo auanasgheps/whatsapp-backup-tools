@@ -6168,3 +6168,81 @@ def test_message_deletions_full_cascade(tmp_path):
     assert cur.execute("SELECT 1 FROM message_revoked WHERE message_row_id = 99").fetchone() is None
     assert cur.execute("SELECT 1 FROM message_system WHERE message_row_id = 99").fetchone() is None
     conn.close()
+
+
+def test_decode_wmi_and_apply_messages_bin_quoted_media_thumbnail(mock_db, tmp_path):
+    """Verify decode_wmi and apply_messages_bin handle quoted media thumbnails and message_type."""
+    fake_thumb = (
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xdb\x00C\x00\xff\xd9"
+    )
+    img_inner = _build_field(3, 2, b"Sunset over the lake") + _build_field(16, 2, fake_thumb)
+    quoted_msg = _build_field(3, 2, img_inner)
+    ctx_bytes = (
+        _build_field(1, 2, b"ORIG_PHOTO_99")
+        + _build_field(2, 2, b"5550200@s.whatsapp.net")
+        + _build_field(3, 2, quoted_msg)
+    )
+    ext_bytes = _build_field(1, 2, b"Amazing sunset!") + _build_field(17, 2, ctx_bytes)
+    msg_bytes = _build_field(6, 2, ext_bytes)
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"REPLY_IMG_KEY")
+    )
+    wmi_data = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000950)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_data)
+    assert decoded["key_id"] == "REPLY_IMG_KEY"
+    qi = decoded["quoted_info"]
+    assert qi is not None
+    assert qi["stanza_id"] == "ORIG_PHOTO_99"
+    assert qi["quoted_text"] == "Sunset over the lake"
+    assert qi["message_type"] == 1
+    assert qi["thumbnail"] == fake_thumb
+
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_quoted (
+            message_row_id INTEGER PRIMARY KEY,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            sender_jid_row_id INTEGER,
+            key_id TEXT NOT NULL,
+            timestamp INTEGER,
+            message_type INTEGER,
+            text_data TEXT
+        );
+        CREATE TABLE IF NOT EXISTS message_quoted_media (
+            message_row_id INTEGER PRIMARY KEY,
+            thumbnail BLOB
+        );
+    """)
+
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_data])
+    bin_file = tmp_path / "messages_quoted_thumb.bin"
+    bin_file.write_bytes(frame)
+
+    inserted = increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
+    conn.commit()
+    assert inserted == 1
+
+    q_row = conn.execute(
+        "SELECT message_row_id, key_id, text_data, message_type FROM message_quoted WHERE key_id = 'ORIG_PHOTO_99'"
+    ).fetchone()
+    assert q_row is not None
+    assert q_row[1] == "ORIG_PHOTO_99"
+    assert q_row[2] == "Sunset over the lake"
+    assert q_row[3] == 1
+
+    mqm_row = conn.execute(
+        "SELECT message_row_id, thumbnail FROM message_quoted_media WHERE message_row_id = ?",
+        (q_row[0],),
+    ).fetchone()
+    assert mqm_row is not None
+    assert mqm_row[1] == fake_thumb
+    conn.close()

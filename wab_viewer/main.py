@@ -1740,8 +1740,86 @@ def _hydrate_quoted_rows(
     source_type: str,
     wa_conn: sqlite3.Connection | None,
 ) -> None:
-    """Hydrate quoted message fields on iOS rows from embedded ZMETADATA blobs."""
-    if not rows or source_type != "ios":
+    """Hydrate quoted message fields on iOS rows from embedded ZMETADATA blobs, and Android rows for quoted thumbnails."""
+    if not rows:
+        return
+
+    if source_type == "android":
+        for row in rows:
+            qt = row.get("quoted_text")
+            if qt and (
+                qt.startswith("📷")
+                or qt.startswith("🎥")
+                or qt.startswith("Sticker")
+                or qt.startswith("📄")
+            ):
+                row["quoted_has_thumb"] = 1
+
+        need_thumb = [
+            r
+            for r in rows
+            if (r.get("quoted_text") or r.get("quoted_msg_id")) and not r.get("quoted_has_thumb")
+        ]
+        if need_thumb and wa_conn is not None:
+            mids = [r["msg_id"] for r in need_thumb if r.get("msg_id")]
+            q_mids = [r["quoted_msg_id"] for r in need_thumb if r.get("quoted_msg_id")]
+            has_thumb_mids = set()
+            try:
+                tables = {
+                    r[0]
+                    for r in wa_conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "message_quoted_media" in tables and mids:
+                    ph = ",".join("?" * len(mids))
+                    has_thumb_mids.update(
+                        r[0]
+                        for r in wa_conn.execute(
+                            f"SELECT message_row_id FROM message_quoted_media WHERE message_row_id IN ({ph}) AND thumbnail IS NOT NULL",
+                            mids,
+                        ).fetchall()
+                    )
+                if q_mids:
+                    ph_q = ",".join("?" * len(q_mids))
+                    if "message_thumbnail" in tables:
+                        has_thumb_mids.update(
+                            r[0]
+                            for r in wa_conn.execute(
+                                f"SELECT message_row_id FROM message_thumbnail WHERE message_row_id IN ({ph_q}) AND thumbnail IS NOT NULL",
+                                q_mids,
+                            ).fetchall()
+                        )
+                    if "media_hash_thumbnail" in tables and "message_media" in tables:
+                        has_thumb_mids.update(
+                            r[0]
+                            for r in wa_conn.execute(
+                                f"""SELECT mm.message_row_id FROM message_media mm
+                                   JOIN media_hash_thumbnail mht ON mht.media_hash = mm.file_hash
+                                   WHERE mm.message_row_id IN ({ph_q}) AND mht.thumbnail IS NOT NULL""",
+                                q_mids,
+                            ).fetchall()
+                        )
+                    if "message" in tables:
+                        has_thumb_mids.update(
+                            r[0]
+                            for r in wa_conn.execute(
+                                f"SELECT _id FROM message WHERE _id IN ({ph_q}) AND message_type IN (1, 3, 9, 20, 26, 42, 43)",
+                                q_mids,
+                            ).fetchall()
+                        )
+            except sqlite3.OperationalError:
+                pass
+
+            for row in need_thumb:
+                if (
+                    row.get("msg_id") in has_thumb_mids
+                    or row.get("quoted_msg_id") in has_thumb_mids
+                ):
+                    row["quoted_has_thumb"] = 1
+        return
+
+    if source_type != "ios":
         return
 
     extracted_senders = {}
@@ -2261,22 +2339,31 @@ def _resolve_quoted_msg_ids(
         try:
             if source_type == "android":
                 live_matches = wa_conn.execute(
-                    f"SELECT key_id AS stanza_id, _id AS live_id, timestamp FROM message WHERE key_id IN ({ph})",
+                    f"SELECT key_id AS stanza_id, _id AS live_id, timestamp, message_type FROM message WHERE key_id IN ({ph})",
                     list(still_needed),
                 ).fetchall()
-                live_map = {m["stanza_id"]: (m["live_id"], m["timestamp"]) for m in live_matches}
+                live_map = {
+                    m["stanza_id"]: (m["live_id"], m["timestamp"], m["message_type"])
+                    for m in live_matches
+                }
             else:
                 live_matches = wa_conn.execute(
-                    f"SELECT ZSTANZAID AS stanza_id, Z_PK AS live_id, CAST((ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS ts FROM ZWAMESSAGE WHERE ZSTANZAID IN ({ph})",
+                    f"SELECT ZSTANZAID AS stanza_id, Z_PK AS live_id, CAST((ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS ts, ZMESSAGETYPE AS mtype FROM ZWAMESSAGE WHERE ZSTANZAID IN ({ph})",
                     list(still_needed),
                 ).fetchall()
-                live_map = {m["stanza_id"]: (m["live_id"], m["ts"]) for m in live_matches}
+                live_map = {
+                    m["stanza_id"]: (m["live_id"], m["ts"], m["mtype"]) for m in live_matches
+                }
             for r in unresolved:
                 if r.get("quoted_msg_id") is None and r["quoted_stanza_id"] in live_map:
-                    live_id, live_ts = live_map[r["quoted_stanza_id"]]
+                    live_id, live_ts, live_type = live_map[r["quoted_stanza_id"]]
                     r["quoted_msg_id"] = live_id
                     if not r.get("quoted_ts"):
                         r["quoted_ts"] = live_ts
+                    if source_type == "android" and live_type in (1, 3, 9, 20, 26, 42, 43):
+                        r["quoted_has_thumb"] = 1
+                    elif source_type == "ios" and live_type in (1, 3, 8, 11, 15, 38, 39):
+                        r["quoted_has_thumb"] = 1
         except sqlite3.OperationalError:
             pass
     finally:
@@ -4334,6 +4421,7 @@ def create_app(output_root: Path, rescan: bool = False):
             link_url       TEXT,
             link_preview_type INTEGER NOT NULL DEFAULT 0,
             has_thumbnail  INTEGER NOT NULL DEFAULT 0,
+            quoted_has_thumb INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -4405,6 +4493,17 @@ def create_app(output_root: Path, rescan: bool = False):
                      media_type = 'service'
                      OR text_body LIKE '%group subject%'
                      OR text_body LIKE '%group description%'
+                 )"""
+        )
+        _archive_conn.execute(
+            """UPDATE recent_messages
+               SET quoted_has_thumb = 1
+               WHERE quoted_has_thumb = 0
+                 AND (
+                     quoted_text LIKE '📷%'
+                     OR quoted_text LIKE '🎥%'
+                     OR quoted_text LIKE 'Sticker%'
+                     OR quoted_text LIKE '📄%'
                  )"""
         )
     except sqlite3.OperationalError:
@@ -4914,12 +5013,6 @@ def create_app(output_root: Path, rescan: bool = False):
         else "0"
     )
 
-    android_quoted_has_thumb_expr = (
-        "CASE WHEN (mqm.message_row_id IS NOT NULL AND mqm.thumbnail IS NOT NULL) THEN 1 ELSE 0 END"
-        if has_message_quoted_media
-        else "0"
-    )
-
     quoted_msg_id_col = "NULL"
     quoted_stanza_id_col = "NULL"
     quoted_ts_col = "COALESCE(mq.timestamp, 0)"
@@ -4931,9 +5024,46 @@ def create_app(output_root: Path, rescan: bool = False):
             else ""
         )
         m_orig_join = f"    LEFT JOIN message m_orig ON m_orig.key_id = mq.key_id {pm_clause}\n"
+        if has_message_thumbnail:
+            m_orig_join += (
+                "    LEFT JOIN message_thumbnail mt_orig ON mt_orig.message_row_id = m_orig._id\n"
+            )
+        if has_media_hash_thumbnail and has_mm_file_hash:
+            m_orig_join += (
+                "    LEFT JOIN message_media mm_orig ON mm_orig.message_row_id = m_orig._id\n"
+                "    LEFT JOIN media_hash_thumbnail mht_orig ON mht_orig.media_hash = mm_orig.file_hash\n"
+            )
+        if has_message_quoted_media:
+            m_orig_join += "    LEFT JOIN message_quoted_media mqm_orig ON mqm_orig.message_row_id = m_orig._id\n"
         quoted_msg_id_col = "m_orig._id"
         quoted_stanza_id_col = "mq.key_id"
         quoted_ts_col = "COALESCE(NULLIF(mq.timestamp, 0), m_orig.timestamp, 0)"
+
+    quoted_thumb_conds = []
+    if has_message_quoted_media:
+        quoted_thumb_conds.append("(mqm.message_row_id IS NOT NULL AND mqm.thumbnail IS NOT NULL)")
+    if has_android_key_id and has_mq_key_id:
+        if has_message_thumbnail:
+            quoted_thumb_conds.append(
+                "(mt_orig.message_row_id IS NOT NULL AND mt_orig.thumbnail IS NOT NULL)"
+            )
+        if has_media_hash_thumbnail and has_mm_file_hash:
+            quoted_thumb_conds.append(
+                "(mht_orig.media_hash IS NOT NULL AND mht_orig.thumbnail IS NOT NULL)"
+            )
+        if has_message_quoted_media:
+            quoted_thumb_conds.append(
+                "(mqm_orig.message_row_id IS NOT NULL AND mqm_orig.thumbnail IS NOT NULL)"
+            )
+        quoted_thumb_conds.append("(m_orig.message_type IN (1, 3, 9, 20, 26, 42, 43))")
+    if has_mq_msg_type:
+        quoted_thumb_conds.append("(mq.message_type IN (1, 3, 9, 20, 26, 42, 43))")
+
+    android_quoted_has_thumb_expr = (
+        f"CASE WHEN {' OR '.join(quoted_thumb_conds)} THEN 1 ELSE 0 END"
+        if quoted_thumb_conds
+        else "0"
+    )
 
     orig_text_arm = (
         "NULLIF(m_orig.text_data, ''),\n            "
@@ -8580,6 +8710,38 @@ def create_app(output_root: Path, rescan: bool = False):
                 ).fetchone()
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
+
+            if not thumb_bytes and has_mq_key_id and has_android_key_id:
+                if has_message_thumbnail:
+                    row = conn.execute(
+                        """
+                        SELECT mt.thumbnail
+                        FROM message_quoted mq
+                        JOIN message m_orig ON m_orig.key_id = mq.key_id
+                        JOIN message_thumbnail mt ON mt.message_row_id = m_orig._id
+                        WHERE mq.message_row_id = ? AND mt.thumbnail IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (msg_id,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
+
+                if not thumb_bytes and has_media_hash_thumbnail and has_mm_file_hash:
+                    row = conn.execute(
+                        """
+                        SELECT mht.thumbnail
+                        FROM message_quoted mq
+                        JOIN message m_orig ON m_orig.key_id = mq.key_id
+                        JOIN message_media mm ON mm.message_row_id = m_orig._id
+                        JOIN media_hash_thumbnail mht ON mht.media_hash = mm.file_hash
+                        WHERE mq.message_row_id = ? AND mht.thumbnail IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (msg_id,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
         elif source_type == "ios":
             thumb_cols = []
             if "ZXMPPTHUMBPATH" in _mi_cols:

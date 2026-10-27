@@ -996,13 +996,13 @@
       qContent.appendChild(qText);
       quote.appendChild(qContent);
 
-      if (msg.quoted_has_thumb && (msg.msg_id || msg.quoted_msg_id)) {
+      if (msg.quoted_has_thumb && (msg.quoted_msg_id || msg.msg_id)) {
         const qThumb = document.createElement('img');
         qThumb.className = 'msg-quote-thumb';
         qThumb.alt = '';
         qThumb.loading = 'lazy';
         qThumb.decoding = 'async';
-        qThumb.src = '/api/thumbnail/' + (msg.msg_id || msg.quoted_msg_id);
+        qThumb.src = '/api/thumbnail/' + (msg.quoted_msg_id || msg.msg_id);
         qThumb.onerror = () => { qThumb.remove(); };
         quote.appendChild(qThumb);
       }
