@@ -29,6 +29,7 @@ dependencies = [
     "flask",
     "wa-crypt-tools",
     "iphone-backup-decrypt",
+    "cryptography",
 ]
 
 [project.optional-dependencies]

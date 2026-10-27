@@ -4391,6 +4391,7 @@ def test_hydrate_poll_rows_resilience():
 
 
 def test_apply_poll_vote_encrypted_payload(tmp_path):
+    pytest.importorskip("cryptography")
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF

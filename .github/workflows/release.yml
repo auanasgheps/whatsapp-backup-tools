@@ -44,7 +44,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install pytest pytest-cov flask wa-crypt-tools iphone-backup-decrypt tzdata
+        run: pip install pytest pytest-cov flask wa-crypt-tools iphone-backup-decrypt tzdata cryptography
 
       - name: Run test suite
         run: pytest tests/ -v
