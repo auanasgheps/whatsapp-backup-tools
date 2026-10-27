@@ -236,21 +236,30 @@ def extract_context_info(payload_fields: dict) -> dict | None:
 
     quoted_text = None
     q_from_me = 0
+    q_type = 0
+    q_thumb = None
     if 3 in ctx_fields and isinstance(ctx_fields[3][0][1], bytes):
         raw_q_fields = parse_wire_fields(ctx_fields[3][0][1])
         q_fields, _ = unwrap_message_container(raw_q_fields, 4)
         if 1 in q_fields:
             quoted_text = q_fields[1][0][1].decode("utf-8", errors="replace")
+            q_type = 0
         elif 6 in q_fields:
             sub = parse_wire_fields(q_fields[6][0][1])
             quoted_text = (
                 sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 1 in sub else ""
             )
+            q_type = 0
+            if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
+                q_thumb = sub[16][0][1]
         elif 3 in q_fields:
             sub = parse_wire_fields(q_fields[3][0][1])
             quoted_text = (
                 sub.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 3 in sub else ""
             )
+            q_type = 1
+            if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
+                q_thumb = sub[16][0][1]
         elif 7 in q_fields:
             sub = parse_wire_fields(q_fields[7][0][1])
             quoted_text = (
@@ -260,13 +269,26 @@ def extract_context_info(payload_fields: dict) -> dict | None:
                 if (3 in sub or 8 in sub)
                 else ""
             )
+            q_type = 9
+            if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
+                q_thumb = sub[16][0][1]
         elif 9 in q_fields:
             sub = parse_wire_fields(q_fields[9][0][1])
             quoted_text = (
                 sub.get(7, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 7 in sub else ""
             )
+            q_type = 3
+            if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
+                q_thumb = sub[16][0][1]
+        elif 20 in q_fields or 26 in q_fields:
+            stk_payload = q_fields[20][0][1] if 20 in q_fields else q_fields[26][0][1]
+            sub = parse_wire_fields(stk_payload)
+            q_type = 20
+            quoted_text = ""
+            if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
+                q_thumb = sub[16][0][1]
 
-    if not stanza_id and not quoted_text and not participant:
+    if not stanza_id and not quoted_text and not participant and not q_thumb:
         return None
 
     return {
@@ -274,6 +296,8 @@ def extract_context_info(payload_fields: dict) -> dict | None:
         "participant": participant,
         "quoted_text": quoted_text or "",
         "from_me": q_from_me,
+        "message_type": q_type,
+        "thumbnail": q_thumb,
     }
 
 
@@ -4053,6 +4077,22 @@ def apply_messages_bin(
                 except sqlite3.OperationalError:
                     pass
 
+            if not (msg.get("quoted_info") and msg["quoted_info"].get("thumbnail")):
+                try:
+                    cur.execute(
+                        "UPDATE message_quoted_media SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            else:
+                try:
+                    cur.execute(
+                        "DELETE FROM message_quoted_media WHERE message_row_id = ?", (old_id,)
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
             if not msg.get("media_info"):
                 try:
                     cur.execute(
@@ -4091,6 +4131,14 @@ def apply_messages_bin(
                         "UPDATE message_text SET message_row_id = ? WHERE message_row_id = ?",
                         (msg_row_id, old_id),
                     )
+                    cur.execute(
+                        "UPDATE message_thumbnail SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            else:
+                try:
                     cur.execute(
                         "UPDATE message_thumbnail SET message_row_id = ? WHERE message_row_id = ?",
                         (msg_row_id, old_id),
@@ -4257,13 +4305,25 @@ def apply_messages_bin(
                     "sender_jid_row_id": q_sender_id,
                     "key_id": q_stanza_id,
                     "timestamp": quoted_ts,
-                    "message_type": 0,
+                    "message_type": qi.get("message_type", 0),
                 }
                 valid_q_cols = [c for c in q_row_map if c in quoted_cols]
                 cur.execute(
                     f"INSERT INTO message_quoted ({', '.join(valid_q_cols)}) VALUES ({', '.join('?' for _ in valid_q_cols)})",
                     [q_row_map[c] for c in valid_q_cols],
                 )
+                if qi.get("thumbnail"):
+                    mqm_cols = get_table_columns(conn, "message_quoted_media", schema_cache)
+                    if mqm_cols:
+                        mqm_map = {
+                            "message_row_id": msg_row_id,
+                            "thumbnail": qi["thumbnail"],
+                        }
+                        valid_mqm = [c for c in mqm_map if c in mqm_cols]
+                        cur.execute(
+                            f"INSERT OR REPLACE INTO message_quoted_media ({', '.join(valid_mqm)}) VALUES ({', '.join('?' for _ in valid_mqm)})",
+                            [mqm_map[c] for c in valid_mqm],
+                        )
 
         # Insert user receipts if present
         if msg.get("user_receipts") and msg_row_id:

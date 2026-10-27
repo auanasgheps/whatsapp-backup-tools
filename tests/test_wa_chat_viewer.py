@@ -10603,3 +10603,116 @@ class TestRichLinkPreviews:
             assert target_msg is not None
             assert target_msg["media_type"] == "image"
             assert target_msg["text_body"] == "Beautiful lake view"
+
+    def test_android_quoted_photo_reply_thumbnail_on_orig_and_cache_self_heal(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE chat (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                jid_row_id INTEGER NOT NULL,
+                hidden INTEGER DEFAULT 0,
+                subject TEXT
+            );
+            CREATE TABLE jid (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user TEXT NOT NULL,
+                server TEXT NOT NULL,
+                raw_string TEXT
+            );
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                key_id TEXT NOT NULL,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            CREATE TABLE message_quoted (
+                message_row_id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER NOT NULL,
+                parent_message_chat_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                sender_jid_row_id INTEGER,
+                key_id TEXT NOT NULL,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            CREATE TABLE message_thumbnail (
+                message_row_id INTEGER PRIMARY KEY,
+                thumbnail BLOB
+            );
+            CREATE TABLE message_media (
+                message_row_id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                file_path TEXT,
+                file_size INTEGER,
+                media_name TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15551234567', 's.whatsapp.net', '15551234567@s.whatsapp.net')"
+        )
+        conn.execute("INSERT INTO chat (_id, jid_row_id, hidden, subject) VALUES (1, 1, 0, NULL)")
+
+        # Original photo message with thumbnail in message_thumbnail
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xdb\x00C\x00\xff\xd9"
+        conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data)
+            VALUES (10, 1, 0, 'PHOTO_STANZA_10', 1, 1000000, 1, 'Mountain Peak')
+        """)
+        conn.execute(
+            "INSERT INTO message_thumbnail (message_row_id, thumbnail) VALUES (10, ?)",
+            (fake_jpeg,),
+        )
+
+        # Replying text message quoting the photo; message_quoted_media does NOT exist
+        conn.execute("""
+            INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data)
+            VALUES (100, 1, 1, 'STANZA_REPLY_100', NULL, 2000000, 0, 'Awesome mountain!')
+        """)
+        conn.execute("""
+            INSERT INTO message_quoted (message_row_id, chat_row_id, parent_message_chat_row_id, from_me, sender_jid_row_id, key_id, timestamp, message_type, text_data)
+            VALUES (100, 1, 1, 0, 1, 'PHOTO_STANZA_10', 1000000, 1, 'Mountain Peak')
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        # Pre-seed recent_messages with quoted_has_thumb = 0 and 📷 prefix to test self-heal
+        archive_conn.execute("""
+            INSERT INTO recent_messages (
+                chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                media_type, text_body, quoted_msg_id, quoted_text,
+                quoted_sender, quoted_ts, quoted_has_thumb
+            ) VALUES (
+                '15551234567', 'contact', 100, 2000000, 'me', 1,
+                'text', 'Awesome mountain!', 10, '📷 Mountain Peak',
+                'Contact', 1000000, 0
+            )
+        """)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=15551234567&chat_type=contact&limit=50")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            reply = next(m for m in msgs if m["msg_id"] == 100)
+            assert reply["quoted_msg_id"] == 10
+            assert reply["quoted_has_thumb"] == 1
+
+            # Thumbnail endpoint: both quoted_msg_id and reply_msg_id must resolve
+            thumb_quoted = client.get("/api/thumbnail/10")
+            assert thumb_quoted.status_code == 200
+            assert thumb_quoted.data == fake_jpeg
+
+            thumb_reply = client.get("/api/thumbnail/100")
+            assert thumb_reply.status_code == 200
+            assert thumb_reply.data == fake_jpeg
