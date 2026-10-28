@@ -5239,11 +5239,9 @@ class TestServiceMessages:
             c_resp = client.get("/api/chats")
             chats = c_resp.get_json()
             assert len(chats) == 1
-            # display_message_row_id in chat was 3 (subject changed)
+            # Most recent message in chat is message 22 ("You left")
             assert chats[0]["last_msg_type"] == "service"
-            assert (
-                chats[0]["last_msg_preview"] == 'You changed the subject to "Renamed Android Group"'
-            )
+            assert chats[0]["last_msg_preview"] == "You left"
 
             # /api/chat-info stats
             info_resp = client.get("/api/chat-info?chat_id=10&chat_type=group")
@@ -7544,8 +7542,8 @@ class TestStickerSupport:
             "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES "
             "(10, 20, 0, 1, 1700000001000, NULL, 1),"
             "(11, 20, 0, 1, 1700000002000, NULL, 42),"
-            "(12, 20, 0, 1, 1700000003000, NULL, 2),"
-            "(13, 20, 0, 1, 1700000004000, 'Nice photo', 0)"
+            "(13, 20, 0, 1, 1700000002500, 'Nice photo', 0),"
+            "(12, 20, 0, 1, 1700000003000, NULL, 2)"
         )
         wa_conn.execute(
             "INSERT INTO message_view_once_media (message_row_id, state) VALUES (10, 1), (12, 2)"
