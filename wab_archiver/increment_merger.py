@@ -1467,6 +1467,14 @@ def filter_active_increments(paths: list[str], base_filename: str | None) -> lis
     if not candidates:
         return []
 
+    seen_ids: set[int] = set()
+    has_duplicate_ids = False
+    for inc_id, _, _ in candidates:
+        if inc_id in seen_ids:
+            has_duplicate_ids = True
+            break
+        seen_ids.add(inc_id)
+
     by_tag: dict[str, list[tuple[int, str]]] = {}
     for inc_id, tag, path in candidates:
         by_tag.setdefault(tag, []).append((inc_id, path))
@@ -1487,7 +1495,10 @@ def filter_active_increments(paths: list[str], base_filename: str | None) -> lis
 
     if matched_base_tag is not None:
         selected = by_tag[matched_base_tag]
-    elif len(by_tag) > 1:
+    elif "" in by_tag and len(by_tag) > 1:
+        # Active undated cycle ('') supersedes historical dated cycles
+        selected = by_tag[""]
+    elif has_duplicate_ids:
         # Multiple generations detected without a matched base tag.
         # In WhatsApp's lifecycle, undated files ('') represent the active live generation
         # and supersede historical rotated dates.

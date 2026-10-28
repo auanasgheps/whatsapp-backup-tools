@@ -5853,10 +5853,38 @@ def create_app(output_root: Path, rescan: bool = False):
             ):
                 d["is_view_once"] = 0
                 d["last_msg_type"] = "sticker"
-            elif raw_type != 0 and media_path:
+            elif raw_type != 0:
                 d["is_view_once"] = 0
-                path = media_path if source_type == "android" else f"Message/{media_path}"
-                d["last_msg_type"] = _media_type_from_path(path)
+                if media_path:
+                    path = media_path if source_type == "android" else f"Message/{media_path}"
+                    d["last_msg_type"] = _media_type_from_path(path)
+                else:
+                    if (source_type == "android" and raw_type == 3) or (
+                        source_type == "ios" and raw_type == 3
+                    ):
+                        d["last_msg_type"] = "video"
+                    elif (source_type == "android" and raw_type == 2) or (
+                        source_type == "ios" and raw_type == 2
+                    ):
+                        d["last_msg_type"] = "audio"
+                    elif (source_type == "android" and raw_type == 9) or (
+                        source_type == "ios" and raw_type == 8
+                    ):
+                        d["last_msg_type"] = "document"
+                    elif (source_type == "android" and raw_type == 5) or (
+                        source_type == "ios" and raw_type == 5
+                    ):
+                        d["last_msg_type"] = "location"
+                    elif (source_type == "android" and raw_type == 16) or (
+                        source_type == "ios" and raw_type == 16
+                    ):
+                        d["last_msg_type"] = "live_location"
+                    elif (source_type == "android" and raw_type == 13) or (
+                        source_type == "ios" and raw_type == 11
+                    ):
+                        d["last_msg_type"] = "gif"
+                    else:
+                        d["last_msg_type"] = "image"
             else:
                 d["is_view_once"] = 0
                 d["last_msg_type"] = "text"

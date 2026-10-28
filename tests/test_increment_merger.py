@@ -814,7 +814,7 @@ def test_merge_increments_end_to_end(mock_db, tmp_path):
 
     # Sequences advanced
     seq = cur.execute("SELECT seq FROM SQLITE_SEQUENCE WHERE name = 'message'").fetchone()[0]
-    assert seq == 102
+    assert seq == 103
 
     conn.close()
 
@@ -6392,9 +6392,9 @@ def test_decode_wmi_and_apply_receipt_only_frame(mock_db, tmp_path):
     increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
     conn.commit()
 
-    # Verify no new message was created
+    # Verify no new message was created (1 initial from mock_db + 1 target message)
     msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
-    assert msg_count == 1
+    assert msg_count == 2
 
     # Verify receipt was attached to target_msg_id
     rcpt = conn.execute(
@@ -6559,6 +6559,13 @@ def test_apply_protocol_record_standalone_revoke(mock_db):
 
 def test_persistent_jid_id_map_across_multiple_increments(mock_db, tmp_path):
     """Verify jid_id_map persists across multiple increment batches and maps subsequent chats (F-07)."""
+    init_conn = sqlite3.connect(mock_db)
+    init_conn.execute(
+        "CREATE TABLE IF NOT EXISTS call_log (_id INTEGER PRIMARY KEY, call_id TEXT, jid_row_id INTEGER)"
+    )
+    init_conn.commit()
+    init_conn.close()
+
     inc1_dir = tmp_path / "inc_1"
     inc1_dir.mkdir()
     (inc1_dir / "header.json").write_text(json.dumps({"creation_date": 1729000000000}))
@@ -6613,6 +6620,8 @@ def test_persistent_jid_id_map_across_multiple_increments(mock_db, tmp_path):
 def test_chat_modified_ignores_foreign_message_pointers(mock_db, tmp_path):
     """Verify chat entity modifications do not adopt foreign phone message row IDs (F-07)."""
     conn = sqlite3.connect(mock_db)
+    conn.execute("ALTER TABLE chat ADD COLUMN display_message_row_id INTEGER")
+    conn.execute("ALTER TABLE chat ADD COLUMN last_message_row_id INTEGER")
     chat_data = [
         {
             "_id": 500,
@@ -6767,6 +6776,9 @@ def test_step6b_phantom_cleanup_preserves_add_on_parents(mock_db, tmp_path):
     cur.execute(
         "CREATE TABLE IF NOT EXISTS message_text (message_row_id INTEGER PRIMARY KEY, url TEXT)"
     )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS receipt_user (message_row_id INTEGER, receipt_user_jid_row_id INTEGER, read_timestamp INTEGER)"
+    )
 
     cur.execute(
         "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9001, 1, 0, 'K_RECEIPT', 1729000000000, 0, NULL)"
@@ -6844,18 +6856,18 @@ def test_verify_message_deletion_gates_reject_drifted_ids(mock_db):
     cur = conn.cursor()
     # Message 8001 has timestamp in the future (Time Paradox)
     cur.execute(
-        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp) "
-        "VALUES (8001, 1, 0, 'K_FUTURE', 1729010000000)"
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type) "
+        "VALUES (8001, 1, 0, 'K_FUTURE', 1729010000000, 0)"
     )
     # Message 8002 references non-existent chat (chat_row_id = 9999)
     cur.execute(
-        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp) "
-        "VALUES (8002, 9999, 0, 'K_ORPHAN', 1729000000000)"
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type) "
+        "VALUES (8002, 9999, 0, 'K_ORPHAN', 1729000000000, 0)"
     )
     # Message 8003 is valid
     cur.execute(
-        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp) "
-        "VALUES (8003, 1, 0, 'K_VALID', 1729000000000)"
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type) "
+        "VALUES (8003, 1, 0, 'K_VALID', 1729000000000, 0)"
     )
     conn.commit()
 
