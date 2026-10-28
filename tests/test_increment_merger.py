@@ -3064,7 +3064,9 @@ def test_apply_increment_folder_nested_header_and_sequences(mock_db, tmp_path):
     # deletedMessages_1.json requesting deletion of 601 and 700
     (inc_dir / "deletedMessages_1.json").write_text(json.dumps({"deleted_ids": [601, 700]}))
 
-    stats = increment_merger.apply_increment_folder(conn, str(inc_dir), logger, None, None, None, {})
+    stats = increment_merger.apply_increment_folder(
+        conn, str(inc_dir), logger, None, None, None, {}
+    )
 
     # Only 601 was deleted; 700 was rejected due to sequence ceiling
     assert stats["messages_deleted"] == 1
@@ -6251,8 +6253,12 @@ def test_decode_wmi_and_apply_messages_bin_quoted_media_thumbnail(mock_db, tmp_p
 def test_apply_messages_bin_in_batch_duplicate_key_id(mock_db, tmp_path):
     """Verify in-batch updates for the same key_id replace previous record without duplicates (F-02)."""
     conn = sqlite3.connect(mock_db)
-    wmi_1 = _build_text_wmi("5550100@s.whatsapp.net", "DUP_BATCH_KEY", "First version", 1, 1729000000)
-    wmi_2 = _build_text_wmi("5550100@s.whatsapp.net", "DUP_BATCH_KEY", "Updated version", 1, 1729000010)
+    wmi_1 = _build_text_wmi(
+        "5550100@s.whatsapp.net", "DUP_BATCH_KEY", "First version", 1, 1729000000
+    )
+    wmi_2 = _build_text_wmi(
+        "5550100@s.whatsapp.net", "DUP_BATCH_KEY", "Updated version", 1, 1729000010
+    )
 
     frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_1, wmi_2])
     bin_file = tmp_path / "dup_key_messages.bin"
@@ -6418,9 +6424,8 @@ def test_message_quoted_from_me_and_pass2_resolution(mock_db, tmp_path):
     """)
 
     # Quoting message arrives BEFORE the parent message (out-of-order)
-    ctx_bytes = (
-        _build_field(1, 2, b"OUTGOING_PARENT_KEY")
-        + _build_field(3, 2, _build_field(1, 2, b"Original user message"))
+    ctx_bytes = _build_field(1, 2, b"OUTGOING_PARENT_KEY") + _build_field(
+        3, 2, _build_field(1, 2, b"Original user message")
     )
     ext_bytes = _build_field(1, 2, b"Replying to your ping") + _build_field(17, 2, ctx_bytes)
     msg_bytes = _build_field(6, 2, ext_bytes)
@@ -6516,7 +6521,9 @@ def test_apply_protocol_record_standalone_revoke(mock_db):
 
     assert applied is True
     # Verify message is type 15 with NULL text
-    m_row = conn.execute("SELECT message_type, text_data FROM message WHERE _id = ?", (target_id,)).fetchone()
+    m_row = conn.execute(
+        "SELECT message_type, text_data FROM message WHERE _id = ?", (target_id,)
+    ).fetchone()
     assert m_row[0] == 15
     assert m_row[1] is None
 
@@ -6530,8 +6537,18 @@ def test_apply_protocol_record_standalone_revoke(mock_db):
     assert rev_row[2] == 1729000080000
 
     # Verify auxiliary tables are purged
-    assert conn.execute("SELECT COUNT(*) FROM message_text WHERE message_row_id = ?", (target_id,)).fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM message_thumbnail WHERE message_row_id = ?", (target_id,)).fetchone()[0] == 0
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_text WHERE message_row_id = ?", (target_id,)
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM message_thumbnail WHERE message_row_id = ?", (target_id,)
+        ).fetchone()[0]
+        == 0
+    )
     conn.close()
 
 
@@ -6546,19 +6563,23 @@ def test_persistent_jid_id_map_across_multiple_increments(mock_db, tmp_path):
     inc1_dir.mkdir()
     (inc1_dir / "header.json").write_text(json.dumps({"creation_date": 1729000000000}))
     jid_data = [
-        {"_id": 77, "user": "5550300", "server": "s.whatsapp.net", "raw_string": "5550300@s.whatsapp.net"}
+        {
+            "_id": 77,
+            "user": "5550300",
+            "server": "s.whatsapp.net",
+            "raw_string": "5550300@s.whatsapp.net",
+        }
     ]
     (inc1_dir / "jid_modified_1.json").write_text(json.dumps(jid_data), encoding="utf-8")
 
     inc2_dir = tmp_path / "inc_2"
     inc2_dir.mkdir()
     (inc2_dir / "header.json").write_text(json.dumps({"creation_date": 1729000010000}))
-    call_data = [
-        {"_id": 1, "call_id": "CALL_ABC", "jid_row_id": 77}
-    ]
+    call_data = [{"_id": 1, "call_id": "CALL_ABC", "jid_row_id": 77}]
     (inc2_dir / "call_log_modified_1.json").write_text(json.dumps(call_data), encoding="utf-8")
 
     import zipfile
+
     inc1_zip = tmp_path / "inc_1.zip"
     with zipfile.ZipFile(inc1_zip, "w") as zf:
         for f in inc1_dir.iterdir():
@@ -6607,9 +6628,7 @@ def test_chat_modified_ignores_foreign_message_pointers(mock_db, tmp_path):
     chat_json = tmp_path / "chat_modified_1.json"
     chat_json.write_text(json.dumps(chat_data), encoding="utf-8")
 
-    count = increment_merger.apply_entity_modifications(
-        conn, "chat", str(chat_json), logger, {}
-    )
+    count = increment_merger.apply_entity_modifications(conn, "chat", str(chat_json), logger, {})
     conn.commit()
 
     assert count == 1
@@ -6651,7 +6670,9 @@ def test_apply_sequences_prior_to_message_insertion(mock_db, tmp_path):
     conn.close()
 
 
-def test_apply_entity_modifications_call_log_participant_v2_and_group_participants(mock_db, tmp_path):
+def test_apply_entity_modifications_call_log_participant_v2_and_group_participants(
+    mock_db, tmp_path
+):
     """Verify call_log_participant_v2 and group_participants composite matching (F-09)."""
     conn = sqlite3.connect(mock_db)
     conn.execute(
@@ -6674,7 +6695,9 @@ def test_apply_entity_modifications_call_log_participant_v2_and_group_participan
     )
     conn.commit()
     assert count1 == 1
-    row = conn.execute("SELECT jid_row_id, call_result FROM call_log_participant_v2 WHERE call_log_row_id = 10").fetchone()
+    row = conn.execute(
+        "SELECT jid_row_id, call_result FROM call_log_participant_v2 WHERE call_log_row_id = 10"
+    ).fetchone()
     assert row[0] == 2
     assert row[1] == 1
 
@@ -6684,8 +6707,18 @@ def test_apply_entity_modifications_call_log_participant_v2_and_group_participan
         conn, "call_log_participant_v2", str(call_part_json), logger, jid_map
     )
     conn.commit()
-    assert conn.execute("SELECT COUNT(*) FROM call_log_participant_v2 WHERE call_log_row_id = 10").fetchone()[0] == 1
-    assert conn.execute("SELECT call_result FROM call_log_participant_v2 WHERE call_log_row_id = 10").fetchone()[0] == 5
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM call_log_participant_v2 WHERE call_log_row_id = 10"
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute(
+            "SELECT call_result FROM call_log_participant_v2 WHERE call_log_row_id = 10"
+        ).fetchone()[0]
+        == 5
+    )
 
     gp_data = [{"group_jid_row_id": 5, "jid_row_id": 99, "admin": 0}]
     gp_json = tmp_path / "gp.json"
@@ -6696,7 +6729,12 @@ def test_apply_entity_modifications_call_log_participant_v2_and_group_participan
     )
     conn.commit()
     assert count2 == 1
-    assert conn.execute("SELECT admin FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2").fetchone()[0] == 0
+    assert (
+        conn.execute(
+            "SELECT admin FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2"
+        ).fetchone()[0]
+        == 0
+    )
 
     gp_data[0]["admin"] = 1
     gp_json.write_text(json.dumps(gp_data), encoding="utf-8")
@@ -6704,8 +6742,18 @@ def test_apply_entity_modifications_call_log_participant_v2_and_group_participan
         conn, "group_participants", str(gp_json), logger, jid_map
     )
     conn.commit()
-    assert conn.execute("SELECT COUNT(*) FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2").fetchone()[0] == 1
-    assert conn.execute("SELECT admin FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2").fetchone()[0] == 1
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2"
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute(
+            "SELECT admin FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2"
+        ).fetchone()[0]
+        == 1
+    )
     conn.close()
 
 
@@ -6713,17 +6761,35 @@ def test_step6b_phantom_cleanup_preserves_add_on_parents(mock_db, tmp_path):
     """Verify Step 6b phantom cleanup preserves messages with auxiliary records (F-10)."""
     conn = sqlite3.connect(mock_db)
     cur = conn.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS message_location (message_row_id INTEGER PRIMARY KEY, latitude REAL, longitude REAL)")
-    cur.execute("CREATE TABLE IF NOT EXISTS message_text (message_row_id INTEGER PRIMARY KEY, url TEXT)")
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS message_location (message_row_id INTEGER PRIMARY KEY, latitude REAL, longitude REAL)"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS message_text (message_row_id INTEGER PRIMARY KEY, url TEXT)"
+    )
 
-    cur.execute("INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9001, 1, 0, 'K_RECEIPT', 1729000000000, 0, NULL)")
-    cur.execute("INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9002, 1, 0, 'K_LOC', 1729000000000, 0, NULL)")
-    cur.execute("INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9003, 1, 0, 'K_TEXT', 1729000000000, 0, NULL)")
-    cur.execute("INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9004, 1, 0, 'K_TRUE_PHANTOM', 1729000000000, 0, NULL)")
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9001, 1, 0, 'K_RECEIPT', 1729000000000, 0, NULL)"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9002, 1, 0, 'K_LOC', 1729000000000, 0, NULL)"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9003, 1, 0, 'K_TEXT', 1729000000000, 0, NULL)"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9004, 1, 0, 'K_TRUE_PHANTOM', 1729000000000, 0, NULL)"
+    )
 
-    cur.execute("INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, read_timestamp) VALUES (9001, 1, 1729000005000)")
-    cur.execute("INSERT INTO message_location (message_row_id, latitude, longitude) VALUES (9002, 45.0, 9.0)")
-    cur.execute("INSERT INTO message_text (message_row_id, url) VALUES (9003, 'https://example.com')")
+    cur.execute(
+        "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, read_timestamp) VALUES (9001, 1, 1729000005000)"
+    )
+    cur.execute(
+        "INSERT INTO message_location (message_row_id, latitude, longitude) VALUES (9002, 45.0, 9.0)"
+    )
+    cur.execute(
+        "INSERT INTO message_text (message_row_id, url) VALUES (9003, 'https://example.com')"
+    )
     conn.commit()
 
     tables_to_check = [
@@ -6739,7 +6805,11 @@ def test_step6b_phantom_cleanup_preserves_add_on_parents(mock_db, tmp_path):
     ]
     del_clauses = ["message_type = 0", "(text_data IS NULL OR TRIM(text_data) = '')"]
     for tbl, col in tables_to_check:
-        if bool(cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)).fetchone()):
+        if bool(
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone()
+        ):
             del_clauses.append(f"NOT EXISTS (SELECT 1 FROM {tbl} t WHERE t.{col} = message._id)")
     cur.execute(f"DELETE FROM message WHERE {' AND '.join(del_clauses)}")
     conn.commit()
@@ -6833,4 +6903,3 @@ def test_apply_entity_deletions_chat_uses_mapped_jid(mock_db, tmp_path):
     assert cur.execute("SELECT COUNT(*) FROM chat WHERE _id = 10").fetchone()[0] == 1
     assert cur.execute("SELECT COUNT(*) FROM chat WHERE _id = 500").fetchone()[0] == 0
     conn.close()
-

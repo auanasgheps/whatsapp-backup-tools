@@ -2123,7 +2123,11 @@ def apply_entity_deletions(
     dict_items: list[dict] = []
 
     for item in raw_items:
-        if table_name == "chat" and isinstance(item, dict) and ("jid_row_id" in item or "account_jid_row_id" in item):
+        if (
+            table_name == "chat"
+            and isinstance(item, dict)
+            and ("jid_row_id" in item or "account_jid_row_id" in item)
+        ):
             raw_j = item.get("jid_row_id")
             raw_a = item.get("account_jid_row_id")
             mapped_j = jid_id_map.get(raw_j, raw_j) if (jid_id_map and raw_j is not None) else raw_j
@@ -2998,9 +3002,13 @@ def apply_protocol_record(
                 if get_table_columns(conn, "message_text", schema_cache):
                     cur.execute("DELETE FROM message_text WHERE message_row_id = ?", (target_id,))
                 if get_table_columns(conn, "message_thumbnail", schema_cache):
-                    cur.execute("DELETE FROM message_thumbnail WHERE message_row_id = ?", (target_id,))
+                    cur.execute(
+                        "DELETE FROM message_thumbnail WHERE message_row_id = ?", (target_id,)
+                    )
                 if get_table_columns(conn, "message_location", schema_cache):
-                    cur.execute("DELETE FROM message_location WHERE message_row_id = ?", (target_id,))
+                    cur.execute(
+                        "DELETE FROM message_location WHERE message_row_id = ?", (target_id,)
+                    )
                 if get_table_columns(conn, "message_vcard", schema_cache):
                     cur.execute("DELETE FROM message_vcard WHERE message_row_id = ?", (target_id,))
                 applied = True

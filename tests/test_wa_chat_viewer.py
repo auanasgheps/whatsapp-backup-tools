@@ -375,9 +375,7 @@ class TestFlaskRoutes:
         assert data[0]["last_msg_type"] == "text"
         assert "msg_count" not in data[0]
 
-    def test_api_chats_system_stubs_do_not_override_conversational_preview(
-        self, tmp_path
-    ):
+    def test_api_chats_system_stubs_do_not_override_conversational_preview(self, tmp_path):
         """A system stub (e.g. type 12) inserted after the real message must not change
         the preview or the sort order — only genuine conversational messages or whitelisted
         system actions are surfaced."""
