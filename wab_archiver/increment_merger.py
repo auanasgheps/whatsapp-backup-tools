@@ -1752,7 +1752,9 @@ def apply_entity_modifications(
 
             if existing_chat is not None:
                 chat_id = existing_chat[0]
-                update_cols = [c for c in filtered if c not in ("_id", "jid_row_id")]
+                update_cols = [
+                    c for c in filtered if c not in ("_id", "jid_row_id", "display_message_row_id")
+                ]
                 if update_cols:
                     set_clause = ", ".join(f"{c} = ?" for c in update_cols)
                     params = [filtered[c] for c in update_cols] + [chat_id]
@@ -3675,7 +3677,6 @@ def apply_messages_bin(
     pending_add_ons: list[PendingAddOn] = []
     pending_quotes: list[tuple[int, str]] = []
     max_ts_per_chat: dict[int, int] = {}
-    max_display_msg_per_chat: dict[int, int] = {}
     chats_to_unhide: set[int] = set()
     for msg in messages:
         remote_jid = msg["remote_jid"]
@@ -4153,8 +4154,6 @@ def apply_messages_bin(
             and msg["timestamp"] >= max_ts_per_chat.get(chat_row_id, 0)
         ):
             max_ts_per_chat[chat_row_id] = msg["timestamp"]
-            if msg_row_id:
-                max_display_msg_per_chat[chat_row_id] = msg_row_id
 
         if msg.get("key_id") and msg_row_id:
             key_cache[msg["key_id"]] = msg_row_id
@@ -4534,11 +4533,6 @@ def apply_messages_bin(
             cur.executemany(
                 "UPDATE chat SET sort_timestamp = MAX(COALESCE(sort_timestamp, 0), ?) WHERE _id = ?",
                 [(ts, cid) for cid, ts in max_ts_per_chat.items()],
-            )
-        if "display_message_row_id" in chat_cols and max_display_msg_per_chat:
-            cur.executemany(
-                "UPDATE chat SET display_message_row_id = ? WHERE _id = ?",
-                [(mid, cid) for cid, mid in max_display_msg_per_chat.items()],
             )
 
     return inserted

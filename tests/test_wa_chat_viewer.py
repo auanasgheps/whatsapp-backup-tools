@@ -375,17 +375,18 @@ class TestFlaskRoutes:
         assert data[0]["last_msg_type"] == "text"
         assert "msg_count" not in data[0]
 
-    def test_api_chats_display_message_row_id_resolves_preview(self, tmp_path):
-        """display_message_row_id points to the specific message shown as preview.
-        A system event inserted after the real message must not change the preview
-        or the sort order — sort_timestamp and display_message_row_id are managed
-        by WhatsApp and already reflect this."""
+    def test_api_chats_system_stubs_do_not_override_conversational_preview(
+        self, tmp_path
+    ):
+        """A system stub (e.g. type 12) inserted after the real message must not change
+        the preview or the sort order — only genuine conversational messages or whitelisted
+        system actions are surfaced."""
         wa_path = tmp_path / "msgstore.db"
         archive_path = tmp_path / ".wa_media_archiver.db"
         wa_conn = make_android_db(wa_path)
         archive_conn = make_archive_db(archive_path)
         seed_android_db(wa_conn, archive_conn)  # real message id=1 at ts=1700000000000
-        # system event inserted after; display_message_row_id still points to message 1
+        # system event inserted after; must not affect conversational preview or sort
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
             "VALUES (99, 10, 0, 1800000000000, NULL, 12)"
@@ -398,10 +399,38 @@ class TestFlaskRoutes:
         with app.test_client() as client:
             data = client.get("/api/chats").get_json()
         assert len(data) == 1
-        # preview comes from display_message_row_id=1 ('Hello world'), not the system event
+        # preview comes from authentic message 1 ('Hello world'), not the system stub
         assert data[0]["last_msg_preview"] == "Hello world"
-        # sort uses sort_timestamp=1700000000000 set by seed_android_db
         assert data[0]["newest_ts"] == 1700000000000
+
+    def test_api_chats_captionless_media_resolves_preview_over_stale_display_message_row_id(
+        self, tmp_path
+    ):
+        """A newer captionless photo must be surfaced as the latest preview even if
+        chat.display_message_row_id is stale or pointing to an older text message."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)  # text message id=1 at ts=1700000000000
+        # Newer captionless photo at ts=1700050000000
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (2, 10, 0, 1700050000000, NULL, 1)"
+        )
+        # Intentionally point display_message_row_id to the older text message 1
+        wa_conn.execute("UPDATE chat SET display_message_row_id = 1 WHERE _id = 10")
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chats").get_json()
+        assert len(data) == 1
+        assert data[0]["last_msg_type"] == "image"
+        assert data[0]["last_msg_preview"] == ""
+        assert data[0]["newest_ts"] == 1700050000000
 
     def test_api_messages_returns_messages(self, app_and_tmp):
         client, tmp = app_and_tmp

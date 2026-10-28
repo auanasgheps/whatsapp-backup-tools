@@ -5303,48 +5303,16 @@ def create_app(output_root: Path, rescan: bool = False):
                 else ""
             )
             ms_allowed_actions_tuple = tuple(ALLOWED_GROUP_SYSTEM_ACTIONS)
-            ms_disp_join = (
-                "LEFT JOIN message_system ms_disp ON ms_disp.message_row_id = m_disp._id"
-                if has_message_system
-                else ""
-            )
             ms_sub_join = (
                 "LEFT JOIN message_system ms_sub ON ms_sub.message_row_id = m_sub._id"
                 if has_message_system
                 else ""
             )
-            ms_disp_col = "ms_disp.action_type" if has_message_system else "NULL"
             ms_sub_col = "ms_sub.action_type" if has_message_system else "NULL"
-            ms_ts_col = "ms_ts.action_type" if has_message_system else "NULL"
-            ms_disp_allowed_clause = (
-                f"AND ms_disp.action_type IN {ms_allowed_actions_tuple}"
-                if has_message_system
-                else "AND 0"
-            )
             ms_sub_allowed_clause = (
                 f"AND ms_sub.action_type IN {ms_allowed_actions_tuple}"
                 if has_message_system
                 else "AND 0"
-            )
-            ms_ts_join = (
-                "LEFT JOIN message_system ms_ts ON ms_ts.message_row_id = m_ts._id"
-                if has_message_system
-                else ""
-            )
-            ms_ts_allowed_clause = (
-                f"AND ms_ts.action_type IN {ms_allowed_actions_tuple}"
-                if has_message_system
-                else "AND 0"
-            )
-            mrev_ts_filter = (
-                "OR EXISTS (SELECT 1 FROM message_revoked mrev_ts WHERE mrev_ts.message_row_id = m_ts._id)"
-                if has_message_revoked
-                else ""
-            )
-            mrev_disp_filter = (
-                "OR EXISTS (SELECT 1 FROM message_revoked mrev_disp WHERE mrev_disp.message_row_id = m_disp._id)"
-                if has_message_revoked
-                else ""
             )
             mrev_sub_filter = (
                 "OR EXISTS (SELECT 1 FROM message_revoked mrev_sub WHERE mrev_sub.message_row_id = m_sub._id)"
@@ -5419,19 +5387,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         'Unknown Contact (' || c._id || ')'
                     )                                                   AS display_name,
                     COALESCE(
-                        (
-                            SELECT MAX(m_ts.timestamp)
-                            FROM message m_ts
-                            {ms_ts_join}
-                            WHERE m_ts.chat_row_id = c._id
-                              AND m_ts.message_type NOT IN (25, 67, 74, 79, 90)
-                              AND (
-                                  (m_ts.text_data IS NOT NULL AND m_ts.text_data != '' AND (m_ts.message_type IS NULL OR m_ts.message_type = 0 OR m_ts.message_type IN (5, 16)))
-                                  OR (m_ts.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_ts_filter})
-                                  OR (m_ts.message_type = 7 AND {ms_ts_col} = 1 AND NOT ({is_group_chat}))
-                                  OR ({is_group_chat} AND m_ts.message_type = 7 {ms_ts_allowed_clause})
-                              )
-                        ),
+                        m.timestamp,
                         NULLIF(c.sort_timestamp, 0),
                         0
                     ) AS newest_ts,
@@ -5458,36 +5414,20 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN _contacts_resolved con ON con.clean_number = {_clean_user_sql("COALESCE(j_chat_real.user, j_chat.user)")}
                 {con_ldn_join}
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(c._id AS TEXT)
-                LEFT JOIN message m ON m._id = COALESCE(
-                    (
-                        SELECT m_disp._id
-                        FROM message m_disp
-                        {ms_disp_join}
-                        WHERE m_disp._id = c.display_message_row_id
-                          AND m_disp.chat_row_id = c._id
-                          AND m_disp.message_type NOT IN (25, 67, 74, 79, 90)
-                          AND (
-                              (m_disp.text_data IS NOT NULL AND m_disp.text_data != '' AND (m_disp.message_type IS NULL OR m_disp.message_type = 0 OR m_disp.message_type IN (5, 16)))
-                              OR (m_disp.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_disp_filter})
-                              OR (m_disp.message_type = 7 AND {ms_disp_col} = 1 AND NOT ({is_group_chat}))
-                              OR ({is_group_chat} AND m_disp.message_type = 7 {ms_disp_allowed_clause})
-                          )
-                    ),
-                    (
-                        SELECT m_sub._id
-                        FROM message m_sub
-                        {ms_sub_join}
-                        WHERE m_sub.chat_row_id = c._id
-                          AND m_sub.message_type NOT IN (25, 67, 74, 79, 90)
-                          AND (
-                              (m_sub.text_data IS NOT NULL AND m_sub.text_data != '' AND (m_sub.message_type IS NULL OR m_sub.message_type = 0 OR m_sub.message_type IN (5, 16)))
-                              OR (m_sub.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_sub_filter})
-                              OR (m_sub.message_type = 7 AND {ms_sub_col} = 1 AND NOT ({is_group_chat}))
-                              OR ({is_group_chat} AND m_sub.message_type = 7 {ms_sub_allowed_clause})
-                          )
-                        ORDER BY m_sub.timestamp DESC, m_sub._id DESC
-                        LIMIT 1
-                    )
+                LEFT JOIN message m ON m._id = (
+                    SELECT m_sub._id
+                    FROM message m_sub
+                    {ms_sub_join}
+                    WHERE m_sub.chat_row_id = c._id
+                      AND m_sub.message_type NOT IN (25, 67, 74, 79, 90)
+                      AND (
+                          (m_sub.text_data IS NOT NULL AND m_sub.text_data != '' AND (m_sub.message_type IS NULL OR m_sub.message_type = 0 OR m_sub.message_type IN (5, 16)))
+                          OR (m_sub.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_sub_filter})
+                          OR (m_sub.message_type = 7 AND {ms_sub_col} = 1 AND NOT ({is_group_chat}))
+                          OR ({is_group_chat} AND m_sub.message_type = 7 {ms_sub_allowed_clause})
+                      )
+                    ORDER BY m_sub.timestamp DESC, m_sub._id DESC
+                    LIMIT 1
                 )
                 LEFT JOIN message_media mm ON mm.message_row_id = m._id
                 LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
