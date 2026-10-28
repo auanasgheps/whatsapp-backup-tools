@@ -585,7 +585,7 @@ def test_apply_entity_deletions(mock_db, tmp_path):
     del_json = tmp_path / "props_deleted_1.json"
     del_json.write_text(json.dumps({"deleted_ids": [1]}))
 
-    count = increment_merger.apply_entity_deletions(conn, "props", str(del_json), logger)
+    count = increment_merger.apply_entity_deletions(conn, "props", str(del_json), logger, {})
     conn.commit()
     assert count == 1
     conn.close()
@@ -1775,7 +1775,7 @@ def test_apply_entity_deletions_props_by_key_string(mock_db, tmp_path):
     del_json = tmp_path / "props_deleted_str.json"
     del_json.write_text(json.dumps({"deleted_ids": ["str_prop"]}))
 
-    count = increment_merger.apply_entity_deletions(conn, "props", str(del_json), logger)
+    count = increment_merger.apply_entity_deletions(conn, "props", str(del_json), logger, {})
     conn.commit()
     assert count == 1
     assert conn.execute("SELECT 1 FROM props WHERE key = 'str_prop'").fetchone() is None
@@ -2250,7 +2250,7 @@ def test_apply_increment_folder_dag_order(mock_db, tmp_path):
 
     conn = sqlite3.connect(mock_db)
     inserted_msgs, receipts, reactions, pins, mod_counts = increment_merger.apply_increment_folder(
-        conn, str(inc_dir), logger, None, None, None
+        conn, str(inc_dir), logger, None, None, None, {}
     )
     conn.commit()
 
@@ -3064,7 +3064,7 @@ def test_apply_increment_folder_nested_header_and_sequences(mock_db, tmp_path):
     # deletedMessages_1.json requesting deletion of 601 and 700
     (inc_dir / "deletedMessages_1.json").write_text(json.dumps({"deleted_ids": [601, 700]}))
 
-    stats = increment_merger.apply_increment_folder(conn, str(inc_dir), logger, None, None, None)
+    stats = increment_merger.apply_increment_folder(conn, str(inc_dir), logger, None, None, None, {})
 
     # Only 601 was deleted; 700 was rejected due to sequence ceiling
     assert stats["messages_deleted"] == 1
@@ -3243,7 +3243,7 @@ def test_apply_entity_deletions_skips_unknown_tables(mock_db, tmp_path):
     del_json = tmp_path / "user_device_deleted_1.json"
     del_json.write_text(json.dumps({"deleted_ids": [1]}), encoding="utf-8")
 
-    count = increment_merger.apply_entity_deletions(conn, "user_device", str(del_json), logger)
+    count = increment_merger.apply_entity_deletions(conn, "user_device", str(del_json), logger, {})
     assert count == 0
     # Row must remain intact
     assert conn.execute("SELECT COUNT(*) FROM user_device WHERE _id = 1").fetchone()[0] == 1
@@ -3276,7 +3276,7 @@ def test_apply_increment_folder_safely_skips_vendor_ancillary_tables(mock_db, tm
 
     schema_cache = {}
     stats = increment_merger.apply_increment_folder(
-        conn, str(inc_dir), logger, None, None, schema_cache
+        conn, str(inc_dir), logger, None, None, schema_cache, {}
     )
 
     # props was applied, receipt_device was skipped cleanly
@@ -3473,7 +3473,7 @@ def test_apply_entity_deletions_call_log_by_call_id(mock_db, tmp_path):
     del_json = tmp_path / "call_log_deleted_1.json"
     del_json.write_text(json.dumps({"deleted_ids": ["call:DELETE_ME"]}), encoding="utf-8")
 
-    count = increment_merger.apply_entity_deletions(conn, "call_log", str(del_json), logger)
+    count = increment_merger.apply_entity_deletions(conn, "call_log", str(del_json), logger, {})
     assert count == 1
     assert conn.execute("SELECT COUNT(*) FROM call_log").fetchone()[0] == 0
     conn.close()
@@ -3504,7 +3504,7 @@ def test_apply_entity_deletions_group_past_participant_user_by_composite(mock_db
     )
 
     count = increment_merger.apply_entity_deletions(
-        conn, "group_past_participant_user", str(del_json), logger
+        conn, "group_past_participant_user", str(del_json), logger, {}
     )
     assert count == 1
     assert conn.execute("SELECT COUNT(*) FROM group_past_participant_user").fetchone()[0] == 0
@@ -6246,3 +6246,591 @@ def test_decode_wmi_and_apply_messages_bin_quoted_media_thumbnail(mock_db, tmp_p
     assert mqm_row is not None
     assert mqm_row[1] == fake_thumb
     conn.close()
+
+
+def test_apply_messages_bin_in_batch_duplicate_key_id(mock_db, tmp_path):
+    """Verify in-batch updates for the same key_id replace previous record without duplicates (F-02)."""
+    conn = sqlite3.connect(mock_db)
+    wmi_1 = _build_text_wmi("5550100@s.whatsapp.net", "DUP_BATCH_KEY", "First version", 1, 1729000000)
+    wmi_2 = _build_text_wmi("5550100@s.whatsapp.net", "DUP_BATCH_KEY", "Updated version", 1, 1729000010)
+
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_1, wmi_2])
+    bin_file = tmp_path / "dup_key_messages.bin"
+    bin_file.write_bytes(frame)
+
+    inserted = increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT _id, key_id, text_data FROM message WHERE key_id = 'DUP_BATCH_KEY'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][2] == "Updated version"
+    conn.close()
+
+
+def test_apply_messages_bin_revoked_media_purge(mock_db, tmp_path):
+    """Verify revoked media messages purge message_media rows without leaking or re-parenting (F-03)."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_revoked (
+            message_row_id INTEGER PRIMARY KEY,
+            revoked_key_id TEXT,
+            admin_jid_row_id INTEGER,
+            revoke_timestamp INTEGER
+        );
+    """)
+
+    # 1. Base database has an image message with linked message_media
+    cur = conn.cursor()
+    cur.execute("SELECT _id FROM chat LIMIT 1")
+    chat_id = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO message (chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) "
+        "VALUES (?, 0, 'REVOKE_IMG_KEY', 1729000000, 1, 'Photo caption', 0)",
+        (chat_id,),
+    )
+    orig_msg_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO message_media (message_row_id, chat_row_id, file_path, file_size, transferred) "
+        "VALUES (?, ?, 'Media/WhatsApp Images/photo.jpg', 12345, 1)",
+        (orig_msg_id, chat_id),
+    )
+    conn.commit()
+
+    # 2. Replay an increment containing a revoke frame (stub_type = 1 / REVOKE)
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"REVOKE_IMG_KEY")
+    )
+    wmi_revoke = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(24, 0, 1)  # stubType = 1 (REVOKE) -> message_type = 15
+        + _build_field(3, 0, 1729000050)
+    )
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_revoke])
+    bin_file = tmp_path / "revoke_media.bin"
+    bin_file.write_bytes(frame)
+
+    increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
+    conn.commit()
+
+    # Verify message is marked revoked and message_media has 0 rows for both old and new IDs
+    rev_msg = conn.execute(
+        "SELECT _id, message_type FROM message WHERE key_id = 'REVOKE_IMG_KEY'"
+    ).fetchone()
+    assert rev_msg is not None
+    assert rev_msg[1] == 15
+
+    media_rows = conn.execute("SELECT * FROM message_media").fetchall()
+    assert len(media_rows) == 0
+
+    revoked_entry = conn.execute(
+        "SELECT message_row_id, revoked_key_id FROM message_revoked WHERE revoked_key_id = 'REVOKE_IMG_KEY'"
+    ).fetchone()
+    assert revoked_entry is not None
+    assert revoked_entry[0] == rev_msg[0]
+    conn.close()
+
+
+def test_decode_wmi_and_apply_receipt_only_frame(mock_db, tmp_path):
+    """Verify decode_wmi has_content recognizes user receipts and attaches them without blank messages (F-04)."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS receipt_user (
+            message_row_id INTEGER NOT NULL,
+            receipt_user_jid_row_id INTEGER NOT NULL,
+            receipt_timestamp INTEGER,
+            read_timestamp INTEGER,
+            played_timestamp INTEGER
+        );
+    """)
+
+    cur = conn.cursor()
+    cur.execute("SELECT _id FROM chat LIMIT 1")
+    chat_id = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO message (chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) "
+        "VALUES (?, 1, 'RECEIPT_TARGET_KEY', 1729000000, 0, 'Ping', 4)",
+        (chat_id,),
+    )
+    target_msg_id = cur.lastrowid
+    conn.commit()
+
+    # Build a receipt-only WMI frame
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"RECEIPT_TARGET_KEY")
+    )
+    ur_bytes = (
+        _build_field(1, 2, b"5550200@s.whatsapp.net")
+        + _build_field(2, 0, 1729000010)  # receipt_timestamp
+        + _build_field(3, 0, 1729000020)  # read_timestamp
+    )
+    wmi_receipt = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(40, 2, ur_bytes)
+        + _build_field(3, 0, 1729000020)
+    )
+
+    decoded = increment_merger.decode_wmi(wmi_receipt)
+    assert decoded["has_content"] is True
+    assert len(decoded["user_receipts"]) == 1
+
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_receipt])
+    bin_file = tmp_path / "receipt_only.bin"
+    bin_file.write_bytes(frame)
+
+    increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
+    conn.commit()
+
+    # Verify no new message was created
+    msg_count = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+    assert msg_count == 1
+
+    # Verify receipt was attached to target_msg_id
+    rcpt = conn.execute(
+        "SELECT message_row_id, read_timestamp FROM receipt_user WHERE message_row_id = ?",
+        (target_msg_id,),
+    ).fetchone()
+    assert rcpt is not None
+    assert rcpt[1] == 1729000020000
+    conn.close()
+
+
+def test_message_quoted_from_me_and_pass2_resolution(mock_db, tmp_path):
+    """Verify quoted replies resolve from_me=1 and sender_jid_row_id=0 for quoted outgoing messages (F-05)."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_quoted (
+            message_row_id INTEGER PRIMARY KEY,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            sender_jid_row_id INTEGER,
+            key_id TEXT NOT NULL,
+            timestamp INTEGER,
+            message_type INTEGER,
+            text_data TEXT
+        );
+    """)
+
+    # Quoting message arrives BEFORE the parent message (out-of-order)
+    ctx_bytes = (
+        _build_field(1, 2, b"OUTGOING_PARENT_KEY")
+        + _build_field(3, 2, _build_field(1, 2, b"Original user message"))
+    )
+    ext_bytes = _build_field(1, 2, b"Replying to your ping") + _build_field(17, 2, ctx_bytes)
+    msg_bytes = _build_field(6, 2, ext_bytes)
+    key_bytes = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"INCOMING_REPLY_KEY")
+    )
+    wmi_reply = (
+        _build_field(1, 2, key_bytes)
+        + _build_field(2, 2, msg_bytes)
+        + _build_field(3, 0, 1729000050)
+    )
+
+    # Later in stream, outgoing parent message arrives
+    wmi_parent = _build_text_wmi(
+        "5550100@s.whatsapp.net", "OUTGOING_PARENT_KEY", "Original user message", 1, 1729000000
+    )
+
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_reply, wmi_parent])
+    bin_file = tmp_path / "quoted_from_me.bin"
+    bin_file.write_bytes(frame)
+
+    inserted = increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
+    conn.commit()
+    assert inserted == 2
+
+    # Verify Pass 2 resolved both timestamp AND from_me = 1
+    q_row = conn.execute(
+        "SELECT key_id, from_me, sender_jid_row_id, timestamp FROM message_quoted WHERE key_id = 'OUTGOING_PARENT_KEY'"
+    ).fetchone()
+    assert q_row is not None
+    assert q_row[0] == "OUTGOING_PARENT_KEY"
+    assert q_row[1] == 1  # from_me resolved to 1
+    assert q_row[2] == 0  # sender_jid_row_id resolved to 0 for from_me=1
+    assert q_row[3] == 1729000000000
+    conn.close()
+
+
+def test_apply_protocol_record_standalone_revoke(mock_db):
+    """Verify apply_protocol_record populates message_revoked and cleans up auxiliary tables (F-06)."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_revoked (
+            message_row_id INTEGER PRIMARY KEY,
+            revoked_key_id TEXT,
+            admin_jid_row_id INTEGER,
+            revoke_timestamp INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS message_text (
+            message_row_id INTEGER PRIMARY KEY,
+            page_title TEXT,
+            description TEXT,
+            url TEXT,
+            matched_text TEXT,
+            canonical_url TEXT,
+            preview_type INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS message_thumbnail (
+            message_row_id INTEGER PRIMARY KEY,
+            thumbnail BLOB
+        );
+    """)
+
+    cur = conn.cursor()
+    cur.execute("SELECT _id FROM chat LIMIT 1")
+    chat_id = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO message (chat_row_id, from_me, key_id, timestamp, message_type, text_data, status) "
+        "VALUES (?, 0, 'STANDALONE_REVOKE_KEY', 1729000000, 0, 'Check this link https://example.com', 0)",
+        (chat_id,),
+    )
+    target_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO message_text (message_row_id, page_title, url) VALUES (?, 'Example Domain', 'https://example.com')",
+        (target_id,),
+    )
+    cur.execute(
+        "INSERT INTO message_thumbnail (message_row_id, thumbnail) VALUES (?, X'123456')",
+        (target_id,),
+    )
+    conn.commit()
+
+    proto_msg = {
+        "revoke_info": {"target_key_id": "STANDALONE_REVOKE_KEY"},
+        "timestamp": 1729000080000,
+    }
+    schema_cache = {}
+    applied = increment_merger.apply_protocol_record(
+        conn, proto_msg, -1, 0, 1729000080000, {}, schema_cache, logger, chat_id
+    )
+    conn.commit()
+
+    assert applied is True
+    # Verify message is type 15 with NULL text
+    m_row = conn.execute("SELECT message_type, text_data FROM message WHERE _id = ?", (target_id,)).fetchone()
+    assert m_row[0] == 15
+    assert m_row[1] is None
+
+    # Verify message_revoked is populated
+    rev_row = conn.execute(
+        "SELECT message_row_id, revoked_key_id, revoke_timestamp FROM message_revoked WHERE message_row_id = ?",
+        (target_id,),
+    ).fetchone()
+    assert rev_row is not None
+    assert rev_row[1] == "STANDALONE_REVOKE_KEY"
+    assert rev_row[2] == 1729000080000
+
+    # Verify auxiliary tables are purged
+    assert conn.execute("SELECT COUNT(*) FROM message_text WHERE message_row_id = ?", (target_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM message_thumbnail WHERE message_row_id = ?", (target_id,)).fetchone()[0] == 0
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Tests: Relational State, Sequences & Entity Mapping
+# ---------------------------------------------------------------------------
+
+
+def test_persistent_jid_id_map_across_multiple_increments(mock_db, tmp_path):
+    """Verify jid_id_map persists across multiple increment batches and maps subsequent chats (F-07)."""
+    inc1_dir = tmp_path / "inc_1"
+    inc1_dir.mkdir()
+    (inc1_dir / "header.json").write_text(json.dumps({"creation_date": 1729000000000}))
+    jid_data = [
+        {"_id": 77, "user": "5550300", "server": "s.whatsapp.net", "raw_string": "5550300@s.whatsapp.net"}
+    ]
+    (inc1_dir / "jid_modified_1.json").write_text(json.dumps(jid_data), encoding="utf-8")
+
+    inc2_dir = tmp_path / "inc_2"
+    inc2_dir.mkdir()
+    (inc2_dir / "header.json").write_text(json.dumps({"creation_date": 1729000010000}))
+    call_data = [
+        {"_id": 1, "call_id": "CALL_ABC", "jid_row_id": 77}
+    ]
+    (inc2_dir / "call_log_modified_1.json").write_text(json.dumps(call_data), encoding="utf-8")
+
+    import zipfile
+    inc1_zip = tmp_path / "inc_1.zip"
+    with zipfile.ZipFile(inc1_zip, "w") as zf:
+        for f in inc1_dir.iterdir():
+            zf.write(f, arcname=f.name)
+
+    inc2_zip = tmp_path / "inc_2.zip"
+    with zipfile.ZipFile(inc2_zip, "w") as zf:
+        for f in inc2_dir.iterdir():
+            zf.write(f, arcname=f.name)
+
+    out_db = tmp_path / "output.db"
+    staging_dir = tmp_path / "staging"
+
+    increment_merger.merge_increments(
+        mock_db,
+        [str(inc1_zip), str(inc2_zip)],
+        "",
+        str(out_db),
+        str(staging_dir),
+        logger,
+    )
+
+    conn = sqlite3.connect(out_db)
+    target_jid_id = conn.execute("SELECT _id FROM jid WHERE user = '5550300'").fetchone()[0]
+    call_row = conn.execute("SELECT jid_row_id FROM call_log WHERE call_id = 'CALL_ABC'").fetchone()
+    assert call_row is not None
+    assert call_row[0] == target_jid_id
+    conn.close()
+
+
+def test_chat_modified_ignores_foreign_message_pointers(mock_db, tmp_path):
+    """Verify chat entity modifications do not adopt foreign phone message row IDs (F-07)."""
+    conn = sqlite3.connect(mock_db)
+    chat_data = [
+        {
+            "_id": 500,
+            "jid_row_id": 1,
+            "subject": "Pointer Chat",
+            "display_message_row_id": 9999,
+            "last_message_row_id": 8888,
+            "last_read_message_row_id": 7777,
+            "last_read_receipt_sent_message_row_id": 6666,
+            "last_message_reaction_row_id": 5555,
+        }
+    ]
+    chat_json = tmp_path / "chat_modified_1.json"
+    chat_json.write_text(json.dumps(chat_data), encoding="utf-8")
+
+    count = increment_merger.apply_entity_modifications(
+        conn, "chat", str(chat_json), logger, {}
+    )
+    conn.commit()
+
+    assert count == 1
+    row = conn.execute(
+        "SELECT display_message_row_id, last_message_row_id FROM chat WHERE subject = 'Pointer Chat'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None or row[0] != 9999
+    assert row[1] is None or row[1] != 8888
+    conn.close()
+
+
+def test_apply_sequences_prior_to_message_insertion(mock_db, tmp_path):
+    """Verify sequence ceilings roll forward before messages are inserted (F-11)."""
+    conn = sqlite3.connect(mock_db)
+    inc_dir = tmp_path / "inc_seq"
+    inc_dir.mkdir()
+    (inc_dir / "header.json").write_text(json.dumps({"creation_date": 1729000000000}))
+    (inc_dir / "sequences.json").write_text(
+        json.dumps({"sequences": [{"name": "message", "value": 5000}]})
+    )
+
+    wmi_bytes = _build_text_wmi(
+        "123456789@s.whatsapp.net", "KEY_SEQ_TEST", "Sequence test msg", 0, 1729000000000
+    )
+    frame = _build_history_sync_frame("123456789@s.whatsapp.net", [wmi_bytes])
+    (inc_dir / "messages.bin").write_bytes(frame)
+
+    schema_cache = {}
+    stats = increment_merger.apply_increment_folder(
+        conn, str(inc_dir), logger, None, None, schema_cache, {}
+    )
+    conn.commit()
+
+    assert stats["messages_inserted"] == 1
+    msg_row = conn.execute("SELECT _id FROM message WHERE key_id = 'KEY_SEQ_TEST'").fetchone()
+    assert msg_row is not None
+    assert msg_row[0] >= 5000
+    conn.close()
+
+
+def test_apply_entity_modifications_call_log_participant_v2_and_group_participants(mock_db, tmp_path):
+    """Verify call_log_participant_v2 and group_participants composite matching (F-09)."""
+    conn = sqlite3.connect(mock_db)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS call_log_participant_v2 ("
+        "_id INTEGER PRIMARY KEY AUTOINCREMENT, call_log_row_id INTEGER, jid_row_id INTEGER, call_result INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS group_participants ("
+        "group_jid_row_id INTEGER, jid_row_id INTEGER, admin INTEGER, pending INTEGER)"
+    )
+    conn.commit()
+
+    jid_map = {99: 2}
+    call_part_data = [{"call_log_row_id": 10, "jid_row_id": 99, "call_result": 1}]
+    call_part_json = tmp_path / "call_part.json"
+    call_part_json.write_text(json.dumps(call_part_data), encoding="utf-8")
+
+    count1 = increment_merger.apply_entity_modifications(
+        conn, "call_log_participant_v2", str(call_part_json), logger, jid_map
+    )
+    conn.commit()
+    assert count1 == 1
+    row = conn.execute("SELECT jid_row_id, call_result FROM call_log_participant_v2 WHERE call_log_row_id = 10").fetchone()
+    assert row[0] == 2
+    assert row[1] == 1
+
+    call_part_data[0]["call_result"] = 5
+    call_part_json.write_text(json.dumps(call_part_data), encoding="utf-8")
+    increment_merger.apply_entity_modifications(
+        conn, "call_log_participant_v2", str(call_part_json), logger, jid_map
+    )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM call_log_participant_v2 WHERE call_log_row_id = 10").fetchone()[0] == 1
+    assert conn.execute("SELECT call_result FROM call_log_participant_v2 WHERE call_log_row_id = 10").fetchone()[0] == 5
+
+    gp_data = [{"group_jid_row_id": 5, "jid_row_id": 99, "admin": 0}]
+    gp_json = tmp_path / "gp.json"
+    gp_json.write_text(json.dumps(gp_data), encoding="utf-8")
+
+    count2 = increment_merger.apply_entity_modifications(
+        conn, "group_participants", str(gp_json), logger, jid_map
+    )
+    conn.commit()
+    assert count2 == 1
+    assert conn.execute("SELECT admin FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2").fetchone()[0] == 0
+
+    gp_data[0]["admin"] = 1
+    gp_json.write_text(json.dumps(gp_data), encoding="utf-8")
+    increment_merger.apply_entity_modifications(
+        conn, "group_participants", str(gp_json), logger, jid_map
+    )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2").fetchone()[0] == 1
+    assert conn.execute("SELECT admin FROM group_participants WHERE group_jid_row_id = 5 AND jid_row_id = 2").fetchone()[0] == 1
+    conn.close()
+
+
+def test_step6b_phantom_cleanup_preserves_add_on_parents(mock_db, tmp_path):
+    """Verify Step 6b phantom cleanup preserves messages with auxiliary records (F-10)."""
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS message_location (message_row_id INTEGER PRIMARY KEY, latitude REAL, longitude REAL)")
+    cur.execute("CREATE TABLE IF NOT EXISTS message_text (message_row_id INTEGER PRIMARY KEY, url TEXT)")
+
+    cur.execute("INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9001, 1, 0, 'K_RECEIPT', 1729000000000, 0, NULL)")
+    cur.execute("INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9002, 1, 0, 'K_LOC', 1729000000000, 0, NULL)")
+    cur.execute("INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9003, 1, 0, 'K_TEXT', 1729000000000, 0, NULL)")
+    cur.execute("INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) VALUES (9004, 1, 0, 'K_TRUE_PHANTOM', 1729000000000, 0, NULL)")
+
+    cur.execute("INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, read_timestamp) VALUES (9001, 1, 1729000005000)")
+    cur.execute("INSERT INTO message_location (message_row_id, latitude, longitude) VALUES (9002, 45.0, 9.0)")
+    cur.execute("INSERT INTO message_text (message_row_id, url) VALUES (9003, 'https://example.com')")
+    conn.commit()
+
+    tables_to_check = [
+        ("message_media", "message_row_id"),
+        ("message_vcard", "message_row_id"),
+        ("message_location", "message_row_id"),
+        ("message_text", "message_row_id"),
+        ("message_thumbnail", "message_row_id"),
+        ("message_add_on", "parent_message_row_id"),
+        ("receipt_user", "message_row_id"),
+        ("message_system", "message_row_id"),
+        ("message_revoked", "message_row_id"),
+    ]
+    del_clauses = ["message_type = 0", "(text_data IS NULL OR TRIM(text_data) = '')"]
+    for tbl, col in tables_to_check:
+        if bool(cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)).fetchone()):
+            del_clauses.append(f"NOT EXISTS (SELECT 1 FROM {tbl} t WHERE t.{col} = message._id)")
+    cur.execute(f"DELETE FROM message WHERE {' AND '.join(del_clauses)}")
+    conn.commit()
+
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 9004").fetchone()[0] == 0
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 9001").fetchone()[0] == 1
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 9002").fetchone()[0] == 1
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 9003").fetchone()[0] == 1
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Tests: Generation Lifecycle & Deletion Safeguards
+# ---------------------------------------------------------------------------
+
+
+def test_filter_active_increments_strict_generation_isolation():
+    # Arrange: Non-colliding IDs across distinct generations
+    paths = [
+        "msgstore-increment-1-2026-10-15.1.db.crypt15",
+        "msgstore-increment-2.db.crypt15",
+    ]
+    # Act: Select without explicit base tag
+    selected = increment_merger.filter_active_increments(paths, None)
+    # Assert: Active undated cycle supersedes rotated dated cycle
+    assert selected == ["msgstore-increment-2.db.crypt15"]
+
+
+def test_verify_message_deletion_gates_reject_drifted_ids(mock_db):
+    # Arrange: DB with 1 chat (chat._id = 1)
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    # Message 8001 has timestamp in the future (Time Paradox)
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp) "
+        "VALUES (8001, 1, 0, 'K_FUTURE', 1729010000000)"
+    )
+    # Message 8002 references non-existent chat (chat_row_id = 9999)
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp) "
+        "VALUES (8002, 9999, 0, 'K_ORPHAN', 1729000000000)"
+    )
+    # Message 8003 is valid
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp) "
+        "VALUES (8003, 1, 0, 'K_VALID', 1729000000000)"
+    )
+    conn.commit()
+
+    # Act
+    backup_ts = 1729000000000  # 8001 ts is 1h in the future
+    verified_ids, audit = increment_merger.verify_message_deletion_candidates(
+        conn, [8001, 8002, 8003], backup_ts, 9000, logger, {}
+    )
+
+    # Assert
+    assert 8003 in verified_ids
+    assert 8001 not in verified_ids
+    assert 8002 not in verified_ids
+
+    audit_map = {r.msg_id: r for r in audit}
+    assert audit_map[8001].rejection_reason == "TIME_PARADOX"
+    assert audit_map[8002].rejection_reason == "ORPHANED_CHAT"
+    conn.close()
+
+
+def test_apply_entity_deletions_chat_uses_mapped_jid(mock_db, tmp_path):
+    # Arrange: Target DB has chat 10 (contact 99) and chat 500 (contact 20)
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (10, 99, 'Mom Chat')")
+    cur.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (500, 20, 'Spam Chat')")
+    conn.commit()
+
+    # Delta requests deleting phone chat 10, but phone chat 10 was contact 50 (mapped to local 20)
+    del_json = tmp_path / "chat_deleted_1.json"
+    del_json.write_text(
+        json.dumps({"deleted_ids": [{"_id": 10, "jid_row_id": 50}]}),
+        encoding="utf-8",
+    )
+    jid_id_map = {50: 20}
+
+    # Act
+    deleted = increment_merger.apply_entity_deletions(
+        conn, "chat", str(del_json), logger, jid_id_map
+    )
+    conn.commit()
+
+    # Assert: Only chat 500 (contact 20) was deleted; chat 10 (Mom) was preserved
+    assert deleted == 1
+    assert cur.execute("SELECT COUNT(*) FROM chat WHERE _id = 10").fetchone()[0] == 1
+    assert cur.execute("SELECT COUNT(*) FROM chat WHERE _id = 500").fetchone()[0] == 0
+    conn.close()
+
