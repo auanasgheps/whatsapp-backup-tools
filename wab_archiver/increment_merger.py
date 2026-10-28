@@ -1161,6 +1161,8 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
         or embedded_reactions
         or stub_type is not None
         or message_type in (15, 64)
+        or user_receipts
+        or (from_me and status > 0)
     )
 
     return {
@@ -1465,15 +1467,6 @@ def filter_active_increments(paths: list[str], base_filename: str | None) -> lis
     if not candidates:
         return []
 
-    # Check for duplicate IDs across candidates
-    seen_ids: set[int] = set()
-    has_duplicate_ids = False
-    for inc_id, _, _ in candidates:
-        if inc_id in seen_ids:
-            has_duplicate_ids = True
-            break
-        seen_ids.add(inc_id)
-
     by_tag: dict[str, list[tuple[int, str]]] = {}
     for inc_id, tag, path in candidates:
         by_tag.setdefault(tag, []).append((inc_id, path))
@@ -1494,7 +1487,7 @@ def filter_active_increments(paths: list[str], base_filename: str | None) -> lis
 
     if matched_base_tag is not None:
         selected = by_tag[matched_base_tag]
-    elif has_duplicate_ids:
+    elif len(by_tag) > 1:
         # Multiple generations detected without a matched base tag.
         # In WhatsApp's lifecycle, undated files ('') represent the active live generation
         # and supersede historical rotated dates.
@@ -1545,6 +1538,7 @@ _ENTITY_TABLE_PRIORITY: dict[str, int] = {
     "group_participants": 61,
     "group_past_participant_user": 62,
     "call_log": 70,
+    "call_log_participant_v2": 71,
 }
 
 _SUPPORTED_ENTITY_TABLES: frozenset[str] = frozenset(
@@ -1558,6 +1552,7 @@ _SUPPORTED_ENTITY_TABLES: frozenset[str] = frozenset(
         "group_participants",
         "group_past_participant_user",
         "call_log",
+        "call_log_participant_v2",
     }
 )
 
@@ -1737,7 +1732,7 @@ def apply_entity_modifications(
                     ).fetchone()
 
             # Priority 4: Match on natural key (user, server)
-            if existing_chat is None:
+            if existing_chat is None and mapped_jid_id is not None:
                 existing_chat = cur.execute(
                     f"""
                     SELECT c._id FROM chat c
@@ -1750,10 +1745,20 @@ def apply_entity_modifications(
                     (mapped_jid_id,),
                 ).fetchone()
 
+            chat_pointer_cols = {
+                "display_message_row_id",
+                "last_message_row_id",
+                "last_read_message_row_id",
+                "last_read_receipt_sent_message_row_id",
+                "last_message_reaction_row_id",
+            }
+
             if existing_chat is not None:
                 chat_id = existing_chat[0]
                 update_cols = [
-                    c for c in filtered if c not in ("_id", "jid_row_id", "display_message_row_id")
+                    c
+                    for c in filtered
+                    if c not in ("_id", "jid_row_id") and c not in chat_pointer_cols
                 ]
                 if update_cols:
                     set_clause = ", ".join(f"{c} = ?" for c in update_cols)
@@ -1774,9 +1779,11 @@ def apply_entity_modifications(
                     if "_id" in filtered
                     else False
                 )
-                insert_cols = (
-                    [c for c in filtered if c != "_id"] if id_used else sorted(filtered.keys())
-                )
+                insert_cols = [
+                    c
+                    for c in filtered
+                    if (c != "_id" if id_used else True) and c not in chat_pointer_cols
+                ]
                 filtered_copy = dict(filtered)
                 filtered_copy["jid_row_id"] = mapped_jid_id
                 if "account_jid_row_id" in filtered_copy and jid_id_map:
@@ -1909,6 +1916,53 @@ def apply_entity_modifications(
             count += 1
             continue
 
+        if table_name == "group_participants":
+            filtered_copy = dict(filtered)
+            existing_gp = None
+            if "group_jid_row_id" in filtered and "jid_row_id" in filtered:
+                raw_g = filtered["group_jid_row_id"]
+                raw_j = filtered["jid_row_id"]
+                mapped_g = jid_id_map.get(raw_g, raw_g) if jid_id_map else raw_g
+                mapped_j = jid_id_map.get(raw_j, raw_j) if jid_id_map else raw_j
+                filtered_copy["group_jid_row_id"] = mapped_g
+                filtered_copy["jid_row_id"] = mapped_j
+                existing_gp = cur.execute(
+                    "SELECT rowid FROM group_participants WHERE group_jid_row_id = ? AND jid_row_id = ?",
+                    (mapped_g, mapped_j),
+                ).fetchone()
+            elif "gjid" in filtered and "jid" in filtered:
+                existing_gp = cur.execute(
+                    "SELECT rowid FROM group_participants WHERE gjid = ? AND jid = ?",
+                    (filtered["gjid"], filtered["jid"]),
+                ).fetchone()
+
+            if existing_gp:
+                row_id = existing_gp[0]
+                update_cols = [c for c in filtered_copy if c != "_id"]
+                if update_cols:
+                    set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+                    cur.execute(
+                        f"UPDATE group_participants SET {set_clause} WHERE rowid = ?",
+                        [filtered_copy[c] for c in update_cols] + [row_id],
+                    )
+            else:
+                if (
+                    "_id" in filtered_copy
+                    and cur.execute(
+                        "SELECT 1 FROM group_participants WHERE _id = ?",
+                        (filtered_copy["_id"],),
+                    ).fetchone()
+                ):
+                    del filtered_copy["_id"]
+                cols_tuple = tuple(sorted(filtered_copy.keys()))
+                placeholders = ", ".join("?" for _ in cols_tuple)
+                cur.execute(
+                    f"INSERT INTO group_participants ({', '.join(cols_tuple)}) VALUES ({placeholders})",
+                    [filtered_copy[c] for c in cols_tuple],
+                )
+            count += 1
+            continue
+
         if table_name == "call_log" and "call_id" in filtered:
             filtered_copy = dict(filtered)
             if "jid_row_id" in filtered_copy and jid_id_map:
@@ -1954,6 +2008,49 @@ def apply_entity_modifications(
             count += 1
             continue
 
+        if (
+            table_name == "call_log_participant_v2"
+            and "call_log_row_id" in filtered
+            and "jid_row_id" in filtered
+        ):
+            raw_c = filtered["call_log_row_id"]
+            raw_j = filtered["jid_row_id"]
+            mapped_j = jid_id_map.get(raw_j, raw_j) if jid_id_map else raw_j
+            filtered_copy = dict(filtered)
+            filtered_copy["jid_row_id"] = mapped_j
+
+            existing_part = cur.execute(
+                "SELECT _id FROM call_log_participant_v2 WHERE call_log_row_id = ? AND jid_row_id = ?",
+                (raw_c, mapped_j),
+            ).fetchone()
+
+            if existing_part:
+                part_id = existing_part[0]
+                update_cols = [c for c in filtered_copy if c != "_id"]
+                if update_cols:
+                    set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+                    cur.execute(
+                        f"UPDATE call_log_participant_v2 SET {set_clause} WHERE _id = ?",
+                        [filtered_copy[c] for c in update_cols] + [part_id],
+                    )
+            else:
+                if (
+                    "_id" in filtered_copy
+                    and cur.execute(
+                        "SELECT 1 FROM call_log_participant_v2 WHERE _id = ?",
+                        (filtered_copy["_id"],),
+                    ).fetchone()
+                ):
+                    del filtered_copy["_id"]
+                cols_tuple = tuple(sorted(filtered_copy.keys()))
+                placeholders = ", ".join("?" for _ in cols_tuple)
+                cur.execute(
+                    f"INSERT INTO call_log_participant_v2 ({', '.join(cols_tuple)}) VALUES ({placeholders})",
+                    [filtered_copy[c] for c in cols_tuple],
+                )
+            count += 1
+            continue
+
         # Check if row has a single primary key and already exists in table
         has_single_pk = isinstance(pk_col, str) and pk_col in filtered
         row_exists = False
@@ -1982,9 +2079,17 @@ def apply_entity_modifications(
 
 
 def apply_entity_deletions(
-    conn: sqlite3.Connection, table_name: str, deleted_json_path: str, logger: logging.Logger
+    conn: sqlite3.Connection,
+    table_name: str,
+    deleted_json_path: str,
+    logger: logging.Logger,
+    jid_id_map: dict[int, int],
 ) -> int:
-    """Delete entity records listed in an entity deleted JSON file."""
+    """Delete entity records listed in an entity deleted JSON file.
+
+    For 'chat', deletes by mapped natural JID (jid_row_id or account_jid_row_id) translated
+    via jid_id_map to prevent surrogate ID drift from destroying unrelated chats.
+    """
     if table_name not in _SUPPORTED_ENTITY_TABLES:
         logger.debug(
             f"EntityTableProcessor: skipping deletions for unknown/unsupported table '{table_name}'"
@@ -2018,6 +2123,24 @@ def apply_entity_deletions(
     dict_items: list[dict] = []
 
     for item in raw_items:
+        if table_name == "chat" and isinstance(item, dict) and ("jid_row_id" in item or "account_jid_row_id" in item):
+            raw_j = item.get("jid_row_id")
+            raw_a = item.get("account_jid_row_id")
+            mapped_j = jid_id_map.get(raw_j, raw_j) if (jid_id_map and raw_j is not None) else raw_j
+            mapped_a = jid_id_map.get(raw_a, raw_a) if (jid_id_map and raw_a is not None) else raw_a
+            clauses = []
+            params = []
+            if mapped_j is not None:
+                clauses.append("jid_row_id = ?")
+                params.append(mapped_j)
+            if mapped_a is not None and "account_jid_row_id" in col_names:
+                clauses.append("account_jid_row_id = ?")
+                params.append(mapped_a)
+            if clauses:
+                cur.execute(f"DELETE FROM chat WHERE {' OR '.join(clauses)}", params)
+                deleted_count += cur.rowcount
+            continue
+
         if isinstance(item, dict):
             if pk_col in item and item[pk_col] is not None:
                 scalar_ids.append(item[pk_col])
@@ -2861,7 +2984,25 @@ def apply_protocol_record(
                     "UPDATE message SET message_type = 15, text_data = NULL WHERE _id = ?",
                     (target_id,),
                 )
-                cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (target_id,))
+                revoked_cols = get_table_columns(conn, "message_revoked", schema_cache)
+                if revoked_cols:
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES (?, ?, ?, ?)",
+                            (target_id, target_key, 0, timestamp),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if get_table_columns(conn, "message_media", schema_cache):
+                    cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (target_id,))
+                if get_table_columns(conn, "message_text", schema_cache):
+                    cur.execute("DELETE FROM message_text WHERE message_row_id = ?", (target_id,))
+                if get_table_columns(conn, "message_thumbnail", schema_cache):
+                    cur.execute("DELETE FROM message_thumbnail WHERE message_row_id = ?", (target_id,))
+                if get_table_columns(conn, "message_location", schema_cache):
+                    cur.execute("DELETE FROM message_location WHERE message_row_id = ?", (target_id,))
+                if get_table_columns(conn, "message_vcard", schema_cache):
+                    cur.execute("DELETE FROM message_vcard WHERE message_row_id = ?", (target_id,))
                 applied = True
 
     if msg.get("edit_info"):
@@ -2931,6 +3072,7 @@ def verify_message_deletion_candidates(
     - Gate 1: Causality verification (message timestamp <= backup_timestamp + 1h).
     - Gate 2: Sequence ceiling verification (candidate _id <= max_sequence).
     - Gate 3: Stanza key validation (key_id must be non-empty valid string).
+    - Gate 4: Active chat context verification (chat_row_id must reference an existing chat record).
     """
     if not candidate_ids:
         return [], []
@@ -2953,6 +3095,13 @@ def verify_message_deletion_candidates(
     cur = conn.cursor()
     verified_ids: list[int] = []
     audit_records: list[DeletionAuditRecord] = []
+
+    has_chat_table = bool(
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat'").fetchone()
+    )
+    existing_chat_ids: set[int] = set()
+    if has_chat_table:
+        existing_chat_ids = {r[0] for r in cur.execute("SELECT _id FROM chat").fetchall()}
 
     for i in range(0, len(candidate_ids), chunk_size):
         chunk = candidate_ids[i : i + chunk_size]
@@ -3042,6 +3191,27 @@ def verify_message_deletion_candidates(
                     )
                 )
                 continue
+
+            # Gate 4: Active Chat Context check
+            if has_chat_table and has_chat_row_id and chat_row_id is not None:
+                if chat_row_id not in existing_chat_ids:
+                    logger.warning(
+                        "Rejected deletion of message %d (key_id=%s): references non-existent chat_row_id %d (Gate 4 Orphaned Chat Context)",
+                        msg_id,
+                        key_id,
+                        chat_row_id,
+                    )
+                    audit_records.append(
+                        DeletionAuditRecord(
+                            msg_id=msg_id,
+                            key_id=key_id,
+                            chat_row_id=chat_row_id,
+                            timestamp=ts,
+                            verified=False,
+                            rejection_reason="ORPHANED_CHAT",
+                        )
+                    )
+                    continue
 
             verified_ids.append(msg_id)
             audit_records.append(
@@ -3589,7 +3759,21 @@ def apply_messages_bin(
     existing_media_paths: dict[str, str] = {}
     existing_row_ids: dict[str, int] = {}
     if "key_id" in msg_cols:
-        key_ids_to_delete = [msg["key_id"] for msg in messages if msg.get("key_id")]
+        key_ids_to_delete = [
+            msg["key_id"]
+            for msg in messages
+            if msg.get("key_id")
+            and (
+                (msg.get("text_data") and msg["text_data"].strip())
+                or msg.get("media_info")
+                or msg.get("vcard")
+                or msg.get("poll_info")
+                or msg.get("location_info")
+                or msg.get("link_preview_info")
+                or msg.get("stub_type") is not None
+                or msg.get("message_type") in (15, 64)
+            )
+        ]
         chunk_size = 500
         for i in range(0, len(key_ids_to_delete), chunk_size):
             chunk = key_ids_to_delete[i : i + chunk_size]
@@ -3745,6 +3929,15 @@ def apply_messages_bin(
                                     ur.get("played_timestamp"),
                                 ),
                             )
+            if msg.get("from_me") and msg.get("status", 0) > 0 and msg.get("key_id"):
+                existing_id = key_cache.get(msg["key_id"]) or find_message_row_id(
+                    conn, msg["key_id"], key_cache
+                )
+                if existing_id:
+                    cur.execute(
+                        "UPDATE message SET status = MAX(status, ?) WHERE _id = ?",
+                        (msg["status"], existing_id),
+                    )
             continue
 
         chat_jid_row_id = resolve_or_create_jid(conn, remote_jid, logger, jid_cache)
@@ -3977,9 +4170,14 @@ def apply_messages_bin(
             except sqlite3.OperationalError:
                 pass
 
-        old_id = existing_row_ids.get(msg.get("key_id", "")) or (
+        old_id = (
             key_cache.get(msg["key_id"]) if msg.get("key_id") else None
-        )
+        ) or existing_row_ids.get(msg.get("key_id", ""))
+        if is_revoked and old_id:
+            try:
+                cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (old_id,))
+            except sqlite3.OperationalError:
+                pass
         if old_id and msg_row_id and old_id != msg_row_id:
             try:
                 cur.execute(
@@ -3988,7 +4186,7 @@ def apply_messages_bin(
                 )
             except sqlite3.OperationalError:
                 pass
-            if msg.get("key_id") and key_cache.get(msg["key_id"]) == old_id:
+            if msg.get("key_id"):
                 try:
                     cur.execute("DELETE FROM message WHERE _id = ?", (old_id,))
                 except sqlite3.OperationalError:
@@ -4094,7 +4292,7 @@ def apply_messages_bin(
                 except sqlite3.OperationalError:
                     pass
 
-            if not msg.get("media_info"):
+            if not msg.get("media_info") and not is_revoked:
                 try:
                     cur.execute(
                         "UPDATE message_media SET message_row_id = ? WHERE message_row_id = ?",
@@ -4157,6 +4355,7 @@ def apply_messages_bin(
 
         if msg.get("key_id") and msg_row_id:
             key_cache[msg["key_id"]] = msg_row_id
+            existing_row_ids[msg["key_id"]] = msg_row_id
             if msg.get("timestamp"):
                 key_ts_cache[msg["key_id"]] = msg["timestamp"]
 
@@ -4287,12 +4486,22 @@ def apply_messages_bin(
                     q_sender_id = 0
                 q_stanza_id = qi.get("stanza_id") or msg.get("key_id", "") or ""
                 quoted_ts = key_ts_cache.get(q_stanza_id, 0)
-                if not quoted_ts and q_stanza_id:
-                    cur.execute("SELECT timestamp FROM message WHERE key_id = ?", (q_stanza_id,))
+                q_from_me = qi.get("from_me", 0)
+                if q_stanza_id:
+                    cur.execute(
+                        "SELECT timestamp, from_me, sender_jid_row_id FROM message WHERE key_id = ?",
+                        (q_stanza_id,),
+                    )
                     t_row = cur.fetchone()
                     if t_row and t_row[0]:
                         quoted_ts = int(t_row[0])
                         key_ts_cache[q_stanza_id] = quoted_ts
+                        if t_row[1] is not None:
+                            q_from_me = int(t_row[1])
+                        if q_from_me == 1:
+                            q_sender_id = 0
+                        elif t_row[2] is not None:
+                            q_sender_id = int(t_row[2])
                     else:
                         pending_quotes.append((msg_row_id, q_stanza_id))
                 q_row_map = {
@@ -4300,7 +4509,7 @@ def apply_messages_bin(
                     "chat_row_id": chat_row_id,
                     "parent_message_chat_row_id": chat_row_id,
                     "text_data": qi.get("quoted_text", ""),
-                    "from_me": qi.get("from_me", 0),
+                    "from_me": q_from_me,
                     "sender_jid_row_id": q_sender_id,
                     "key_id": q_stanza_id,
                     "timestamp": quoted_ts,
@@ -4494,16 +4703,22 @@ def apply_messages_bin(
         recovered_quotes = 0
         for q_msg_id, q_stanza_id in pending_quotes:
             q_ts = key_ts_cache.get(q_stanza_id, 0)
-            if not q_ts:
-                cur.execute("SELECT timestamp FROM message WHERE key_id = ?", (q_stanza_id,))
-                t_row = cur.fetchone()
-                if t_row and t_row[0]:
-                    q_ts = int(t_row[0])
-                    key_ts_cache[q_stanza_id] = q_ts
+            q_fm = 0
+            q_s_id = 0
+            cur.execute(
+                "SELECT timestamp, from_me, sender_jid_row_id FROM message WHERE key_id = ?",
+                (q_stanza_id,),
+            )
+            t_row = cur.fetchone()
+            if t_row and t_row[0]:
+                q_ts = int(t_row[0])
+                key_ts_cache[q_stanza_id] = q_ts
+                q_fm = int(t_row[1] or 0)
+                q_s_id = 0 if q_fm == 1 else (int(t_row[2]) if t_row[2] is not None else 0)
             if q_ts:
                 cur.execute(
-                    "UPDATE message_quoted SET timestamp = ? WHERE message_row_id = ?",
-                    (q_ts, q_msg_id),
+                    "UPDATE message_quoted SET timestamp = ?, from_me = ?, sender_jid_row_id = ? WHERE message_row_id = ?",
+                    (q_ts, q_fm, q_s_id, q_msg_id),
                 )
                 recovered_quotes += 1
         if recovered_quotes > 0:
@@ -4575,8 +4790,18 @@ def apply_increment_folder(
     jid_cache: dict[str, int] | None,
     chat_cache: dict[int, int] | None,
     schema_cache: dict[str, set[str]] | None,
+    jid_id_map: dict[int, int],
 ) -> dict:
-    """Apply an unpacked increment directory onto the active SQLite database."""
+    """Apply an unpacked increment directory onto the active SQLite database.
+
+    Enforces the strict 6-step DAG execution pipeline:
+    - Step 1: Auxiliary Entity Updates (topological order) with foreign pointer quarantine
+    - Step 2: Auxiliary Entity Deletions with mapped JID translation for chats
+    - Step 3: Autoincrement Sequence Roll-Forward (before deletions and message insertion)
+    - Step 4: Defensive Message Deletions (4-gate verification)
+    - Step 5: Protobuf Message Delta Ingestion (messages.bin with Two-Pass Add-On Staging)
+    - Step 6: Chat Message Pointer Sanitization & Step 6b Correlated Phantom Pruning
+    """
     header_path = os.path.join(inc_dir, "header.json")
     header = {}
     if os.path.isfile(header_path):
@@ -4632,7 +4857,6 @@ def apply_increment_folder(
         mod_files = [
             fn for fn in os.listdir(inc_dir) if "_modified_" in fn and fn.endswith(".json")
         ]
-        jid_id_map: dict[int, int] = {}
         for mf in sorted(mod_files, key=_entity_file_sort_key):
             table_name = mf.split("_modified_")[0]
             stats["entity_modified"] += apply_entity_modifications(
@@ -4644,32 +4868,20 @@ def apply_increment_folder(
         for df in sorted(del_files, key=_entity_file_sort_key):
             table_name = df.split("_deleted_")[0]
             stats["entity_deleted"] += apply_entity_deletions(
-                conn, table_name, os.path.join(inc_dir, df), logger
+                conn, table_name, os.path.join(inc_dir, df), logger, jid_id_map
             )
 
-        # Sanitize display_message_row_id in chat to prevent referencing messages from another chat
-        chat_cols = get_table_columns(conn, "chat", schema_cache)
-        if "display_message_row_id" in chat_cols:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                UPDATE chat
-                SET display_message_row_id = (
-                    SELECT _id FROM message
-                    WHERE chat_row_id = chat._id
-                      AND message_type NOT IN (25, 67, 74, 79)
-                    ORDER BY timestamp DESC, _id DESC LIMIT 1
-                )
-                WHERE display_message_row_id IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM message m
-                      WHERE m._id = chat.display_message_row_id
-                        AND m.chat_row_id = chat._id
-                  )
-                """
-            )
+        # Step 3: Sequence roll-forward (Must run before message replay to prevent surrogate key drift)
+        seq_name = (
+            header.get("sequences")
+            if isinstance(header.get("sequences"), str)
+            else "sequences.json"
+        )
+        seq_path = os.path.join(inc_dir, seq_name)
+        if os.path.isfile(seq_path):
+            stats["sequences_updated"] += apply_sequences(conn, seq_path, logger)
 
-        # Step 3: Message deletions
+        # Step 4: Message deletions
         del_msg_files = [
             fn
             for fn in os.listdir(inc_dir)
@@ -4689,22 +4901,52 @@ def apply_increment_folder(
                     conn, df_path, logger, schema_cache, backup_timestamp, max_msg_seq
                 )
 
-        # Step 4: Protobuf message replay
+        # Step 5: Protobuf message replay
         messages_bin_path = os.path.join(inc_dir, "messages.bin")
         if os.path.isfile(messages_bin_path):
             stats["messages_inserted"] += apply_messages_bin(
                 conn, messages_bin_path, logger, jid_cache, chat_cache, schema_cache
             )
 
-        # Step 5: Sequence roll-forward
-        seq_name = (
-            header.get("sequences")
-            if isinstance(header.get("sequences"), str)
-            else "sequences.json"
-        )
-        seq_path = os.path.join(inc_dir, seq_name)
-        if os.path.isfile(seq_path):
-            stats["sequences_updated"] += apply_sequences(conn, seq_path, logger)
+        # Step 6: Sanitize chat message pointers to prevent referencing foreign or invalid messages
+        chat_cols = get_table_columns(conn, "chat", schema_cache)
+        if "display_message_row_id" in chat_cols:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE chat
+                SET display_message_row_id = (
+                    SELECT _id FROM message
+                    WHERE chat_row_id = chat._id
+                      AND message_type NOT IN (25, 67, 74, 79)
+                    ORDER BY timestamp DESC, _id DESC LIMIT 1
+                )
+                WHERE display_message_row_id IS NULL
+                   OR NOT EXISTS (
+                      SELECT 1 FROM message m
+                      WHERE m._id = chat.display_message_row_id
+                        AND m.chat_row_id = chat._id
+                  )
+                """
+            )
+        if "last_message_row_id" in chat_cols:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE chat
+                SET last_message_row_id = (
+                    SELECT _id FROM message
+                    WHERE chat_row_id = chat._id
+                    ORDER BY timestamp DESC, _id DESC LIMIT 1
+                )
+                WHERE last_message_row_id IS NULL
+                   OR NOT EXISTS (
+                      SELECT 1 FROM message m
+                      WHERE m._id = chat.last_message_row_id
+                        AND m.chat_row_id = chat._id
+                  )
+                """
+            )
 
     return stats
 
@@ -5040,8 +5282,10 @@ def merge_increments(
     staging_dir: str,
     logger: logging.Logger,
 ) -> int:
-    """
-    Merge a base decrypted database and a sequence of increment archives into output_db_path.
+    """Merge a base decrypted database and a sequence of increment archives into output_db_path.
+
+    Maintains a persistent jid_id_map across all increment folders in the merge session
+    to prevent cross-increment surrogate ID divergence.
     Returns the total count of messages inserted across all increments.
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_db_path)), exist_ok=True)
@@ -5147,6 +5391,7 @@ def merge_increments(
                 for r in cur.execute(jm_sql).fetchall():
                     chat_cache[r[0]] = r[1]
 
+        jid_id_map: dict[int, int] = {}
         for idx, inc_path in enumerate(increment_paths):
             logger.info(
                 f"Merging incremental backup [{idx + 1}/{len(increment_paths)}]: {os.path.basename(inc_path)}"
@@ -5155,7 +5400,7 @@ def merge_increments(
             unpack_increment_archive(inc_path, key_obj, work_dir, logger)
 
             stats = apply_increment_folder(
-                conn, work_dir, logger, jid_cache, chat_cache, schema_cache
+                conn, work_dir, logger, jid_cache, chat_cache, schema_cache, jid_id_map
             )
             total_inserted += stats["messages_inserted"]
             total_deleted += stats["messages_deleted"]
@@ -5176,16 +5421,27 @@ def merge_increments(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_media'"
                 ).fetchone()
             )
-            has_mv = bool(
-                cur.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_vcard'"
-                ).fetchone()
-            )
+            tables_to_check = [
+                ("message_media", "message_row_id"),
+                ("message_vcard", "message_row_id"),
+                ("message_location", "message_row_id"),
+                ("message_text", "message_row_id"),
+                ("message_thumbnail", "message_row_id"),
+                ("message_add_on", "parent_message_row_id"),
+                ("receipt_user", "message_row_id"),
+                ("message_system", "message_row_id"),
+                ("message_revoked", "message_row_id"),
+            ]
             del_clauses = ["message_type = 0", "(text_data IS NULL OR TRIM(text_data) = '')"]
-            if has_mm:
-                del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_media)")
-            if has_mv:
-                del_clauses.append("_id NOT IN (SELECT message_row_id FROM message_vcard)")
+            for tbl, col in tables_to_check:
+                if bool(
+                    cur.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+                    ).fetchone()
+                ):
+                    del_clauses.append(
+                        f"NOT EXISTS (SELECT 1 FROM {tbl} t WHERE t.{col} = message._id)"
+                    )
             cur.execute(f"DELETE FROM message WHERE {' AND '.join(del_clauses)}")
             deleted_phantoms = cur.rowcount
             if deleted_phantoms > 0:
