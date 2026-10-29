@@ -400,7 +400,8 @@
   }
 
   const MEDIA_LABELS = {image:'📷 Photo', video:'🎥 Video', audio:'🎵 Voice message',
-                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link', location:'📍 Location'};
+                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link',
+                        location:'📍 Location', live_location:'📍 Live location', vcard:'👤 Contact'};
   function chatPreview(chat) {
     const prefix = chat.last_msg_from_me ? 'You: ' : '';
     if (chat.last_msg_type === 'service') {

@@ -5473,6 +5473,8 @@ def create_app(output_root: Path, rescan: bool = False):
             cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
             has_cs_ident = "ZCONTACTIDENTIFIER" in cs_cols
             cs_ident_col = "cs.ZCONTACTIDENTIFIER" if has_cs_ident else "NULL"
+            mi_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
+            vcard_name_ios = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
             ios_phone_expr = f"""
                 COALESCE(
                     CASE WHEN cs.ZCONTACTJID LIKE '%@s.whatsapp.net'
@@ -5500,7 +5502,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         'Unknown Contact (' || cs.Z_PK || ')'
                     )                                                   AS display_name,
                     CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS newest_ts,
-                    COALESCE(m.ZTEXT, '')                              AS last_msg_preview,
+                    COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({vcard_name_ios}, ''), '') AS last_msg_preview,
                     COALESCE(m.ZMESSAGETYPE, 0)                        AS last_msg_type,
                     {group_ev_col}                                     AS last_msg_group_event_type,
                     COALESCE(m.ZISFROMME, 0)                           AS last_msg_from_me,
@@ -5521,7 +5523,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     LEFT JOIN ZWAMEDIAITEM mi2 ON mi2.Z_PK = msg.ZMEDIAITEM
                     WHERE (msg.ZTEXT IS NOT NULL AND msg.ZTEXT != '' AND (msg.ZMESSAGETYPE IS NULL OR msg.ZMESSAGETYPE = 0))
                        OR (msg.ZMESSAGETYPE IS NOT NULL AND msg.ZMESSAGETYPE NOT IN (0, 6, 10, 14, 38, 39, 53)
-                           AND mi2.ZMEDIALOCALPATH IS NOT NULL)
+                           AND (mi2.ZMEDIALOCALPATH IS NOT NULL OR msg.ZMESSAGETYPE IN (1, 2, 3, 5, 7, 8, 11, 15, 23, 46, 54) OR mi2.ZTITLE IS NOT NULL))
                        OR (msg.ZMESSAGETYPE IN (4, 14, 38, 39, 53))
                        {ios_service_filter_last_real}
                     GROUP BY msg.ZCHATSESSION
@@ -5853,6 +5855,15 @@ def create_app(output_root: Path, rescan: bool = False):
             ):
                 d["is_view_once"] = 0
                 d["last_msg_type"] = "sticker"
+            elif (source_type == "ios" and raw_type == 7) or (
+                (raw_type == 0 or raw_type is None)
+                and (
+                    "http://" in (d.get("last_msg_preview") or "").lower()
+                    or "https://" in (d.get("last_msg_preview") or "").lower()
+                )
+            ):
+                d["is_view_once"] = 0
+                d["last_msg_type"] = "link"
             elif raw_type != 0:
                 d["is_view_once"] = 0
                 if media_path:
@@ -5860,7 +5871,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     d["last_msg_type"] = _media_type_from_path(path)
                 else:
                     if (source_type == "android" and raw_type == 3) or (
-                        source_type == "ios" and raw_type == 3
+                        source_type == "ios" and raw_type in (3, 54)
                     ):
                         d["last_msg_type"] = "video"
                     elif (source_type == "android" and raw_type == 2) or (
