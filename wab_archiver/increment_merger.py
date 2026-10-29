@@ -3321,15 +3321,13 @@ def apply_message_deletions(
         if cid in order_id_to_key:
             target_k = order_id_to_key[cid]
             if target_k in active_inc_keys:
-                logger.info(
+                logger.debug(
                     "Protected active entity message %d (key_id=%s) from deletion: updated in current increment",
                     cid,
                     target_k,
                 )
                 continue
-            row = cur.execute(
-                "SELECT _id FROM message WHERE key_id = ?", (target_k,)
-            ).fetchone()
+            row = cur.execute("SELECT _id FROM message WHERE key_id = ?", (target_k,)).fetchone()
             if row is not None:
                 logger.debug(
                     "Mapped intra-increment deletion candidate %d -> local _id %d (key_id=%s)",
@@ -3347,7 +3345,7 @@ def apply_message_deletions(
                 target_k = target_m.get("key_id")
                 if target_k:
                     if target_k in active_inc_keys:
-                        logger.info(
+                        logger.debug(
                             "Protected active entity message %d (key_id=%s) from deletion: updated in current increment",
                             cid,
                             target_k,
@@ -3369,11 +3367,9 @@ def apply_message_deletions(
             final_candidate_ids.append(cid)
         else:
             if active_inc_keys:
-                row = cur.execute(
-                    "SELECT key_id FROM message WHERE _id = ?", (cid,)
-                ).fetchone()
+                row = cur.execute("SELECT key_id FROM message WHERE _id = ?", (cid,)).fetchone()
                 if row is not None and row[0] in active_inc_keys:
-                    logger.info(
+                    logger.debug(
                         "Protected active entity message %d (key_id=%s) from deletion: updated in current increment",
                         cid,
                         row[0],
@@ -4851,9 +4847,7 @@ def apply_messages_bin(
                 if not applied and pending.add_on_type == "edit":
                     fb_key_id = pending.key_id or pending.msg.get("key_id", "")
                     existing_m_id = (
-                        find_message_row_id(conn, fb_key_id, key_cache)
-                        if fb_key_id
-                        else None
+                        find_message_row_id(conn, fb_key_id, key_cache) if fb_key_id else None
                     )
                     if existing_m_id is None:
                         msg_item = pending.msg
@@ -4887,13 +4881,21 @@ def apply_messages_bin(
                                 key_cache[fb_key_id] = m_id
                                 key_ts_cache[fb_key_id] = fb_ts
 
-                            old_id = existing_row_ids.get(fb_key_id) or existing_row_ids.get(pending.target_key_id)
+                            old_id = existing_row_ids.get(fb_key_id) or existing_row_ids.get(
+                                pending.target_key_id
+                            )
                             if old_id and old_id != m_id:
                                 try:
                                     if not msg_item.get("quoted_info"):
-                                        cur.execute("UPDATE message_quoted SET message_row_id = ? WHERE message_row_id = ?", (m_id, old_id))
+                                        cur.execute(
+                                            "UPDATE message_quoted SET message_row_id = ? WHERE message_row_id = ?",
+                                            (m_id, old_id),
+                                        )
                                     else:
-                                        cur.execute("DELETE FROM message_quoted WHERE message_row_id = ?", (old_id,))
+                                        cur.execute(
+                                            "DELETE FROM message_quoted WHERE message_row_id = ?",
+                                            (old_id,),
+                                        )
                                 except sqlite3.OperationalError:
                                     pass
                                 for tbl, col in [
@@ -4911,13 +4913,14 @@ def apply_messages_bin(
                                     ("message_thumbnail", "message_row_id"),
                                 ]:
                                     try:
-                                        cur.execute(f"UPDATE {tbl} SET {col} = ? WHERE {col} = ?", (m_id, old_id))
+                                        cur.execute(
+                                            f"UPDATE {tbl} SET {col} = ? WHERE {col} = ?",
+                                            (m_id, old_id),
+                                        )
                                     except sqlite3.OperationalError:
                                         pass
 
-                            edit_cols = get_table_columns(
-                                conn, "message_edit_info", schema_cache
-                            )
+                            edit_cols = get_table_columns(conn, "message_edit_info", schema_cache)
                             if edit_cols:
                                 cur.execute(
                                     "INSERT OR REPLACE INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp) VALUES (?, ?, ?, ?)",
@@ -4928,9 +4931,7 @@ def apply_messages_bin(
                                         fb_ts,
                                     ),
                                 )
-                            add_on_cols = get_table_columns(
-                                conn, "message_add_on", schema_cache
-                            )
+                            add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
                             if add_on_cols:
                                 a_map = {
                                     "parent_message_row_id": m_id,
@@ -4949,15 +4950,11 @@ def apply_messages_bin(
                                 )
 
                             if msg_item.get("user_receipts"):
-                                ru_cols = get_table_columns(
-                                    conn, "receipt_user", schema_cache
-                                )
+                                ru_cols = get_table_columns(conn, "receipt_user", schema_cache)
                                 if ru_cols:
                                     for ur in msg_item["user_receipts"]:
                                         ur_jid = ur.get("user_jid", "")
-                                        if ur_jid and not is_valid_jid_string(
-                                            ur_jid
-                                        ):
+                                        if ur_jid and not is_valid_jid_string(ur_jid):
                                             continue
                                         try:
                                             ur_jid_id = (
@@ -4983,15 +4980,11 @@ def apply_messages_bin(
                             if msg_item.get("media_info") and sql_insert_media:
                                 media = msg_item["media_info"]
                                 f_hash_str = (
-                                    base64.b64encode(media["file_sha256"]).decode(
-                                        "ascii"
-                                    )
+                                    base64.b64encode(media["file_sha256"]).decode("ascii")
                                     if media.get("file_sha256")
                                     else None
                                 )
-                                f_path = existing_media_paths.get(
-                                    fb_key_id
-                                ) or (
+                                f_path = existing_media_paths.get(fb_key_id) or (
                                     media.get("file_path") if media else None
                                 )
                                 if (
@@ -5013,10 +5006,7 @@ def apply_messages_bin(
                                 }
                                 cur.execute(
                                     sql_insert_media,
-                                    [
-                                        media_row_map[c]
-                                        for c in target_media_cols
-                                    ],
+                                    [media_row_map[c] for c in target_media_cols],
                                 )
 
                             if msg_item.get("link_preview_info"):
@@ -5035,9 +5025,7 @@ def apply_messages_bin(
                                         )
                                     except sqlite3.OperationalError:
                                         pass
-                                if has_message_thumbnail_table and lp.get(
-                                    "thumbnail"
-                                ):
+                                if has_message_thumbnail_table and lp.get("thumbnail"):
                                     try:
                                         cur.execute(
                                             "INSERT OR REPLACE INTO message_thumbnail (message_row_id, thumbnail) VALUES (?, ?)",
@@ -5074,10 +5062,8 @@ def apply_messages_bin(
                                     jid_cache,
                                 )
 
-                            if (
-                                fb_chat_id is not None
-                                and fb_ts
-                                >= max_ts_per_chat.get(fb_chat_id, 0)
+                            if fb_chat_id is not None and fb_ts >= max_ts_per_chat.get(
+                                fb_chat_id, 0
                             ):
                                 max_ts_per_chat[fb_chat_id] = fb_ts
                             if fb_chat_id is not None:
@@ -5097,7 +5083,7 @@ def apply_messages_bin(
                 )
 
         if pass2_recovered > 0:
-            logger.info(
+            logger.debug(
                 f"Two-pass add-on staging resolved {pass2_recovered} out-of-order add-on(s) "
                 f"({pass2_orphans} unresolvable orphan(s))."
             )
@@ -5138,7 +5124,7 @@ def apply_messages_bin(
                 )
                 recovered_quotes += 1
         if recovered_quotes > 0:
-            logger.info(
+            logger.debug(
                 f"Two-pass quote reconciliation resolved {recovered_quotes} out-of-order quoted timestamp(s)."
             )
 
@@ -5791,9 +5777,7 @@ def merge_increments(
         except sqlite3.OperationalError:
             pass
         try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_jid_user_server ON jid(user, server)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jid_user_server ON jid(user, server)")
         except sqlite3.OperationalError:
             pass
 
