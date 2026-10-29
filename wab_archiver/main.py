@@ -1983,10 +1983,32 @@ def decrypt_msgstore(
         os.makedirs(output_dir, exist_ok=True)
     if os.path.exists(output_path):
         logger.warning(f"Overwriting existing {output_path} with decrypted database.")
+    _clean_sqlite_files(output_path)
     with open(output_path, "wb") as out:
         out.write(output_file)
     logger.info("Decryption complete.")
     return output_path
+
+
+def _clean_sqlite_files(db_path: str) -> None:
+    """Remove a SQLite database file and any associated WAL, SHM, and rollback journal sidecars."""
+    for ext in ("", "-wal", "-shm", "-journal"):
+        target = db_path + ext
+        if os.path.exists(target):
+            with contextlib.suppress(OSError):
+                os.remove(target)
+
+
+def _safe_replace_sqlite_db(src: str, dst: str) -> None:
+    """Safely replace a SQLite database file and its sidecars atomically."""
+    _clean_sqlite_files(dst)
+    os.replace(src, dst)
+    for ext in ("-wal", "-shm", "-journal"):
+        src_sidecar = src + ext
+        dst_sidecar = dst + ext
+        if os.path.exists(src_sidecar):
+            with contextlib.suppress(OSError):
+                os.replace(src_sidecar, dst_sidecar)
 
 
 def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger) -> None:
@@ -2022,17 +2044,13 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
         incoming_db = os.path.join(db_dir, "msgstore.db.incoming")
         merge_staging_dir = os.path.join(db_dir, ".staging_merge")
 
-        if os.path.exists(incoming_db):
-            with contextlib.suppress(OSError):
-                os.remove(incoming_db)
+        _clean_sqlite_files(incoming_db)
 
         try:
             if all_increments:
                 logger.info(f"Detected {len(all_increments)} incremental backup(s) to merge.")
                 base_decrypted = os.path.join(db_dir, "msgstore.db.base_decrypted")
-                if os.path.exists(base_decrypted):
-                    with contextlib.suppress(OSError):
-                        os.remove(base_decrypted)
+                _clean_sqlite_files(base_decrypted)
 
                 try:
                     if is_encrypted:
@@ -2049,26 +2067,20 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
                         logger,
                     )
                 finally:
-                    if os.path.exists(base_decrypted):
-                        with contextlib.suppress(OSError):
-                            os.remove(base_decrypted)
+                    _clean_sqlite_files(base_decrypted)
             else:
                 decrypt_msgstore(args.msgstore, args.e2e_key, incoming_db, logger)
         except BaseException:
-            if os.path.exists(incoming_db):
-                with contextlib.suppress(OSError):
-                    os.remove(incoming_db)
+            _clean_sqlite_files(incoming_db)
             raise
 
         has_previous_db = os.path.isfile(decrypted_db)
 
         if getattr(args, "preserve_deleted", False):
             if has_previous_db:
-                if os.path.exists(old_db):
-                    with contextlib.suppress(OSError):
-                        os.remove(old_db)
-                os.replace(decrypted_db, old_db)
-                os.replace(incoming_db, decrypted_db)
+                _clean_sqlite_files(old_db)
+                _safe_replace_sqlite_db(decrypted_db, old_db)
+                _safe_replace_sqlite_db(incoming_db, decrypted_db)
                 args.msgstore = decrypted_db
 
                 try:
@@ -2085,27 +2097,23 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
                     logger.error(
                         f"Preservation failed ({e}). Restoring previous database from {old_db}."
                     )
-                    if os.path.exists(decrypted_db):
-                        with contextlib.suppress(OSError):
-                            os.remove(decrypted_db)
+                    _clean_sqlite_files(decrypted_db)
                     with contextlib.suppress(OSError):
-                        os.replace(old_db, decrypted_db)
+                        _safe_replace_sqlite_db(old_db, decrypted_db)
                     raise
                 finally:
-                    if os.path.exists(old_db):
-                        with contextlib.suppress(OSError):
-                            os.remove(old_db)
+                    _clean_sqlite_files(old_db)
             else:
                 logger.info(
                     "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
                 )
                 args._preservation_stats = preservation.PreservationResult(messages=0, chats=0)
-                os.replace(incoming_db, decrypted_db)
+                _safe_replace_sqlite_db(incoming_db, decrypted_db)
                 args.msgstore = decrypted_db
         else:
             if has_previous_db:
                 logger.warning(f"Overwriting existing {decrypted_db} with decrypted database.")
-            os.replace(incoming_db, decrypted_db)
+            _safe_replace_sqlite_db(incoming_db, decrypted_db)
             args.msgstore = decrypted_db
 
         # Clear stale viewer caches in archive db if present
@@ -2154,10 +2162,8 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
 
         if getattr(args, "preserve_deleted", False):
             if has_previous_ios_db:
-                if os.path.exists(old_ios_db):
-                    with contextlib.suppress(OSError):
-                        os.remove(old_ios_db)
-                os.replace(existing_chat_storage, old_ios_db)
+                _clean_sqlite_files(old_ios_db)
+                _safe_replace_sqlite_db(existing_chat_storage, old_ios_db)
 
                 try:
                     if is_encrypted:
@@ -2196,16 +2202,12 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
                     logger.error(
                         f"Preservation failed ({e}). Restoring previous database from {old_ios_db}."
                     )
-                    if os.path.exists(existing_chat_storage):
-                        with contextlib.suppress(OSError):
-                            os.remove(existing_chat_storage)
+                    _clean_sqlite_files(existing_chat_storage)
                     with contextlib.suppress(OSError):
-                        os.replace(old_ios_db, existing_chat_storage)
+                        _safe_replace_sqlite_db(old_ios_db, existing_chat_storage)
                     raise
                 finally:
-                    if os.path.exists(old_ios_db):
-                        with contextlib.suppress(OSError):
-                            os.remove(old_ios_db)
+                    _clean_sqlite_files(old_ios_db)
             else:
                 logger.info(
                     "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
@@ -2494,10 +2496,9 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
                     archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
                     old_db = dest_db + ".old"
-                    if os.path.exists(old_db):
-                        with contextlib.suppress(OSError):
-                            os.remove(old_db)
-                    os.replace(dest_db, old_db)
+                    _clean_sqlite_files(old_db)
+                    _safe_replace_sqlite_db(dest_db, old_db)
+                    _clean_sqlite_files(dest_db)
                     shutil.copy2(args.msgstore, dest_db)
                     try:
                         pres_stats = preservation.preserve_deleted_messages(
@@ -2512,16 +2513,12 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                         logger.error(
                             f"Preservation failed ({e}). Restoring previous database from {old_db}."
                         )
-                        if os.path.exists(dest_db):
-                            with contextlib.suppress(OSError):
-                                os.remove(dest_db)
+                        _clean_sqlite_files(dest_db)
                         with contextlib.suppress(OSError):
-                            os.replace(old_db, dest_db)
+                            _safe_replace_sqlite_db(old_db, dest_db)
                         raise
                     finally:
-                        if os.path.exists(old_db):
-                            with contextlib.suppress(OSError):
-                                os.remove(old_db)
+                        _clean_sqlite_files(old_db)
                     args.msgstore = dest_db
             else:
                 logger.info(
@@ -2529,6 +2526,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 )
                 pres_stats = preservation.PreservationResult(messages=0, chats=0)
                 if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
+                    _clean_sqlite_files(dest_db)
                     shutil.copy2(args.msgstore, dest_db)
                     args.msgstore = dest_db
         else:
