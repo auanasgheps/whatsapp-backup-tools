@@ -8021,6 +8021,157 @@ class TestPollSupport:
         assert res_none.get_json()["available"] is True
         assert len(res_none.get_json()["options"]) == 0
 
+    def test_live_poll_not_misidentified_as_preserved(self, tmp_path):
+        """Verify that a live poll present in msgstore.db is NEVER misidentified as preserved
+
+        or duplicated even if preserved_messages.db has an entry, and results are never lost.
+        """
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+
+        wa_path = tmp_path / "msgstore.db"
+        wa_conn = sqlite3.connect(str(wa_path))
+        wa_conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER NOT NULL, key_id TEXT, from_me INTEGER NOT NULL DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER, text_data TEXT, message_type INTEGER DEFAULT 0);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (message_row_id INTEGER PRIMARY KEY, text_data TEXT, from_me INTEGER DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER DEFAULT 0);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE message_poll (message_row_id INTEGER PRIMARY KEY, selectable_options_count INTEGER);
+            CREATE TABLE message_poll_option (_id INTEGER PRIMARY KEY, message_row_id INTEGER, option_name TEXT, vote_total INTEGER);
+            CREATE TABLE message_add_on (_id INTEGER PRIMARY KEY, parent_message_row_id INTEGER, message_add_on_type INTEGER, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE message_add_on_poll_vote_selected_option (message_add_on_row_id INTEGER, message_poll_option_id INTEGER);
+        """)
+
+        # Group Chat
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (1, '15551111111')")
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '15552222222')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (1, 1, 'Group Chat', 0, 1700000000000, 10)"
+        )
+
+        # Live poll in database with key_id
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, key_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) VALUES (10, 1, 'POLL_STANZA_1', 0, 2, 1700000000000, 'Lunch spot?', 66)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_poll (message_row_id, selectable_options_count) VALUES (10, 0)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_poll_option (_id, message_row_id, option_name, vote_total) VALUES (101, 10, 'Tacos', 2)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_poll_option (_id, message_row_id, option_name, vote_total) VALUES (102, 10, 'Pizza', 1)"
+        )
+        wa_conn.commit()
+
+        # Contacts
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15552222222', 'Bob (15552222222)', 'Bob')"
+        )
+        archive_conn.commit()
+
+        # Now simulate a preserved_messages.db that also contains an entry for this poll
+        pres_path = tmp_path / "preserved_messages.db"
+        pres_conn = sqlite3.connect(str(pres_path))
+        pres_conn.executescript("""
+            CREATE TABLE preserved_messages (
+                msg_id INTEGER,
+                stanza_id TEXT,
+                chat_id TEXT,
+                chat_type TEXT,
+                chat_jid TEXT,
+                timestamp_ms INTEGER,
+                sender TEXT,
+                sender_jid TEXT,
+                sender_phone TEXT,
+                from_me INTEGER,
+                text_body TEXT,
+                media_type TEXT,
+                media_name TEXT,
+                archive_path TEXT,
+                original_path TEXT,
+                vcard_data TEXT,
+                media_width INTEGER,
+                media_height INTEGER,
+                media_duration INTEGER,
+                media_size INTEGER,
+                is_view_once INTEGER,
+                latitude REAL,
+                longitude REAL,
+                location_name TEXT,
+                location_address TEXT,
+                location_url TEXT,
+                live_location_share_duration INTEGER,
+                quoted_text TEXT,
+                quoted_sender TEXT,
+                quoted_ts INTEGER,
+                quoted_stanza_id TEXT,
+                quoted_parent_type TEXT,
+                is_edited INTEGER,
+                edited_ts INTEGER,
+                is_starred INTEGER,
+                action_type INTEGER,
+                participant_name TEXT,
+                preserved_at TEXT,
+                preservation_reason TEXT,
+                source_platform TEXT,
+                reactions TEXT,
+                poll_data TEXT,
+                is_pinned INTEGER,
+                pin_expiry_ts INTEGER,
+                service_metadata TEXT
+            );
+        """)
+        pres_conn.execute(
+            """INSERT INTO preserved_messages (
+                msg_id, stanza_id, chat_id, chat_type, timestamp_ms, sender, from_me,
+                text_body, media_type, preservation_reason, poll_data
+            ) VALUES (
+                10, 'POLL_STANZA_1', '1', 'group', 1700000000000, 'Bob', 0,
+                'Lunch spot?', 'poll', 'deleted_on_phone', '{"options": [{"name": "Tacos", "votes": 0}], "total_votes": 0}'
+            )"""
+        )
+        pres_conn.commit()
+        pres_conn.close()
+
+        app = viewer.create_app(tmp_path)
+        client = app.test_client()
+
+        # Initial fetch from live database (and backfill to recent_messages)
+        res1 = client.get("/api/messages?chat_id=1&chat_type=group")
+        assert res1.status_code == 200
+        msgs1 = res1.get_json()
+        assert len(msgs1) == 1, "Must NOT duplicate live poll with preserved copy"
+        p1 = msgs1[0]
+        assert p1["msg_id"] == 10
+        assert p1.get("is_preserved") is None or p1.get("is_preserved") == 0
+        assert p1["media_type"] == "poll"
+        assert p1["poll"]["total_votes"] == 3
+        assert len(p1["poll"]["options"]) == 2
+
+        # Second fetch: populate from recent_messages cache directly
+        # Wait for background thread backfill if running
+        time.sleep(0.1)
+        res2 = client.get("/api/messages?chat_id=1&chat_type=group")
+        assert res2.status_code == 200
+        msgs2 = res2.get_json()
+        assert len(msgs2) == 1, "Recent messages cache must NOT leak preserved duplicate"
+        p2 = msgs2[0]
+        assert p2["msg_id"] == 10
+        assert p2.get("is_preserved") is None or p2.get("is_preserved") == 0
+        assert p2["poll"]["total_votes"] == 3
+        assert len(p2["poll"]["options"]) == 2
+
+        # Test negative ID lookup for poll details (preserved poll details fallback)
+        res_neg = client.get("/api/poll_details/-1")
+        assert res_neg.status_code == 200
+        neg_data = res_neg.get_json()
+        assert neg_data["available"] is True
+        # Since POLL_STANZA_1 exists in live msgstore.db, it resolved to live details!
+        assert len(neg_data["options"]) == 2
+
     def test_ios_poll_messages_and_details(self, tmp_path):
         """Test iOS poll hydration in /api/messages and /api/poll_details."""
         archive_path = tmp_path / ".wa_media_archiver.db"

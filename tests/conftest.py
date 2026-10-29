@@ -51,6 +51,7 @@ def make_archive_db(path: Path | str) -> sqlite3.Connection:
             chat_id          TEXT NOT NULL,
             chat_type        TEXT NOT NULL,
             msg_id           INTEGER NOT NULL,
+            stanza_id        TEXT,
             timestamp_ms     INTEGER NOT NULL,
             sender           TEXT NOT NULL,
             from_me          INTEGER NOT NULL,

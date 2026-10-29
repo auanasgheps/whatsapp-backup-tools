@@ -1951,6 +1951,10 @@ def _hydrate_link_preview_rows(rows: list[dict], source_type: str) -> None:
 def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: list) -> None:
     if not rows or not archive_target:
         return
+    # Only cache live messages, never synthetic preserved messages (negative msg_id or is_preserved)
+    rows = [r for r in rows if not r.get("is_preserved") and (r.get("msg_id") or 0) > 0]
+    if not rows:
+        return
     conn = None
     should_close = False
     try:
@@ -1964,40 +1968,44 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
         else:
             conn = archive_target
         cur_cols = {r[1] for r in conn.execute("PRAGMA table_info(recent_messages)").fetchall()}
+        has_stanza = "stanza_id" in cur_cols
         has_qmid = "quoted_msg_id" in cur_cols
         has_lp = "link_title" in cur_cols and "has_thumbnail" in cur_cols
         has_qthumb = "quoted_has_thumb" in cur_cols
+
+        stanza_col = ", stanza_id" if has_stanza else ""
+        stanza_val = ", ?" if has_stanza else ""
         if has_lp:
             qthumb_col = ", quoted_has_thumb" if has_qthumb else ""
             qthumb_val = ", ?" if has_qthumb else ""
             sql = f"""
                 INSERT OR REPLACE INTO recent_messages
-                    (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                    (chat_id, chat_type, msg_id{stanza_col}, timestamp_ms, sender, from_me,
                      archive_path, media_type, media_name, text_body,
                      quoted_text, quoted_sender, quoted_ts, quoted_msg_id{qthumb_col}, reactions,
                      is_edited, edited_ts, is_view_once, link_title, link_desc, link_url,
                      link_preview_type, has_thumbnail)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         elif has_qmid:
             qthumb_col = ", quoted_has_thumb" if has_qthumb else ""
             qthumb_val = ", ?" if has_qthumb else ""
             sql = f"""
                 INSERT OR REPLACE INTO recent_messages
-                    (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                    (chat_id, chat_type, msg_id{stanza_col}, timestamp_ms, sender, from_me,
                      archive_path, media_type, media_name, text_body,
                      quoted_text, quoted_sender, quoted_ts, quoted_msg_id{qthumb_col}, reactions,
                      is_edited, edited_ts, is_view_once)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?)
+                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?)
             """
         else:
-            sql = """
+            sql = f"""
                 INSERT OR REPLACE INTO recent_messages
-                    (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me,
+                    (chat_id, chat_type, msg_id{stanza_col}, timestamp_ms, sender, from_me,
                      archive_path, media_type, media_name, text_body,
                      quoted_text, quoted_sender, quoted_ts, reactions,
                      is_edited, edited_ts, is_view_once)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         keys = rows[0].keys()
         params = []
@@ -2006,6 +2014,10 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
                 r["chat_id"],
                 r["chat_type"],
                 r["msg_id"],
+            ]
+            if has_stanza:
+                row_vals.append(r.get("stanza_id"))
+            row_vals.extend([
                 r["timestamp_ms"],
                 r["sender"],
                 r["from_me"],
@@ -2016,7 +2028,7 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
                 r["quoted_text"] if "quoted_text" in keys else None,
                 r["quoted_sender"] if "quoted_sender" in keys else None,
                 r["quoted_ts"] if "quoted_ts" in keys else None,
-            ]
+            ])
             if has_qmid or has_lp:
                 row_vals.append(r["quoted_msg_id"] if "quoted_msg_id" in keys else None)
             if has_qthumb and (has_qmid or has_lp):
@@ -2254,9 +2266,38 @@ def _query_preserved_messages(
                     else d["poll_data"]
                 )
                 if isinstance(p, dict):
-                    d["poll"] = p
+                    opts = []
+                    for opt in p.get("options") or []:
+                        vc = opt.get("vote_count", opt.get("votes", 0))
+                        opts.append(
+                            {
+                                "id": opt.get("id"),
+                                "name": opt.get("name", ""),
+                                "vote_count": vc,
+                                "user_selected": bool(opt.get("user_selected", False)),
+                            }
+                        )
+                    total_v = p.get("total_votes", sum(o["vote_count"] for o in opts))
+                    multi = p.get("multiple_answers")
+                    if multi is None:
+                        multi = p.get("selectable_options_count") == 0
+                    d["poll"] = {
+                        "question": p.get("question") or d.get("text_body") or "Poll",
+                        "multiple_answers": bool(multi),
+                        "total_votes": total_v,
+                        "total_voters": p.get("total_voters", total_v),
+                        "options": opts,
+                    }
             except Exception:
                 pass
+        if d.get("media_type") == "poll" and not d.get("poll"):
+            d["poll"] = {
+                "question": d.get("text_body") or "Poll",
+                "multiple_answers": False,
+                "total_votes": 0,
+                "total_voters": 0,
+                "options": [],
+            }
         d["link_title"] = None
         d["link_desc"] = None
         d["link_url"] = None
@@ -2377,6 +2418,16 @@ def _merge_messages(
     descending: bool,
     limit: int,
 ) -> list[dict]:
+    """Merge live messages from the active database with preserved historical records.
+
+    Invariants:
+    - Phase 1: Revoked/deleted placeholders (media_type == 'deleted') are re-hydrated
+      with pre-revocation preserved content.
+    - Phase 2: Live non-deleted messages take absolute precedence. If a message is
+      alive in the database, any duplicate preserved stub is discarded.
+    - Matches on stanza_id (with fallback to timestamp/from_me when stanza_id is absent).
+    - Preserved polls and options are deduped against live polls.
+    """
     if not pres_rows:
         return live_rows[:limit]
     if not live_rows:
@@ -2385,8 +2436,9 @@ def _merge_messages(
     merged = list(live_rows)
     used_pres_indexes = set()
 
+    # Phase 1: Re-hydrate deleted/revoked stubs with preserved content
     for i, p in enumerate(pres_rows):
-        if p.get("preservation_reason") == "revoked_by_sender":
+        if p.get("preservation_reason") in ("revoked_by_sender", "revoked_by_admin"):
             p_stanza = p.get("stanza_id")
             p_ts = p.get("timestamp_ms", 0)
             p_fm = p.get("from_me", 0)
@@ -2404,16 +2456,33 @@ def _merge_messages(
     live_stanzas = {r["stanza_id"] for r in merged if r.get("stanza_id")}
     live_keys = {(r.get("timestamp_ms"), r.get("from_me")) for r in merged}
 
+    # Phase 2: Append preserved rows that do not exist in the live database
     for i, p in enumerate(pres_rows):
         if i in used_pres_indexes:
             continue
         p_stanza = p.get("stanza_id")
+        p_ts = p.get("timestamp_ms", 0)
+        p_fm = p.get("from_me", 0)
+
+        # Invariant: If the message exists alive in the database (not deleted),
+        # never duplicate it or show it as preserved!
         if p_stanza:
-            if p_stanza not in live_stanzas:
-                merged.append(p)
-                live_stanzas.add(p_stanza)
+            if p_stanza in live_stanzas:
+                continue
+            # Special protection for polls: check if a live poll exists matching this poll
+            if p.get("media_type") == "poll":
+                is_live_poll = False
+                for live in merged:
+                    if live.get("media_type") == "poll" and live.get("from_me") == p_fm:
+                        if abs(live.get("timestamp_ms", 0) - p_ts) < 2000:
+                            is_live_poll = True
+                            break
+                if is_live_poll:
+                    continue
+            merged.append(p)
+            live_stanzas.add(p_stanza)
         else:
-            key = (p.get("timestamp_ms"), p.get("from_me"))
+            key = (p_ts, p_fm)
             if key not in live_keys:
                 merged.append(p)
                 live_keys.add(key)
@@ -4425,6 +4494,7 @@ def create_app(output_root: Path, rescan: bool = False):
             chat_id        TEXT NOT NULL,
             chat_type      TEXT NOT NULL,
             msg_id         INTEGER NOT NULL,
+            stanza_id      TEXT,
             timestamp_ms   INTEGER NOT NULL,
             sender         TEXT NOT NULL,
             from_me        INTEGER NOT NULL,
@@ -4469,6 +4539,8 @@ def create_app(output_root: Path, rescan: bool = False):
         _archive_conn.execute("ALTER TABLE archive_copies ADD COLUMN timestamp_ms INTEGER")
 
     cols = [r[1] for r in _archive_conn.execute("PRAGMA table_info(recent_messages)").fetchall()]
+    if "stanza_id" not in cols:
+        _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN stanza_id TEXT")
     if "reactions" not in cols:
         _archive_conn.execute("ALTER TABLE recent_messages ADD COLUMN reactions TEXT")
     if "is_edited" not in cols:
@@ -7115,9 +7187,71 @@ def create_app(output_root: Path, rescan: bool = False):
 
     # ---- API: poll details ----------------------------------------------------
 
-    @app.route("/api/poll_details/<int:message_id>")
+    @app.route("/api/poll_details/<message_id>")
     def api_poll_details(message_id):
+        try:
+            mid = int(message_id)
+        except (ValueError, TypeError):
+            return jsonify({"available": False}), 400
+
         conn = get_wa()
+        if mid < 0:
+            pres = get_preserved()
+            if pres is None:
+                return jsonify({"available": False})
+            pr_row = pres.execute(
+                "SELECT * FROM preserved_messages WHERE rowid = ?", (-mid,)
+            ).fetchone()
+            if not pr_row:
+                return jsonify({"available": False})
+            pr = dict(pr_row)
+            if conn is not None and pr.get("stanza_id"):
+                try:
+                    live_m = conn.execute(
+                        "SELECT _id FROM message WHERE key_id = ?", (pr["stanza_id"],)
+                    ).fetchone()
+                    if live_m:
+                        mid = live_m[0]
+                except sqlite3.OperationalError:
+                    pass
+            if mid < 0:
+                p_data = {}
+                if pr.get("poll_data"):
+                    try:
+                        p_data = (
+                            json.loads(pr["poll_data"])
+                            if isinstance(pr["poll_data"], str)
+                            else pr["poll_data"]
+                        )
+                    except Exception:
+                        pass
+                options = []
+                for opt in p_data.get("options") or []:
+                    vc = opt.get("vote_count", opt.get("votes", 0))
+                    options.append(
+                        {
+                            "id": opt.get("id"),
+                            "name": opt.get("name", ""),
+                            "vote_count": vc,
+                            "voters": [],
+                        }
+                    )
+                multi = p_data.get("multiple_answers")
+                if multi is None:
+                    multi = p_data.get("selectable_options_count") == 0
+                total_v = p_data.get("total_votes", sum(o["vote_count"] for o in options))
+                return jsonify(
+                    {
+                        "available": True,
+                        "question": p_data.get("question") or pr.get("text_body") or "Poll",
+                        "multiple_answers": bool(multi),
+                        "selectable_count": 0 if multi else 1,
+                        "total_voters": p_data.get("total_voters", total_v),
+                        "options": options,
+                    }
+                )
+
+        message_id = mid
         if conn is None:
             return jsonify({"available": False})
 

@@ -671,11 +671,17 @@ def diff_and_extract_android(
             else "''"
         )
 
+        poll_pred = (
+            "(m.message_type = 66 OR (EXISTS (SELECT 1 FROM old_db.message_poll mp WHERE mp.message_row_id = m._id)))"
+            if has_poll
+            else "(m.message_type = 66)"
+        )
+
         media_type_expr = f"""CASE
             WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IN (4, 14) THEN 'vcard'
             WHEN m.message_type IN (5, 18) THEN 'location'
-            WHEN m.message_type = 66 THEN 'poll'
+            WHEN {poll_pred} THEN 'poll'
             WHEN m.message_type = 20 THEN 'sticker'
             WHEN m.message_type = 1 THEN 'image'
             WHEN m.message_type = 2 THEN 'audio'
@@ -766,7 +772,7 @@ def diff_and_extract_android(
                 {sender_jid_sql} AS sender_jid,
                 {sender_phone_sql} AS sender_phone,
                 m.from_me AS from_me,
-                COALESCE(m.text_data, '') AS text_body,
+                COALESCE(NULLIF(m.text_data, ''), CASE WHEN {poll_pred} THEN 'Poll' END, '') AS text_body,
                 {media_type_expr} AS media_type,
                 COALESCE({media_name_col}, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
                 {archive_path_expr} AS archive_path,
@@ -863,7 +869,7 @@ def diff_and_extract_android(
                 {sender_jid_sql} AS sender_jid,
                 {sender_phone_sql} AS sender_phone,
                 m.from_me AS from_me,
-                COALESCE(m.text_data, '') AS text_body,
+                COALESCE(NULLIF(m.text_data, ''), CASE WHEN {poll_pred} THEN 'Poll' END, '') AS text_body,
                 {media_type_expr} AS media_type,
                 COALESCE({media_name_col}, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
                 {archive_path_expr} AS archive_path,
@@ -998,21 +1004,63 @@ def diff_and_extract_android(
                 poll_rows = [r for r in extracted_rows if r.get("media_type") == "poll"]
                 if poll_rows:
                     poll_msg_ids = [r["msg_id"] for r in poll_rows]
+                    has_add_on_votes = (
+                        "message_add_on_poll_vote_selected_option" in old_tables
+                        and "message_add_on" in old_tables
+                    )
                     for i in range(0, len(poll_msg_ids), 900):
                         chunk = poll_msg_ids[i : i + 900]
                         ph = ",".join("?" * len(chunk))
                         opt_sql = f"""
-                            SELECT message_row_id, option_name, COALESCE(vote_total, 0) AS votes
+                            SELECT _id, message_row_id, option_name, COALESCE(vote_total, 0) AS votes
                             FROM old_db.message_poll_option
                             WHERE message_row_id IN ({ph})
                             ORDER BY message_row_id, _id ASC
                         """
                         opts_by_msg: dict[int, list[dict]] = {}
+                        opt_ids: list[int] = []
                         with contextlib.suppress(sqlite3.OperationalError):
                             for opt_r in conn.execute(opt_sql, chunk).fetchall():
-                                opts_by_msg.setdefault(opt_r[0], []).append(
-                                    {"name": opt_r[1] or "", "votes": int(opt_r[2] or 0)}
+                                opt_ids.append(opt_r[0])
+                                opts_by_msg.setdefault(opt_r[1], []).append(
+                                    {
+                                        "id": opt_r[0],
+                                        "name": opt_r[2] or "",
+                                        "votes": int(opt_r[3] or 0),
+                                    }
                                 )
+
+                        addon_votes_by_opt: dict[int, int] = {}
+                        voter_counts: dict[int, int] = {}
+                        if has_add_on_votes and opt_ids:
+                            for j in range(0, len(opt_ids), 900):
+                                opt_chunk = opt_ids[j : j + 900]
+                                opt_ph = ",".join("?" * len(opt_chunk))
+                                with contextlib.suppress(sqlite3.OperationalError):
+                                    v_rows = conn.execute(
+                                        f"""
+                                        SELECT ps.message_poll_option_id, COUNT(DISTINCT ps.message_add_on_row_id)
+                                        FROM old_db.message_add_on_poll_vote_selected_option ps
+                                        WHERE ps.message_poll_option_id IN ({opt_ph})
+                                        GROUP BY ps.message_poll_option_id
+                                        """,
+                                        opt_chunk,
+                                    ).fetchall()
+                                    for vr in v_rows:
+                                        addon_votes_by_opt[vr[0]] = vr[1]
+
+                            with contextlib.suppress(sqlite3.OperationalError):
+                                vc_rows = conn.execute(
+                                    f"""
+                                    SELECT parent_message_row_id, COUNT(DISTINCT _id)
+                                    FROM old_db.message_add_on
+                                    WHERE parent_message_row_id IN ({ph}) AND message_add_on_type = 67
+                                    GROUP BY parent_message_row_id
+                                    """,
+                                    chunk,
+                                ).fetchall()
+                                for vcr in vc_rows:
+                                    voter_counts[vcr[0]] = vcr[1]
 
                         poll_meta: dict[int, int] = {}
                         if has_poll:
@@ -1029,10 +1077,19 @@ def diff_and_extract_android(
                             mid = r["msg_id"]
                             if mid in opts_by_msg:
                                 options = opts_by_msg[mid]
+                                for o in options:
+                                    actual_cnt = max(
+                                        o["votes"], addon_votes_by_opt.get(o["id"], 0)
+                                    )
+                                    o["votes"] = actual_cnt
                                 total_votes = sum(o["votes"] for o in options)
+                                sel_count = poll_meta.get(mid, 1)
                                 poll_payload = {
-                                    "selectable_options_count": poll_meta.get(mid, 1),
-                                    "options": options,
+                                    "selectable_options_count": sel_count,
+                                    "options": [
+                                        {"name": o["name"], "votes": o["votes"]}
+                                        for o in options
+                                    ],
                                     "total_votes": total_votes,
                                 }
                                 r["poll_data"] = json.dumps(
@@ -1669,8 +1726,18 @@ def _parse_ios_receipt_poll(data: bytes) -> str | None:
 
         poll_payload = {
             "selectable_options_count": selectable_count,
-            "options": [{"name": opt, "votes": option_votes[i]} for i, opt in enumerate(options)],
+            "multiple_answers": (selectable_count == 0),
+            "options": [
+                {
+                    "id": i,
+                    "name": opt,
+                    "votes": option_votes[i],
+                    "vote_count": option_votes[i],
+                }
+                for i, opt in enumerate(options)
+            ],
             "total_votes": sum(option_votes),
+            "total_voters": len(votes),
         }
         return json.dumps(poll_payload, ensure_ascii=False, separators=(",", ":"))
     except Exception:

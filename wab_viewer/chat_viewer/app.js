@@ -661,6 +661,24 @@
         msgList.push(m);
       }
     }
+    // Discard any preserved duplicates when matching non-deleted live messages are present
+    const liveStanzas = new Set();
+    const liveKeys = new Set();
+    for (const m of msgList) {
+      if (!m.is_preserved && m.media_type !== 'deleted') {
+        if (m.stanza_id) liveStanzas.add(m.stanza_id);
+        liveKeys.add(`${m.timestamp_ms}_${m.from_me ? 1 : 0}`);
+      }
+    }
+    if (liveStanzas.size > 0 || liveKeys.size > 0) {
+      msgList = msgList.filter(m => {
+        if (m.is_preserved) {
+          if (m.stanza_id && liveStanzas.has(m.stanza_id)) return false;
+          if (liveKeys.has(`${m.timestamp_ms}_${m.from_me ? 1 : 0}`)) return false;
+        }
+        return true;
+      });
+    }
     msgList.sort((a, b) => (a.timestamp_ms - b.timestamp_ms) || ((a.sort_id ?? a.msg_id) - (b.sort_id ?? b.msg_id)) || (a.msg_id - b.msg_id));
   }
 
@@ -1501,7 +1519,8 @@
       const optEl = document.createElement('div');
       optEl.className = 'msg-poll-option' + (opt.user_selected ? ' user-selected' : '');
 
-      const pct = totalVotes > 0 ? Math.round(((opt.vote_count || 0) / totalVotes) * 100) : 0;
+      const optVotes = (opt.vote_count !== undefined ? opt.vote_count : opt.votes) || 0;
+      const pct = totalVotes > 0 ? Math.round((optVotes / totalVotes) * 100) : 0;
 
       const fill = document.createElement('div');
       fill.className = 'msg-poll-option-fill';
@@ -1530,7 +1549,7 @@
 
       const countEl = document.createElement('span');
       countEl.className = 'msg-poll-option-count';
-      countEl.textContent = String(opt.vote_count || 0);
+      countEl.textContent = String(optVotes);
       content.appendChild(countEl);
 
       optEl.appendChild(content);
