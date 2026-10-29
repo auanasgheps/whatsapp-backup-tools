@@ -2017,18 +2017,20 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
             ]
             if has_stanza:
                 row_vals.append(r.get("stanza_id"))
-            row_vals.extend([
-                r["timestamp_ms"],
-                r["sender"],
-                r["from_me"],
-                r["archive_path"] if "archive_path" in keys else None,
-                r["media_type"],
-                r["media_name"] if "media_name" in keys else None,
-                r["text_body"],
-                r["quoted_text"] if "quoted_text" in keys else None,
-                r["quoted_sender"] if "quoted_sender" in keys else None,
-                r["quoted_ts"] if "quoted_ts" in keys else None,
-            ])
+            row_vals.extend(
+                [
+                    r["timestamp_ms"],
+                    r["sender"],
+                    r["from_me"],
+                    r["archive_path"] if "archive_path" in keys else None,
+                    r["media_type"],
+                    r["media_name"] if "media_name" in keys else None,
+                    r["text_body"],
+                    r["quoted_text"] if "quoted_text" in keys else None,
+                    r["quoted_sender"] if "quoted_sender" in keys else None,
+                    r["quoted_ts"] if "quoted_ts" in keys else None,
+                ]
+            )
             if has_qmid or has_lp:
                 row_vals.append(r["quoted_msg_id"] if "quoted_msg_id" in keys else None)
             if has_qthumb and (has_qmid or has_lp):

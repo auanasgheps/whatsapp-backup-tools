@@ -1078,17 +1078,14 @@ def diff_and_extract_android(
                             if mid in opts_by_msg:
                                 options = opts_by_msg[mid]
                                 for o in options:
-                                    actual_cnt = max(
-                                        o["votes"], addon_votes_by_opt.get(o["id"], 0)
-                                    )
+                                    actual_cnt = max(o["votes"], addon_votes_by_opt.get(o["id"], 0))
                                     o["votes"] = actual_cnt
                                 total_votes = sum(o["votes"] for o in options)
                                 sel_count = poll_meta.get(mid, 1)
                                 poll_payload = {
                                     "selectable_options_count": sel_count,
                                     "options": [
-                                        {"name": o["name"], "votes": o["votes"]}
-                                        for o in options
+                                        {"name": o["name"], "votes": o["votes"]} for o in options
                                     ],
                                     "total_votes": total_votes,
                                 }
@@ -2899,7 +2896,9 @@ def preserve_incremental_deletions(
     now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     extracted_rows: list[dict] = []
 
-    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
     has_media = "message_media" in tables
     has_quoted = "message_quoted" in tables
     has_system = "message_system" in tables
@@ -2914,11 +2913,17 @@ def preserve_incremental_deletions(
     has_chat = "chat" in tables
     has_jid = "jid" in tables
 
-    msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()} if "message" in tables else set()
+    msg_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
+        if "message" in tables
+        else set()
+    )
     has_starred = "starred" in msg_cols
     starred_expr = "COALESCE(m.starred, 0)" if has_starred else "0"
 
-    jid_cols = {r[1] for r in conn.execute("PRAGMA table_info(jid)").fetchall()} if has_jid else set()
+    jid_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(jid)").fetchall()} if has_jid else set()
+    )
     has_jid_server = "server" in jid_cols
     has_jid_raw = "raw_string" in jid_cols
 
@@ -2939,17 +2944,24 @@ def preserve_incremental_deletions(
         sender_jid_sql = "COALESCE(j2.user, j.user)"
         sender_phone_sql = "COALESCE(j2.user, j.user)"
 
-    chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()} if has_chat else set()
+    chat_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()} if has_chat else set()
+    )
     chat_subject_expr = "c.subject" if "subject" in chat_cols else "NULL"
     chat_desc_expr = "c.description" if "description" in chat_cols else "NULL"
     chat_created_ts_expr = "c.created_timestamp" if "created_timestamp" in chat_cols else "NULL"
     chat_gjid_expr = "c.jid_row_id" if "jid_row_id" in chat_cols else "NULL"
     chat_creator_jid_expr = (
         "(SELECT j_cr.raw_string FROM jid j_cr WHERE j_cr._id = c.creator_jid_row_id)"
-        if ("creator_jid_row_id" in chat_cols and has_jid) else "NULL"
+        if ("creator_jid_row_id" in chat_cols and has_jid)
+        else "NULL"
     )
 
-    mm_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_media)").fetchall()} if has_media else set()
+    mm_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(message_media)").fetchall()}
+        if has_media
+        else set()
+    )
     mm_width = "mm.width" if "width" in mm_cols else "NULL"
     mm_height = "mm.height" if "height" in mm_cols else "NULL"
     mm_duration = "mm.media_duration" if "media_duration" in mm_cols else "NULL"
@@ -2964,15 +2976,25 @@ def preserve_incremental_deletions(
     file_path_col = "mm.file_path" if "file_path" in mm_cols else "NULL"
     media_name_col = "mm.media_name" if "media_name" in mm_cols else "NULL"
 
-    ml_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_location)").fetchall()} if has_location else set()
+    ml_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(message_location)").fetchall()}
+        if has_location
+        else set()
+    )
     ml_lat = "ml.latitude" if "latitude" in ml_cols else "NULL"
     ml_lng = "ml.longitude" if "longitude" in ml_cols else "NULL"
     ml_name = "ml.place_name" if "place_name" in ml_cols else "NULL"
     ml_address = "ml.place_address" if "place_address" in ml_cols else "NULL"
     ml_url = "ml.url" if "url" in ml_cols else "NULL"
-    ml_dur = "ml.live_location_share_duration" if "live_location_share_duration" in ml_cols else "NULL"
+    ml_dur = (
+        "ml.live_location_share_duration" if "live_location_share_duration" in ml_cols else "NULL"
+    )
 
-    mq_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_quoted)").fetchall()} if has_quoted else set()
+    mq_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(message_quoted)").fetchall()}
+        if has_quoted
+        else set()
+    )
     mq_key_id_expr = "mq.key_id" if "key_id" in mq_cols else "NULL"
     mq_text_expr = "COALESCE(mq.text_data, '')" if "text_data" in mq_cols else "''"
     mq_parent_type_expr = "NULL"
@@ -2985,28 +3007,42 @@ def preserve_incremental_deletions(
     mscp_join = (
         "LEFT JOIN message_system_chat_participant mscp ON mscp.message_row_id = m._id\n"
         "LEFT JOIN jid j_mscp ON j_mscp._id = mscp.user_jid_row_id"
-        if (has_system and has_system_participant and has_jid) else ""
+        if (has_system and has_system_participant and has_jid)
+        else ""
     )
     ml_join = "LEFT JOIN message_location ml ON ml.message_row_id = m._id" if has_location else ""
     mv_join = "LEFT JOIN message_vcard mv ON mv.message_row_id = m._id" if has_vcard else ""
-    mvom_join = "LEFT JOIN message_view_once_media mvom ON mvom.message_row_id = m._id" if has_view_once else ""
-    edit_join = "LEFT JOIN message_edit_info mei ON mei.message_row_id = m._id" if has_edit_info else ""
+    mvom_join = (
+        "LEFT JOIN message_view_once_media mvom ON mvom.message_row_id = m._id"
+        if has_view_once
+        else ""
+    )
+    edit_join = (
+        "LEFT JOIN message_edit_info mei ON mei.message_row_id = m._id" if has_edit_info else ""
+    )
     jm_join = (
         "LEFT JOIN jid_map jm ON jm.lid_row_id = m.sender_jid_row_id\n"
         "LEFT JOIN jid j2 ON j2._id = jm.jid_row_id"
-        if has_jid_map else "LEFT JOIN jid j2 ON 0 = 1"
+        if has_jid_map
+        else "LEFT JOIN jid j2 ON 0 = 1"
     )
     jm_chat_join = (
         "LEFT JOIN jid_map jm_chat ON jm_chat.lid_row_id = c.jid_row_id\n"
         "LEFT JOIN jid j_phone ON j_phone._id = jm_chat.jid_row_id"
-        if has_jid_map else "LEFT JOIN jid j_phone ON 0 = 1"
+        if has_jid_map
+        else "LEFT JOIN jid j_phone ON 0 = 1"
     )
     jmq_join = (
         "LEFT JOIN jid_map jmq ON jmq.lid_row_id = mq.sender_jid_row_id\n"
         "LEFT JOIN jid jq2 ON jq2._id = jmq.jid_row_id"
-        if (has_jid_map and has_quoted) else "LEFT JOIN jid jq2 ON 0 = 1"
+        if (has_jid_map and has_quoted)
+        else "LEFT JOIN jid jq2 ON 0 = 1"
     )
-    jq_join = "LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id" if has_quoted else "LEFT JOIN jid jq ON 0 = 1"
+    jq_join = (
+        "LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id"
+        if has_quoted
+        else "LEFT JOIN jid jq ON 0 = 1"
+    )
 
     vcard_data_col = "mv.vcard" if has_vcard else "NULL"
     mvom_or = "OR mvom.message_row_id IS NOT NULL" if has_view_once else ""
@@ -3014,17 +3050,21 @@ def preserve_incremental_deletions(
         WHEN m.message_type IN (42, 43, 82) {mvom_or} THEN 1
         ELSE 0
     END"""
-    edit_is_edited_col = "CASE WHEN mei.message_row_id IS NOT NULL THEN 1 ELSE 0 END" if has_edit_info else "0"
+    edit_is_edited_col = (
+        "CASE WHEN mei.message_row_id IS NOT NULL THEN 1 ELSE 0 END" if has_edit_info else "0"
+    )
     edit_ts_col = "mei.edited_timestamp" if has_edit_info else "NULL"
     ms_action_col = "ms.action_type" if has_system else "NULL"
     part_name_expr = (
         "CASE WHEN j_mscp.user IS NOT NULL THEN '+' || j_mscp.user ELSE '' END"
-        if (has_system and has_system_participant and has_jid) else "''"
+        if (has_system and has_system_participant and has_jid)
+        else "''"
     )
 
     poll_pred = (
         "(m.message_type = 66 OR (EXISTS (SELECT 1 FROM message_poll mp WHERE mp.message_row_id = m._id)))"
-        if has_poll else "(m.message_type = 66)"
+        if has_poll
+        else "(m.message_type = 66)"
     )
 
     media_type_expr = f"""CASE
