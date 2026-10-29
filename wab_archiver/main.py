@@ -2065,6 +2065,7 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
                         incoming_db,
                         merge_staging_dir,
                         logger,
+                        args.output if getattr(args, "preserve_deleted", False) else None,
                     )
                 finally:
                     _clean_sqlite_files(base_decrypted)

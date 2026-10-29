@@ -1291,6 +1291,10 @@ def extract_messages_from_proto_frame(data: bytes) -> list[dict]:
                     hsm_fields = parse_wire_fields(hsm_bytes)
                 except (ValueError, Exception):
                     continue
+                order_id = None
+                if 2 in hsm_fields and hsm_fields[2]:
+                    order_id = hsm_fields[2][0][1]
+
                 # WebMessageInfo is field 1 of HistorySyncMsg
                 for wmi_tuple in hsm_fields.get(1, []):
                     wmi_bytes = wmi_tuple[1]
@@ -1299,6 +1303,8 @@ def extract_messages_from_proto_frame(data: bytes) -> list[dict]:
                             msg = decode_wmi(wmi_bytes)
                         except (ValueError, Exception):
                             continue
+                        if order_id is not None:
+                            msg["order_id"] = int(order_id)
                         if not msg.get("remote_jid") and conv_id:
                             msg["remote_jid"] = conv_id
                         if is_valid_jid_string(msg.get("remote_jid", "")):
@@ -2985,6 +2991,7 @@ def apply_protocol_record(
     schema_cache: dict[str, set[str]] | None,
     logger: logging.Logger,
     chat_row_id: int | None,
+    jid_cache: dict[str, int],
 ) -> bool:
     """Apply protocol revoke or edit updates to an existing message, recording edit add-ons. Returns True if applied, False otherwise."""
     cur = conn.cursor()
@@ -3028,38 +3035,56 @@ def apply_protocol_record(
         target_key = msg["edit_info"].get("target_key_id", "")
         new_text = msg["edit_info"].get("new_text")
         edited_ts = msg["edit_info"].get("edited_ts", timestamp)
+        target_id = None
         if target_key:
             target_id = find_message_row_id(conn, target_key, key_cache)
-            if target_id is not None and new_text is not None:
+        if target_id is None and msg.get("key_id"):
+            target_id = find_message_row_id(conn, msg["key_id"], key_cache)
+
+        if target_id is not None:
+            if new_text is not None:
                 cur.execute(
                     "UPDATE message SET text_data = ? WHERE _id = ?",
                     (new_text, target_id),
                 )
-                edit_cols = get_table_columns(conn, "message_edit_info", schema_cache)
-                if edit_cols:
-                    cur.execute(
-                        "INSERT OR REPLACE INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp) "
-                        "VALUES (?, ?, ?, ?)",
-                        (target_id, target_key, edited_ts, edited_ts),
-                    )
-                add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
-                if add_on_cols:
-                    row_map = {
-                        "parent_message_row_id": target_id,
-                        "from_me": from_me,
-                        "sender_jid_row_id": sender_jid_row_id,
-                        "status": 0,
-                        "message_add_on_type": 74,
-                        "timestamp": edited_ts,
-                        "key_id": target_key or "",
-                        "chat_row_id": chat_row_id,
-                    }
-                    valid_cols = [c for c in row_map if c in add_on_cols]
-                    cur.execute(
-                        f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
-                        [row_map[c] for c in valid_cols],
-                    )
-                applied = True
+            edit_cols = get_table_columns(conn, "message_edit_info", schema_cache)
+            if edit_cols:
+                cur.execute(
+                    "INSERT OR REPLACE INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp) "
+                    "VALUES (?, ?, ?, ?)",
+                    (target_id, target_key or msg.get("key_id", ""), edited_ts, edited_ts),
+                )
+            add_on_cols = get_table_columns(conn, "message_add_on", schema_cache)
+            if add_on_cols:
+                row_map = {
+                    "parent_message_row_id": target_id,
+                    "from_me": from_me,
+                    "sender_jid_row_id": sender_jid_row_id,
+                    "status": 0,
+                    "message_add_on_type": 74,
+                    "timestamp": edited_ts,
+                    "key_id": target_key or msg.get("key_id", "") or "",
+                    "chat_row_id": chat_row_id,
+                }
+                valid_cols = [c for c in row_map if c in add_on_cols]
+                cur.execute(
+                    f"INSERT INTO message_add_on ({', '.join(valid_cols)}) VALUES ({', '.join('?' for _ in valid_cols)})",
+                    [row_map[c] for c in valid_cols],
+                )
+            if msg.get("embedded_poll_votes"):
+                rem_jid = msg.get("remote_jid", "")
+                is_grp = bool(rem_jid.endswith("@g.us"))
+                apply_embedded_poll_votes(
+                    conn,
+                    target_id,
+                    msg["embedded_poll_votes"],
+                    schema_cache,
+                    logger,
+                    chat_row_id,
+                    is_grp,
+                    jid_cache,
+                )
+            applied = True
 
     return applied
 
@@ -3084,6 +3109,7 @@ def verify_message_deletion_candidates(
     max_sequence: int | None,
     logger: logging.Logger,
     schema_cache: dict[str, set[str]] | None,
+    intra_mapped_ids: set[int] | None,
 ) -> tuple[list[int], list[DeletionAuditRecord]]:
     """Verify deletion candidate IDs against message timestamps, sequence ceilings, and stanza keys.
 
@@ -3175,23 +3201,26 @@ def verify_message_deletion_candidates(
 
             # Gate 2: Sequence ceiling check
             if max_sequence is not None and msg_id > max_sequence:
-                logger.warning(
-                    "Rejected deletion of message %d (key_id=%s): ID exceeds backup max sequence %d (Gate 2 Sequence Overflow)",
-                    msg_id,
-                    key_id,
-                    max_sequence,
-                )
-                audit_records.append(
-                    DeletionAuditRecord(
-                        msg_id=msg_id,
-                        key_id=key_id,
-                        chat_row_id=chat_row_id,
-                        timestamp=ts,
-                        verified=False,
-                        rejection_reason="SEQUENCE_OVERFLOW",
+                if intra_mapped_ids is not None and msg_id in intra_mapped_ids:
+                    pass
+                else:
+                    logger.warning(
+                        "Rejected deletion of message %d (key_id=%s): ID exceeds backup max sequence %d (Gate 2 Sequence Overflow)",
+                        msg_id,
+                        key_id,
+                        max_sequence,
                     )
-                )
-                continue
+                    audit_records.append(
+                        DeletionAuditRecord(
+                            msg_id=msg_id,
+                            key_id=key_id,
+                            chat_row_id=chat_row_id,
+                            timestamp=ts,
+                            verified=False,
+                            rejection_reason="SEQUENCE_OVERFLOW",
+                        )
+                    )
+                    continue
 
             # Gate 3: Stanza key integrity
             if has_key_id and (not key_id or not isinstance(key_id, str) or not key_id.strip()):
@@ -3254,8 +3283,11 @@ def apply_message_deletions(
     schema_cache: dict[str, set[str]] | None,
     backup_timestamp: int | None,
     max_sequence: int | None,
+    inc_base_seq: int | None,
+    messages_bin_path: str | None,
+    output_root: str | None,
 ) -> int:
-    """Delete messages and auxiliary records (media, add-ons, polls, quoted, receipts) in deletedMessages_*.json."""
+    """Delete messages and auxiliary records in deletedMessages_*.json, resolving intra-increment sequence drift and protecting active entities."""
     with open(deleted_json_path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -3267,11 +3299,107 @@ def apply_message_deletions(
     if not candidate_ids:
         return 0
 
+    cur = conn.cursor()
+    inc_messages: list[dict] = []
+    active_inc_keys: set[str] = set()
+    order_id_to_key: dict[int, str] = {}
+    if messages_bin_path and os.path.isfile(messages_bin_path):
+        inc_messages = read_delimited_messages_bin(messages_bin_path)
+        for m in inc_messages:
+            k = m.get("key_id")
+            oid = m.get("order_id")
+            if oid is not None and k:
+                order_id_to_key[oid] = k
+            if k and (m.get("poll_info") or m.get("embedded_poll_votes") or m.get("edit_info")):
+                active_inc_keys.add(k)
+            if m.get("edit_info") and m["edit_info"].get("target_key_id"):
+                active_inc_keys.add(m["edit_info"]["target_key_id"])
+
+    final_candidate_ids: list[int] = []
+    intra_mapped_ids: set[int] = set()
+    for cid in candidate_ids:
+        if cid in order_id_to_key:
+            target_k = order_id_to_key[cid]
+            if target_k in active_inc_keys:
+                logger.info(
+                    "Protected active entity message %d (key_id=%s) from deletion: updated in current increment",
+                    cid,
+                    target_k,
+                )
+                continue
+            row = cur.execute(
+                "SELECT _id FROM message WHERE key_id = ?", (target_k,)
+            ).fetchone()
+            if row is not None:
+                logger.debug(
+                    "Mapped intra-increment deletion candidate %d -> local _id %d (key_id=%s)",
+                    cid,
+                    row[0],
+                    target_k,
+                )
+                final_candidate_ids.append(row[0])
+                intra_mapped_ids.add(row[0])
+                continue
+        elif inc_base_seq is not None and cid > inc_base_seq and inc_messages:
+            offset = cid - inc_base_seq - 1
+            if 0 <= offset < len(inc_messages):
+                target_m = inc_messages[offset]
+                target_k = target_m.get("key_id")
+                if target_k:
+                    if target_k in active_inc_keys:
+                        logger.info(
+                            "Protected active entity message %d (key_id=%s) from deletion: updated in current increment",
+                            cid,
+                            target_k,
+                        )
+                        continue
+                    row = cur.execute(
+                        "SELECT _id FROM message WHERE key_id = ?", (target_k,)
+                    ).fetchone()
+                    if row is not None:
+                        logger.debug(
+                            "Mapped intra-increment deletion candidate %d -> local _id %d (key_id=%s)",
+                            cid,
+                            row[0],
+                            target_k,
+                        )
+                        final_candidate_ids.append(row[0])
+                        intra_mapped_ids.add(row[0])
+                        continue
+            final_candidate_ids.append(cid)
+        else:
+            if active_inc_keys:
+                row = cur.execute(
+                    "SELECT key_id FROM message WHERE _id = ?", (cid,)
+                ).fetchone()
+                if row is not None and row[0] in active_inc_keys:
+                    logger.info(
+                        "Protected active entity message %d (key_id=%s) from deletion: updated in current increment",
+                        cid,
+                        row[0],
+                    )
+                    continue
+            final_candidate_ids.append(cid)
+
+    if not final_candidate_ids:
+        return 0
+
     verified_ids, _ = verify_message_deletion_candidates(
-        conn, candidate_ids, backup_timestamp, max_sequence, logger, schema_cache
+        conn,
+        final_candidate_ids,
+        backup_timestamp,
+        max_sequence,
+        logger,
+        schema_cache,
+        intra_mapped_ids,
     )
     if not verified_ids:
         return 0
+
+    if output_root is not None and verified_ids:
+        from . import preservation
+
+        preservation.preserve_incremental_deletions(conn, verified_ids, output_root, logger)
 
     cur = conn.cursor()
     total_deleted = 0
@@ -4094,6 +4222,7 @@ def apply_messages_bin(
                 schema_cache,
                 logger,
                 chat_row_id,
+                jid_cache,
             )
             if not applied:
                 target_k = msg["edit_info"].get("target_key_id", "")
@@ -4110,7 +4239,8 @@ def apply_messages_bin(
                             chat_row_id=chat_row_id,
                         )
                     )
-            inserted += 1
+            else:
+                inserted += 1
             continue
 
         # Standalone protocol revoke message: apply revoke directly without inserting phantom message row
@@ -4125,6 +4255,7 @@ def apply_messages_bin(
                 schema_cache,
                 logger,
                 chat_row_id,
+                jid_cache,
             )
             if not applied:
                 target_k = msg["revoke_info"].get("target_key_id", "")
@@ -4141,7 +4272,8 @@ def apply_messages_bin(
                             chat_row_id=chat_row_id,
                         )
                     )
-            inserted += 1
+            else:
+                inserted += 1
             continue
 
         # Fallback delete for messages without key_id
@@ -4512,6 +4644,19 @@ def apply_messages_bin(
                         (q_stanza_id,),
                     )
                     t_row = cur.fetchone()
+                    has_edit_tbl = bool(get_table_columns(conn, "message_edit_info", schema_cache))
+                    if not (t_row and t_row[0]) and has_edit_tbl:
+                        cur.execute(
+                            """
+                            SELECT m.timestamp, m.from_me, m.sender_jid_row_id
+                            FROM message m
+                            JOIN message_edit_info mei ON mei.message_row_id = m._id
+                            WHERE mei.original_key_id = ?
+                            LIMIT 1
+                            """,
+                            (q_stanza_id,),
+                        )
+                        t_row = cur.fetchone()
                     if t_row and t_row[0]:
                         quoted_ts = int(t_row[0])
                         key_ts_cache[q_stanza_id] = quoted_ts
@@ -4701,10 +4846,249 @@ def apply_messages_bin(
                     schema_cache,
                     logger,
                     pending.chat_row_id,
+                    jid_cache,
                 )
+                if not applied and pending.add_on_type == "edit":
+                    fb_key_id = pending.key_id or pending.msg.get("key_id", "")
+                    existing_m_id = (
+                        find_message_row_id(conn, fb_key_id, key_cache)
+                        if fb_key_id
+                        else None
+                    )
+                    if existing_m_id is None:
+                        msg_item = pending.msg
+                        fb_chat_id = pending.chat_row_id
+                        fb_from_me = pending.from_me
+                        fb_sender_id = pending.sender_jid_row_id
+                        fb_ts = pending.timestamp
+                        fb_mtype = msg_item.get("message_type", 0)
+                        fb_text = msg_item.get("text_data")
+                        fb_starred = msg_item.get("starred", 0)
+                        fb_status = msg_item.get("status", 0)
+
+                        fb_row_map = {
+                            "chat_row_id": fb_chat_id,
+                            "from_me": fb_from_me,
+                            "key_id": fb_key_id,
+                            "sender_jid_row_id": fb_sender_id,
+                            "timestamp": fb_ts,
+                            "message_type": fb_mtype,
+                            "text_data": fb_text,
+                            "starred": fb_starred,
+                            "status": fb_status,
+                        }
+                        cur.execute(
+                            sql_insert_msg,
+                            [fb_row_map[c] for c in target_msg_cols],
+                        )
+                        m_id = cur.lastrowid
+                        if m_id:
+                            if fb_key_id:
+                                key_cache[fb_key_id] = m_id
+                                key_ts_cache[fb_key_id] = fb_ts
+
+                            old_id = existing_row_ids.get(fb_key_id) or existing_row_ids.get(pending.target_key_id)
+                            if old_id and old_id != m_id:
+                                try:
+                                    if not msg_item.get("quoted_info"):
+                                        cur.execute("UPDATE message_quoted SET message_row_id = ? WHERE message_row_id = ?", (m_id, old_id))
+                                    else:
+                                        cur.execute("DELETE FROM message_quoted WHERE message_row_id = ?", (old_id,))
+                                except sqlite3.OperationalError:
+                                    pass
+                                for tbl, col in [
+                                    ("message_quoted_media", "message_row_id"),
+                                    ("message_media", "message_row_id"),
+                                    ("receipt_user", "message_row_id"),
+                                    ("message_view_once_media", "message_row_id"),
+                                    ("message_secret", "message_row_id"),
+                                    ("message_add_on", "parent_message_row_id"),
+                                    ("message_association", "message_row_id"),
+                                    ("message_association", "parent_message_row_id"),
+                                    ("message_location", "message_row_id"),
+                                    ("message_vcard", "message_row_id"),
+                                    ("message_text", "message_row_id"),
+                                    ("message_thumbnail", "message_row_id"),
+                                ]:
+                                    try:
+                                        cur.execute(f"UPDATE {tbl} SET {col} = ? WHERE {col} = ?", (m_id, old_id))
+                                    except sqlite3.OperationalError:
+                                        pass
+
+                            edit_cols = get_table_columns(
+                                conn, "message_edit_info", schema_cache
+                            )
+                            if edit_cols:
+                                cur.execute(
+                                    "INSERT OR REPLACE INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp) VALUES (?, ?, ?, ?)",
+                                    (
+                                        m_id,
+                                        pending.target_key_id,
+                                        fb_ts,
+                                        fb_ts,
+                                    ),
+                                )
+                            add_on_cols = get_table_columns(
+                                conn, "message_add_on", schema_cache
+                            )
+                            if add_on_cols:
+                                a_map = {
+                                    "parent_message_row_id": m_id,
+                                    "from_me": fb_from_me,
+                                    "sender_jid_row_id": fb_sender_id,
+                                    "status": 0,
+                                    "message_add_on_type": 74,
+                                    "timestamp": fb_ts,
+                                    "key_id": pending.target_key_id or fb_key_id,
+                                    "chat_row_id": fb_chat_id,
+                                }
+                                v_cols = [c for c in a_map if c in add_on_cols]
+                                cur.execute(
+                                    f"INSERT INTO message_add_on ({', '.join(v_cols)}) VALUES ({', '.join('?' for _ in v_cols)})",
+                                    [a_map[c] for c in v_cols],
+                                )
+
+                            if msg_item.get("user_receipts"):
+                                ru_cols = get_table_columns(
+                                    conn, "receipt_user", schema_cache
+                                )
+                                if ru_cols:
+                                    for ur in msg_item["user_receipts"]:
+                                        ur_jid = ur.get("user_jid", "")
+                                        if ur_jid and not is_valid_jid_string(
+                                            ur_jid
+                                        ):
+                                            continue
+                                        try:
+                                            ur_jid_id = (
+                                                resolve_or_create_jid(
+                                                    conn, ur_jid, logger, jid_cache
+                                                )
+                                                if ur_jid
+                                                else fb_chat_id
+                                            )
+                                        except ValueError:
+                                            continue
+                                        cur.execute(
+                                            "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) VALUES (?, ?, ?, ?, ?)",
+                                            (
+                                                m_id,
+                                                ur_jid_id,
+                                                ur.get("receipt_timestamp"),
+                                                ur.get("read_timestamp"),
+                                                ur.get("played_timestamp"),
+                                            ),
+                                        )
+
+                            if msg_item.get("media_info") and sql_insert_media:
+                                media = msg_item["media_info"]
+                                f_hash_str = (
+                                    base64.b64encode(media["file_sha256"]).decode(
+                                        "ascii"
+                                    )
+                                    if media.get("file_sha256")
+                                    else None
+                                )
+                                f_path = existing_media_paths.get(
+                                    fb_key_id
+                                ) or (
+                                    media.get("file_path") if media else None
+                                )
+                                if (
+                                    not f_path
+                                    and media.get("media_type") == "document"
+                                    and media.get("media_name")
+                                ):
+                                    f_path = f"Media/WhatsApp Documents/{media['media_name']}"
+                                media_row_map = {
+                                    "message_row_id": m_id,
+                                    "chat_row_id": fb_chat_id,
+                                    "file_path": f_path,
+                                    "file_size": media.get("file_size"),
+                                    "media_name": media.get("media_name"),
+                                    "message_url": media.get("message_url"),
+                                    "mime_type": media.get("mime_type"),
+                                    "file_hash": f_hash_str,
+                                    "transferred": 1,
+                                }
+                                cur.execute(
+                                    sql_insert_media,
+                                    [
+                                        media_row_map[c]
+                                        for c in target_media_cols
+                                    ],
+                                )
+
+                            if msg_item.get("link_preview_info"):
+                                lp = msg_item["link_preview_info"]
+                                if has_message_text_table:
+                                    try:
+                                        cur.execute(
+                                            "INSERT OR REPLACE INTO message_text (message_row_id, description, page_title, url, preview_type) VALUES (?, ?, ?, ?, ?)",
+                                            (
+                                                m_id,
+                                                lp.get("description"),
+                                                lp.get("title"),
+                                                lp.get("url"),
+                                                lp.get("preview_type", 0),
+                                            ),
+                                        )
+                                    except sqlite3.OperationalError:
+                                        pass
+                                if has_message_thumbnail_table and lp.get(
+                                    "thumbnail"
+                                ):
+                                    try:
+                                        cur.execute(
+                                            "INSERT OR REPLACE INTO message_thumbnail (message_row_id, thumbnail) VALUES (?, ?)",
+                                            (m_id, lp["thumbnail"]),
+                                        )
+                                    except sqlite3.OperationalError:
+                                        pass
+
+                            if msg_item.get("embedded_poll_votes"):
+                                rem_jid = msg_item.get("remote_jid", "")
+                                is_g = bool(rem_jid.endswith("@g.us"))
+                                apply_embedded_poll_votes(
+                                    conn,
+                                    m_id,
+                                    msg_item["embedded_poll_votes"],
+                                    schema_cache,
+                                    logger,
+                                    fb_chat_id,
+                                    is_g,
+                                    jid_cache,
+                                )
+
+                            if msg_item.get("embedded_reactions"):
+                                rem_jid = msg_item.get("remote_jid", "")
+                                is_g = bool(rem_jid.endswith("@g.us"))
+                                apply_embedded_reactions(
+                                    conn,
+                                    m_id,
+                                    fb_chat_id,
+                                    is_g,
+                                    msg_item["embedded_reactions"],
+                                    schema_cache,
+                                    logger,
+                                    jid_cache,
+                                )
+
+                            if (
+                                fb_chat_id is not None
+                                and fb_ts
+                                >= max_ts_per_chat.get(fb_chat_id, 0)
+                            ):
+                                max_ts_per_chat[fb_chat_id] = fb_ts
+                            if fb_chat_id is not None:
+                                chats_to_unhide.add(fb_chat_id)
+
+                            applied = True
 
             if applied:
                 pass2_recovered += 1
+                if pending.add_on_type in ("edit", "revoke"):
+                    inserted += 1
             else:
                 pass2_orphans += 1
                 logger.debug(
@@ -4729,6 +5113,19 @@ def apply_messages_bin(
                 (q_stanza_id,),
             )
             t_row = cur.fetchone()
+            has_edit_tbl = bool(get_table_columns(conn, "message_edit_info", schema_cache))
+            if not (t_row and t_row[0]) and has_edit_tbl:
+                cur.execute(
+                    """
+                    SELECT m.timestamp, m.from_me, m.sender_jid_row_id
+                    FROM message m
+                    JOIN message_edit_info mei ON mei.message_row_id = m._id
+                    WHERE mei.original_key_id = ?
+                    LIMIT 1
+                    """,
+                    (q_stanza_id,),
+                )
+                t_row = cur.fetchone()
             if t_row and t_row[0]:
                 q_ts = int(t_row[0])
                 key_ts_cache[q_stanza_id] = q_ts
@@ -4810,15 +5207,17 @@ def apply_increment_folder(
     chat_cache: dict[int, int] | None,
     schema_cache: dict[str, set[str]] | None,
     jid_id_map: dict[int, int],
+    phone_base_seq: int | None,
+    output_root: str | None,
 ) -> dict:
     """Apply an unpacked increment directory onto the active SQLite database.
 
     Enforces the strict 6-step DAG execution pipeline:
     - Step 1: Auxiliary Entity Updates (topological order) with foreign pointer quarantine
     - Step 2: Auxiliary Entity Deletions with mapped JID translation for chats
-    - Step 3: Autoincrement Sequence Roll-Forward (before deletions and message insertion)
-    - Step 4: Defensive Message Deletions (4-gate verification)
-    - Step 5: Protobuf Message Delta Ingestion (messages.bin with Two-Pass Add-On Staging)
+    - Step 3: Protobuf Message Delta Ingestion (messages.bin with Two-Pass Add-On Staging)
+    - Step 4: Defensive Message Deletions (4-gate verification, intra-increment sequence drift mapping, entity protection, incremental preservation)
+    - Step 5: Autoincrement Sequence Roll-Forward (align sequence ceilings after message replay & deletions)
     - Step 6: Chat Message Pointer Sanitization & Step 6b Correlated Phantom Pruning
     """
     header_path = os.path.join(inc_dir, "header.json")
@@ -4872,6 +5271,18 @@ def apply_increment_folder(
     }
 
     with conn:
+        # Step 0: Ensure essential performance indices exist for delta processing and pointer sanitization
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_key_id ON message(key_id)")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_chat_ts ON message(chat_row_id, timestamp)"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # Step 1: Auxiliary entity modifications sorted by foreign key dependency (DAG)
         mod_files = [
             fn for fn in os.listdir(inc_dir) if "_modified_" in fn and fn.endswith(".json")
@@ -4890,17 +5301,28 @@ def apply_increment_folder(
                 conn, table_name, os.path.join(inc_dir, df), logger, jid_id_map
             )
 
-        # Step 3: Sequence roll-forward (Must run before message replay to prevent surrogate key drift)
-        seq_name = (
-            header.get("sequences")
-            if isinstance(header.get("sequences"), str)
-            else "sequences.json"
-        )
-        seq_path = os.path.join(inc_dir, seq_name)
-        if os.path.isfile(seq_path):
-            stats["sequences_updated"] += apply_sequences(conn, seq_path, logger)
+        # Capture baseline sequence before message replay to map intra-increment deletions
+        if phone_base_seq is not None:
+            inc_base_seq = phone_base_seq
+        else:
+            cur = conn.cursor()
+            cur.execute("SELECT seq FROM SQLITE_SEQUENCE WHERE name = 'message'")
+            seq_row = cur.fetchone()
+            if seq_row and seq_row[0] is not None:
+                inc_base_seq = int(seq_row[0])
+            else:
+                cur.execute("SELECT MAX(_id) FROM message")
+                row = cur.fetchone()
+                inc_base_seq = int(row[0]) if row and row[0] is not None else 0
 
-        # Step 4: Message deletions
+        # Step 3: Protobuf message replay (replay messages and add-ons before processing deletions)
+        messages_bin_path = os.path.join(inc_dir, "messages.bin")
+        if os.path.isfile(messages_bin_path):
+            stats["messages_inserted"] += apply_messages_bin(
+                conn, messages_bin_path, logger, jid_cache, chat_cache, schema_cache
+            )
+
+        # Step 4: Defensive message deletions (resolve intra-increment sequence drift, entity protection, incremental preservation)
         del_msg_files = [
             fn
             for fn in os.listdir(inc_dir)
@@ -4917,15 +5339,26 @@ def apply_increment_folder(
             df_path = os.path.join(inc_dir, df)
             if os.path.isfile(df_path):
                 stats["messages_deleted"] += apply_message_deletions(
-                    conn, df_path, logger, schema_cache, backup_timestamp, max_msg_seq
+                    conn,
+                    df_path,
+                    logger,
+                    schema_cache,
+                    backup_timestamp,
+                    max_msg_seq,
+                    inc_base_seq,
+                    messages_bin_path,
+                    output_root,
                 )
 
-        # Step 5: Protobuf message replay
-        messages_bin_path = os.path.join(inc_dir, "messages.bin")
-        if os.path.isfile(messages_bin_path):
-            stats["messages_inserted"] += apply_messages_bin(
-                conn, messages_bin_path, logger, jid_cache, chat_cache, schema_cache
-            )
+        # Step 5: Sequence roll-forward (align sequence ceilings after message replay & deletions)
+        seq_name = (
+            header.get("sequences")
+            if isinstance(header.get("sequences"), str)
+            else "sequences.json"
+        )
+        seq_path = os.path.join(inc_dir, seq_name)
+        if os.path.isfile(seq_path):
+            stats["sequences_updated"] += apply_sequences(conn, seq_path, logger)
 
         # Step 6: Sanitize chat message pointers to prevent referencing foreign or invalid messages
         chat_cols = get_table_columns(conn, "chat", schema_cache)
@@ -5300,6 +5733,7 @@ def merge_increments(
     output_db_path: str,
     staging_dir: str,
     logger: logging.Logger,
+    output_root: str | None,
 ) -> int:
     """Merge a base decrypted database and a sequence of increment archives into output_db_path.
 
@@ -5434,6 +5868,15 @@ def merge_increments(
                     chat_cache[r[0]] = r[1]
 
         jid_id_map: dict[int, int] = {}
+        # Capture baseline sequence from base DB before merging increments
+        cur.execute("SELECT seq FROM SQLITE_SEQUENCE WHERE name = 'message'")
+        seq_r = cur.fetchone()
+        phone_msg_seq = int(seq_r[0]) if seq_r and seq_r[0] is not None else None
+        if phone_msg_seq is None:
+            cur.execute("SELECT MAX(_id) FROM message")
+            max_r = cur.fetchone()
+            phone_msg_seq = int(max_r[0]) if max_r and max_r[0] is not None else 0
+
         for idx, inc_path in enumerate(increment_paths):
             logger.info(
                 f"Merging incremental backup [{idx + 1}/{len(increment_paths)}]: {os.path.basename(inc_path)}"
@@ -5442,8 +5885,34 @@ def merge_increments(
             unpack_increment_archive(inc_path, key_obj, work_dir, logger)
 
             stats = apply_increment_folder(
-                conn, work_dir, logger, jid_cache, chat_cache, schema_cache, jid_id_map
+                conn,
+                work_dir,
+                logger,
+                jid_cache,
+                chat_cache,
+                schema_cache,
+                jid_id_map,
+                phone_msg_seq,
+                output_root,
             )
+            inc_seq_path = os.path.join(work_dir, "sequences.json")
+            if os.path.isfile(inc_seq_path):
+                try:
+                    with open(inc_seq_path, encoding="utf-8") as sf:
+                        s_data = json.load(sf)
+                    s_items = (
+                        s_data.get("sequences", [])
+                        if isinstance(s_data, dict)
+                        else (s_data if isinstance(s_data, list) else [])
+                    )
+                    for s_it in s_items:
+                        if isinstance(s_it, dict) and s_it.get("name") == "message":
+                            v = s_it.get("value", s_it.get("seq"))
+                            if v is not None:
+                                phone_msg_seq = int(v)
+                                break
+                except Exception:
+                    pass
             total_inserted += stats["messages_inserted"]
             total_deleted += stats["messages_deleted"]
             logger.info(
