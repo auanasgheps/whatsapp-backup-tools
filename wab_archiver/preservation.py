@@ -2881,3 +2881,289 @@ def preserve_deleted_messages(
         if extracted_calls:
             record_preserved_calls(pres_conn, extracted_calls, platform, logger)
         return res
+
+
+def preserve_incremental_deletions(
+    conn: sqlite3.Connection,
+    verified_ids: list[int],
+    output_root: str,
+    logger: logging.Logger,
+) -> int:
+    """
+    Extract and preserve messages being deleted during incremental merge
+    directly into preserved_messages.db before they are deleted from msgstore.db.
+    """
+    if not verified_ids:
+        return 0
+
+    now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    extracted_rows: list[dict] = []
+
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    has_media = "message_media" in tables
+    has_quoted = "message_quoted" in tables
+    has_system = "message_system" in tables
+    has_system_participant = "message_system_chat_participant" in tables
+    has_edit_info = "message_edit_info" in tables
+    has_add_on = "message_add_on" in tables
+    has_location = "message_location" in tables
+    has_vcard = "message_vcard" in tables
+    has_poll = "message_poll" in tables
+    has_view_once = "message_view_once_media" in tables
+    has_jid_map = "jid_map" in tables
+    has_chat = "chat" in tables
+    has_jid = "jid" in tables
+
+    msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()} if "message" in tables else set()
+    has_starred = "starred" in msg_cols
+    starred_expr = "COALESCE(m.starred, 0)" if has_starred else "0"
+
+    jid_cols = {r[1] for r in conn.execute("PRAGMA table_info(jid)").fetchall()} if has_jid else set()
+    has_jid_server = "server" in jid_cols
+    has_jid_raw = "raw_string" in jid_cols
+
+    if has_jid_raw and has_jid_server:
+        chat_jid_sql = "COALESCE(j_phone.raw_string, j_chat.raw_string, CASE WHEN j_phone.server IS NOT NULL THEN j_phone.user || '@' || j_phone.server WHEN j_chat.server IS NOT NULL THEN j_chat.user || '@' || j_chat.server ELSE j_chat.user END)"
+        sender_jid_sql = "COALESCE(j2.raw_string, j.raw_string, CASE WHEN j2.server IS NOT NULL THEN j2.user || '@' || j2.server END, CASE WHEN j.server IS NOT NULL THEN j.user || '@' || j.server END, j2.user, j.user)"
+        sender_phone_sql = "COALESCE(j2.user, CASE WHEN j.server = 's.whatsapp.net' OR j.server IS NULL THEN j.user END)"
+    elif has_jid_raw:
+        chat_jid_sql = "COALESCE(j_phone.raw_string, j_chat.raw_string, j_chat.user)"
+        sender_jid_sql = "COALESCE(j2.raw_string, j.raw_string, j2.user, j.user)"
+        sender_phone_sql = "COALESCE(j2.user, j.user)"
+    elif has_jid_server:
+        chat_jid_sql = "COALESCE(CASE WHEN j_phone.server IS NOT NULL THEN j_phone.user || '@' || j_phone.server END, CASE WHEN j_chat.server IS NOT NULL THEN j_chat.user || '@' || j_chat.server ELSE j_chat.user END)"
+        sender_jid_sql = "COALESCE(CASE WHEN j2.server IS NOT NULL THEN j2.user || '@' || j2.server END, CASE WHEN j.server IS NOT NULL THEN j.user || '@' || j.server END, j2.user, j.user)"
+        sender_phone_sql = "COALESCE(j2.user, CASE WHEN j.server = 's.whatsapp.net' OR j.server IS NULL THEN j.user END)"
+    else:
+        chat_jid_sql = "COALESCE(j_phone.user, j_chat.user)"
+        sender_jid_sql = "COALESCE(j2.user, j.user)"
+        sender_phone_sql = "COALESCE(j2.user, j.user)"
+
+    chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()} if has_chat else set()
+    chat_subject_expr = "c.subject" if "subject" in chat_cols else "NULL"
+    chat_desc_expr = "c.description" if "description" in chat_cols else "NULL"
+    chat_created_ts_expr = "c.created_timestamp" if "created_timestamp" in chat_cols else "NULL"
+    chat_gjid_expr = "c.jid_row_id" if "jid_row_id" in chat_cols else "NULL"
+    chat_creator_jid_expr = (
+        "(SELECT j_cr.raw_string FROM jid j_cr WHERE j_cr._id = c.creator_jid_row_id)"
+        if ("creator_jid_row_id" in chat_cols and has_jid) else "NULL"
+    )
+
+    mm_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_media)").fetchall()} if has_media else set()
+    mm_width = "mm.width" if "width" in mm_cols else "NULL"
+    mm_height = "mm.height" if "height" in mm_cols else "NULL"
+    mm_duration = "mm.media_duration" if "media_duration" in mm_cols else "NULL"
+    if "file_length" in mm_cols and "file_size" in mm_cols:
+        mm_size = "COALESCE(mm.file_length, mm.file_size)"
+    elif "file_length" in mm_cols:
+        mm_size = "mm.file_length"
+    elif "file_size" in mm_cols:
+        mm_size = "mm.file_size"
+    else:
+        mm_size = "NULL"
+    file_path_col = "mm.file_path" if "file_path" in mm_cols else "NULL"
+    media_name_col = "mm.media_name" if "media_name" in mm_cols else "NULL"
+
+    ml_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_location)").fetchall()} if has_location else set()
+    ml_lat = "ml.latitude" if "latitude" in ml_cols else "NULL"
+    ml_lng = "ml.longitude" if "longitude" in ml_cols else "NULL"
+    ml_name = "ml.place_name" if "place_name" in ml_cols else "NULL"
+    ml_address = "ml.place_address" if "place_address" in ml_cols else "NULL"
+    ml_url = "ml.url" if "url" in ml_cols else "NULL"
+    ml_dur = "ml.live_location_share_duration" if "live_location_share_duration" in ml_cols else "NULL"
+
+    mq_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_quoted)").fetchall()} if has_quoted else set()
+    mq_key_id_expr = "mq.key_id" if "key_id" in mq_cols else "NULL"
+    mq_text_expr = "COALESCE(mq.text_data, '')" if "text_data" in mq_cols else "''"
+    mq_parent_type_expr = "NULL"
+    quoted_ts_col = "mq.timestamp" if "timestamp" in mq_cols else "0"
+    quoted_from_me_col = "mq.from_me" if "from_me" in mq_cols else "0"
+
+    mm_join = "LEFT JOIN message_media mm ON mm.message_row_id = m._id" if has_media else ""
+    mq_join = "LEFT JOIN message_quoted mq ON mq.message_row_id = m._id" if has_quoted else ""
+    ms_join = "LEFT JOIN message_system ms ON ms.message_row_id = m._id" if has_system else ""
+    mscp_join = (
+        "LEFT JOIN message_system_chat_participant mscp ON mscp.message_row_id = m._id\n"
+        "LEFT JOIN jid j_mscp ON j_mscp._id = mscp.user_jid_row_id"
+        if (has_system and has_system_participant and has_jid) else ""
+    )
+    ml_join = "LEFT JOIN message_location ml ON ml.message_row_id = m._id" if has_location else ""
+    mv_join = "LEFT JOIN message_vcard mv ON mv.message_row_id = m._id" if has_vcard else ""
+    mvom_join = "LEFT JOIN message_view_once_media mvom ON mvom.message_row_id = m._id" if has_view_once else ""
+    edit_join = "LEFT JOIN message_edit_info mei ON mei.message_row_id = m._id" if has_edit_info else ""
+    jm_join = (
+        "LEFT JOIN jid_map jm ON jm.lid_row_id = m.sender_jid_row_id\n"
+        "LEFT JOIN jid j2 ON j2._id = jm.jid_row_id"
+        if has_jid_map else "LEFT JOIN jid j2 ON 0 = 1"
+    )
+    jm_chat_join = (
+        "LEFT JOIN jid_map jm_chat ON jm_chat.lid_row_id = c.jid_row_id\n"
+        "LEFT JOIN jid j_phone ON j_phone._id = jm_chat.jid_row_id"
+        if has_jid_map else "LEFT JOIN jid j_phone ON 0 = 1"
+    )
+    jmq_join = (
+        "LEFT JOIN jid_map jmq ON jmq.lid_row_id = mq.sender_jid_row_id\n"
+        "LEFT JOIN jid jq2 ON jq2._id = jmq.jid_row_id"
+        if (has_jid_map and has_quoted) else "LEFT JOIN jid jq2 ON 0 = 1"
+    )
+    jq_join = "LEFT JOIN jid jq ON jq._id = mq.sender_jid_row_id" if has_quoted else "LEFT JOIN jid jq ON 0 = 1"
+
+    vcard_data_col = "mv.vcard" if has_vcard else "NULL"
+    mvom_or = "OR mvom.message_row_id IS NOT NULL" if has_view_once else ""
+    is_view_once_expr = f"""CASE
+        WHEN m.message_type IN (42, 43, 82) {mvom_or} THEN 1
+        ELSE 0
+    END"""
+    edit_is_edited_col = "CASE WHEN mei.message_row_id IS NOT NULL THEN 1 ELSE 0 END" if has_edit_info else "0"
+    edit_ts_col = "mei.edited_timestamp" if has_edit_info else "NULL"
+    ms_action_col = "ms.action_type" if has_system else "NULL"
+    part_name_expr = (
+        "CASE WHEN j_mscp.user IS NOT NULL THEN '+' || j_mscp.user ELSE '' END"
+        if (has_system and has_system_participant and has_jid) else "''"
+    )
+
+    poll_pred = (
+        "(m.message_type = 66 OR (EXISTS (SELECT 1 FROM message_poll mp WHERE mp.message_row_id = m._id)))"
+        if has_poll else "(m.message_type = 66)"
+    )
+
+    media_type_expr = f"""CASE
+        WHEN m.message_type = 7 THEN 'service'
+        WHEN m.message_type IN (4, 14) THEN 'vcard'
+        WHEN m.message_type IN (5, 18) THEN 'location'
+        WHEN {poll_pred} THEN 'poll'
+        WHEN m.message_type = 20 THEN 'sticker'
+        WHEN m.message_type = 1 THEN 'image'
+        WHEN m.message_type = 2 THEN 'audio'
+        WHEN m.message_type = 3 THEN 'video'
+        WHEN m.message_type = 9 THEN 'document'
+        WHEN m.message_type = 13 THEN 'gif'
+        WHEN m.message_type = 42 THEN 'image'
+        WHEN m.message_type = 43 THEN 'video'
+        WHEN m.message_type = 82 THEN 'audio'
+        WHEN m.message_type IS NULL OR m.message_type = 0 THEN
+            CASE WHEN m.text_data IS NOT NULL
+                  AND (INSTR(LOWER(m.text_data), 'http://') > 0
+                       OR INSTR(LOWER(m.text_data), 'https://') > 0)
+                 THEN 'link' ELSE 'text' END
+        ELSE 'document'
+    END"""
+
+    sub_chunk_size = 500
+    cur = conn.cursor()
+    for sc_idx in range(0, len(verified_ids), sub_chunk_size):
+        sub_ids = verified_ids[sc_idx : sc_idx + sub_chunk_size]
+        ph = ", ".join("?" for _ in sub_ids)
+        sql_extract = f"""
+            SELECT
+                m._id AS msg_id,
+                COALESCE(NULLIF(m.key_id, ''), 'msg_' || m._id) AS stanza_id,
+                CASE
+                    WHEN {chat_subject_expr} IS NOT NULL THEN CAST(m.chat_row_id AS TEXT)
+                    ELSE COALESCE(j_phone.user, j_chat.user, CAST(m.chat_row_id AS TEXT))
+                END AS chat_id,
+                CASE WHEN {chat_subject_expr} IS NOT NULL THEN 'group' ELSE 'contact' END AS chat_type,
+                {chat_jid_sql} AS chat_jid,
+                COALESCE(m.timestamp, 0) AS timestamp_ms,
+                COALESCE(
+                    CASE WHEN COALESCE(j2.user, j.user) = '0' THEN 'WhatsApp' END,
+                    CASE WHEN j2.user IS NOT NULL THEN '+' || j2.user END,
+                    CASE WHEN j.user IS NOT NULL THEN '+' || j.user END,
+                    ''
+                ) AS sender,
+                {sender_jid_sql} AS sender_jid,
+                {sender_phone_sql} AS sender_phone,
+                m.from_me AS from_me,
+                COALESCE(NULLIF(m.text_data, ''), CASE WHEN {poll_pred} THEN 'Poll' END, '') AS text_body,
+                {media_type_expr} AS media_type,
+                COALESCE({media_name_col}, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
+                NULL AS archive_path,
+                {file_path_col} AS original_path,
+                {vcard_data_col} AS vcard_data,
+                {mm_width} AS media_width,
+                {mm_height} AS media_height,
+                {mm_duration} AS media_duration,
+                {mm_size} AS media_size,
+                {is_view_once_expr} AS is_view_once,
+                {ml_lat} AS latitude,
+                {ml_lng} AS longitude,
+                {ml_name} AS location_name,
+                {ml_address} AS location_address,
+                {ml_url} AS location_url,
+                {ml_dur} AS live_location_share_duration,
+                {mq_text_expr} AS quoted_text,
+                CASE WHEN {quoted_from_me_col} = 1 THEN 'You'
+                     ELSE COALESCE(
+                         CASE WHEN jq2.user IS NOT NULL THEN '+' || jq2.user END,
+                         CASE WHEN jq.user IS NOT NULL THEN '+' || jq.user END,
+                         '')
+                END AS quoted_sender,
+                COALESCE({quoted_ts_col}, 0) AS quoted_ts,
+                {mq_key_id_expr} AS quoted_stanza_id,
+                {mq_parent_type_expr} AS quoted_parent_type,
+                {edit_is_edited_col} AS is_edited,
+                {edit_ts_col} AS edited_ts,
+                {starred_expr} AS is_starred,
+                {ms_action_col} AS action_type,
+                {part_name_expr} AS participant_name,
+                {chat_subject_expr} AS _chat_subject,
+                {chat_desc_expr} AS _chat_description,
+                {chat_created_ts_expr} AS _chat_created_ts,
+                {chat_creator_jid_expr} AS _chat_creator_jid,
+                {chat_gjid_expr} AS _chat_group_jid_id,
+                'deleted_on_phone' AS preservation_reason
+            FROM message m
+            LEFT JOIN chat c ON c._id = m.chat_row_id
+            LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+            LEFT JOIN jid j ON j._id = m.sender_jid_row_id
+            {jm_join}
+            {jm_chat_join}
+            {mm_join}
+            {mq_join}
+            {jq_join}
+            {jmq_join}
+            {ms_join}
+            {mscp_join}
+            {ml_join}
+            {mv_join}
+            {mvom_join}
+            {edit_join}
+            WHERE m._id IN ({ph})
+        """
+        cur.execute(sql_extract, sub_ids)
+        cols = [d[0] for d in cur.description]
+        for r in cur.fetchall():
+            row_dict = dict(zip(cols, r))
+            row_dict["preserved_at"] = now_iso
+            row_dict["source_platform"] = "android"
+            row_dict["reactions"] = None
+            row_dict["poll_data"] = None
+            row_dict["service_metadata"] = None
+            extracted_rows.append(row_dict)
+
+    if not extracted_rows:
+        return 0
+
+    if has_add_on and extracted_rows:
+        all_m_ids = [r["msg_id"] for r in extracted_rows]
+        rx_chunk_size = 900
+        for i in range(0, len(all_m_ids), rx_chunk_size):
+            chunk = all_m_ids[i : i + rx_chunk_size]
+            ph = ",".join("?" * len(chunk))
+            rx_sql = f"""
+                SELECT ao.parent_message_row_id AS msg_id,
+                       GROUP_CONCAT(r.reaction) AS reactions
+                FROM message_add_on ao
+                JOIN message_add_on_reaction r ON r.message_add_on_row_id = ao._id
+                WHERE ao.parent_message_row_id IN ({ph})
+                GROUP BY ao.parent_message_row_id
+            """
+            with contextlib.suppress(sqlite3.OperationalError):
+                rx_map = dict(conn.execute(rx_sql, chunk).fetchall())
+                for row in extracted_rows:
+                    if row["msg_id"] in rx_map:
+                        row["reactions"] = rx_map[row["msg_id"]]
+
+    with contextlib.closing(open_preservation_db(output_root)) as pres_conn:
+        res = record_preserved_messages(pres_conn, extracted_rows, "android", logger)
+        return res.messages

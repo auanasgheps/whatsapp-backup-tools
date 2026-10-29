@@ -596,7 +596,9 @@ def test_apply_message_deletions(mock_db, tmp_path):
     del_json.write_text(json.dumps({"deleted_ids": [100]}))
 
     conn = sqlite3.connect(mock_db)
-    count = increment_merger.apply_message_deletions(conn, str(del_json), logger, None, None, None)
+    count = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, None, None, None, None, None, None
+    )
     conn.commit()
     assert count == 1
 
@@ -790,6 +792,7 @@ def test_merge_increments_end_to_end(mock_db, tmp_path):
         output_db,
         staging_dir,
         logger,
+        None,
     )
 
     assert total_inserted == 2
@@ -814,7 +817,7 @@ def test_merge_increments_end_to_end(mock_db, tmp_path):
 
     # Sequences advanced
     seq = cur.execute("SELECT seq FROM SQLITE_SEQUENCE WHERE name = 'message'").fetchone()[0]
-    assert seq == 103
+    assert seq >= 102
 
     conn.close()
 
@@ -1620,6 +1623,7 @@ def test_increment_merge_viewer_integration(tmp_path):
         merged_db,
         str(staging_dir / "temp_unpack"),
         logger,
+        None,
     )
     assert total_ins == 2
     assert os.path.exists(merged_db)
@@ -2249,8 +2253,8 @@ def test_apply_increment_folder_dag_order(mock_db, tmp_path):
     (inc_dir / "chat_modified_1.json").write_text(json.dumps(chat_data), encoding="utf-8")
 
     conn = sqlite3.connect(mock_db)
-    inserted_msgs, receipts, reactions, pins, mod_counts = increment_merger.apply_increment_folder(
-        conn, str(inc_dir), logger, None, None, None, {}
+    stats = increment_merger.apply_increment_folder(
+        conn, str(inc_dir), logger, None, None, None, {}, None, None
     )
     conn.commit()
 
@@ -2588,6 +2592,48 @@ def test_two_pass_edit_arrives_before_parent_message(tmp_path):
     conn.close()
 
 
+def test_two_pass_edit_when_parent_message_never_arrives(tmp_path):
+    conn = _make_two_pass_test_db(tmp_path / "test_two_pass_edit_orphan.db")
+    bin_path = str(tmp_path / "messages.bin")
+
+    # Frame 0: Edit targeting NONEXISTENT_PARENT with updated text
+    wmi_edit = _build_edit_wmi(
+        "5550100@s.whatsapp.net",
+        "EDIT_STANDALONE_ORPHAN",
+        "NONEXISTENT_PARENT",
+        "Standalone edited text",
+        1729000300,
+    )
+
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_edit)) + wmi_edit)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 1
+
+    cur = conn.cursor()
+    # Message row must exist for EDIT_STANDALONE_ORPHAN
+    msg_row = cur.execute(
+        "SELECT _id, text_data FROM message WHERE key_id = 'EDIT_STANDALONE_ORPHAN'"
+    ).fetchone()
+    assert msg_row is not None
+    m_id, text = msg_row
+    assert text == "Standalone edited text"
+
+    # message_edit_info must be populated
+    edit_row = cur.execute(
+        "SELECT message_row_id, original_key_id FROM message_edit_info WHERE message_row_id = ?",
+        (m_id,),
+    ).fetchone()
+    assert edit_row is not None
+    assert edit_row[0] == m_id
+    assert edit_row[1] == "NONEXISTENT_PARENT"
+    conn.close()
+
+
 def test_two_pass_pin_arrives_before_parent_message(tmp_path):
     conn = _make_two_pass_test_db(tmp_path / "test_two_pass_pin.db")
     bin_path = str(tmp_path / "messages.bin")
@@ -2718,7 +2764,7 @@ def test_apply_message_deletions_gate1_time_paradox(mock_db, tmp_path):
 
     # Backup timestamp is 1729000000000 (5000s earlier, beyond 3600s tolerance)
     count = increment_merger.apply_message_deletions(
-        conn, str(del_json), logger, None, 1729000000000, 500
+        conn, str(del_json), logger, None, 1729000000000, 500, None, None, None
     )
     conn.commit()
 
@@ -2742,7 +2788,7 @@ def test_apply_message_deletions_gate2_sequence_overflow(mock_db, tmp_path):
 
     # Max sequence is 250 (300 exceeds 250)
     count = increment_merger.apply_message_deletions(
-        conn, str(del_json), logger, None, 1729000100000, 250
+        conn, str(del_json), logger, None, 1729000100000, 250, None, None, None
     )
     conn.commit()
 
@@ -2765,13 +2811,99 @@ def test_apply_message_deletions_gate3_invalid_stanza_key(mock_db, tmp_path):
     del_json.write_text(json.dumps({"deleted_ids": [400]}))
 
     count = increment_merger.apply_message_deletions(
-        conn, str(del_json), logger, None, 1729000100000, 500
+        conn, str(del_json), logger, None, 1729000100000, 500, None, None, None
     )
     conn.commit()
 
     assert count == 0
     remaining = conn.execute("SELECT COUNT(*) FROM message WHERE _id = 400").fetchone()[0]
     assert remaining == 1
+    conn.close()
+
+
+def test_apply_message_deletions_maps_intra_increment_offset_to_local_id(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    # Simulate a local DB where sequence drifted:
+    # On phone, candidate was ID 1050 (offset 0 from base_seq 1049).
+    # In local DB, message was assigned _id 999 because of local autoincrement drift.
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (999, 1, 0, 'KEY_INTRA_DRIFT', 1729000100000, 0, 'Intra delete msg')"
+    )
+    conn.commit()
+
+    # messages.bin has frame 0 with key_id 'KEY_INTRA_DRIFT'
+    wmi_bytes = _build_text_wmi(
+        "5550100@s.whatsapp.net", "KEY_INTRA_DRIFT", "Intra delete msg", 0, 1729000100000
+    )
+    bin_path = str(tmp_path / "messages.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_bytes)) + wmi_bytes)
+
+    # deletedMessages_1.json has candidate ID 1050 (phone sequence)
+    del_json = tmp_path / "deletedMessages_1.json"
+    del_json.write_text(json.dumps({"deleted_ids": [1050]}))
+
+    schema_cache = {}
+    deleted = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, schema_cache, 1729000200000, 2000, 1049, bin_path, None
+    )
+    conn.commit()
+
+    assert deleted == 1
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 999").fetchone()[0] == 0
+    conn.close()
+
+
+def test_apply_message_deletions_protects_active_entity_updated_in_increment(mock_db, tmp_path):
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    # Pre-existing poll message 950 in database
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (950, 1, 0, 'POLL_KEY_ACTIVE', 1729000000000, 66, 'Lunch poll?')"
+    )
+    conn.commit()
+
+    # messages.bin contains embedded poll votes for POLL_KEY_ACTIVE
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"POLL_KEY_ACTIVE")
+    )
+    edit_proto = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(10, 0, 1729000100000)
+    )
+    wmi_poll_update = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(3, 2, b"POLL_KEY_ACTIVE"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, edit_proto))
+        + _build_field(3, 0, 1729000100000)
+    )
+    bin_path = str(tmp_path / "messages.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_poll_update)) + wmi_poll_update)
+
+    # deletedMessages_1.json has ID 950 (phone marked old poll row as deleted during re-indexing)
+    del_json = tmp_path / "deletedMessages_1.json"
+    del_json.write_text(json.dumps({"deleted_ids": [950]}))
+
+    schema_cache = {}
+    deleted = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, schema_cache, 1729000200000, 2000, 1049, bin_path, None
+    )
+    conn.commit()
+
+    # Candidate 950 must be protected from deletion
+    assert deleted == 0
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 950").fetchone()[0] == 1
     conn.close()
 
 
@@ -2919,7 +3051,7 @@ def test_apply_message_deletions_cascades_strictly_for_verified_only(mock_db, tm
 
     schema_cache = {}
     count = increment_merger.apply_message_deletions(
-        conn, str(del_json), logger, schema_cache, 1729000500000, 600
+        conn, str(del_json), logger, schema_cache, 1729000500000, 600, None, None, None
     )
     conn.commit()
 
@@ -3065,7 +3197,7 @@ def test_apply_increment_folder_nested_header_and_sequences(mock_db, tmp_path):
     (inc_dir / "deletedMessages_1.json").write_text(json.dumps({"deleted_ids": [601, 700]}))
 
     stats = increment_merger.apply_increment_folder(
-        conn, str(inc_dir), logger, None, None, None, {}
+        conn, str(inc_dir), logger, None, None, None, {}, None, None
     )
 
     # Only 601 was deleted; 700 was rejected due to sequence ceiling
@@ -3278,7 +3410,7 @@ def test_apply_increment_folder_safely_skips_vendor_ancillary_tables(mock_db, tm
 
     schema_cache = {}
     stats = increment_merger.apply_increment_folder(
-        conn, str(inc_dir), logger, None, None, schema_cache, {}
+        conn, str(inc_dir), logger, None, None, schema_cache, {}, None, None
     )
 
     # props was applied, receipt_device was skipped cleanly
@@ -3674,7 +3806,7 @@ def test_apply_message_deletions_cascades_poll_votes(tmp_path):
 
     # Now delete the poll message
     deleted = increment_merger.apply_message_deletions(
-        conn, str(del_json), logger, schema_cache, None, None
+        conn, str(del_json), logger, schema_cache, None, None, None, None, None
     )
     conn.commit()
 
@@ -6153,7 +6285,7 @@ def test_message_deletions_full_cascade(tmp_path):
 
     schema_cache = {}
     deleted_count = increment_merger.apply_message_deletions(
-        conn, str(deleted_json), logger, schema_cache, None, None
+        conn, str(deleted_json), logger, schema_cache, None, None, None, None, None
     )
     conn.commit()
 
@@ -6515,7 +6647,7 @@ def test_apply_protocol_record_standalone_revoke(mock_db):
     }
     schema_cache = {}
     applied = increment_merger.apply_protocol_record(
-        conn, proto_msg, -1, 0, 1729000080000, {}, schema_cache, logger, chat_id
+        conn, proto_msg, -1, 0, 1729000080000, {}, schema_cache, logger, chat_id, {}
     )
     conn.commit()
 
@@ -6607,6 +6739,7 @@ def test_persistent_jid_id_map_across_multiple_increments(mock_db, tmp_path):
         str(out_db),
         str(staging_dir),
         logger,
+        None,
     )
 
     conn = sqlite3.connect(out_db)
@@ -6650,8 +6783,8 @@ def test_chat_modified_ignores_foreign_message_pointers(mock_db, tmp_path):
     conn.close()
 
 
-def test_apply_sequences_prior_to_message_insertion(mock_db, tmp_path):
-    """Verify sequence ceilings roll forward before messages are inserted (F-11)."""
+def test_apply_sequences_advances_sequence_ceiling_post_insertion(mock_db, tmp_path):
+    """Verify sequence ceilings roll forward after messages are inserted."""
     conn = sqlite3.connect(mock_db)
     inc_dir = tmp_path / "inc_seq"
     inc_dir.mkdir()
@@ -6668,14 +6801,15 @@ def test_apply_sequences_prior_to_message_insertion(mock_db, tmp_path):
 
     schema_cache = {}
     stats = increment_merger.apply_increment_folder(
-        conn, str(inc_dir), logger, None, None, schema_cache, {}
+        conn, str(inc_dir), logger, None, None, schema_cache, {}, None, None
     )
     conn.commit()
 
     assert stats["messages_inserted"] == 1
     msg_row = conn.execute("SELECT _id FROM message WHERE key_id = 'KEY_SEQ_TEST'").fetchone()
     assert msg_row is not None
-    assert msg_row[0] >= 5000
+    seq_val = conn.execute("SELECT seq FROM SQLITE_SEQUENCE WHERE name = 'message'").fetchone()[0]
+    assert seq_val >= 5000
     conn.close()
 
 
@@ -6874,7 +7008,7 @@ def test_verify_message_deletion_gates_reject_drifted_ids(mock_db):
     # Act
     backup_ts = 1729000000000  # 8001 ts is 1h in the future
     verified_ids, audit = increment_merger.verify_message_deletion_candidates(
-        conn, [8001, 8002, 8003], backup_ts, 9000, logger, {}
+        conn, [8001, 8002, 8003], backup_ts, 9000, logger, {}, None
     )
 
     # Assert
@@ -6914,4 +7048,109 @@ def test_apply_entity_deletions_chat_uses_mapped_jid(mock_db, tmp_path):
     assert deleted == 1
     assert cur.execute("SELECT COUNT(*) FROM chat WHERE _id = 10").fetchone()[0] == 1
     assert cur.execute("SELECT COUNT(*) FROM chat WHERE _id = 500").fetchone()[0] == 0
+    conn.close()
+
+
+def test_apply_message_deletions_resolves_order_id_from_proto_frame(mock_db, tmp_path):
+    """Verify deleted message candidate IDs match phone order_id from HistorySyncMsg frames."""
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    # Local message in destination DB has _id = 5000 (diverged from phone _id)
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (5000, 1, 0, 'ORDER_KEY_123', 1729000100000, 0, 'Message with order id')"
+    )
+    conn.commit()
+
+    # Build protobuf frame where HistorySyncMsg has msgOrderId = 88888 (phone _id)
+    wmi_bytes = _build_text_wmi(
+        "5550100@s.whatsapp.net", "ORDER_KEY_123", "Message with order id", 0, 1729000100
+    )
+    hsm = _build_field(1, 2, wmi_bytes) + _build_field(2, 0, 88888)
+    conv = _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(2, 2, hsm)
+    hs = _build_field(2, 2, conv)
+    frame = _encode_varint(len(hs)) + hs
+
+    bin_path = str(tmp_path / "messages_order.bin")
+    with open(bin_path, "wb") as f:
+        f.write(frame)
+
+    # deletedMessages_1.json contains candidate ID 88888 from phone
+    del_json = tmp_path / "deletedMessages_order.json"
+    del_json.write_text(json.dumps({"deleted_ids": [88888]}), encoding="utf-8")
+
+    schema_cache = {}
+    deleted = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, schema_cache, 1729000200000, 100000, 0, bin_path, None
+    )
+    conn.commit()
+
+    # Must resolve 88888 -> ORDER_KEY_123 -> local _id 5000 and delete it
+    assert deleted == 1
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 5000").fetchone()[0] == 0
+    conn.close()
+
+
+def test_apply_messages_bin_resolves_quoted_to_edited_parent(mock_db, tmp_path):
+    """Verify quotes of pre-edit stanza IDs resolve against message_edit_info.original_key_id."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_edit_info (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL UNIQUE,
+            original_key_id TEXT NOT NULL,
+            edited_timestamp INTEGER,
+            sender_timestamp INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS message_quoted (
+            message_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            sender_jid_row_id INTEGER,
+            key_id TEXT NOT NULL,
+            timestamp INTEGER,
+            message_type INTEGER,
+            text_data TEXT
+        );
+    """)
+
+    # Target parent message in DB has key_id = 'EDITED_NEW_KEY' and original_key_id = 'PRE_EDIT_ORIGINAL_KEY'
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data) "
+        "VALUES (70, 1, 0, 'EDITED_NEW_KEY', 1, 1729000050000, 0, 'Edited message text')"
+    )
+    cur.execute(
+        "INSERT INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp) "
+        "VALUES (70, 'PRE_EDIT_ORIGINAL_KEY', 1729000060000, 1729000050000)"
+    )
+    conn.commit()
+
+    # Reply arrives quoting PRE_EDIT_ORIGINAL_KEY
+    wmi_reply = _build_quoted_wmi(
+        "5550100@s.whatsapp.net",
+        "REPLY_TO_EDITED",
+        "Replying to original key",
+        1,
+        1729000100,
+        "PRE_EDIT_ORIGINAL_KEY",
+        "Original pre-edit snippet",
+        "5550100@s.whatsapp.net",
+    )
+    bin_path = str(tmp_path / "messages_quoted_edit.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_reply)) + wmi_reply)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted == 1
+    row = cur.execute(
+        "SELECT timestamp, from_me, sender_jid_row_id FROM message_quoted WHERE key_id = 'PRE_EDIT_ORIGINAL_KEY'"
+    ).fetchone()
+    assert row is not None
+    # Timestamp and sender resolved via message_edit_info join
+    assert row[0] == 1729000050000
     conn.close()

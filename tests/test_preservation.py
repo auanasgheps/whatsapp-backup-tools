@@ -3080,3 +3080,45 @@ def test_diff_and_extract_ios_link_preview(tmp_path: Path) -> None:
     assert meta["link_preview"]["title"] == "iOS Title"
     assert meta["link_preview"]["desc"] == "iOS page snippet"
     assert meta["link_preview"]["url"] == "https://example.org"
+
+
+def test_preserve_incremental_deletions_flow(tmp_path: Path) -> None:
+    """Verify preserve_incremental_deletions extracts deleting messages into preserved_messages.db."""
+    db_file = tmp_path / "test_msgstore.db"
+    with sqlite3.connect(db_file) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                from_me INTEGER,
+                key_id TEXT,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            INSERT INTO jid VALUES (1, '5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
+            INSERT INTO chat VALUES (1, 1, 'Test Chat');
+            INSERT INTO message VALUES (42, 1, 0, 'INC_DEL_KEY_42', 1, 1729000100000, 0, 'To be preserved');
+        """)
+        conn.commit()
+
+        count = preservation.preserve_incremental_deletions(
+            conn, [42], str(tmp_path), _TEST_LOGGER
+        )
+        assert count == 1
+
+    pres_db = Path(preservation.get_preserved_db_path(str(tmp_path)))
+    assert pres_db.exists()
+    with sqlite3.connect(pres_db) as pconn:
+        row = pconn.execute(
+            "SELECT stanza_id, text_body, preservation_reason, chat_jid FROM preserved_messages WHERE stanza_id = 'INC_DEL_KEY_42'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "INC_DEL_KEY_42"
+        assert row[1] == "To be preserved"
+        assert row[2] == "deleted_on_phone"
+        assert row[3] == "5550100@s.whatsapp.net"
+

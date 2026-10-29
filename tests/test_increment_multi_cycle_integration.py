@@ -527,6 +527,7 @@ def test_multi_cycle_incremental_lifecycle(tmp_path):
         output_db_path=merged_db,
         staging_dir=staging_dir,
         logger=logger,
+        output_root=None,
     )
 
     # Verify return count
@@ -678,6 +679,7 @@ def test_multi_cycle_viewer_integration(tmp_path):
         output_db_path=merged_db,
         staging_dir=staging_dir,
         logger=logger,
+        output_root=None,
     )
 
     # Copy merged database to WhatsApp Databases directory structure for viewer
