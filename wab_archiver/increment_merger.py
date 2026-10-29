@@ -5311,6 +5311,11 @@ def merge_increments(
     os.makedirs(staging_dir, exist_ok=True)
 
     if os.path.abspath(base_db_path) != os.path.abspath(output_db_path):
+        for ext in ("", "-wal", "-shm", "-journal"):
+            sidecar = output_db_path + ext
+            if os.path.exists(sidecar):
+                with contextlib.suppress(OSError):
+                    os.remove(sidecar)
         shutil.copy2(base_db_path, output_db_path)
 
     total_inserted = 0
@@ -5329,6 +5334,12 @@ def merge_increments(
         conn.execute("PRAGMA cache_size = -64000")
         conn.execute("PRAGMA mmap_size = 268435456")
 
+        base_check = conn.execute("PRAGMA quick_check").fetchone()
+        if base_check is None or base_check[0] != "ok":
+            raise RuntimeError(
+                f"Base database integrity check failed before merging increments: {base_check}"
+            )
+
         try:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_key_id ON message(key_id)")
         except sqlite3.OperationalError:
@@ -5336,6 +5347,18 @@ def merge_increments(
         try:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_message_add_on_parent ON message_add_on(parent_message_row_id, message_add_on_type)"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_chat_ts ON message(chat_row_id, timestamp)"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jid_user_server ON jid(user, server)"
             )
         except sqlite3.OperationalError:
             pass
@@ -5530,7 +5553,8 @@ def merge_increments(
         # Commit all pending transactions before changing PRAGMA synchronous
         conn.commit()
 
-        # Restore synchronous mode and execute quick integrity check
+        # Checkpoint WAL, restore synchronous mode and execute quick integrity check
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("PRAGMA synchronous = NORMAL")
         integrity = conn.execute("PRAGMA quick_check").fetchone()
         if integrity is None or integrity[0] != "ok":
