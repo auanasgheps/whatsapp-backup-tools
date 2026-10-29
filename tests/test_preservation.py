@@ -3105,9 +3105,7 @@ def test_preserve_incremental_deletions_flow(tmp_path: Path) -> None:
         """)
         conn.commit()
 
-        count = preservation.preserve_incremental_deletions(
-            conn, [42], str(tmp_path), _TEST_LOGGER
-        )
+        count = preservation.preserve_incremental_deletions(conn, [42], str(tmp_path), _TEST_LOGGER)
         assert count == 1
 
     pres_db = Path(preservation.get_preserved_db_path(str(tmp_path)))
@@ -3121,4 +3119,3 @@ def test_preserve_incremental_deletions_flow(tmp_path: Path) -> None:
         assert row[1] == "To be preserved"
         assert row[2] == "deleted_on_phone"
         assert row[3] == "5550100@s.whatsapp.net"
-

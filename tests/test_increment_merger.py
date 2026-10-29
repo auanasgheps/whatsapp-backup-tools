@@ -2873,16 +2873,13 @@ def test_apply_message_deletions_protects_active_entity_updated_in_increment(moc
         + _build_field(3, 2, b"POLL_KEY_ACTIVE")
     )
     edit_proto = (
-        _build_field(1, 2, target_key)
-        + _build_field(2, 0, 14)
-        + _build_field(10, 0, 1729000100000)
+        _build_field(1, 2, target_key) + _build_field(2, 0, 14) + _build_field(10, 0, 1729000100000)
     )
     wmi_poll_update = (
         _build_field(
             1,
             2,
-            _build_field(1, 2, b"5550100@s.whatsapp.net")
-            + _build_field(3, 2, b"POLL_KEY_ACTIVE"),
+            _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(3, 2, b"POLL_KEY_ACTIVE"),
         )
         + _build_field(2, 2, _build_field(12, 2, edit_proto))
         + _build_field(3, 0, 1729000100000)
