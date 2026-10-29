@@ -6781,6 +6781,100 @@ class TestVcardViewer:
             chats = chats_resp.get_json()
             assert len(chats) == 1
             assert chats[0]["last_msg_type"] == "vcard"
+            assert chats[0]["last_msg_preview"] == "Doctor Bob"
+
+    def test_ios_chat_list_link_and_contact_terminology(self, tmp_path):
+        from tests.test_wa_chat_viewer import make_archive_db
+
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('44111111', 'Alice', 'Alice')"
+        )
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('44222222', 'Bob', 'Bob')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        wa_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMEDIAURL TEXT,
+                ZVCARDNAME TEXT,
+                ZVCARDSTRING TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZFROMJID TEXT,
+                ZSTANZAID TEXT,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+        """)
+        # Chat 1: last message is a rich link preview (ZMESSAGETYPE = 7, ZMEDIALOCALPATH is NULL)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44111111@s.whatsapp.net', NULL, 'Alice')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMEDIAURL) VALUES (1, NULL, 'Example Domain', 'https://example.com')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES (1, 1, 0, 700000000.0, 7, 'Check this: https://example.com', 1)"
+        )
+
+        # Chat 2: last message is a contact card (ZMESSAGETYPE = 4, ZMEDIALOCALPATH is NULL, ZVCARDNAME is Charlie Doctor)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (2, '44222222@s.whatsapp.net', NULL, 'Bob')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZVCARDNAME, ZVCARDSTRING) VALUES (2, NULL, NULL, 'Charlie Doctor', 'BEGIN:VCARD\\r\\nFN:Charlie Doctor\\r\\nEND:VCARD\\r\\n')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES (2, 2, 0, 700000010.0, 4, NULL, 2)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            chats_resp = client.get("/api/chats")
+            assert chats_resp.status_code == 200
+            chats_by_id = {c["id"]: c for c in chats_resp.get_json()}
+            assert len(chats_by_id) == 2
+
+            # Chat 1: Link preview must be categorized as 'link' (not 'document')
+            assert chats_by_id["1"]["last_msg_type"] == "link"
+            assert "https://example.com" in chats_by_id["1"]["last_msg_preview"]
+
+            # Chat 2: Contact card must be categorized as 'vcard' and have contact name
+            assert chats_by_id["2"]["last_msg_type"] == "vcard"
+            assert chats_by_id["2"]["last_msg_preview"] == "Charlie Doctor"
 
 
 class TestEditedMessages:
