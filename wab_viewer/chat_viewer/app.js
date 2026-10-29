@@ -3330,14 +3330,14 @@
     const chatAtOpen = currentChat;
 
     // Kick off both requests in parallel
-    let info, sizeData;
+    const sizePromise = fetch('/api/chat-info/media-size?' + params)
+      .then(r => r.ok ? r.json() : { bytes: 0 })
+      .catch(() => ({ bytes: 0 }));
+
+    let info;
     try {
-      const [infoResp, sizeResp] = await Promise.all([
-        fetch('/api/chat-info?' + params),
-        fetch('/api/chat-info/media-size?' + params),
-      ]);
+      const infoResp = await fetch('/api/chat-info?' + params);
       info = await infoResp.json();
-      sizeData = await sizeResp.json();
     } catch (_) {
       if (currentChat === chatAtOpen && panel.classList.contains('open')) {
         body.innerHTML = '<div class="chat-info-row" style="color:var(--text-muted)">Could not load chat info.</div>';
@@ -3405,8 +3405,14 @@
     galleryLink.addEventListener('click', () => { closeChatInfo(); openMediaGallery(); });
     body.appendChild(_infoRow('Media', galleryLink).row);
 
-    // Media size row (already resolved since we awaited both)
-    body.appendChild(_infoRow('Media size', _formatBytes(sizeData.bytes || 0)).row);
+    // Media size row
+    const sizeRowObj = _infoRow('Media size', 'Calculating…');
+    body.appendChild(sizeRowObj.row);
+    sizePromise.then(sizeData => {
+      if (currentChat === chatAtOpen && panel.classList.contains('open')) {
+        sizeRowObj.val.textContent = _formatBytes(sizeData.bytes || 0);
+      }
+    });
 
     // Group members
     if (currentChat.type === 'group' && info.members && info.members.length > 0) {

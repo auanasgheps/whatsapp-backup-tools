@@ -3296,6 +3296,7 @@ _ANDROID_JID_MAP = """
 """
 
 _ANDROID_SELECT = None
+_ANDROID_STAT_SELECT = None
 
 _SUPPORTED_ANDROID_SYSTEM_ACTIONS = (
     1,
@@ -4520,6 +4521,8 @@ def create_app(output_root: Path, rescan: bool = False):
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
             ON recent_messages(chat_id, chat_type, timestamp_ms DESC);
+        CREATE INDEX IF NOT EXISTS idx_archive_copies_path
+            ON archive_copies(archive_path);
 
         CREATE TABLE IF NOT EXISTS reactions_cache (
             chat_id    TEXT NOT NULL,
@@ -5009,12 +5012,18 @@ def create_app(output_root: Path, rescan: bool = False):
     """
     globals()["_ANDROID_FILTER_TS"] = globals()["_ANDROID_FILTER"]
 
-    ldn_select_joins = (
+    ldn_sender_joins = (
         """
     LEFT JOIN _lid_map_resolved jm_lid_s ON jm_lid_s.jid_row_id = m.sender_jid_row_id
     LEFT JOIN lid_display_name ldn_s_direct ON ldn_s_direct.lid_row_id = m.sender_jid_row_id
     LEFT JOIN lid_display_name ldn_s_mapped ON ldn_s_mapped.lid_row_id = jm_lid_s.lid_row_id
+"""
+        if has_lid_dn
+        else ""
+    )
 
+    ldn_quoted_joins = (
+        """
     LEFT JOIN _lid_map_resolved jm_lid_sq ON jm_lid_sq.jid_row_id = mq.sender_jid_row_id
     LEFT JOIN lid_display_name ldn_sq_direct ON ldn_sq_direct.lid_row_id = mq.sender_jid_row_id
     LEFT JOIN lid_display_name ldn_sq_mapped ON ldn_sq_mapped.lid_row_id = jm_lid_sq.lid_row_id
@@ -5022,6 +5031,7 @@ def create_app(output_root: Path, rescan: bool = False):
         if has_lid_dn
         else ""
     )
+    ldn_select_joins = ldn_sender_joins + ldn_quoted_joins
 
     ldn_sender_arm = (
         """
@@ -5330,6 +5340,37 @@ def create_app(output_root: Path, rescan: bool = False):
         CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
              THEN 'WhatsApp\\' || REPLACE(mm.file_path, '/', '\\') END
     )
+"""
+
+    globals()["_ANDROID_STAT_SELECT"] = f"""
+    SELECT
+        m._id                                                        AS msg_id,
+        COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
+        COALESCE(
+            NULLIF(con_s.display_name, ''),
+            NULLIF(con_s.folder, ''),
+            CASE WHEN COALESCE(j2.user, CASE WHEN NOT ({j_is_lid}) THEN j.user END) = '0' THEN 'WhatsApp' END,
+            CASE WHEN j2.user IS NOT NULL THEN '+' || {_clean_user_sql("j2.user")} END,
+            {ldn_sender_arm}
+            CASE WHEN NOT ({j_is_lid}) AND j.user IS NOT NULL THEN '+' || {_clean_user_sql("j.user")} END,
+            ''
+        )                                                            AS sender,
+        m.from_me,
+        CASE
+            WHEN m.message_type = 7 AND NOT (({ms_col} = 1 OR {ms_col} IS NULL) AND NOT ({is_group_chat_select})) THEN 'service'
+            ELSE 'other'
+        END                                                          AS media_type
+    FROM message m
+    LEFT JOIN message_media mm ON mm.message_row_id = m._id
+    {mvom_join}
+    LEFT JOIN chat c ON c._id = m.chat_row_id
+    LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+    LEFT JOIN jid j ON j._id = m.sender_jid_row_id
+    {_ANDROID_JID_MAP}
+    {ldn_sender_joins}
+    {ms_join}
+    {mrev_join}
+    LEFT JOIN _contacts_resolved con_s  ON con_s.clean_number  = {_clean_user_sql("COALESCE(j2.user, j.user)")}
 """
 
     def get_archive():
@@ -7863,17 +7904,30 @@ def create_app(output_root: Path, rescan: bool = False):
         ).fetchone()
         last_ts = ts_row["last_ts"] if ts_row else None
         first_ts = None
+        sent = received = total = None
 
         conn = get_wa()
 
         if conn is not None:
             if source_type == "android":
                 chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
-                live = conn.execute(
-                    f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts"
-                    f" FROM ({_ANDROID_SELECT} WHERE {chat_pred} {_ANDROID_FILTER_TS})",
+                extra = _ANDROID_FILTER
+                stat_row = conn.execute(
+                    f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts,"
+                    f" COUNT(CASE WHEN media_type != 'service' THEN 1 END) AS total,"
+                    f" SUM(CASE WHEN media_type != 'service' AND from_me=1 THEN 1 ELSE 0 END) AS sent,"
+                    f" SUM(CASE WHEN media_type != 'service' AND from_me=0 THEN 1 ELSE 0 END) AS received"
+                    f" FROM ({_ANDROID_STAT_SELECT} WHERE {chat_pred} {extra})",
                     chat_params,
                 ).fetchone()
+                if stat_row:
+                    first_ts = stat_row["first_ts"]
+                    last_ts = last_ts or stat_row["last_ts"]
+                    total = stat_row["total"] or 0
+                    sent = stat_row["sent"] or 0
+                    received = stat_row["received"] or 0
+                else:
+                    total = sent = received = 0
             else:
                 chat_pred, chat_params = _ios_chat_filter(chat_id)
                 live = conn.execute(
@@ -7881,10 +7935,9 @@ def create_app(output_root: Path, rescan: bool = False):
                     f" FROM ({_IOS_SELECT} WHERE {chat_pred} {_IOS_FILTER_TS})",
                     chat_params,
                 ).fetchone()
-            if live:
-                first_ts = live["first_ts"]
-                last_ts = last_ts or live["last_ts"]
-        sent = received = total = None
+                if live:
+                    first_ts = live["first_ts"]
+                    last_ts = last_ts or live["last_ts"]
 
         display_name = None
         number = None
@@ -7899,18 +7952,6 @@ def create_app(output_root: Path, rescan: bool = False):
             if source_type == "android":
                 chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
                 extra = _ANDROID_FILTER
-                select = _ANDROID_SELECT
-
-                count_row = conn.execute(
-                    f"SELECT COUNT(*) AS total,"
-                    f" SUM(CASE WHEN from_me=1 THEN 1 ELSE 0 END) AS sent,"
-                    f" SUM(CASE WHEN from_me=0 THEN 1 ELSE 0 END) AS received"
-                    f" FROM ({select} WHERE {chat_pred} {extra}) WHERE media_type != 'service'",
-                    chat_params,
-                ).fetchone()
-                total = count_row["total"] or 0 if count_row else 0
-                sent = count_row["sent"] or 0 if count_row else 0
-                received = count_row["received"] or 0 if count_row else 0
 
                 if chat_type == "contact":
                     row = conn.execute(
@@ -7950,7 +7991,7 @@ def create_app(output_root: Path, rescan: bool = False):
 
                     top_rows = conn.execute(
                         f"SELECT CASE WHEN from_me=1 THEN 'You' ELSE sender END AS sndr,"
-                        f" COUNT(*) AS cnt FROM ({select} WHERE {chat_pred} {extra})"
+                        f" COUNT(*) AS cnt FROM ({_ANDROID_STAT_SELECT} WHERE {chat_pred} {extra})"
                         f" WHERE (from_me=1 OR sender != '') AND media_type != 'service' GROUP BY sndr ORDER BY cnt DESC LIMIT 5",
                         chat_params,
                     ).fetchall()
@@ -8509,18 +8550,63 @@ def create_app(output_root: Path, rescan: bool = False):
                 return jsonify({"bytes": 0})
 
             safe_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            paths = [
-                r["archive_path"]
-                for r in archive_conn.execute(
-                    "SELECT archive_path FROM archive_copies WHERE archive_path LIKE ? ESCAPE '\\'",
+            has_files_table = (
+                archive_conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'"
+                ).fetchone()
+                is not None
+            )
+
+            has_size_col = False
+            if has_files_table:
+                files_cols = {
+                    r[1] for r in archive_conn.execute("PRAGMA table_info(files)").fetchall()
+                }
+                has_size_col = "size" in files_cols
+
+            paths_missing = []
+            total_bytes = 0
+
+            if has_size_col:
+                stat_row = archive_conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_count,
+                        COUNT(f.size) AS known_count,
+                        COALESCE(SUM(f.size), 0) AS known_bytes
+                    FROM archive_copies ac
+                    LEFT JOIN files f ON f.original_path = ac.original_path
+                    WHERE ac.archive_path LIKE ? ESCAPE '\\'
+                    """,
                     (safe_prefix + "%",),
-                ).fetchall()
-            ]
+                ).fetchone()
+                if stat_row:
+                    total_bytes = stat_row["known_bytes"]
+                    if stat_row["known_count"] < stat_row["total_count"]:
+                        paths_missing = [
+                            r["archive_path"]
+                            for r in archive_conn.execute(
+                                """
+                                SELECT ac.archive_path
+                                FROM archive_copies ac
+                                LEFT JOIN files f ON f.original_path = ac.original_path
+                                WHERE ac.archive_path LIKE ? ESCAPE '\\' AND f.size IS NULL
+                                """,
+                                (safe_prefix + "%",),
+                            ).fetchall()
+                        ]
+            else:
+                paths_missing = [
+                    r["archive_path"]
+                    for r in archive_conn.execute(
+                        "SELECT archive_path FROM archive_copies WHERE archive_path LIKE ? ESCAPE '\\'",
+                        (safe_prefix + "%",),
+                    ).fetchall()
+                ]
         finally:
             archive_conn.close()
 
-        total_bytes = 0
-        for p in paths:
+        for p in paths_missing:
             full = output_root / p
             try:
                 total_bytes += full.stat().st_size
