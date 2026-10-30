@@ -92,6 +92,10 @@ HTML_TEMPLATE = (
       </div>
       <div id="message-scroll"></div>
       <button id="scroll-to-bottom" title="Jump to latest">&#8627;</button>
+      <div id="chat-jump-hud" class="chat-jump-hud" role="status" aria-live="polite">
+        <span class="jump-hud-spinner"></span>
+        <span id="chat-jump-hud-text" class="jump-hud-text">Jumping to message…</span>
+      </div>
       <div id="empty-pane">Select a chat to browse messages</div>
       <div id="chat-loading">
         <div class="loading-spinner"></div>

@@ -379,6 +379,11 @@
       padding: 16px;
       display: flex; flex-direction: column; gap: 4px;
     }
+    #message-scroll.is-navigating {
+      opacity: 0.45;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
 
     .msg-row { display: flex; flex-direction: column; margin-bottom: 2px; }
     .msg-row.sent { align-items: flex-end; }
@@ -859,6 +864,54 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     #chat-loading-count { font-size: 12px; color: var(--text-muted); }
+    .chat-jump-hud {
+      position: absolute;
+      top: 58px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-10px);
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+      z-index: 25;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+    .chat-jump-hud.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+      pointer-events: auto;
+    }
+    .chat-jump-hud.error {
+      border-color: #ef4444;
+      color: #ef4444;
+    }
+    .jump-hud-spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--text-muted);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+    .chat-jump-hud.error .jump-hud-spinner {
+      display: none;
+    }
+    .jump-hud-text {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 320px;
+    }
     .index-spinner {
       display: inline-block;
       width: 10px; height: 10px;
@@ -1126,6 +1179,11 @@
       opacity: 0; transition: opacity 0.15s; margin: 0;
     }
     .gallery-item:hover .gallery-goto { opacity: 1; }
+    .gallery-goto:disabled {
+      opacity: 0.8 !important;
+      cursor: wait;
+      pointer-events: none;
+    }
     .gallery-link-card {
       grid-column: 1 / -1; height: auto; min-height: 64px;
       display: flex; flex-direction: column; justify-content: center;
