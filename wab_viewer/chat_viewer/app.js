@@ -1405,6 +1405,16 @@
     }
 
     const src = '/media/' + msg.archive_path;
+    const isImageGif = (msg.archive_path || '').toLowerCase().endsWith('.gif');
+    if (isImageGif) {
+      const img = document.createElement('img');
+      img.src = src;
+      img.loading = 'lazy';
+      img.addEventListener('click', () => showLightbox(msg));
+      wrap.appendChild(img);
+      return wrap;
+    }
+
     const vid = document.createElement('video');
     vid.className = 'msg-gif-video';
     vid.preload = 'metadata';
@@ -2107,7 +2117,7 @@
     lb.appendChild(tsEl);
 
     let media;
-    if (mt === 'video' || mt === 'gif') {
+    if ((mt === 'video' || mt === 'gif') && !src.toLowerCase().endsWith('.gif')) {
       media = document.createElement('video');
       media.controls = (mt === 'video');
       media.autoplay = true;

@@ -53,6 +53,16 @@ class TestMediaTypeFromPath:
 
     def test_gif(self):
         assert viewer._media_type_from_path("foo/anim.gif") == "gif"
+        assert (
+            viewer._media_type_from_path(
+                "Media/WhatsApp Animated Gifs/VID-20230101-WA0001.mp4"
+            )
+            == "gif"
+        )
+        assert (
+            viewer._media_type_from_path("WhatsApp Animated Gifs/GIF-123.mp4") == "gif"
+        )
+        assert viewer._media_type_from_path("foo/GIF-123.mp4") == "gif"
 
     def test_sticker(self):
         assert viewer._media_type_from_path("foo/Sticker/abc.webp") == "sticker"
@@ -7285,6 +7295,127 @@ class TestStickerSupport:
 
         # Verify _toggleTypeFilter toggles DEFAULT_DESELECTED_TYPES exclusively
         assert "DEFAULT_DESELECTED_TYPES.has(type)" in js
+
+    def test_android_gif_classification_and_gallery(self, tmp_path):
+        """Android GIFs (message_type 13, WhatsApp Animated Gifs folder, GIF- prefix, or gif_attribution)
+        are classified as 'gif', suppress raw media_name, and are correctly isolated in gallery queries."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        wa_conn.execute("ALTER TABLE message_media ADD COLUMN gif_attribution INTEGER")
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        # 1. Native message_type = 13 GIF
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (101, 10, 0, 1, 1700000010000, NULL, 13)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name, gif_attribution) "
+            "VALUES (101, 'Media/WhatsApp Animated Gifs/GIF-101.mp4', 'GIF-101.mp4', 0)"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/WhatsApp Animated Gifs/GIF-101.mp4', 'Contacts/Alice/2026/GIF-101.mp4')"
+        )
+
+        # 2. WhatsApp Animated Gifs folder path with standard video message_type = 3
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (102, 10, 0, 1, 1700000020000, 'Funny cat', 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name, gif_attribution) "
+            "VALUES (102, 'Media/WhatsApp Animated Gifs/Sent/VID-20260101-WA0002.mp4', 'VID-20260101-WA0002.mp4', 0)"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/WhatsApp Animated Gifs/Sent/VID-20260101-WA0002.mp4', 'Contacts/Alice/2026/VID-20260101-WA0002.mp4')"
+        )
+
+        # 3. Standard regular video (must NOT be classified as gif)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (103, 10, 0, 1, 1700000030000, 'Holiday video', 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name, gif_attribution) "
+            "VALUES (103, 'Media/WhatsApp Video/VID-20260101-WA0003.mp4', 'VID-20260101-WA0003.mp4', 0)"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/WhatsApp Video/VID-20260101-WA0003.mp4', 'Contacts/Alice/2026/VID-20260101-WA0003.mp4')"
+        )
+
+        # 4. GIF identified via gif_attribution > 0 (even with message_type = 3 and generic path)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (104, 10, 0, 1, 1700000040000, NULL, 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name, gif_attribution) "
+            "VALUES (104, 'Media/WhatsApp Video/VID-from-tenor.mp4', 'VID-from-tenor.mp4', 1)"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/WhatsApp Video/VID-from-tenor.mp4', 'Contacts/Alice/2026/VID-from-tenor.mp4')"
+        )
+
+        # 5. GIF filename prefix GIF-*.mp4
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (105, 10, 0, 1, 1700000050000, NULL, 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name, gif_attribution) "
+            "VALUES (105, 'Media/WhatsApp Video/GIF-2026-sample.mp4', 'GIF-2026-sample.mp4', 0)"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/WhatsApp Video/GIF-2026-sample.mp4', 'Contacts/Alice/2026/GIF-2026-sample.mp4')"
+        )
+
+        wa_conn.commit()
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            by_id = {m["msg_id"]: m for m in resp.get_json()}
+
+            # Verify msg 101 (native type 13)
+            assert by_id[101]["media_type"] == "gif"
+            assert by_id[101]["media_name"] == ""
+
+            # Verify msg 102 (WhatsApp Animated Gifs folder)
+            assert by_id[102]["media_type"] == "gif"
+            assert by_id[102]["media_name"] == ""
+            assert by_id[102]["text_body"] == "Funny cat"
+
+            # Verify msg 103 (regular video)
+            assert by_id[103]["media_type"] == "video"
+            assert by_id[103]["media_name"] == "VID-20260101-WA0003.mp4"
+
+            # Verify msg 104 (gif_attribution > 0)
+            assert by_id[104]["media_type"] == "gif"
+            assert by_id[104]["media_name"] == ""
+
+            # Verify msg 105 (GIF- prefix)
+            assert by_id[105]["media_type"] == "gif"
+            assert by_id[105]["media_name"] == ""
+
+            # Gallery: types=gif returns all 4 GIFs, excludes regular video
+            gif_resp = client.get("/api/media?chat_id=123456789&chat_type=contact&types=gif")
+            assert gif_resp.status_code == 200
+            gif_ids = {m["msg_id"] for m in gif_resp.get_json()}
+            assert {101, 102, 104, 105}.issubset(gif_ids)
+            assert 103 not in gif_ids
+
+            # Gallery: types=video returns msg 103, excludes all GIFs
+            vid_resp = client.get("/api/media?chat_id=123456789&chat_type=contact&types=video")
+            assert vid_resp.status_code == 200
+            vid_ids = {m["msg_id"] for m in vid_resp.get_json()}
+            assert 103 in vid_ids
+            assert not any(gid in vid_ids for gid in (101, 102, 104, 105))
 
     def test_android_deleted_messages(self, tmp_path):
         """Android deleted messages (type 15 and 64) are returned as media_type='deleted' with synthesized text."""
