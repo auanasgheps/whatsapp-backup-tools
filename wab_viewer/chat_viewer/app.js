@@ -1858,6 +1858,8 @@
   const DEFAULT_DESELECTED_TYPES = new Set(['sticker', 'link', 'document']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
   let galleryLoadingMore = false;
+  let linksAllLoaded = false;
+  let linksLoadingMore = false;
   let galleryBackfillGen = 0;
   let gallerySentinel = null;
   let galleryObserver = null;
@@ -1958,11 +1960,61 @@
     }
   }
 
+  async function _loadMoreLinks() {
+    if (archiveViewActive || linksAllLoaded || linksLoadingMore || !currentChat) return;
+    linksLoadingMore = true;
+    const grid = document.getElementById('media-gallery-grid');
+    try {
+      const linkCells = grid ? [...grid.querySelectorAll('.gallery-item[data-type="link"]')] : [];
+      if (!linkCells.length) {
+        linksAllLoaded = true;
+        return;
+      }
+      let oldestTs = Infinity;
+      for (const cell of linkCells) {
+        const ts = parseInt(cell.dataset.ts || '0', 10);
+        if (ts > 0 && ts < oldestTs) oldestTs = ts;
+      }
+      if (oldestTs === Infinity) {
+        linksAllLoaded = true;
+        return;
+      }
+      const qs = 'chat_id=' + encodeURIComponent(currentChat.id) +
+                 '&chat_type=' + encodeURIComponent(currentChat.type) +
+                 '&limit=100&before=' + oldestTs;
+      const res = await fetch('/api/media/links?' + qs);
+      if (!res.ok) throw new Error('Failed to fetch more links');
+      const items = await res.json();
+      if (items.length < 100) linksAllLoaded = true;
+      for (const msg of items) {
+        _insertGalleryGridItem(grid, msg);
+      }
+      _syncMonthHeaders();
+    } catch (err) {
+      console.error('Failed to load more links:', err);
+    } finally {
+      linksLoadingMore = false;
+    }
+  }
+
   function _checkGalleryLoadMore() {
-    if (archiveViewActive || galleryAllLoaded || galleryLoadingMore) return;
+    if (archiveViewActive) return;
     const grid = document.getElementById('media-gallery-grid');
     if (!grid) return;
 
+    if (!linksAllLoaded && !linksLoadingMore && (activeTypes.has('link') || activeTypes.size === 0)) {
+      const linkCells = grid.querySelectorAll('.gallery-item[data-type="link"]:not(.type-hidden)');
+      const oldestLinkCell = linkCells[linkCells.length - 1];
+      if (oldestLinkCell) {
+        const cellRect = oldestLinkCell.getBoundingClientRect();
+        const gridRect = grid.getBoundingClientRect();
+        if (cellRect.top <= gridRect.bottom + 800) {
+          _loadMoreLinks();
+        }
+      }
+    }
+
+    if (galleryAllLoaded || galleryLoadingMore) return;
     const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
     if (!mediaTypesActive) return;
 
@@ -2219,6 +2271,12 @@
       } else {
         scheduleVisibleVideoExtraction();
       }
+    } else if (mt === 'link') {
+      img.src = src;
+      img.onerror = () => {
+        const box = cell.querySelector('.gallery-rich-link-media');
+        if (box) box.innerHTML = '<span class="gallery-rich-link-fallback-icon">🔗</span>';
+      };
     }
   }
 
@@ -2301,22 +2359,77 @@
       d.addEventListener('click', () => window.open(src, '_blank'));
       cell.appendChild(d);
     } else if (mt === 'link') {
-      const urlMatch = msg.text_body.match(/https?:\/\/[^\s<>"]+/);
-      const url = urlMatch ? urlMatch[0] : msg.text_body;
-      cell.classList.add('gallery-link-card');
-      const a = document.createElement('a');
-      a.className = 'gallery-link-url';
-      a.href = url;
-      a.title = url;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      a.textContent = url;
-      const meta = document.createElement('div');
-      meta.className = 'gallery-link-meta';
-      meta.textContent = (msg.sender || 'You') + ' · ' + new Date(msg.timestamp_ms).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
-      cell.appendChild(a);
-      cell.appendChild(meta);
-      cell.addEventListener('click', e => { if (!e.target.closest('a')) window.open(url, '_blank'); });
+      const urlMatch = (msg.text_body || '').match(/https?:\/\/[^\s<>"]+/);
+      const rawUrl = msg.link_url || (urlMatch ? urlMatch[0] : '') || msg.text_body || '';
+      const url = rawUrl.replace(/[.,;:!?)'"]+$/, '');
+      const domain = extractDomain(url);
+
+      cell.classList.add('gallery-link-card', 'gallery-rich-link-card');
+
+      const mediaBox = document.createElement('div');
+      mediaBox.className = 'gallery-rich-link-media';
+
+      if (msg.has_thumbnail && msg.msg_id) {
+        cell.dataset.src = '/api/thumbnail/' + msg.msg_id;
+        cell.dataset.hydrated = 'false';
+        const img = document.createElement('img');
+        img.className = 'gallery-thumb gallery-rich-link-thumb';
+        img.src = EMPTY_GALLERY_PIX;
+        img.alt = '';
+        mediaBox.appendChild(img);
+      } else {
+        mediaBox.innerHTML = '<span class="gallery-rich-link-fallback-icon">🔗</span>';
+      }
+      cell.appendChild(mediaBox);
+
+      const body = document.createElement('div');
+      body.className = 'gallery-rich-link-body';
+
+      if (domain) {
+        const domEl = document.createElement('div');
+        domEl.className = 'gallery-rich-link-domain';
+        domEl.textContent = domain;
+        body.appendChild(domEl);
+      }
+
+      const titleText = msg.link_title || domain || url || 'Link';
+      const titleEl = document.createElement('a');
+      titleEl.className = 'gallery-rich-link-title' + (!msg.link_desc ? ' no-desc' : '');
+      titleEl.href = url || '#';
+      titleEl.target = '_blank';
+      titleEl.rel = 'noopener noreferrer';
+      titleEl.title = titleText;
+      titleEl.textContent = titleText;
+      titleEl.setAttribute('aria-label', 'Open link: ' + titleText);
+      body.appendChild(titleEl);
+
+      if (msg.link_desc) {
+        const descEl = document.createElement('div');
+        descEl.className = 'gallery-rich-link-desc';
+        descEl.title = msg.link_desc;
+        descEl.textContent = msg.link_desc;
+        body.appendChild(descEl);
+      }
+
+      const metaEl = document.createElement('div');
+      metaEl.className = 'gallery-rich-link-meta';
+      const dateStr = new Date(msg.timestamp_ms).toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric'
+      });
+      const senderStr = msg.sender || 'You';
+      const metaText = senderStr + ' · ' + dateStr + (url ? ' · ' + url : '');
+      metaEl.textContent = metaText;
+      metaEl.title = metaText;
+      body.appendChild(metaEl);
+
+      cell.appendChild(body);
+      cell.addEventListener('click', e => {
+        if (!e.target.closest('a') && !e.target.closest('.gallery-goto')) {
+          if (url && url !== '#') window.open(url, '_blank');
+        }
+      });
     } else if (mt === 'document') {
       cell.classList.add('gallery-link-card');
       const name = document.createElement('div');
@@ -2432,6 +2545,8 @@
     activeTypes = new Set();
     galleryAllLoaded = false;
     galleryLoadingMore = false;
+    linksAllLoaded = false;
+    linksLoadingMore = false;
 
     try {
       // fetch counts, documents, and links in parallel, then render media
@@ -2446,11 +2561,12 @@
           if (!r.ok) throw new Error('Failed to fetch documents');
           return r.json();
         }),
-        fetch('/api/media/links?' + qs).then(r => {
+        fetch('/api/media/links?' + qs + '&limit=100').then(r => {
           if (!r.ok) throw new Error('Failed to fetch links');
           return r.json();
         }),
       ]);
+      if (linkItems.length < 100) linksAllLoaded = true;
       stats.innerHTML = '';
       if (counts.total) {
         stats.appendChild(_makeStatPill('total', counts.total, null, counts.total - counts.archived));
@@ -2481,6 +2597,9 @@
         if (entries[0].isIntersecting) {
           const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
           _loadGalleryPage(oldest);
+          if (activeTypes.has('link') || activeTypes.size === 0) {
+            _loadMoreLinks();
+          }
         }
       }, { root: grid, threshold: 0.1 });
       galleryObserver.observe(gallerySentinel);
@@ -2635,6 +2754,9 @@
     scheduleVisibleVideoExtraction();
     const gen = ++galleryBackfillGen;
     _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen);
+    if (activeTypes.has('link')) {
+      _checkGalleryLoadMore();
+    }
   }
 
   function _applyTypeFilter() {

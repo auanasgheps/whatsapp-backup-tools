@@ -6578,6 +6578,8 @@ def create_app(output_root: Path, rescan: bool = False):
     def api_media_links():
         chat_id = request.args.get("chat_id", "")
         chat_type = request.args.get("chat_type", "")
+        before = request.args.get("before")
+        limit = request.args.get("limit")
         conn = get_wa()
         if conn is None:
             return jsonify([])
@@ -6590,8 +6592,20 @@ def create_app(output_root: Path, rescan: bool = False):
             chat_pred, chat_params = _ios_chat_filter(chat_id)
             is_link = _IOS_IS_LINK
             ts_col = _IOS_TS
-        sql = f"{select} WHERE {chat_pred} AND {is_link} ORDER BY {ts_col} DESC"
-        rows = [dict(r) for r in conn.execute(sql, chat_params).fetchall()]
+
+        params = list(chat_params)
+        ts_clause = ""
+        if before:
+            ts_clause = f"AND {ts_col} < ?"
+            params.append(int(before))
+
+        lim_clause = ""
+        if limit:
+            lim_clause = "LIMIT ?"
+            params.append(int(limit))
+
+        sql = f"{select} WHERE {chat_pred} AND {is_link} {ts_clause} ORDER BY {ts_col} DESC {lim_clause}"
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
         _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
         return jsonify(rows)
