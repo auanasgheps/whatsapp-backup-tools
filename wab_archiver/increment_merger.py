@@ -621,6 +621,11 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 if 7 in loc_fields
                 else None
             )
+            jpeg_thumbnail = (
+                loc_fields.get(16, [(2, b"")])[0][1]
+                if 16 in loc_fields and loc_fields[16][0][1]
+                else None
+            )
             text_data = name or address or comment or f"{lat}, {lng}"
             location_info = {
                 "latitude": lat,
@@ -628,6 +633,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "place_name": name,
                 "place_address": address,
                 "url": url,
+                "thumbnail": jpeg_thumbnail,
             }
 
         # 6: extendedTextMessage
@@ -838,6 +844,11 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
             )
             duration = ll_fields.get(8, [(0, 0)])[0][1] if 8 in ll_fields else 0
             seq_num = ll_fields.get(7, [(0, 0)])[0][1] if 7 in ll_fields else 0
+            jpeg_thumbnail = (
+                ll_fields.get(16, [(2, b"")])[0][1]
+                if 16 in ll_fields and ll_fields[16][0][1]
+                else None
+            )
             text_data = caption or f"Live Location: {lat}, {lng}"
             location_info = {
                 "latitude": lat,
@@ -847,6 +858,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "url": None,
                 "duration": duration,
                 "sequence_number": seq_num,
+                "thumbnail": jpeg_thumbnail,
             }
 
         # 20 or 26: stickerMessage
@@ -2966,18 +2978,37 @@ def apply_location_record(
     if not loc_cols:
         return
 
+    cols = ["message_row_id"]
+    vals = [msg_row_id]
+    if "latitude" in loc_cols:
+        cols.append("latitude")
+        vals.append(location_info.get("latitude", 0.0))
+    if "longitude" in loc_cols:
+        cols.append("longitude")
+        vals.append(location_info.get("longitude", 0.0))
+    if "place_name" in loc_cols:
+        cols.append("place_name")
+        vals.append(location_info.get("place_name"))
+    if "place_address" in loc_cols:
+        cols.append("place_address")
+        vals.append(location_info.get("place_address"))
+    if "url" in loc_cols:
+        cols.append("url")
+        vals.append(location_info.get("url"))
+    if "live_location_share_duration" in loc_cols and "duration" in location_info:
+        cols.append("live_location_share_duration")
+        vals.append(location_info.get("duration", 0))
+    if "live_location_sequence_number" in loc_cols and "sequence_number" in location_info:
+        cols.append("live_location_sequence_number")
+        vals.append(location_info.get("sequence_number", 0))
+
+    placeholders = ", ".join(["?"] * len(cols))
+    col_str = ", ".join(cols)
     cur = conn.cursor()
+    cur.execute("DELETE FROM message_location WHERE message_row_id = ?", (msg_row_id,))
     cur.execute(
-        "INSERT INTO message_location (message_row_id, latitude, longitude, place_name, place_address, url) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            msg_row_id,
-            location_info.get("latitude", 0.0),
-            location_info.get("longitude", 0.0),
-            location_info.get("place_name"),
-            location_info.get("place_address"),
-            location_info.get("url"),
-        ),
+        f"INSERT INTO message_location ({col_str}) VALUES ({placeholders})",
+        tuple(vals),
     )
 
 
@@ -4589,6 +4620,18 @@ def apply_messages_bin(
         # Apply location metadata if present
         if msg.get("location_info") and msg_row_id:
             apply_location_record(conn, msg_row_id, msg["location_info"], schema_cache, logger)
+            if has_message_thumbnail_table and msg["location_info"].get("thumbnail"):
+                try:
+                    cur.execute(
+                        """
+                        INSERT OR REPLACE INTO message_thumbnail
+                            (message_row_id, thumbnail)
+                        VALUES (?, ?)
+                        """,
+                        (msg_row_id, msg["location_info"]["thumbnail"]),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
         # Apply poll creation metadata and embedded votes if present
         if msg.get("poll_info") and msg_row_id:

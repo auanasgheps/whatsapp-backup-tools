@@ -207,6 +207,52 @@ HTML_TEMPLATE = (
 
 <div id="msg-details-popup"></div>
 
+<div id="map-chooser-modal" role="dialog" aria-modal="true" aria-labelledby="map-chooser-title" aria-describedby="map-chooser-subtitle">
+  <div id="map-chooser-panel">
+    <div id="map-chooser-header">
+      <div class="map-chooser-header-text">
+        <h3 id="map-chooser-title">Open in Maps</h3>
+        <div id="map-chooser-subtitle" class="map-chooser-subtitle"></div>
+      </div>
+      <button id="map-chooser-close" aria-label="Close dialog">&#10005;</button>
+    </div>
+    <div id="map-chooser-body">
+      <div class="map-provider-list">
+        <a id="map-provider-google" class="map-provider-btn" target="_blank" rel="noopener noreferrer">
+          <span class="map-provider-icon">🌐</span>
+          <div class="map-provider-info">
+            <span class="map-provider-name">Google Maps</span>
+            <span class="map-provider-desc">Open exact coordinates on Google Maps</span>
+          </div>
+          <span class="map-provider-arrow" aria-hidden="true">↗</span>
+        </a>
+        <a id="map-provider-bing" class="map-provider-btn" target="_blank" rel="noopener noreferrer">
+          <span class="map-provider-icon">🧭</span>
+          <div class="map-provider-info">
+            <span class="map-provider-name">Bing Maps</span>
+            <span class="map-provider-desc">Open exact coordinates on Microsoft Bing Maps</span>
+          </div>
+          <span class="map-provider-arrow" aria-hidden="true">↗</span>
+        </a>
+        <a id="map-provider-osm" class="map-provider-btn" target="_blank" rel="noopener noreferrer">
+          <span class="map-provider-icon">🗺️</span>
+          <div class="map-provider-info">
+            <span class="map-provider-name">OpenStreetMap</span>
+            <span class="map-provider-desc">Open exact coordinates on open community map</span>
+          </div>
+          <span class="map-provider-arrow" aria-hidden="true">↗</span>
+        </a>
+      </div>
+      <div class="map-chooser-footer">
+        <button id="map-copy-coords-btn" class="map-copy-btn" type="button">
+          <span class="map-copy-icon">📋</span>
+          <span id="map-copy-coords-text">Copy Coordinates</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>window.OUTPUT_ROOT = {{ output_root | tojson }};</script>
 <script src="/static/app.js?v={{ version }}"></script>
 

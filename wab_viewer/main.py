@@ -2260,6 +2260,8 @@ def _query_preserved_messages(
         d["is_view_once"] = int(d.get("is_view_once") or 0)
         d["is_edited"] = int(d.get("is_edited") or 0)
         d["quoted_msg_id"] = None
+        if d.get("live_location_share_duration") and d.get("media_type") == "location":
+            d["media_type"] = "live_location"
         if d.get("poll_data"):
             try:
                 p = (
@@ -3040,6 +3042,18 @@ def _fts_android_chat(
         else ""
     )
 
+    has_loc = bool(
+        wa_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_location'"
+        ).fetchone()
+    )
+    loc_join = "LEFT JOIN message_location ml ON ml.message_row_id = m._id" if has_loc else ""
+    loc_text = (
+        "WHEN m.message_type IN (5, 16) THEN COALESCE(NULLIF(m.text_data, ''), NULLIF(ml.place_name || ' ' || COALESCE(ml.place_address, ''), ''), ml.place_name)"
+        if has_loc
+        else ""
+    )
+
     cursor = wa_conn.execute(
         f"""
         SELECT
@@ -3049,6 +3063,7 @@ def _fts_android_chat(
             COALESCE(m.timestamp, 0)                                AS timestamp_ms,
             COALESCE(
                 CASE WHEN m.message_type = 66 THEN m.text_data {poll_opt_sql}
+                     {loc_text}
                      ELSE m.text_data
                 END,
                 ''
@@ -3057,6 +3072,7 @@ def _fts_android_chat(
             mm.file_path                                            AS media_file
         FROM message m
         LEFT JOIN message_media mm ON mm.message_row_id = m._id
+        {loc_join}
         WHERE {chat_pred}
         {hd_clause}
         ORDER BY m.timestamp ASC
@@ -3175,7 +3191,13 @@ def _fts_ios_chat(
             CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
                  ELSE 'contact' END                                     AS chat_type,
             CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)       AS timestamp_ms,
-            COALESCE(m.ZTEXT, CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_col} END, '') AS text_body,
+            COALESCE(
+                CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_col}
+                     WHEN m.ZMESSAGETYPE IN (5, 16) THEN COALESCE(NULLIF(mi.ZTITLE, '') || ' ' || NULLIF(m.ZTEXT, ''), mi.ZTITLE, m.ZTEXT)
+                     ELSE m.ZTEXT
+                END,
+                ''
+            ) AS text_body,
             {poll_receipt_col}
             m.ZMESSAGETYPE                                              AS message_type,
             mi.ZMEDIALOCALPATH                                          AS media_file
@@ -3393,6 +3415,7 @@ _IOS_SELECT = f"""
             WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
             WHEN m.ZMESSAGETYPE IN (6, 10) THEN 'service'
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+            WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND ((mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0) OR (mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0))) THEN 'live_location'
             WHEN m.ZMESSAGETYPE = 5 THEN 'location'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
@@ -3431,6 +3454,8 @@ _IOS_SELECT = f"""
                 WHEN qm.ZMESSAGETYPE = 1 THEN '📷 Photo'
                 WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
                 WHEN qm.ZMESSAGETYPE = 3 THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE = 5 THEN '📍 Location'
+                WHEN qm.ZMESSAGETYPE = 16 THEN '📍 Live location'
                 WHEN qm.ZMESSAGETYPE = 15 THEN 'Sticker'
             END,
             ''
@@ -3466,6 +3491,29 @@ _IOS_SELECT = f"""
         NULL                                                         AS link_desc,
         CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZMEDIAURL, '') END AS link_url,
         0                                                            AS link_preview_type,
+        mi.ZLATITUDE                                                 AS latitude,
+        mi.ZLONGITUDE                                                AS longitude,
+        COALESCE(
+            CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL THEN
+                CASE WHEN INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                     THEN SUBSTR(mi.ZVCARDNAME, 1, INSTR(mi.ZVCARDNAME, CHAR(10)) - 1)
+                     ELSE mi.ZVCARDNAME END
+            END,
+            CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZTITLE, '') END
+        )                                                            AS location_name,
+        COALESCE(
+            CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL AND INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                 THEN NULLIF(SUBSTR(mi.ZVCARDNAME, INSTR(mi.ZVCARDNAME, CHAR(10)) + 1), '')
+            END,
+            CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZTITLE IS NOT NULL AND m.ZTEXT != mi.ZTITLE THEN NULLIF(m.ZTEXT, '') END
+        )                                                            AS location_address,
+        CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZMEDIAURL, '') END AS location_url,
+        CASE
+            WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0
+                THEN mi.ZMOVIEDURATION
+            WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0
+                THEN CAST(ROUND(CAST(SUBSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), INSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), ';') + 1) AS REAL)) AS INTEGER)
+        END                                                          AS live_location_share_duration,
         NULL                                                         AS _raw_metadata
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
@@ -3495,7 +3543,7 @@ _IOS_SELECT = f"""
 _BASE_IOS_FILTER = """
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND (mi.ZMEDIALOCALPATH IS NOT NULL OR m.ZMESSAGETYPE IN (1, 2, 3, 5, 8, 11, 15, 23, 38, 39, 54) OR mi.ZTITLE IS NOT NULL))
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND (mi.ZMEDIALOCALPATH IS NOT NULL OR m.ZMESSAGETYPE IN (1, 2, 3, 5, 8, 11, 15, 16, 23, 38, 39, 54) OR mi.ZTITLE IS NOT NULL))
         OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
@@ -4608,6 +4656,11 @@ def create_app(output_root: Path, rescan: bool = False):
                      OR quoted_text LIKE '📄%'
                  )"""
         )
+        _archive_conn.execute(
+            """DELETE FROM recent_messages
+               WHERE media_type IN ('location', 'live_location')
+                  OR (media_type = 'link' AND (text_body LIKE 'Location%' OR text_body LIKE 'Live Location%'))"""
+        )
     except sqlite3.OperationalError:
         pass
     _archive_conn.commit()
@@ -4652,6 +4705,15 @@ def create_app(output_root: Path, rescan: bool = False):
     has_mq_pm_chat = False
     has_message_view_once_media = False
     has_message_revoked = False
+    has_message_location = False
+    has_ml_lat = False
+    has_ml_lng = False
+    has_ml_name = False
+    has_ml_address = False
+    has_ml_url = False
+    has_ml_duration = False
+    has_ios_lat = False
+    has_ios_lng = False
     _mi_cols = set()
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
@@ -4732,6 +4794,7 @@ def create_app(output_root: Path, rescan: bool = False):
             else set()
         )
         has_ios_vcard_name = "ZVCARDNAME" in _mi_cols
+        has_ios_vcard_string = "ZVCARDSTRING" in _mi_cols
         has_ios_aspect_ratio = "ZASPECTRATIO" in _mi_cols
         has_ios_filesize = "ZFILESIZE" in _mi_cols
         has_ios_duration = "ZMOVIEDURATION" in _mi_cols
@@ -4748,6 +4811,20 @@ def create_app(output_root: Path, rescan: bool = False):
         has_mt_desc = "description" in _mt_cols
         has_mt_url = "url" in _mt_cols
         has_mt_preview_type = "preview_type" in _mt_cols
+        has_message_location = "message_location" in _wa_tables
+        _ml_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_location)").fetchall()}
+            if has_message_location
+            else set()
+        )
+        has_ml_lat = "latitude" in _ml_cols
+        has_ml_lng = "longitude" in _ml_cols
+        has_ml_name = "place_name" in _ml_cols
+        has_ml_address = "place_address" in _ml_cols
+        has_ml_url = "url" in _ml_cols
+        has_ml_duration = "live_location_share_duration" in _ml_cols
+        has_ios_lat = "ZLATITUDE" in _mi_cols
+        has_ios_lng = "ZLONGITUDE" in _mi_cols
         _zwa_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
             if "ZWAMESSAGE" in _wa_tables
@@ -4782,6 +4859,66 @@ def create_app(output_root: Path, rescan: bool = False):
             else "NULL"
         )
         ios_raw_metadata = "mi.ZMETADATA" if has_ios_metadata else "NULL"
+        ios_latitude_col = "mi.ZLATITUDE" if has_ios_lat else "NULL"
+        ios_longitude_col = "mi.ZLONGITUDE" if has_ios_lng else "NULL"
+        if has_ios_vcard_name and has_ios_title:
+            ios_location_name_col = """COALESCE(
+                CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL THEN
+                    CASE WHEN INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                         THEN SUBSTR(mi.ZVCARDNAME, 1, INSTR(mi.ZVCARDNAME, CHAR(10)) - 1)
+                         ELSE mi.ZVCARDNAME END
+                END,
+                CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZTITLE, '') END
+            )"""
+            ios_location_address_col = """COALESCE(
+                CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL AND INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                     THEN NULLIF(SUBSTR(mi.ZVCARDNAME, INSTR(mi.ZVCARDNAME, CHAR(10)) + 1), '')
+                END,
+                CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZTITLE IS NOT NULL AND m.ZTEXT != mi.ZTITLE THEN NULLIF(m.ZTEXT, '') END
+            )"""
+        elif has_ios_vcard_name:
+            ios_location_name_col = """CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL THEN
+                CASE WHEN INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                     THEN SUBSTR(mi.ZVCARDNAME, 1, INSTR(mi.ZVCARDNAME, CHAR(10)) - 1)
+                     ELSE mi.ZVCARDNAME END
+            END"""
+            ios_location_address_col = """CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL AND INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                THEN NULLIF(SUBSTR(mi.ZVCARDNAME, INSTR(mi.ZVCARDNAME, CHAR(10)) + 1), '')
+            END"""
+        elif has_ios_title:
+            ios_location_name_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZTITLE, '') END"
+            ios_location_address_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZTITLE IS NOT NULL AND m.ZTEXT != mi.ZTITLE THEN NULLIF(m.ZTEXT, '') END"
+        else:
+            ios_location_name_col = "NULL"
+            ios_location_address_col = "NULL"
+
+        ios_location_url_col = (
+            "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZMEDIAURL, '') END"
+            if has_ios_mediaurl
+            else "NULL"
+        )
+        ios_vcs_dur_expr = (
+            "CAST(ROUND(CAST(SUBSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), INSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), ';') + 1) AS REAL)) AS INTEGER)"
+            if has_ios_vcard_string
+            else "NULL"
+        )
+        if has_ios_duration and has_ios_vcard_string:
+            ios_live_location_dur_col = f"""CASE
+                WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0
+                    THEN mi.ZMOVIEDURATION
+                WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0
+                    THEN {ios_vcs_dur_expr}
+            END"""
+            ios_live_type_cond = "WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND ((mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0) OR (mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0))) THEN 'live_location'"
+        elif has_ios_duration:
+            ios_live_location_dur_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN mi.ZMOVIEDURATION END"
+            ios_live_type_cond = "WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0) THEN 'live_location'"
+        elif has_ios_vcard_string:
+            ios_live_location_dur_col = f"CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0 THEN {ios_vcs_dur_expr} END"
+            ios_live_type_cond = "WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0) THEN 'live_location'"
+        else:
+            ios_live_location_dur_col = "NULL"
+            ios_live_type_cond = "WHEN m.ZMESSAGETYPE = 16 THEN 'live_location'"
         ios_thumb_arms = []
         if "ZXMPPTHUMBPATH" in _mi_cols:
             ios_thumb_arms.append("mi.ZXMPPTHUMBPATH IS NOT NULL")
@@ -4809,7 +4946,7 @@ def create_app(output_root: Path, rescan: bool = False):
         globals()["_BASE_IOS_FILTER"] = f"""
     AND (
         (m.ZTEXT IS NOT NULL AND m.ZTEXT != '' AND (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0))
-        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND (mi.ZMEDIALOCALPATH IS NOT NULL OR m.ZMESSAGETYPE IN (1, 2, 3, 5, 8, 11, 15, 23, 38, 39, 54) OR mi.ZTITLE IS NOT NULL))
+        OR (m.ZMESSAGETYPE IS NOT NULL AND m.ZMESSAGETYPE != 0 AND m.ZMESSAGETYPE NOT IN (6, 10) AND (mi.ZMEDIALOCALPATH IS NOT NULL OR m.ZMESSAGETYPE IN (1, 2, 3, 5, 8, 11, 15, 16, 23, 38, 39, 54) OR mi.ZTITLE IS NOT NULL))
         OR (m.ZMESSAGETYPE = 4)
         OR (m.ZMESSAGETYPE = 14)
         OR (m.ZMESSAGETYPE IN (38, 39, 53))
@@ -4861,6 +4998,7 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
             {ios_service_case}
             WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+            {ios_live_type_cond}
             WHEN m.ZMESSAGETYPE = 5 THEN 'location'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
@@ -4901,6 +5039,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHEN qm.ZMESSAGETYPE = 1 THEN '📷 Photo'
                 WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
                 WHEN qm.ZMESSAGETYPE = 3 THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE = 5 THEN '📍 Location'
+                WHEN qm.ZMESSAGETYPE = 16 THEN '📍 Live location'
                 WHEN qm.ZMESSAGETYPE = 15 THEN 'Sticker'
             END,
             ''
@@ -4936,6 +5076,12 @@ def create_app(output_root: Path, rescan: bool = False):
         NULL                                                         AS link_desc,
         {ios_link_url}                                               AS link_url,
         0                                                            AS link_preview_type,
+        {ios_latitude_col}                                           AS latitude,
+        {ios_longitude_col}                                          AS longitude,
+        {ios_location_name_col}                                      AS location_name,
+        {ios_location_address_col}                                   AS location_address,
+        {ios_location_url_col}                                       AS location_url,
+        {ios_live_location_dur_col}                                  AS live_location_share_duration,
         {ios_raw_metadata}                                           AS _raw_metadata
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
@@ -5186,6 +5332,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHEN mq.message_type IN (1, 42) THEN '📷 Photo'
                 WHEN mq.message_type IN (2, 82) THEN '🎵 Audio'
                 WHEN mq.message_type IN (3, 43) THEN '🎥 Video'
+                WHEN mq.message_type = 5 THEN '📍 Location'
+                WHEN mq.message_type = 16 THEN '📍 Live location'
                 WHEN mq.message_type = 20 THEN 'Sticker'
                 WHEN mq.message_type = 66 THEN 'Poll'
             END,
@@ -5219,6 +5367,24 @@ def create_app(output_root: Path, rescan: bool = False):
         "    LEFT JOIN message_text mtxt ON mtxt.message_row_id = m._id\n"
         if has_message_text
         else ""
+    )
+    android_loc_join = (
+        "    LEFT JOIN message_location ml ON ml.message_row_id = m._id\n"
+        if has_message_location
+        else ""
+    )
+    android_latitude_col = "ml.latitude" if has_ml_lat else "NULL"
+    android_longitude_col = "ml.longitude" if has_ml_lng else "NULL"
+    android_location_name_col = "ml.place_name" if has_ml_name else "NULL"
+    android_location_address_col = "ml.place_address" if has_ml_address else "NULL"
+    android_location_url_col = "ml.url" if has_ml_url else "NULL"
+    android_live_location_dur_col = (
+        "ml.live_location_share_duration" if has_ml_duration else "NULL"
+    )
+    android_live_type_cond = (
+        "WHEN m.message_type = 16 OR (m.message_type = 5 AND ml.live_location_share_duration IS NOT NULL AND ml.live_location_share_duration > 0) THEN 'live_location'"
+        if has_ml_duration
+        else "WHEN m.message_type = 16 THEN 'live_location'"
     )
     mt_title_col = "NULLIF(mtxt.page_title, '')" if has_mt_title else "NULL"
     mt_desc_col = "NULLIF(mtxt.description, '')" if has_mt_desc else "NULL"
@@ -5259,12 +5425,13 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.message_type = 43 THEN 'video'
             WHEN m.message_type = 82 THEN 'audio'
             WHEN m.message_type = 66{extra_poll_select} THEN 'poll'
+            {android_live_type_cond}
+            WHEN m.message_type = 5 THEN 'location'
             WHEN m.message_type IS NULL OR m.message_type = 0 THEN
                 CASE WHEN m.text_data IS NOT NULL
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
                            OR INSTR(LOWER(m.text_data), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
-            WHEN m.message_type IN (5, 16) THEN 'link'
             WHEN mm.file_path IS NULL AND m.message_type = 1 THEN 'image'
             WHEN mm.file_path IS NULL AND m.message_type = 2 THEN 'audio'
             WHEN mm.file_path IS NULL AND m.message_type IN (3, 13, 28) THEN 'video'
@@ -5280,6 +5447,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHEN m.message_type = 15 OR {mrev_pred} OR (m.message_type = 7 AND ({ms_col} = 1 OR {ms_col} IS NULL) AND NOT ({is_group_chat_select})) THEN 'This message was deleted'
                 WHEN m.message_type IN (4, 14) THEN m.text_data
                 WHEN m.message_type = 66{extra_poll_select} THEN 'Poll'
+                WHEN m.message_type = 5 THEN COALESCE({android_location_name_col}, 'Location')
+                WHEN m.message_type = 16 THEN 'Live Location'
             END,
             ''
         )                                                            AS text_body,
@@ -5310,10 +5479,16 @@ def create_app(output_root: Path, rescan: bool = False):
         {mt_title_col}                                               AS link_title,
         {mt_desc_col}                                                AS link_desc,
         {mt_url_col}                                                 AS link_url,
-        {mt_preview_type_col}                                        AS link_preview_type
+        {mt_preview_type_col}                                        AS link_preview_type,
+        {android_latitude_col}                                       AS latitude,
+        {android_longitude_col}                                      AS longitude,
+        {android_location_name_col}                                  AS location_name,
+        {android_location_address_col}                               AS location_address,
+        {android_location_url_col}                                   AS location_url,
+        {android_live_location_dur_col}                              AS live_location_share_duration
     FROM message m
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
-{android_thumb_joins}{android_text_join}{mvom_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
+{android_thumb_joins}{android_text_join}{android_loc_join}{mvom_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
     LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
     LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
     LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
@@ -5590,6 +5765,23 @@ def create_app(output_root: Path, rescan: bool = False):
             cs_ident_col = "cs.ZCONTACTIDENTIFIER" if has_cs_ident else "NULL"
             mi_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
             vcard_name_ios = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
+            if "ZMOVIEDURATION" in mi_cols and "ZVCARDSTRING" in mi_cols:
+                ios_dur_col = """CASE
+                    WHEN mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0 THEN mi.ZMOVIEDURATION
+                    WHEN mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0
+                        THEN CAST(ROUND(CAST(SUBSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), INSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), ';') + 1) AS REAL)) AS INTEGER)
+                    ELSE 0
+                END"""
+            elif "ZMOVIEDURATION" in mi_cols:
+                ios_dur_col = "COALESCE(mi.ZMOVIEDURATION, 0)"
+            elif "ZVCARDSTRING" in mi_cols:
+                ios_dur_col = """CASE
+                    WHEN mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0
+                        THEN CAST(ROUND(CAST(SUBSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), INSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), ';') + 1) AS REAL)) AS INTEGER)
+                    ELSE 0
+                END"""
+            else:
+                ios_dur_col = "0"
             ios_phone_expr = f"""
                 COALESCE(
                     CASE WHEN cs.ZCONTACTJID LIKE '%@s.whatsapp.net'
@@ -5619,6 +5811,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS newest_ts,
                     COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({vcard_name_ios}, ''), '') AS last_msg_preview,
                     COALESCE(m.ZMESSAGETYPE, 0)                        AS last_msg_type,
+                    {ios_dur_col}                                      AS last_msg_duration,
                     {group_ev_col}                                     AS last_msg_group_event_type,
                     COALESCE(m.ZISFROMME, 0)                           AS last_msg_from_me,
                     mi.ZMEDIALOCALPATH                                  AS last_msg_media_path,
@@ -5998,11 +6191,11 @@ def create_app(output_root: Path, rescan: bool = False):
                     ):
                         d["last_msg_type"] = "document"
                     elif (source_type == "android" and raw_type == 5) or (
-                        source_type == "ios" and raw_type == 5
+                        source_type == "ios" and raw_type == 5 and not (r.get("last_msg_duration") and r["last_msg_duration"] > 0)
                     ):
                         d["last_msg_type"] = "location"
                     elif (source_type == "android" and raw_type == 16) or (
-                        source_type == "ios" and raw_type == 16
+                        source_type == "ios" and (raw_type == 16 or (raw_type == 5 and r.get("last_msg_duration") and r["last_msg_duration"] > 0))
                     ):
                         d["last_msg_type"] = "live_location"
                     elif (source_type == "android" and raw_type == 13) or (
