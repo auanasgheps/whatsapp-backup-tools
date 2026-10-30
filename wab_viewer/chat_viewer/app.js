@@ -2906,7 +2906,8 @@
       if (linkItems.length < 100) linksAllLoaded = true;
       stats.innerHTML = '';
       if (counts.total) {
-        stats.appendChild(_makeStatPill('total', counts.total, null, counts.total - counts.archived));
+        const totalMissing = Object.values(counts.by_type || {}).reduce((acc, d) => acc + (d.missing || 0), 0);
+        stats.appendChild(_makeStatPill('total', counts.total, null, totalMissing));
         for (const t of typeOrder) {
           const d = counts.by_type[t];
           if (!d) continue;

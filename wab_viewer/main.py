@@ -3576,7 +3576,7 @@ _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
 _ANDROID_FILTER_TS = _ANDROID_FILTER
 
 _ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type IN (0, 7, 15, 64, 66))"
-_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 6, 10, 14, 46))"
+_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 6, 7, 10, 14, 46))"
 
 _ANDROID_IS_LINK = (
     "(m.message_type IS NULL OR m.message_type = 0)"
@@ -3597,7 +3597,7 @@ _ANDROID_IS_DOCUMENT_UNDOWNLOADED = (
     " AND mm.media_name IS NOT NULL AND mm.media_name != ''"
 )
 _IOS_IS_DOCUMENT_UNDOWNLOADED = (
-    "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+    "m.ZMESSAGETYPE = 8"
     " AND mi.ZMEDIALOCALPATH IS NULL"
     " AND mi.ZTITLE IS NOT NULL AND mi.ZTITLE != ''"
 )
@@ -6929,7 +6929,7 @@ def create_app(output_root: Path, rescan: bool = False):
             by_type.setdefault(t, {"count": 0, "missing": 0})
             by_type[t]["count"] += 1
             is_vo = r["is_view_once"] if "is_view_once" in r.keys() else 0
-            if not r["archive_path"] and not is_vo:
+            if t not in ("link", "text") and not r["archive_path"] and not is_vo:
                 by_type[t]["missing"] += 1
         for r in list(doc_rows) + list(link_rows):
             t = r["media_type"]
