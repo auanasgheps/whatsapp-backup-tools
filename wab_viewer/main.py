@@ -451,6 +451,11 @@ _MEDIA_TYPE_EXPR = """
         WHEN {col} IS NULL THEN 'text'
         WHEN LOWER({col}) LIKE '%.vcf' THEN 'vcard'
         WHEN LOWER({col}) LIKE '%sticker%' THEN 'sticker'
+        WHEN LOWER({col}) LIKE '%.gif'
+          OR LOWER({col}) LIKE '%/animated gifs/%'
+          OR LOWER({col}) LIKE '%whatsapp animated gifs%'
+          OR LOWER({col}) LIKE '%/gif-%'
+          OR LOWER({col}) LIKE 'gif-%' THEN 'gif'
         WHEN LOWER({col}) LIKE '%.jpg'  OR LOWER({col}) LIKE '%.jpeg'
           OR LOWER({col}) LIKE '%.png'  OR LOWER({col}) LIKE '%.webp'
           OR LOWER({col}) LIKE '%.heic' OR LOWER({col}) LIKE '%.heif' THEN 'image'
@@ -460,7 +465,6 @@ _MEDIA_TYPE_EXPR = """
         WHEN LOWER({col}) LIKE '%.mp3'  OR LOWER({col}) LIKE '%.ogg'
           OR LOWER({col}) LIKE '%.aac'  OR LOWER({col}) LIKE '%.opus'
           OR LOWER({col}) LIKE '%.m4a' THEN 'audio'
-        WHEN LOWER({col}) LIKE '%.gif' THEN 'gif'
         ELSE 'document'
     END
 """
@@ -2080,6 +2084,14 @@ def _media_type_from_path(path: str) -> str:
         or p.endswith(".was")
     ):
         return "sticker"
+    fname = os.path.basename(p)
+    if (
+        p.endswith(".gif")
+        or "/animated gifs/" in p
+        or "whatsapp animated gifs" in p
+        or fname.startswith("gif-")
+    ):
+        return "gif"
     ext = os.path.splitext(p)[1]
     if ext in (".jpg", ".jpeg", ".png", ".heic", ".heif"):
         return "image"
@@ -2087,8 +2099,6 @@ def _media_type_from_path(path: str) -> str:
         return "video"
     if ext in (".mp3", ".ogg", ".aac", ".opus", ".m4a"):
         return "audio"
-    if ext == ".gif":
-        return "gif"
     return "document"
 
 
@@ -4654,6 +4664,7 @@ def create_app(output_root: Path, rescan: bool = False):
                  AND (
                      quoted_text LIKE '📷%'
                      OR quoted_text LIKE '🎥%'
+                     OR quoted_text LIKE '🎞️%'
                      OR quoted_text LIKE 'Sticker%'
                      OR quoted_text LIKE '📄%'
                  )"""
@@ -4699,6 +4710,7 @@ def create_app(output_root: Path, rescan: bool = False):
     has_mm_size = False
     has_mm_duration = False
     has_mm_file_hash = False
+    has_mm_gif_attribution = False
     has_ios_aspect_ratio = False
     has_ios_filesize = False
     has_ios_duration = False
@@ -4758,6 +4770,7 @@ def create_app(output_root: Path, rescan: bool = False):
         has_mm_size = "file_size" in _mm_cols
         has_mm_duration = "media_duration" in _mm_cols
         has_mm_file_hash = "file_hash" in _mm_cols
+        has_mm_gif_attribution = "gif_attribution" in _mm_cols
         _msg_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message)").fetchall()}
             if "message" in _wa_tables
@@ -5314,9 +5327,9 @@ def create_app(output_root: Path, rescan: bool = False):
             quoted_thumb_conds.append(
                 "(mqm_orig.message_row_id IS NOT NULL AND mqm_orig.thumbnail IS NOT NULL)"
             )
-        quoted_thumb_conds.append("(m_orig.message_type IN (1, 3, 9, 20, 26, 42, 43))")
+        quoted_thumb_conds.append("(m_orig.message_type IN (1, 3, 9, 13, 20, 26, 42, 43))")
     if has_mq_msg_type:
-        quoted_thumb_conds.append("(mq.message_type IN (1, 3, 9, 20, 26, 42, 43))")
+        quoted_thumb_conds.append("(mq.message_type IN (1, 3, 9, 13, 20, 26, 42, 43))")
 
     android_quoted_has_thumb_expr = (
         f"CASE WHEN {' OR '.join(quoted_thumb_conds)} THEN 1 ELSE 0 END"
@@ -5329,14 +5342,19 @@ def create_app(output_root: Path, rescan: bool = False):
         if (has_android_key_id and has_mq_key_id)
         else ""
     )
+    orig_gif_arm = (
+        " OR (m_orig.message_type = 13)"
+        if (has_android_key_id and has_mq_key_id)
+        else ""
+    )
     if has_mq_msg_type:
         quoted_text_expr = f"""COALESCE(
             NULLIF(mq.text_data, ''),
             {orig_text_arm}CASE
+                WHEN mq.message_type = 13{orig_gif_arm} THEN '🎞️ GIF'
                 WHEN mq.message_type IN (1, 42) THEN '📷 Photo'
                 WHEN mq.message_type IN (2, 82) THEN '🎵 Audio'
                 WHEN mq.message_type IN (3, 43) THEN '🎥 Video'
-                WHEN mq.message_type = 13 THEN '🎞️ GIF'
                 WHEN mq.message_type = 5 THEN '📍 Location'
                 WHEN mq.message_type = 16 THEN '📍 Live location'
                 WHEN mq.message_type = 20 THEN 'Sticker'
@@ -5402,6 +5420,24 @@ def create_app(output_root: Path, rescan: bool = False):
     )
     mvom_or = " OR mvom.message_row_id IS NOT NULL" if has_message_view_once_media else ""
 
+    android_gif_attr_cond = (
+        "(mm.gif_attribution IS NOT NULL AND mm.gif_attribution > 0)"
+        if has_mm_gif_attribution
+        else "0=1"
+    )
+    android_gif_cond = f"""(
+        m.message_type = 13
+        OR {android_gif_attr_cond}
+        OR mm.file_path LIKE '%WhatsApp Animated Gifs/%'
+        OR mm.file_path LIKE '%/Animated Gifs/%'
+        OR mm.file_path LIKE '%/GIF-%'
+        OR mm.file_path LIKE 'GIF-%'
+        OR ac.archive_path LIKE '%WhatsApp Animated Gifs/%'
+        OR ac.archive_path LIKE '%/Animated Gifs/%'
+        OR ac.archive_path LIKE '%/GIF-%'
+        OR ac.archive_path LIKE '%.gif'
+    )"""
+
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
@@ -5426,7 +5462,7 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IN (4, 14) THEN 'vcard'
             WHEN m.message_type = 20 THEN 'sticker'
-            WHEN m.message_type = 13 THEN 'gif'
+            WHEN {android_gif_cond} THEN 'gif'
             WHEN m.message_type = 42 THEN 'image'
             WHEN m.message_type = 43 THEN 'video'
             WHEN m.message_type = 82 THEN 'audio'
@@ -5444,7 +5480,12 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN mm.file_path IS NULL AND m.message_type = 9 THEN 'document'
             ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE(mm.file_path, mm.media_name)")}
         END                                                          AS media_type,
-        COALESCE(mm.media_name, CASE WHEN m.message_type IN (4, 14) THEN m.text_data END, '') AS media_name,
+        COALESCE(
+            CASE WHEN {android_gif_cond} THEN '' END,
+            mm.media_name,
+            CASE WHEN m.message_type IN (4, 14) THEN m.text_data END,
+            ''
+        )                                                            AS media_name,
         COALESCE(
             m.text_data,
             CASE
@@ -6715,11 +6756,11 @@ def create_app(output_root: Path, rescan: bool = False):
                 for mt in media_types:
                     if mt == "video":
                         vid_exts = " OR ".join(f"LOWER(ac.archive_path) LIKE '{ext}'" for ext in _EXT_PATTERNS["video"])
-                        not_gif = "m.message_type != 13" if source_type == "android" else "m.ZMESSAGETYPE != 11"
+                        not_gif = f"NOT ({android_gif_cond})" if source_type == "android" else "m.ZMESSAGETYPE != 11"
                         ext_conds.append(f"(({vid_exts}) AND {not_gif})")
                     elif mt == "gif":
-                        is_gif = "m.message_type = 13" if source_type == "android" else "m.ZMESSAGETYPE = 11"
-                        ext_conds.append(f"(LOWER(ac.archive_path) LIKE '%.gif' OR {is_gif})")
+                        is_gif = android_gif_cond if source_type == "android" else "(LOWER(ac.archive_path) LIKE '%.gif' OR m.ZMESSAGETYPE = 11)"
+                        ext_conds.append(is_gif)
                     else:
                         for ext in _EXT_PATTERNS.get(mt, []):
                             ext_conds.append(f"LOWER(ac.archive_path) LIKE '{ext}'")
