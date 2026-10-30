@@ -1146,38 +1146,8 @@
       bubble.appendChild(voEl);
     } else if (msg.media_type === 'poll') {
       bubble.appendChild(renderPoll(msg));
-    } else if (msg.media_type === 'location') {
-      const locEl = document.createElement('div');
-      locEl.className = 'msg-location-card';
-      const locIcon = document.createElement('span');
-      locIcon.className = 'location-icon';
-      locIcon.textContent = '📍';
-      locEl.appendChild(locIcon);
-      const locDetails = document.createElement('div');
-      locDetails.className = 'location-details';
-      if (msg.location_name) {
-        const nameEl = document.createElement('div');
-        nameEl.className = 'location-name';
-        nameEl.textContent = msg.location_name;
-        locDetails.appendChild(nameEl);
-      }
-      if (msg.location_address) {
-        const addrEl = document.createElement('div');
-        addrEl.className = 'location-address';
-        addrEl.textContent = msg.location_address;
-        locDetails.appendChild(addrEl);
-      }
-      if (msg.latitude && msg.longitude) {
-        const linkEl = document.createElement('a');
-        linkEl.className = 'location-map-link';
-        linkEl.target = '_blank';
-        linkEl.rel = 'noopener noreferrer';
-        linkEl.href = msg.location_url || ('https://maps.google.com/?q=' + msg.latitude + ',' + msg.longitude);
-        linkEl.textContent = 'View on Google Maps';
-        locDetails.appendChild(linkEl);
-      }
-      locEl.appendChild(locDetails);
-      bubble.appendChild(locEl);
+    } else if (msg.media_type === 'location' || msg.media_type === 'live_location') {
+      bubble.appendChild(renderLocation(msg));
     } else if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
         bubble.appendChild(renderMissingMedia(msg));
@@ -1492,6 +1462,207 @@
       voBadge.innerHTML = '<span class="vo-icon">①</span> View Once';
       wrap.appendChild(voBadge);
     }
+    return wrap;
+  }
+
+  function formatCoordinates(lat, lng) {
+    const latNum = Number(lat);
+    const lngNum = Number(lng);
+    if (isNaN(latNum) || isNaN(lngNum)) return (lat || '') + ', ' + (lng || '');
+    const latDir = latNum >= 0 ? 'N' : 'S';
+    const lngDir = lngNum >= 0 ? 'E' : 'W';
+    return Math.abs(latNum).toFixed(4) + '° ' + latDir + ', ' + Math.abs(lngNum).toFixed(4) + '° ' + lngDir;
+  }
+
+  function renderLocation(msg) {
+    const isLive = msg.media_type === 'live_location'
+      || msg.raw_msg_type === 16
+      || Boolean(Number(msg.live_location_share_duration) > 0);
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-location-wrap';
+
+    const card = document.createElement('div');
+    card.className = 'msg-location-card' + (isLive ? ' is-live-location' : ' is-static-location');
+
+    // 1. Map Header (Pre-rendered thumbnail from DB or offline vector fallback)
+    const mapHeader = document.createElement('div');
+    mapHeader.className = 'location-map-header';
+
+    const typeChip = document.createElement('div');
+    typeChip.className = 'location-map-type-chip' + (isLive ? ' is-live' : ' is-static');
+    typeChip.innerHTML = isLive
+      ? '<span class="live-pulse-dot" aria-hidden="true"></span><span>Live Location</span>'
+      : '<span class="loc-pin-icon" aria-hidden="true">📍</span><span>Location</span>';
+    mapHeader.appendChild(typeChip);
+
+    const fallbackVector = () => {
+      const existingHint = mapHeader.querySelector('.location-map-hover-hint');
+      const existingChip = mapHeader.querySelector('.location-map-type-chip');
+      mapHeader.innerHTML = '';
+      if (existingChip) {
+        mapHeader.appendChild(existingChip);
+      }
+      const svgWrap = document.createElement('div');
+      svgWrap.className = 'location-vector-map' + (isLive ? ' is-live' : '');
+      svgWrap.innerHTML = `
+        <svg viewBox="0 0 320 180" xmlns="http://www.w3.org/2000/svg" class="location-map-svg" aria-hidden="true">
+          <defs>
+            <pattern id="locGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+              <path d="M 40 0 L 0 0 0 40" fill="none" stroke="currentColor" stroke-width="0.75" stroke-opacity="0.18" />
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="currentColor" class="map-bg" />
+          <rect width="100%" height="100%" fill="url(#locGrid)" />
+          <path d="M-10 60 Q 90 40 180 80 T 330 110" fill="none" stroke="currentColor" stroke-width="5" stroke-opacity="0.32" />
+          <path d="M 70 -10 Q 120 70 160 190" fill="none" stroke="currentColor" stroke-width="3" stroke-opacity="0.25" />
+          <path d="M 230 -10 Q 200 80 250 190" fill="none" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.2" />
+          <circle cx="160" cy="90" r="${isLive ? 32 : 24}" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-opacity="0.35" class="location-ping-ring" />
+          ${isLive ? '<circle cx="160" cy="90" r="16" fill="var(--accent)" fill-opacity="0.2" />' : ''}
+          ${isLive 
+            ? '<circle cx="160" cy="90" r="6" fill="var(--accent)" />'
+            : '<path d="M 160 76 C 153.4 76 148 81.4 148 88 C 148 97 160 108 160 108 C 160 108 172 97 172 88 C 172 81.4 166.6 76 160 76 Z" fill="#ea4335" /><circle cx="160" cy="87" r="3.5" fill="#fff" />'
+          }
+        </svg>
+      `;
+      mapHeader.appendChild(svgWrap);
+      if (existingHint) {
+        mapHeader.appendChild(existingHint);
+      }
+    };
+
+    if (msg.has_thumbnail) {
+      const img = document.createElement('img');
+      img.className = 'location-map-thumb';
+      img.loading = 'lazy';
+      img.alt = msg.location_name || (isLive ? 'Live Location' : 'Location map');
+      img.src = '/api/thumbnail/' + msg.msg_id;
+      img.addEventListener('error', fallbackVector, { once: true });
+      mapHeader.appendChild(img);
+    } else {
+      fallbackVector();
+    }
+
+    if (msg.latitude && msg.longitude) {
+      mapHeader.classList.add('is-interactive');
+      mapHeader.setAttribute('role', 'button');
+      mapHeader.setAttribute('tabindex', '0');
+      mapHeader.setAttribute('aria-haspopup', 'dialog');
+      mapHeader.setAttribute('aria-label', (msg.location_name ? (msg.location_name + ' — ') : '') + 'Open in Maps');
+      mapHeader.title = 'Click to open in maps';
+
+      const hoverHint = document.createElement('div');
+      hoverHint.className = 'location-map-hover-hint';
+      hoverHint.innerHTML = '<span class="hover-hint-icon" aria-hidden="true">🗺️</span><span>Open in Maps</span> <span class="hover-hint-arrow" aria-hidden="true">↗</span>';
+      mapHeader.appendChild(hoverHint);
+
+      const triggerMapChooser = (e) => {
+        e.stopPropagation();
+        openMapChooser({
+          latitude: msg.latitude,
+          longitude: msg.longitude,
+          name: msg.location_name,
+          address: msg.location_address,
+          isLive: isLive
+        }, mapHeader);
+      };
+
+      mapHeader.addEventListener('click', triggerMapChooser);
+      mapHeader.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          triggerMapChooser(e);
+        }
+      });
+    }
+
+    card.appendChild(mapHeader);
+
+    // 2. Details (Venue Name, Address, Status, Timestamps, Coordinates)
+    const details = document.createElement('div');
+    details.className = 'location-details';
+
+    if (isLive) {
+      const liveBadge = document.createElement('div');
+      liveBadge.className = 'location-live-badge';
+      liveBadge.innerHTML = '<span class="live-dot" aria-hidden="true"></span><span class="live-label">Live location ended</span>';
+      details.appendChild(liveBadge);
+
+      if (msg.live_location_share_duration || msg.timestamp_ms) {
+        const timeInfo = document.createElement('div');
+        timeInfo.className = 'location-time-info';
+        let durStr = '';
+        const dur = Number(msg.live_location_share_duration) || 0;
+        if (dur >= 3600) {
+          const hrs = Math.round((dur / 3600) * 10) / 10;
+          durStr = hrs + (hrs === 1 ? ' hr' : ' hrs');
+        } else if (dur > 0) {
+          durStr = Math.round(dur / 60) + ' min';
+        }
+
+        let endStr = '';
+        if (msg.timestamp_ms && dur > 0) {
+          const endDate = new Date(Number(msg.timestamp_ms) + dur * 1000);
+          endStr = 'Ended at ' + endDate.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        }
+
+        const summary = [durStr ? ('Shared for ' + durStr) : '', endStr].filter(Boolean).join(' · ');
+        if (summary) {
+          timeInfo.textContent = summary;
+          details.appendChild(timeInfo);
+        }
+      }
+
+      if (msg.latitude && msg.longitude) {
+        const coordsEl = document.createElement('div');
+        coordsEl.className = 'location-coords-sub';
+        coordsEl.textContent = formatCoordinates(msg.latitude, msg.longitude);
+        details.appendChild(coordsEl);
+      }
+    } else {
+      if (msg.location_name) {
+        const nameEl = document.createElement('div');
+        nameEl.className = 'location-name';
+        nameEl.textContent = msg.location_name;
+        details.appendChild(nameEl);
+      } else {
+        const nameEl = document.createElement('div');
+        nameEl.className = 'location-name';
+        nameEl.textContent = 'Pinned location';
+        details.appendChild(nameEl);
+      }
+      if (msg.location_address) {
+        const addrEl = document.createElement('div');
+        addrEl.className = 'location-address';
+        addrEl.textContent = msg.location_address;
+        details.appendChild(addrEl);
+      }
+      if (msg.latitude && msg.longitude) {
+        const coordsEl = document.createElement('div');
+        coordsEl.className = 'location-coords-sub';
+        coordsEl.textContent = formatCoordinates(msg.latitude, msg.longitude);
+        details.appendChild(coordsEl);
+      }
+    }
+
+    card.appendChild(details);
+    wrap.appendChild(card);
+
+    if (msg.text_body) {
+      const cleanBody = msg.text_body.trim();
+      const isDuplicate = cleanBody === msg.location_name
+        || cleanBody === msg.location_address
+        || cleanBody === 'Location'
+        || cleanBody === 'Pinned location'
+        || cleanBody === 'Live Location'
+        || cleanBody.startsWith('Live Location');
+      if (!isDuplicate && cleanBody) {
+        const cap = document.createElement('div');
+        cap.className = 'msg-caption';
+        cap.innerHTML = highlight(cleanBody, '');
+        wrap.appendChild(cap);
+      }
+    }
+
     return wrap;
   }
 
@@ -4025,6 +4196,106 @@
       }
     });
   }
+
+  // ---- map provider chooser modal ------------------------------------------
+  let activeMapTrigger = null;
+
+  function openMapChooser(locData, triggerEl) {
+    activeMapTrigger = triggerEl;
+    const modal = document.getElementById('map-chooser-modal');
+    if (!modal) return;
+
+    const lat = Number(locData.latitude);
+    const lng = Number(locData.longitude);
+    if (isNaN(lat) || isNaN(lng)) return;
+
+    const titleEl = document.getElementById('map-chooser-title');
+    const subtitleEl = document.getElementById('map-chooser-subtitle');
+    const copyTextEl = document.getElementById('map-copy-coords-text');
+    const copyBtn = document.getElementById('map-copy-coords-btn');
+
+    const formattedCoords = formatCoordinates(lat, lng);
+    const placeName = locData.name ? locData.name.trim() : '';
+    const address = locData.address ? locData.address.trim() : '';
+
+    if (titleEl) {
+      titleEl.textContent = placeName || (locData.isLive ? 'Live Location' : 'Shared Location');
+    }
+    if (subtitleEl) {
+      subtitleEl.textContent = address ? (address + ' · ' + formattedCoords) : formattedCoords;
+    }
+
+    // 1. Google Maps: embedded exact coordinates
+    const gmapsBtn = document.getElementById('map-provider-google');
+    if (gmapsBtn) {
+      gmapsBtn.href = 'https://www.google.com/maps/search/?api=1&query=' + lat + ',' + lng;
+    }
+
+    // 2. Bing Maps: centers view (cp), sets street zoom (lvl=16), drops named pushpin (sp=point.lat_lng_Name)
+    const bingBtn = document.getElementById('map-provider-bing');
+    if (bingBtn) {
+      const pinLabel = placeName || address || 'Location';
+      bingBtn.href = 'https://www.bing.com/maps?cp=' + lat + '~' + lng + '&lvl=16&sp=point.' + lat + '_' + lng + '_' + encodeURIComponent(pinLabel);
+    }
+
+    // 3. OpenStreetMap: sets marker pin (mlat/mlon) and centers map (#map=16/lat/lng)
+    const osmBtn = document.getElementById('map-provider-osm');
+    if (osmBtn) {
+      osmBtn.href = 'https://www.openstreetmap.org/?mlat=' + lat + '&mlon=' + lng + '#map=16/' + lat + '/' + lng;
+    }
+
+    // Copy Coordinates button
+    if (copyBtn && copyTextEl) {
+      copyBtn.classList.remove('copied');
+      copyTextEl.textContent = 'Copy Coordinates (' + lat.toFixed(4) + ', ' + lng.toFixed(4) + ')';
+      copyBtn.onclick = (e) => {
+        e.preventDefault();
+        const rawCoords = lat + ', ' + lng;
+        navigator.clipboard.writeText(rawCoords).then(() => {
+          copyBtn.classList.add('copied');
+          copyTextEl.textContent = 'Copied to clipboard! ✓';
+          setTimeout(() => {
+            copyBtn.classList.remove('copied');
+            copyTextEl.textContent = 'Copy Coordinates (' + lat.toFixed(4) + ', ' + lng.toFixed(4) + ')';
+          }, 2000);
+        }).catch(() => {});
+      };
+    }
+
+    modal.classList.add('open');
+    setTimeout(() => {
+      gmapsBtn?.focus();
+    }, 50);
+  }
+
+  function closeMapChooser() {
+    const modal = document.getElementById('map-chooser-modal');
+    if (!modal || !modal.classList.contains('open')) return;
+    modal.classList.remove('open');
+    if (activeMapTrigger && typeof activeMapTrigger.focus === 'function') {
+      activeMapTrigger.focus();
+    }
+    activeMapTrigger = null;
+  }
+
+  const mapModal = document.getElementById('map-chooser-modal');
+  if (mapModal) {
+    document.getElementById('map-chooser-close')?.addEventListener('click', closeMapChooser);
+    mapModal.addEventListener('click', (e) => {
+      if (e.target === mapModal) closeMapChooser();
+    });
+    mapModal.querySelectorAll('.map-provider-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setTimeout(closeMapChooser, 150);
+      });
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeMapChooser();
+    }
+  });
 
   loadPrefs().then(() => loadChats());
 })();

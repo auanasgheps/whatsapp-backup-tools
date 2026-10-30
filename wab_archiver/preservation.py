@@ -516,7 +516,7 @@ def diff_and_extract_android(
                 WHEN mq.message_type = 2 THEN 'audio'
                 WHEN mq.message_type = 3 THEN 'video'
                 WHEN mq.message_type IN (4, 14) THEN 'vcard'
-                WHEN mq.message_type IN (5, 18) THEN 'location'
+                WHEN mq.message_type IN (5, 16, 18) THEN 'location'
                 WHEN mq.message_type = 9 THEN 'document'
                 WHEN mq.message_type = 13 THEN 'gif'
                 WHEN mq.message_type = 20 THEN 'sticker'
@@ -530,7 +530,7 @@ def diff_and_extract_android(
                 WHEN mq.message_type = 2 THEN '🎵 Audio'
                 WHEN mq.message_type = 3 THEN '🎥 Video'
                 WHEN mq.message_type IN (4, 14) THEN '👤 Contact card'
-                WHEN mq.message_type IN (5, 18) THEN '📍 Location'
+                WHEN mq.message_type IN (5, 16, 18) THEN '📍 Location'
                 WHEN mq.message_type = 20 THEN 'Sticker'
                 WHEN mq.message_type = 66 THEN '📊 Poll'
                 ELSE ''
@@ -680,7 +680,7 @@ def diff_and_extract_android(
         media_type_expr = f"""CASE
             WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IN (4, 14) THEN 'vcard'
-            WHEN m.message_type IN (5, 18) THEN 'location'
+            WHEN m.message_type IN (5, 16, 18) THEN 'location'
             WHEN {poll_pred} THEN 'poll'
             WHEN m.message_type = 20 THEN 'sticker'
             WHEN m.message_type = 1 THEN 'image'
@@ -1794,7 +1794,57 @@ def diff_and_extract_ios(
         lng_col = "mi.ZLONGITUDE" if "ZLONGITUDE" in mi_cols else "NULL"
         title_col = "mi.ZTITLE" if "ZTITLE" in mi_cols else "NULL"
         url_col = "mi.ZMEDIAURL" if "ZMEDIAURL" in mi_cols else "NULL"
-        vcard_data_col = "mi.ZVCARDSTRING" if "ZVCARDSTRING" in mi_cols else "NULL"
+        has_vcard_name = "ZVCARDNAME" in mi_cols
+        has_vcard_string = "ZVCARDSTRING" in mi_cols
+        vcard_data_col = "mi.ZVCARDSTRING" if has_vcard_string else "NULL"
+
+        if has_vcard_name and "ZTITLE" in mi_cols:
+            loc_name_col = """COALESCE(
+                CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL THEN
+                    CASE WHEN INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                         THEN SUBSTR(mi.ZVCARDNAME, 1, INSTR(mi.ZVCARDNAME, CHAR(10)) - 1)
+                         ELSE mi.ZVCARDNAME END
+                END,
+                CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZTITLE, '') END
+            )"""
+            loc_addr_col = """COALESCE(
+                CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL AND INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                     THEN NULLIF(SUBSTR(mi.ZVCARDNAME, INSTR(mi.ZVCARDNAME, CHAR(10)) + 1), '')
+                END,
+                CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZTITLE IS NOT NULL AND m.ZTEXT != mi.ZTITLE THEN NULLIF(m.ZTEXT, '') END
+            )"""
+        elif has_vcard_name:
+            loc_name_col = """CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL THEN
+                CASE WHEN INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                     THEN SUBSTR(mi.ZVCARDNAME, 1, INSTR(mi.ZVCARDNAME, CHAR(10)) - 1)
+                     ELSE mi.ZVCARDNAME END
+            END"""
+            loc_addr_col = """CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDNAME IS NOT NULL AND INSTR(mi.ZVCARDNAME, CHAR(10)) > 0
+                THEN NULLIF(SUBSTR(mi.ZVCARDNAME, INSTR(mi.ZVCARDNAME, CHAR(10)) + 1), '')
+            END"""
+        elif "ZTITLE" in mi_cols:
+            loc_name_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZTITLE, '') END"
+            loc_addr_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZTITLE IS NOT NULL AND m.ZTEXT != mi.ZTITLE THEN NULLIF(m.ZTEXT, '') END"
+        else:
+            loc_name_col = "NULL"
+            loc_addr_col = "NULL"
+
+        ios_vcs_dur = "CAST(ROUND(CAST(SUBSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), INSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), ';') + 1) AS REAL)) AS INTEGER)"
+        if "ZMOVIEDURATION" in mi_cols and has_vcard_string:
+            loc_dur_col = f"""CASE
+                WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0 THEN mi.ZMOVIEDURATION
+                WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0 THEN {ios_vcs_dur}
+            END"""
+            loc_type_expr = "WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND ((mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0) OR (mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0))) THEN 'live_location'"
+        elif "ZMOVIEDURATION" in mi_cols:
+            loc_dur_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN mi.ZMOVIEDURATION END"
+            loc_type_expr = "WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0) THEN 'live_location'"
+        elif has_vcard_string:
+            loc_dur_col = f"CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0 THEN {ios_vcs_dur} END"
+            loc_type_expr = "WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0) THEN 'live_location'"
+        else:
+            loc_dur_col = "NULL"
+            loc_type_expr = "WHEN m.ZMESSAGETYPE = 16 THEN 'live_location'"
         media_path_col = (
             "COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)"
             if "ZMEDIALOCALPATH" in mi_cols
@@ -1888,7 +1938,7 @@ def diff_and_extract_ios(
                     WHEN qm.ZMESSAGETYPE = 2 THEN 'audio'
                     WHEN qm.ZMESSAGETYPE IN (3, 39, 54) THEN 'video'
                     WHEN qm.ZMESSAGETYPE IN (4, 14) THEN 'vcard'
-                    WHEN qm.ZMESSAGETYPE = 5 THEN 'location'
+                    WHEN qm.ZMESSAGETYPE IN (5, 16) THEN 'location'
                     WHEN qm.ZMESSAGETYPE = 8 THEN 'document'
                     WHEN qm.ZMESSAGETYPE = 11 THEN 'gif'
                     WHEN qm.ZMESSAGETYPE = 15 THEN 'sticker'
@@ -1902,7 +1952,7 @@ def diff_and_extract_ios(
                     WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
                     WHEN qm.ZMESSAGETYPE IN (3, 39, 54) THEN '🎥 Video'
                     WHEN qm.ZMESSAGETYPE IN (4, 14) THEN '👤 Contact card'
-                    WHEN qm.ZMESSAGETYPE = 5 THEN '📍 Location'
+                    WHEN qm.ZMESSAGETYPE IN (5, 16) THEN '📍 Location'
                     WHEN qm.ZMESSAGETYPE = 15 THEN 'Sticker'
                     WHEN qm.ZMESSAGETYPE = 46 THEN '📊 Poll'
                     ELSE ''
@@ -1940,6 +1990,7 @@ def diff_and_extract_ios(
         media_type_expr = f"""CASE
             WHEN m.ZMESSAGETYPE IN (6, 10) THEN 'service'
             WHEN m.ZMESSAGETYPE IN (4, 14) THEN 'vcard'
+            {loc_type_expr}
             WHEN m.ZMESSAGETYPE = 5 THEN 'location'
             WHEN m.ZMESSAGETYPE = 7 THEN 'link'
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
@@ -2029,10 +2080,10 @@ def diff_and_extract_ios(
                 {is_view_once_expr} AS is_view_once,
                 {lat_col} AS latitude,
                 {lng_col} AS longitude,
-                {title_col} AS location_name,
-                NULL AS location_address,
+                {loc_name_col} AS location_name,
+                {loc_addr_col} AS location_address,
                 {url_col} AS location_url,
-                NULL AS live_location_share_duration,
+                {loc_dur_col} AS live_location_share_duration,
                 {quoted_text_col} AS quoted_text,
                 {quoted_sender_col} AS quoted_sender,
                 {quoted_ts_col} AS quoted_ts,
@@ -2125,10 +2176,10 @@ def diff_and_extract_ios(
                 {is_view_once_expr} AS is_view_once,
                 {lat_col} AS latitude,
                 {lng_col} AS longitude,
-                {title_col} AS location_name,
-                NULL AS location_address,
+                {loc_name_col} AS location_name,
+                {loc_addr_col} AS location_address,
                 {url_col} AS location_url,
-                NULL AS live_location_share_duration,
+                {loc_dur_col} AS live_location_share_duration,
                 {quoted_text_col} AS quoted_text,
                 {quoted_sender_col} AS quoted_sender,
                 {quoted_ts_col} AS quoted_ts,
@@ -3070,7 +3121,7 @@ def preserve_incremental_deletions(
     media_type_expr = f"""CASE
         WHEN m.message_type = 7 THEN 'service'
         WHEN m.message_type IN (4, 14) THEN 'vcard'
-        WHEN m.message_type IN (5, 18) THEN 'location'
+        WHEN m.message_type IN (5, 16, 18) THEN 'location'
         WHEN {poll_pred} THEN 'poll'
         WHEN m.message_type = 20 THEN 'sticker'
         WHEN m.message_type = 1 THEN 'image'
