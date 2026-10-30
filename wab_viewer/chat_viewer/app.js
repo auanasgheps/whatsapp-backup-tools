@@ -1393,7 +1393,6 @@
   function renderGif(msg) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-media msg-gif';
-    wrap.setAttribute('role', 'button');
     wrap.setAttribute('tabindex', '0');
     wrap.setAttribute('aria-label', 'Animated GIF: click to play');
 
