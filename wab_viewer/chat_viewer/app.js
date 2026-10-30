@@ -469,6 +469,11 @@
     document.getElementById('search-results').innerHTML = '';
 
     // reset in-chat search and date picker when switching chats
+    if (_jumpAbortController) {
+      _jumpAbortController.abort();
+    }
+    hideJumpHud();
+    scroll.classList.remove('is-navigating');
     document.getElementById('chat-search-input').value = '';
     document.getElementById('chat-search-clear').style.display = 'none';
     clearChatSearch();
@@ -2461,6 +2466,9 @@
     btn.textContent = '→ in chat';
     btn.addEventListener('click', e => {
       e.stopPropagation();
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '⏳ in chat';
       closeMediaGallery();
       jumpToMessage(msg);
     });
@@ -3317,6 +3325,47 @@
     recenter();
   }
 
+  let _jumpHudTimeout = null;
+  let _jumpAbortController = null;
+
+  function showJumpHud(text) {
+    const hud = document.getElementById('chat-jump-hud');
+    const label = document.getElementById('chat-jump-hud-text');
+    if (!hud || !label) return;
+    if (_jumpHudTimeout) {
+      clearTimeout(_jumpHudTimeout);
+      _jumpHudTimeout = null;
+    }
+    hud.classList.remove('error');
+    label.textContent = text;
+    hud.classList.add('visible');
+  }
+
+  function hideJumpHud() {
+    const hud = document.getElementById('chat-jump-hud');
+    if (!hud) return;
+    if (_jumpHudTimeout) {
+      clearTimeout(_jumpHudTimeout);
+      _jumpHudTimeout = null;
+    }
+    hud.classList.remove('visible', 'error');
+  }
+
+  function showJumpHudError(errorText) {
+    const hud = document.getElementById('chat-jump-hud');
+    const label = document.getElementById('chat-jump-hud-text');
+    if (!hud || !label) return;
+    if (_jumpHudTimeout) {
+      clearTimeout(_jumpHudTimeout);
+    }
+    hud.classList.add('error', 'visible');
+    label.textContent = errorText;
+    _jumpHudTimeout = setTimeout(() => {
+      hud.classList.remove('visible', 'error');
+      _jumpHudTimeout = null;
+    }, 3000);
+  }
+
   // exactMsgId: when the caller needs a specific message in the DOM (e.g. jumpToMessage,
   // chat search), pass its msg_id to bypass the nearest-ts early-exit.
   // isExactTarget: true when jumping to a specific message or quote (tightens threshold to 1500ms
@@ -3335,9 +3384,20 @@
       }
     }
 
+    if (_jumpAbortController) {
+      _jumpAbortController.abort();
+    }
+    _jumpAbortController = new AbortController();
+    const abortSignal = _jumpAbortController.signal;
+
     const gen = ++_loadGen;
     loading = true;
     const scroll = document.getElementById('message-scroll');
+    if (scroll) scroll.classList.add('is-navigating');
+
+    const dateLabel = ts ? fmtDateSep(ts) : '';
+    const hudText = dateLabel ? `Jumping to message · ${dateLabel}` : 'Jumping to message…';
+    showJumpHud(hudText);
 
     try {
       const params = new URLSearchParams({
@@ -3346,10 +3406,19 @@
         ts,
         limit: 50
       });
-      const res = await fetch('/api/messages/at?' + params);
+      const res = await fetch('/api/messages/at?' + params, { signal: abortSignal });
+      if (!res.ok) {
+        if (gen === _loadGen) {
+          showJumpHudError(`Failed to load message (${res.status})`);
+        }
+        throw new Error(`Server returned HTTP ${res.status} when loading messages at timestamp ${ts}`);
+      }
       const msgs = await res.json();
       if (gen !== _loadGen) return null;
-      if (!msgs.length) return null;
+      if (!msgs.length) {
+        showJumpHudError('Message not found');
+        return null;
+      }
 
       msgList = [];
       noMoreOlder = false;
@@ -3367,8 +3436,18 @@
         if (isExactTarget) flashHighlightRow(targetEl);
       }
       if (gen !== _loadGen) return null;
+      hideJumpHud();
       return targetEl || null;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        return null;
+      }
+      if (gen === _loadGen) {
+        showJumpHudError('Unable to load message');
+      }
+      throw err;
     } finally {
+      if (scroll) scroll.classList.remove('is-navigating');
       if (gen === _loadGen) loading = false;
     }
   }
