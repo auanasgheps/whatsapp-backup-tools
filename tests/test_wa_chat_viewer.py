@@ -54,14 +54,10 @@ class TestMediaTypeFromPath:
     def test_gif(self):
         assert viewer._media_type_from_path("foo/anim.gif") == "gif"
         assert (
-            viewer._media_type_from_path(
-                "Media/WhatsApp Animated Gifs/VID-20230101-WA0001.mp4"
-            )
+            viewer._media_type_from_path("Media/WhatsApp Animated Gifs/VID-20230101-WA0001.mp4")
             == "gif"
         )
-        assert (
-            viewer._media_type_from_path("WhatsApp Animated Gifs/GIF-123.mp4") == "gif"
-        )
+        assert viewer._media_type_from_path("WhatsApp Animated Gifs/GIF-123.mp4") == "gif"
         assert viewer._media_type_from_path("foo/GIF-123.mp4") == "gif"
 
     def test_sticker(self):

@@ -4901,7 +4901,9 @@ def create_app(output_root: Path, rescan: bool = False):
                 THEN NULLIF(SUBSTR(mi.ZVCARDNAME, INSTR(mi.ZVCARDNAME, CHAR(10)) + 1), '')
             END"""
         elif has_ios_title:
-            ios_location_name_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZTITLE, '') END"
+            ios_location_name_col = (
+                "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN NULLIF(mi.ZTITLE, '') END"
+            )
             ios_location_address_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZTITLE IS NOT NULL AND m.ZTEXT != mi.ZTITLE THEN NULLIF(m.ZTEXT, '') END"
         else:
             ios_location_name_col = "NULL"
@@ -4926,7 +4928,9 @@ def create_app(output_root: Path, rescan: bool = False):
             END"""
             ios_live_type_cond = "WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND ((mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0) OR (mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0))) THEN 'live_location'"
         elif has_ios_duration:
-            ios_live_location_dur_col = "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN mi.ZMOVIEDURATION END"
+            ios_live_location_dur_col = (
+                "CASE WHEN m.ZMESSAGETYPE IN (5, 16) THEN mi.ZMOVIEDURATION END"
+            )
             ios_live_type_cond = "WHEN m.ZMESSAGETYPE = 16 OR (m.ZMESSAGETYPE = 5 AND mi.ZMOVIEDURATION IS NOT NULL AND mi.ZMOVIEDURATION > 0) THEN 'live_location'"
         elif has_ios_vcard_string:
             ios_live_location_dur_col = f"CASE WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0 THEN {ios_vcs_dur_expr} END"
@@ -5343,9 +5347,7 @@ def create_app(output_root: Path, rescan: bool = False):
         else ""
     )
     orig_gif_arm = (
-        " OR (m_orig.message_type = 13)"
-        if (has_android_key_id and has_mq_key_id)
-        else ""
+        " OR (m_orig.message_type = 13)" if (has_android_key_id and has_mq_key_id) else ""
     )
     if has_mq_msg_type:
         quoted_text_expr = f"""COALESCE(
@@ -5401,9 +5403,7 @@ def create_app(output_root: Path, rescan: bool = False):
     android_location_name_col = "ml.place_name" if has_ml_name else "NULL"
     android_location_address_col = "ml.place_address" if has_ml_address else "NULL"
     android_location_url_col = "ml.url" if has_ml_url else "NULL"
-    android_live_location_dur_col = (
-        "ml.live_location_share_duration" if has_ml_duration else "NULL"
-    )
+    android_live_location_dur_col = "ml.live_location_share_duration" if has_ml_duration else "NULL"
     android_live_type_cond = (
         "WHEN m.message_type = 16 OR (m.message_type = 5 AND ml.live_location_share_duration IS NOT NULL AND ml.live_location_share_duration > 0) THEN 'live_location'"
         if has_ml_duration
@@ -6238,11 +6238,21 @@ def create_app(output_root: Path, rescan: bool = False):
                     ):
                         d["last_msg_type"] = "document"
                     elif (source_type == "android" and raw_type == 5) or (
-                        source_type == "ios" and raw_type == 5 and not (r.get("last_msg_duration") and r["last_msg_duration"] > 0)
+                        source_type == "ios"
+                        and raw_type == 5
+                        and not (r.get("last_msg_duration") and r["last_msg_duration"] > 0)
                     ):
                         d["last_msg_type"] = "location"
                     elif (source_type == "android" and raw_type == 16) or (
-                        source_type == "ios" and (raw_type == 16 or (raw_type == 5 and r.get("last_msg_duration") and r["last_msg_duration"] > 0))
+                        source_type == "ios"
+                        and (
+                            raw_type == 16
+                            or (
+                                raw_type == 5
+                                and r.get("last_msg_duration")
+                                and r["last_msg_duration"] > 0
+                            )
+                        )
                     ):
                         d["last_msg_type"] = "live_location"
                     elif (source_type == "android" and raw_type == 13) or (
@@ -6755,11 +6765,21 @@ def create_app(output_root: Path, rescan: bool = False):
                 ext_conds = []
                 for mt in media_types:
                     if mt == "video":
-                        vid_exts = " OR ".join(f"LOWER(ac.archive_path) LIKE '{ext}'" for ext in _EXT_PATTERNS["video"])
-                        not_gif = f"NOT ({android_gif_cond})" if source_type == "android" else "m.ZMESSAGETYPE != 11"
+                        vid_exts = " OR ".join(
+                            f"LOWER(ac.archive_path) LIKE '{ext}'" for ext in _EXT_PATTERNS["video"]
+                        )
+                        not_gif = (
+                            f"NOT ({android_gif_cond})"
+                            if source_type == "android"
+                            else "m.ZMESSAGETYPE != 11"
+                        )
                         ext_conds.append(f"(({vid_exts}) AND {not_gif})")
                     elif mt == "gif":
-                        is_gif = android_gif_cond if source_type == "android" else "(LOWER(ac.archive_path) LIKE '%.gif' OR m.ZMESSAGETYPE = 11)"
+                        is_gif = (
+                            android_gif_cond
+                            if source_type == "android"
+                            else "(LOWER(ac.archive_path) LIKE '%.gif' OR m.ZMESSAGETYPE = 11)"
+                        )
                         ext_conds.append(is_gif)
                     else:
                         for ext in _EXT_PATTERNS.get(mt, []):
