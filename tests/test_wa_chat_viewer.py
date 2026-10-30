@@ -1164,6 +1164,60 @@ class TestApiMedia:
         assert data["by_type"]["link"]["missing"] == 0  # links have no archive concept
         assert data["by_type"]["image"]["count"] == 1
 
+    def test_ios_media_count_includes_links_without_missing(self, tmp_path):
+        """/api/media/count on iOS includes ZMESSAGETYPE=7 links without marking them missing or double-counting."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            -- 1. Archived photo (ZMESSAGETYPE=1)
+            INSERT INTO ZWAMEDIAITEM VALUES (20, 'Media/photo.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 10, 0, 1000.0, 'MSG_1', 1, 20, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+
+            -- 2. Link with preview (ZMESSAGETYPE=7)
+            INSERT INTO ZWAMEDIAITEM VALUES (21, NULL, 'Example Title');
+            INSERT INTO ZWAMESSAGE VALUES (101, 10, 0, 1001.0, 'MSG_2', 7, 21, NULL, NULL, 'User1', 'https://example.com/preview', '15550001111@s.whatsapp.net');
+
+            -- 3. Plain text link (ZMESSAGETYPE=0)
+            INSERT INTO ZWAMESSAGE VALUES (102, 10, 0, 1002.0, 'MSG_3', 0, NULL, NULL, NULL, 'User1', 'Check out https://another.com', '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) "
+            "VALUES ('Message/Media/photo.jpg', 'photos/photo.jpg')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/media/count?chat_id=10&chat_type=group")
+            data = resp.get_json()
+
+        assert data["total"] == 3  # 1 image + 2 links
+        assert data["archived"] == 1  # only image is archived
+        assert data["by_type"]["image"]["count"] == 1
+        assert data["by_type"]["image"]["missing"] == 0
+        assert data["by_type"]["link"]["count"] == 2
+        assert data["by_type"]["link"]["missing"] == 0  # links cannot be missing
+
     def test_media_links_endpoint(self, tmp_path):
         """/api/media/links returns link rows; /api/media never returns them."""
         wa_path = tmp_path / "msgstore.db"
