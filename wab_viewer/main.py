@@ -6033,7 +6033,21 @@ def create_app(output_root: Path, rescan: bool = False):
         after = request.args.get("after")
         limit = min(int(request.args.get("limit", 50)), 200)
 
-        if not before and not after and source_type == "android":
+        b_val = None
+        if before:
+            try:
+                b_val = int(float(before))
+            except (ValueError, TypeError):
+                b_val = None
+
+        a_val = None
+        if after:
+            try:
+                a_val = int(float(after))
+            except (ValueError, TypeError):
+                a_val = None
+
+        if b_val is None and a_val is None and source_type == "android":
             rows = (
                 get_archive()
                 .execute(
@@ -6226,14 +6240,12 @@ def create_app(output_root: Path, rescan: bool = False):
         if conn is None:
             pres = get_preserved()
             if pres is not None:
-                b_val = int(before) if before else None
-                a_val = int(after) if after else None
                 pres_rows = _query_preserved_messages(pres, chat_id, chat_type, b_val, a_val, limit)
                 _resolve_quoted_msg_ids(pres_rows, source_type, None, pres)
                 return jsonify(pres_rows)
             return jsonify([])
 
-        if not before and not after:
+        if b_val is None and a_val is None:
             _maybe_start_indexing(
                 chat_id,
                 chat_type,
@@ -6257,12 +6269,12 @@ def create_app(output_root: Path, rescan: bool = False):
             ts_col = _IOS_TS
             sort_phys_col = "COALESCE(m.ZSORT, m.Z_PK)" if has_ios_sort else "m.Z_PK"
 
-        if before:
+        if b_val is not None:
             sql = f"{select} WHERE {chat_pred} AND {ts_col} < ? {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?"
-            rows = conn.execute(sql, chat_params + [int(before), limit]).fetchall()
-        elif after:
+            rows = conn.execute(sql, chat_params + [b_val, limit]).fetchall()
+        elif a_val is not None:
             sql = f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC, {sort_phys_col} ASC LIMIT ?"
-            rows = conn.execute(sql, chat_params + [int(after), limit]).fetchall()
+            rows = conn.execute(sql, chat_params + [a_val, limit]).fetchall()
         else:
             sql = f"{select} WHERE {chat_pred} {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?"
             rows = conn.execute(sql, chat_params + [limit]).fetchall()
@@ -6338,15 +6350,13 @@ def create_app(output_root: Path, rescan: bool = False):
         _hydrate_link_preview_rows(rows, source_type)
         pres = get_preserved()
         if pres is not None:
-            b_val = int(before) if before else None
-            a_val = int(after) if after else None
             pres_rows = _query_preserved_messages(pres, chat_id, chat_type, b_val, a_val, limit)
             if pres_rows:
-                descending = after is None
+                descending = a_val is None
                 rows = _merge_messages(rows, pres_rows, descending, limit)
         _resolve_quoted_msg_ids(rows, source_type, conn, pres)
 
-        if not before and not after:
+        if b_val is None and a_val is None:
             threading.Thread(
                 target=_backfill_recent_messages,
                 args=(archive_db_path, [dict(r) for r in rows]),

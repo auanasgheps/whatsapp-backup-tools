@@ -446,6 +446,22 @@ class TestFlaskRoutes:
         assert resp.status_code == 200
         assert isinstance(resp.get_json(), list)
 
+    def test_api_messages_cursor_before_decimal_string(self, app_and_tmp):
+        client, tmp = app_and_tmp
+        resp = client.get(
+            "/api/messages?chat_id=123456789&chat_type=contact&before=1800000000000.5&limit=10"
+        )
+        assert resp.status_code == 200
+        assert isinstance(resp.get_json(), list)
+
+    def test_api_messages_cursor_before_invalid_string(self, app_and_tmp):
+        client, tmp = app_and_tmp
+        resp = client.get(
+            "/api/messages?chat_id=123456789&chat_type=contact&before=undefined&limit=10"
+        )
+        assert resp.status_code == 200
+        assert isinstance(resp.get_json(), list)
+
     def test_api_messages_at(self, app_and_tmp):
         client, tmp = app_and_tmp
         resp = client.get("/api/messages/at?chat_id=123456789&chat_type=contact&ts=1700000000000")
