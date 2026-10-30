@@ -585,6 +585,15 @@
       cursor: pointer;
       user-select: none;
       -webkit-user-select: none;
+      padding: 0;
+      border: none;
+      background: transparent;
+      box-shadow: none;
+    }
+    .msg-media.msg-gif:hover,
+    .msg-media.msg-gif:focus {
+      background: transparent;
+      box-shadow: none;
     }
     .msg-media.msg-gif video {
       display: block;
