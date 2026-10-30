@@ -3434,6 +3434,7 @@ _IOS_SELECT = f"""
         END                                                           AS media_type,
         COALESCE(
             CASE WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(m.ZTEXT, '') END,
+            CASE WHEN m.ZMESSAGETYPE = 11 THEN '' END,
             mi.ZMEDIALOCALPATH,
             ''
         )                                                             AS media_name,
@@ -3454,6 +3455,7 @@ _IOS_SELECT = f"""
                 WHEN qm.ZMESSAGETYPE = 1 THEN '📷 Photo'
                 WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
                 WHEN qm.ZMESSAGETYPE = 3 THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE = 11 THEN '🎞️ GIF'
                 WHEN qm.ZMESSAGETYPE = 5 THEN '📍 Location'
                 WHEN qm.ZMESSAGETYPE = 16 THEN '📍 Live location'
                 WHEN qm.ZMESSAGETYPE = 15 THEN 'Sticker'
@@ -5018,6 +5020,7 @@ def create_app(output_root: Path, rescan: bool = False):
         COALESCE(
             CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END,
             CASE WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(m.ZTEXT, '') END,
+            CASE WHEN m.ZMESSAGETYPE = 11 THEN '' END,
             mi.ZMEDIALOCALPATH,
             ''
         )                                                             AS media_name,
@@ -5039,6 +5042,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHEN qm.ZMESSAGETYPE = 1 THEN '📷 Photo'
                 WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
                 WHEN qm.ZMESSAGETYPE = 3 THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE = 11 THEN '🎞️ GIF'
                 WHEN qm.ZMESSAGETYPE = 5 THEN '📍 Location'
                 WHEN qm.ZMESSAGETYPE = 16 THEN '📍 Live location'
                 WHEN qm.ZMESSAGETYPE = 15 THEN 'Sticker'
@@ -5332,6 +5336,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHEN mq.message_type IN (1, 42) THEN '📷 Photo'
                 WHEN mq.message_type IN (2, 82) THEN '🎵 Audio'
                 WHEN mq.message_type IN (3, 43) THEN '🎥 Video'
+                WHEN mq.message_type = 13 THEN '🎞️ GIF'
                 WHEN mq.message_type = 5 THEN '📍 Location'
                 WHEN mq.message_type = 16 THEN '📍 Live location'
                 WHEN mq.message_type = 20 THEN 'Sticker'
@@ -5421,6 +5426,7 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.message_type = 7 THEN 'service'
             WHEN m.message_type IN (4, 14) THEN 'vcard'
             WHEN m.message_type = 20 THEN 'sticker'
+            WHEN m.message_type = 13 THEN 'gif'
             WHEN m.message_type = 42 THEN 'image'
             WHEN m.message_type = 43 THEN 'video'
             WHEN m.message_type = 82 THEN 'audio'
@@ -5434,7 +5440,7 @@ def create_app(output_root: Path, rescan: bool = False):
                      THEN 'link' ELSE 'text' END
             WHEN mm.file_path IS NULL AND m.message_type = 1 THEN 'image'
             WHEN mm.file_path IS NULL AND m.message_type = 2 THEN 'audio'
-            WHEN mm.file_path IS NULL AND m.message_type IN (3, 13, 28) THEN 'video'
+            WHEN mm.file_path IS NULL AND m.message_type IN (3, 28) THEN 'video'
             WHEN mm.file_path IS NULL AND m.message_type = 9 THEN 'document'
             ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE(mm.file_path, mm.media_name)")}
         END                                                          AS media_type,
@@ -6707,20 +6713,28 @@ def create_app(output_root: Path, rescan: bool = False):
             if not has_all and not has_doc and media_types:
                 ext_conds = []
                 for mt in media_types:
-                    for ext in _EXT_PATTERNS.get(mt, []):
-                        ext_conds.append(f"LOWER(ac.archive_path) LIKE '{ext}'")
-                    if mt == "vcard":
-                        if source_type == "android":
-                            ext_conds.append("m.message_type IN (4, 14)")
-                        else:
-                            ext_conds.append("m.ZMESSAGETYPE = 4")
-                    if mt == "sticker":
-                        if source_type == "android":
-                            ext_conds.append(
-                                "(m.message_type = 20 OR mm.file_path LIKE '%sticker%')"
-                            )
-                        else:
-                            ext_conds.append("m.ZMESSAGETYPE = 15")
+                    if mt == "video":
+                        vid_exts = " OR ".join(f"LOWER(ac.archive_path) LIKE '{ext}'" for ext in _EXT_PATTERNS["video"])
+                        not_gif = "m.message_type != 13" if source_type == "android" else "m.ZMESSAGETYPE != 11"
+                        ext_conds.append(f"(({vid_exts}) AND {not_gif})")
+                    elif mt == "gif":
+                        is_gif = "m.message_type = 13" if source_type == "android" else "m.ZMESSAGETYPE = 11"
+                        ext_conds.append(f"(LOWER(ac.archive_path) LIKE '%.gif' OR {is_gif})")
+                    else:
+                        for ext in _EXT_PATTERNS.get(mt, []):
+                            ext_conds.append(f"LOWER(ac.archive_path) LIKE '{ext}'")
+                        if mt == "vcard":
+                            if source_type == "android":
+                                ext_conds.append("m.message_type IN (4, 14)")
+                            else:
+                                ext_conds.append("m.ZMESSAGETYPE = 4")
+                        if mt == "sticker":
+                            if source_type == "android":
+                                ext_conds.append(
+                                    "(m.message_type = 20 OR mm.file_path LIKE '%sticker%')"
+                                )
+                            else:
+                                ext_conds.append("m.ZMESSAGETYPE = 15")
                 if ext_conds:
                     prune_sql = " OR ".join(ext_conds)
                     cand_clauses.append(
