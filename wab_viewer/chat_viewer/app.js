@@ -568,12 +568,15 @@
       }
 
       suppressScroll = true;
-      const anchor = captureAnchor(direction);
-      mergePage(msgs);
-      pruneList(direction);
-      renderWindow();
-      restoreAnchor(anchor);
-      suppressScroll = false;
+      try {
+        const anchor = captureAnchor(direction);
+        mergePage(msgs);
+        pruneList(direction);
+        renderWindow();
+        restoreAnchor(anchor);
+      } finally {
+        suppressScroll = false;
+      }
 
     } catch (err) {
       removeSpinner(direction === 'older' ? 'top' : 'bottom');
@@ -872,6 +875,12 @@
         loadMessages('newer');
       }
     });
+    scroll.addEventListener('wheel', function (e) {
+      if (e.deltaY < 0 && scroll.scrollTop < 100) {
+        if (loading || noMoreOlder) return;
+        loadMessages('older');
+      }
+    }, { passive: true });
     btn.addEventListener('click', async () => {
       isUserAtBottom = true;
       if (noMoreNewer) {
