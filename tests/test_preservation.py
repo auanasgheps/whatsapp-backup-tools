@@ -1698,6 +1698,65 @@ def test_diff_and_extract_ios_fresh_archive_db(tmp_path: Path) -> None:
     assert extracted[0]["text_body"] == "iOS Deleted"
 
 
+def test_diff_and_extract_ios_video_caption_and_audio(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_ios_media.db"
+    new_db = tmp_path / "new_ios_media.db"
+    arch_db = tmp_path / "arch_ios_media.db"
+    sqlite3.connect(arch_db).close()
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT, ZMEDIALOCALPATH TEXT, ZVCARDSTRING TEXT
+            );
+            INSERT INTO ZWAMEDIAITEM VALUES
+                (1, 'Video Caption', 'Media/v.mp4', 'video/mp4'),
+                (2, NULL, 'Media/a.opus', 'audio/ogg; codecs=opus');
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+            );
+            INSERT INTO ZWAMESSAGE VALUES
+                (1, 1, 'stanza_vid', 0, 'partner@s.whatsapp.net', 1000.0, 2, NULL, 'Partner', 1, NULL),
+                (2, 1, 'stanza_aud', 0, 'partner@s.whatsapp.net', 1010.0, 3, NULL, 'Partner', 2, NULL);
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT, ZMEDIALOCALPATH TEXT, ZVCARDSTRING TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
+                ZISFROMME INTEGER, ZFROMJID TEXT, ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER
+            );
+        """)
+
+    extracted = preservation.diff_and_extract_ios(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    assert len(extracted) == 2
+    vid_rec = next(r for r in extracted if r["stanza_id"] == "stanza_vid")
+    aud_rec = next(r for r in extracted if r["stanza_id"] == "stanza_aud")
+
+    assert vid_rec["media_type"] == "video"
+    assert vid_rec["text_body"] == "Video Caption"
+
+    assert aud_rec["media_type"] == "audio"
+
+
 def test_preserve_deleted_messages_orchestrator_fresh_output_dir(tmp_path: Path) -> None:
     output_root = tmp_path / "fresh_run_out"
     output_root.mkdir()

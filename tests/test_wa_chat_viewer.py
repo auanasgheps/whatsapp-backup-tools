@@ -10664,6 +10664,119 @@ class TestRichLinkPreviews:
             assert doc_msg["media_type"] == "document"
             assert doc_msg["link_url"] is None
 
+    def test_ios_video_audio_classification_and_captions(self, tmp_path):
+        """ZMESSAGETYPE=2 is Video with caption in ZTITLE, ZMESSAGETYPE=3 is Audio, ZMESSAGETYPE=54 is Video note."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMETADATA BLOB,
+                ZMEDIAURL TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCREATIONDATE REAL,
+                ZCREATORJID TEXT,
+                ZPICTUREID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO, ZCONTACTJID, ZPARTNERNAME)
+            VALUES (1, NULL, '15559876543@s.whatsapp.net', 'Alice');
+
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA, ZMEDIAURL)
+            VALUES
+                (1, 'Media/video.mp4', 'Goal celebration!', NULL, 'https://mmg.whatsapp.net/mms/video.mp4'),
+                (2, 'Media/voice_note.opus', NULL, NULL, 'https://mmg.whatsapp.net/mms/voice.opus'),
+                (3, 'Media/ptv_note.mp4', NULL, NULL, 'https://mmg.whatsapp.net/mms/ptv.mp4');
+
+            -- Message 30: Video with caption (ZMESSAGETYPE=2, ZTEXT is NULL, ZTITLE is caption)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (30, 1, 0, 700000000.0, 'STANZA_VID_30', 2, 1, NULL, NULL, 'Alice', NULL, '15559876543@s.whatsapp.net');
+
+            -- Message 31: Audio voice note (ZMESSAGETYPE=3, ZTEXT is NULL, ZTITLE is NULL)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (31, 1, 0, 700000010.0, 'STANZA_AUD_31', 3, 2, NULL, NULL, 'Alice', NULL, '15559876543@s.whatsapp.net');
+
+            -- Message 32: Push-to-video circular note (ZMESSAGETYPE=54)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (32, 1, 0, 700000020.0, 'STANZA_PTV_32', 54, 3, NULL, NULL, 'Alice', NULL, '15559876543@s.whatsapp.net');
+
+            -- Message 33: Reply quoting the video (ZPARENTMESSAGE=30)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (33, 1, 1, 700000030.0, 'STANZA_REPLY_33', 0, NULL, NULL, 30, 'Me', 'Awesome video!', NULL);
+
+            -- Message 34: Reply quoting the audio (ZPARENTMESSAGE=31)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (34, 1, 1, 700000040.0, 'STANZA_REPLY_34', 0, NULL, NULL, 31, 'Me', 'Heard your message', NULL);
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 5
+            vid_msg = next(m for m in msgs if m["msg_id"] == 30)
+            aud_msg = next(m for m in msgs if m["msg_id"] == 31)
+            ptv_msg = next(m for m in msgs if m["msg_id"] == 32)
+            reply_vid = next(m for m in msgs if m["msg_id"] == 33)
+            reply_aud = next(m for m in msgs if m["msg_id"] == 34)
+
+            # Video asserts: type is video and caption is preserved
+            assert vid_msg["media_type"] == "video"
+            assert vid_msg["text_body"] == "Goal celebration!"
+
+            # Audio asserts: type is audio
+            assert aud_msg["media_type"] == "audio"
+
+            # Video note assert: type is video
+            assert ptv_msg["media_type"] == "video"
+
+            # Quoted reply previews
+            assert "🎥 Video" in reply_vid["quoted_text"]
+            assert "🎵 Audio" in reply_aud["quoted_text"]
+
     def test_ios_quoted_media_reply_no_url_leak(self, tmp_path):
         wa_path = tmp_path / "ChatStorage.sqlite"
         archive_path = tmp_path / ".wa_media_archiver.db"

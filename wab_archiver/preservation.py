@@ -1935,8 +1935,8 @@ def diff_and_extract_ios(
             if "ZMESSAGETYPE" in old_cols:
                 quoted_parent_type_col = """CASE
                     WHEN qm.ZMESSAGETYPE IN (1, 38) THEN 'image'
-                    WHEN qm.ZMESSAGETYPE = 2 THEN 'audio'
-                    WHEN qm.ZMESSAGETYPE IN (3, 39, 54) THEN 'video'
+                    WHEN qm.ZMESSAGETYPE IN (2, 39, 54) THEN 'video'
+                    WHEN qm.ZMESSAGETYPE IN (3, 53) THEN 'audio'
                     WHEN qm.ZMESSAGETYPE IN (4, 14) THEN 'vcard'
                     WHEN qm.ZMESSAGETYPE IN (5, 16) THEN 'location'
                     WHEN qm.ZMESSAGETYPE = 8 THEN 'document'
@@ -1949,8 +1949,8 @@ def diff_and_extract_ios(
                 quoted_text_col = """CASE
                     WHEN qm.ZTEXT IS NOT NULL AND qm.ZTEXT != '' THEN qm.ZTEXT
                     WHEN qm.ZMESSAGETYPE IN (1, 38) THEN '📷 Photo'
-                    WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
-                    WHEN qm.ZMESSAGETYPE IN (3, 39, 54) THEN '🎥 Video'
+                    WHEN qm.ZMESSAGETYPE IN (2, 39, 54) THEN '🎥 Video'
+                    WHEN qm.ZMESSAGETYPE IN (3, 53) THEN '🎵 Audio'
                     WHEN qm.ZMESSAGETYPE IN (4, 14) THEN '👤 Contact card'
                     WHEN qm.ZMESSAGETYPE IN (5, 16) THEN '📍 Location'
                     WHEN qm.ZMESSAGETYPE = 15 THEN 'Sticker'
@@ -1996,8 +1996,8 @@ def diff_and_extract_ios(
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
-            WHEN m.ZMESSAGETYPE = 2 THEN 'audio'
-            WHEN m.ZMESSAGETYPE IN (3, 39, 54) THEN 'video'
+            WHEN m.ZMESSAGETYPE IN (2, 39, 54) THEN 'video'
+            WHEN m.ZMESSAGETYPE IN (3, 53) THEN 'audio'
             WHEN m.ZMESSAGETYPE = 8 THEN 'document'
             WHEN m.ZMESSAGETYPE = 11 THEN 'gif'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
@@ -2063,7 +2063,7 @@ def diff_and_extract_ios(
                 COALESCE(
                     CASE
                         WHEN m.ZMESSAGETYPE = 8 THEN NULLIF({title_col}, '')
-                        WHEN m.ZMESSAGETYPE IN (1, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({title_col}, ''))
+                        WHEN m.ZMESSAGETYPE IN (1, 2, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({title_col}, ''))
                         ELSE m.ZTEXT
                     END,
                     ''
@@ -2159,7 +2159,7 @@ def diff_and_extract_ios(
                 COALESCE(
                     CASE
                         WHEN m.ZMESSAGETYPE = 8 THEN NULLIF({title_col}, '')
-                        WHEN m.ZMESSAGETYPE IN (1, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({title_col}, ''))
+                        WHEN m.ZMESSAGETYPE IN (1, 2, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({title_col}, ''))
                         ELSE m.ZTEXT
                     END,
                     ''

@@ -2417,7 +2417,7 @@ def _resolve_quoted_msg_ids(
                         r["quoted_ts"] = live_ts
                     if source_type == "android" and live_type in (1, 3, 9, 20, 26, 42, 43):
                         r["quoted_has_thumb"] = 1
-                    elif source_type == "ios" and live_type in (1, 3, 8, 11, 15, 38, 39):
+                    elif source_type == "ios" and live_type in (1, 2, 8, 11, 15, 38, 39, 54):
                         r["quoted_has_thumb"] = 1
         except sqlite3.OperationalError:
             pass
@@ -3429,8 +3429,8 @@ _IOS_SELECT = f"""
             WHEN m.ZMESSAGETYPE = 5 THEN 'location'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
-            WHEN m.ZMESSAGETYPE IN (3, 39) THEN 'video'
-            WHEN m.ZMESSAGETYPE IN (2, 53) THEN 'audio'
+            WHEN m.ZMESSAGETYPE IN (2, 39, 54) THEN 'video'
+            WHEN m.ZMESSAGETYPE IN (3, 53) THEN 'audio'
             WHEN m.ZMESSAGETYPE = 8 THEN 'document'
             WHEN m.ZMESSAGETYPE = 11 THEN 'gif'
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
@@ -3453,7 +3453,7 @@ _IOS_SELECT = f"""
                 WHEN m.ZISFROMME = 1 AND m.ZMESSAGETYPE = 14 THEN 'You deleted this message'
                 WHEN m.ZMESSAGETYPE = 14 THEN 'This message was deleted'
                 WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(mi.ZTITLE, '')
-                WHEN m.ZMESSAGETYPE IN (1, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))
+                WHEN m.ZMESSAGETYPE IN (1, 2, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))
                 ELSE m.ZTEXT
             END,
             ''
@@ -3462,9 +3462,9 @@ _IOS_SELECT = f"""
             qm.ZTEXT,
             CASE
                 WHEN qm.ZMESSAGETYPE = 46 THEN 'Poll'
-                WHEN qm.ZMESSAGETYPE = 1 THEN '📷 Photo'
-                WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
-                WHEN qm.ZMESSAGETYPE = 3 THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE IN (1, 38) THEN '📷 Photo'
+                WHEN qm.ZMESSAGETYPE IN (2, 39, 54) THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE IN (3, 53) THEN '🎵 Audio'
                 WHEN qm.ZMESSAGETYPE = 11 THEN '🎞️ GIF'
                 WHEN qm.ZMESSAGETYPE = 5 THEN '📍 Location'
                 WHEN qm.ZMESSAGETYPE = 16 THEN '📍 Live location'
@@ -5021,8 +5021,8 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.ZMESSAGETYPE = 5 THEN 'location'
             WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
             WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
-            WHEN m.ZMESSAGETYPE IN (3, 39) THEN 'video'
-            WHEN m.ZMESSAGETYPE IN (2, 53) THEN 'audio'
+            WHEN m.ZMESSAGETYPE IN (2, 39, 54) THEN 'video'
+            WHEN m.ZMESSAGETYPE IN (3, 53) THEN 'audio'
             WHEN m.ZMESSAGETYPE = 8 THEN 'document'
             WHEN m.ZMESSAGETYPE = 11 THEN 'gif'
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
@@ -5047,7 +5047,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 WHEN m.ZMESSAGETYPE = 14 THEN 'This message was deleted'
                 WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios}
                 WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(mi.ZTITLE, '')
-                WHEN m.ZMESSAGETYPE IN (1, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))
+                WHEN m.ZMESSAGETYPE IN (1, 2, 3, 11, 38, 39, 54) THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))
                 ELSE m.ZTEXT
             END,
             ''
@@ -5056,9 +5056,9 @@ def create_app(output_root: Path, rescan: bool = False):
             qm.ZTEXT,
             CASE
                 WHEN qm.ZMESSAGETYPE = 46 THEN 'Poll'
-                WHEN qm.ZMESSAGETYPE = 1 THEN '📷 Photo'
-                WHEN qm.ZMESSAGETYPE = 2 THEN '🎵 Audio'
-                WHEN qm.ZMESSAGETYPE = 3 THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE IN (1, 38) THEN '📷 Photo'
+                WHEN qm.ZMESSAGETYPE IN (2, 39, 54) THEN '🎥 Video'
+                WHEN qm.ZMESSAGETYPE IN (3, 53) THEN '🎵 Audio'
                 WHEN qm.ZMESSAGETYPE = 11 THEN '🎞️ GIF'
                 WHEN qm.ZMESSAGETYPE = 5 THEN '📍 Location'
                 WHEN qm.ZMESSAGETYPE = 16 THEN '📍 Live location'
@@ -6226,11 +6226,11 @@ def create_app(output_root: Path, rescan: bool = False):
                     d["last_msg_type"] = _media_type_from_path(path)
                 else:
                     if (source_type == "android" and raw_type == 3) or (
-                        source_type == "ios" and raw_type in (3, 54)
+                        source_type == "ios" and raw_type in (2, 54)
                     ):
                         d["last_msg_type"] = "video"
                     elif (source_type == "android" and raw_type == 2) or (
-                        source_type == "ios" and raw_type == 2
+                        source_type == "ios" and raw_type in (3, 53)
                     ):
                         d["last_msg_type"] = "audio"
                     elif (source_type == "android" and raw_type == 9) or (
