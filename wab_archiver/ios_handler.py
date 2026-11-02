@@ -208,16 +208,16 @@ def build_ios_query(
         mime_type_expr = """CASE
                  WHEN mi.ZVCARDSTRING IS NOT NULL AND mi.ZVCARDSTRING != '' THEN mi.ZVCARDSTRING
                  WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image/jpeg'
-                 WHEN m.ZMESSAGETYPE = 2 THEN 'audio/ogg'
-                 WHEN m.ZMESSAGETYPE IN (3, 39, 54) THEN 'video/mp4'
+                 WHEN m.ZMESSAGETYPE IN (3, 53) THEN 'audio/ogg'
+                 WHEN m.ZMESSAGETYPE IN (2, 39, 54) THEN 'video/mp4'
                  WHEN m.ZMESSAGETYPE = 11 THEN 'image/gif'
                  WHEN m.ZMESSAGETYPE = 15 THEN 'image/webp'
                  ELSE 'application/octet-stream' END AS mime_type"""
     elif has_msg_type:
         mime_type_expr = """CASE
                  WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image/jpeg'
-                 WHEN m.ZMESSAGETYPE = 2 THEN 'audio/ogg'
-                 WHEN m.ZMESSAGETYPE IN (3, 39, 54) THEN 'video/mp4'
+                 WHEN m.ZMESSAGETYPE IN (3, 53) THEN 'audio/ogg'
+                 WHEN m.ZMESSAGETYPE IN (2, 39, 54) THEN 'video/mp4'
                  WHEN m.ZMESSAGETYPE = 11 THEN 'image/gif'
                  WHEN m.ZMESSAGETYPE = 15 THEN 'image/webp'
                  ELSE 'application/octet-stream' END AS mime_type"""
