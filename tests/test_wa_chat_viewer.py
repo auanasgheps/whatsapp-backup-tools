@@ -2965,6 +2965,12 @@ class TestRecentMessagesRouting:
             "link_desc",
             "link_url",
             "link_preview_type",
+            "latitude",
+            "longitude",
+            "location_name",
+            "location_address",
+            "location_url",
+            "live_location_share_duration",
         }
         assert set(data[0].keys()) == expected_keys
 
