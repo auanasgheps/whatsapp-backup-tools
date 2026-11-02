@@ -149,6 +149,70 @@ def has_ios_thumb_support(cursor: sqlite3.Cursor) -> bool:
     return has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
 
 
+def has_ios_link_thumbnails_support(cursor: sqlite3.Cursor) -> bool:
+    """Return True if ChatStorage.sqlite contains ZWAMESSAGEDATAITEM or ZWAMEDIAITEM with thumbnail paths."""
+    has_mdi = has_ios_column(cursor, "ZWAMESSAGEDATAITEM", "ZTHUMBNAILPATH")
+    has_xmpp = has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
+    return has_mdi or has_xmpp
+
+
+def build_ios_link_thumbnails_query(cursor: sqlite3.Cursor, since_ms: int | None) -> str:
+    """
+    Build query to extract distinct link thumbnail candidate paths from ChatStorage.sqlite.
+    Returns:
+        message_id   — ZWAMESSAGE.Z_PK
+        timestamp_ms — Unix epoch milliseconds
+        thumb_path   — relative file path formatted as 'Message/Media/...'
+    """
+    has_mdi = has_ios_column(cursor, "ZWAMESSAGEDATAITEM", "ZTHUMBNAILPATH")
+    has_xmpp = has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
+
+    if since_ms is not None:
+        ios_since = (since_ms / 1000.0) - APPLE_EPOCH_OFFSET
+        since_clause = f"AND m.ZMESSAGEDATE >= {ios_since}"
+    else:
+        since_clause = ""
+
+    unions: list[str] = []
+    if has_mdi:
+        unions.append(f"""
+        SELECT
+            m.Z_PK AS message_id,
+            CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+            CASE
+                WHEN mdi.ZTHUMBNAILPATH LIKE 'Message/%' THEN mdi.ZTHUMBNAILPATH
+                ELSE 'Message/' || mdi.ZTHUMBNAILPATH
+            END AS thumb_path
+        FROM ZWAMESSAGEDATAITEM mdi
+        JOIN ZWAMESSAGE m ON m.Z_PK = mdi.ZMESSAGE
+        WHERE mdi.ZTHUMBNAILPATH IS NOT NULL
+          AND mdi.ZTHUMBNAILPATH != ''
+          {since_clause}
+        """)
+
+    if has_xmpp:
+        unions.append(f"""
+        SELECT
+            m.Z_PK AS message_id,
+            CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+            CASE
+                WHEN mi.ZXMPPTHUMBPATH LIKE 'Message/%' THEN mi.ZXMPPTHUMBPATH
+                ELSE 'Message/' || mi.ZXMPPTHUMBPATH
+            END AS thumb_path
+        FROM ZWAMESSAGE m
+        JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+        WHERE m.ZMESSAGETYPE = 7
+          AND mi.ZXMPPTHUMBPATH IS NOT NULL
+          AND mi.ZXMPPTHUMBPATH != ''
+          {since_clause}
+        """)
+
+    if not unions:
+        return "SELECT NULL AS message_id, NULL AS timestamp_ms, NULL AS thumb_path WHERE 0"
+
+    return f"SELECT DISTINCT message_id, timestamp_ms, thumb_path FROM ({' UNION '.join(unions)}) WHERE thumb_path IS NOT NULL"
+
+
 def build_ios_query(
     limit: int | None,
     since_ms: int | None,

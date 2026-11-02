@@ -226,7 +226,6 @@ class TestBuildQuery:
         assert "Media/WhatsApp %" in query
 
 
-
 class TestGetMediaFilePaths:
     def test_get_media_file_paths_since_filter(self):
         conn = _make_msgstore()
@@ -779,6 +778,117 @@ class TestBuildIosQuery:
             ios.build_ios_query(None, None, False, False, False, False, False)
         ).fetchall()
         assert len(rows) == 0
+
+
+class TestIosLinkThumbnails:
+    def test_has_ios_link_thumbnails_support_false_when_absent(self):
+        conn = sqlite3.connect(":memory:")
+        c = conn.cursor()
+        assert ios.has_ios_link_thumbnails_support(c) is False
+        conn.close()
+
+    def test_has_ios_link_thumbnails_support_true_with_mdi_or_mediaitem(self):
+        conn = sqlite3.connect(":memory:")
+        c = conn.cursor()
+        conn.execute("CREATE TABLE ZWAMESSAGEDATAITEM (ZTHUMBNAILPATH TEXT)")
+        assert ios.has_ios_link_thumbnails_support(c) is True
+        conn.close()
+
+        conn = sqlite3.connect(":memory:")
+        c = conn.cursor()
+        conn.execute("CREATE TABLE ZWAMEDIAITEM (ZXMPPTHUMBPATH TEXT)")
+        assert ios.has_ios_link_thumbnails_support(c) is True
+        conn.close()
+
+    def test_build_ios_link_thumbnails_query_structure_and_since(self):
+        conn = sqlite3.connect(":memory:")
+        c = conn.cursor()
+        conn.execute("CREATE TABLE ZWAMESSAGEDATAITEM (ZMESSAGE INTEGER, ZTHUMBNAILPATH TEXT)")
+        conn.execute("CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER, ZXMPPTHUMBPATH TEXT)")
+        conn.execute(
+            "CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZMESSAGEDATE REAL, ZMEDIAITEM INTEGER, ZMESSAGETYPE INTEGER)"
+        )
+
+        q = ios.build_ios_link_thumbnails_query(c, None)
+        assert "ZWAMESSAGEDATAITEM" in q
+        assert "ZWAMEDIAITEM" in q
+        assert "ZMESSAGEDATE >=" not in q
+
+        q_since = ios.build_ios_link_thumbnails_query(c, 1700000000000)
+        assert "ZMESSAGEDATE >=" in q_since
+        conn.close()
+
+    def test_process_ios_link_thumbnails_copies_and_records(self, tmp_path):
+        import logging
+
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        output_dir = tmp_path / "output"
+
+        # Create source fake thumb file
+        source_dir = tmp_path / "backup_files"
+        source_dir.mkdir(parents=True)
+        fake_thumb = source_dir / "sample.thumb"
+        fake_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 32)
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZXMPPTHUMBPATH TEXT
+            );
+            CREATE TABLE ZWAMESSAGEDATAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMESSAGE INTEGER,
+                ZTHUMBNAILPATH TEXT
+            );
+
+            INSERT INTO ZWAMESSAGE VALUES (10, 700000000.0, 7, 1);
+            INSERT INTO ZWAMEDIAITEM VALUES (1, 'Media/sample.thumb');
+            INSERT INTO ZWAMESSAGEDATAITEM VALUES (1, 10, 'Media/sample.thumb');
+        """)
+        conn.commit()
+
+        # Archive DB
+        output_dir.mkdir(parents=True, exist_ok=True)
+        arch_conn = arc.open_archive_db(str(output_dir))
+
+        def resolver(fp):
+            if "sample.thumb" in fp:
+                return str(fake_thumb)
+            return None
+
+        stats = wa.process_ios_link_thumbnails(
+            conn.cursor(),
+            resolver,
+            str(output_dir),
+            arch_conn,
+            None,
+            False,
+            logging.getLogger("test"),
+        )
+        assert stats["copied"] == 1
+        assert stats["missing"] == 0
+
+        # Check copied file on disk
+        dest_thumb = output_dir / "Whatsapp Databases" / ".thumbnails" / "sample.thumb"
+        assert dest_thumb.exists()
+
+        # Check recorded in archive_copies
+        rows = arch_conn.execute(
+            "SELECT original_path, archive_path FROM archive_copies"
+        ).fetchall()
+        orig_paths = {r[0] for r in rows}
+        assert "Media/sample.thumb" in orig_paths
+        assert "Message/Media/sample.thumb" in orig_paths
+
+        conn.close()
+        arch_conn.close()
 
 
 # ===========================================================================

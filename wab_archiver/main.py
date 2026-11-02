@@ -1147,6 +1147,96 @@ def process_vcard_rows(
     return stats, updated_index, updated_group_index
 
 
+def process_ios_link_thumbnails(
+    cursor: sqlite3.Cursor,
+    media_resolver,
+    output_root: str,
+    archive_conn: sqlite3.Connection | None,
+    since_ms: int | None,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> dict[str, int]:
+    """
+    Extract link preview thumbnails from iOS ChatStorage.sqlite into Whatsapp Databases/.thumbnails/
+    and record them in .wa_media_archiver.db (archive_copies).
+    """
+    query = ios_handler.build_ios_link_thumbnails_query(cursor, since_ms)
+    rows = cursor.execute(query).fetchall()
+    if not rows:
+        return {"copied": 0, "skipped": 0, "missing": 0}
+
+    copied = 0
+    skipped = 0
+    missing = 0
+    thumb_dir_ensured = False
+    thumb_dest_dir = os.path.join(output_root, "Whatsapp Databases", ".thumbnails")
+
+    for row in rows:
+        _msg_id, timestamp_ms, thumb_path = row[0], row[1], row[2]
+        if not thumb_path:
+            continue
+
+        norm_path = thumb_path.replace("\\", "/")
+        cands = [norm_path]
+        if norm_path.startswith("Message/"):
+            cands.append(norm_path[8:])
+        else:
+            cands.append(f"Message/{norm_path}")
+
+        src_thumb = None
+        for cand in cands:
+            resolved = media_resolver(cand)
+            if resolved and os.path.isfile(resolved):
+                src_thumb = resolved
+                break
+
+        if not src_thumb:
+            missing += 1
+            continue
+
+        thumb_filename = os.path.basename(norm_path)
+        dest_thumb = os.path.join(thumb_dest_dir, thumb_filename)
+
+        if not dry_run:
+            if not thumb_dir_ensured:
+                os.makedirs(thumb_dest_dir, exist_ok=True)
+                thumb_dir_ensured = True
+
+            try:
+                if not os.path.exists(dest_thumb):
+                    shutil.copy2(src_thumb, dest_thumb)
+                    copied += 1
+                else:
+                    skipped += 1
+
+                if archive_conn is not None:
+                    rel_path = os.path.relpath(dest_thumb, output_root).replace(os.sep, "/")
+                    file_size = os.path.getsize(dest_thumb)
+                    keys = {
+                        norm_path,
+                        norm_path[8:] if norm_path.startswith("Message/") else norm_path,
+                    }
+                    for key_path in keys:
+                        archive_db.record_file_archived(
+                            archive_conn.cursor(),
+                            key_path,
+                            b"",
+                            rel_path,
+                            file_size,
+                            0,
+                            timestamp_ms or 0,
+                        )
+            except OSError as e:
+                logger.warning(f"Failed to copy link thumbnail {src_thumb} -> {dest_thumb}: {e}")
+        else:
+            copied += 1
+
+    if archive_conn is not None and not dry_run:
+        archive_conn.commit()
+
+    return {"copied": copied, "skipped": skipped, "missing": missing}
+
+
 # ---------------------------------------------------------------------------
 # Restore mode
 # ---------------------------------------------------------------------------
@@ -2717,6 +2807,24 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                     stats["skipped_empty_vcard"] = stats.get(
                         "skipped_empty_vcard", 0
                     ) + v_stats.get("skipped_empty_vcard", 0)
+
+            if platform == "ios" and ios_handler.has_ios_link_thumbnails_support(cursor):
+                logger.info("Extracting iOS link preview thumbnails...")
+                link_thumb_stats = process_ios_link_thumbnails(
+                    cursor,
+                    media_resolver,
+                    args.output,
+                    archive_conn if not args.dry_run else None,
+                    since_ms,
+                    args.dry_run,
+                    logger,
+                )
+                if link_thumb_stats["copied"] > 0 or link_thumb_stats["skipped"] > 0:
+                    logger.info(
+                        f"Link preview thumbnails: {link_thumb_stats['copied']} extracted, "
+                        f"{link_thumb_stats['skipped']} already present, "
+                        f"{link_thumb_stats['missing']} missing in backup source."
+                    )
 
             if not args.dry_run:
                 archive_conn.commit()
