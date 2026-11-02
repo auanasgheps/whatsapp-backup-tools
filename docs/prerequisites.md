@@ -42,7 +42,7 @@ This registers the two unified CLI commands:
 - **`wab-archiver`**: Preserves and organizes media into a structured directory tree.
 - **`wab-viewer`**: Launches the local WebUI chat viewer.
 
-All required core packages (`flask`, `wa-crypt-tools`, `iphone-backup-decrypt`) are automatically installed.
+All required core packages (`flask`, `wa-crypt-tools`, `iphone-backup-decrypt`, `cryptography`) are automatically installed.
 
 ### Manual Execution (without pip)
 
@@ -55,7 +55,7 @@ python -m wab_archiver --help
 python -m wab_viewer --help
 ```
 
-When using manual execution, you must manually install required packages.
+When using manual execution, you must manually install required packages (`pip install flask wa-crypt-tools iphone-backup-decrypt cryptography`).
 
 ---
 
@@ -63,14 +63,30 @@ When using manual execution, you must manually install required packages.
 
 - **Android Users**:
   - Enable **End-to-End Encrypted Backup** in WhatsApp (`Settings → Chats → Chat Backup → End-to-end Encrypted Backup`) and save your 64-digit key.
-  - ADB (Android Debug Bridge) installed on your computer.
+  - **ADB (Android Debug Bridge)**: Required if using automated USB extraction (`--from-adb` or `--pull-media`).
   - No root is required.
   - Review the [Android Setup Guide](archiver/setup-android.md).
 
 - **iOS Users**:
   - In-app WhatsApp E2E backup must be **disabled** before making a device backup.
-  - Create a device backup using **Finder** (macOS) or the **Apple Devices app / iTunes** (Windows).
+  - **Apple Devices App / iTunes / Finder**: Required to create a local computer backup of your device (`--ios-backup`).
   - Review the [iOS Setup Guide](archiver/setup-ios.md).
+
+---
+
+## 4. Third-Party Libraries & Dependencies
+
+WhatsApp Backup Tools uses the following open-source dependencies (installed automatically via `pip` or bundled locally):
+
+| Library | Type | Purpose | Component |
+| :--- | :--- | :--- | :--- |
+| [`flask`](https://palletsprojects.com/p/flask/) | Python Package | Local WebUI server (`127.0.0.1:5000`) | `wab-viewer` |
+| [`wa-crypt-tools`](https://github.com/eladnava/wa-crypt-tools) | Python Package | Android `crypt12/14/15` backup decryption | `wab-archiver` |
+| [`iphone-backup-decrypt`](https://github.com/johanley/iphone-backup-decrypt) | Python Package | iOS backup parsing and decryption | `wab-archiver` |
+| [`cryptography`](https://cryptography.io/) | Python Package | Low-level cryptographic primitives | Archiver decryption pipelines |
+| [`Pico CSS`](https://picocss.com/) | CSS (Bundled) | Semantic, zero-CDN dark/light styling | `wab-viewer` |
+
+*(Optional)* For contributors running tests or linting (`pip install -e ".[test,lint]"`): `pytest`, `pytest-cov`, `ruff`, and `tzdata`.
 
 ---
 

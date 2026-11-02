@@ -223,6 +223,7 @@ The archiver is **safe to re-run** on an existing archive:
 ## Prerequisites
 
 - **Python 3.11** or later is required
+- **Core Dependencies**: Required Python packages (`flask`, `wa-crypt-tools`, `iphone-backup-decrypt`, `cryptography`) are installed automatically by `pip`. See [docs/prerequisites.md](docs/prerequisites.md) for complete technical details.
 - **Android**: 
   - End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
   - ADB is installed
@@ -264,6 +265,8 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 - Inspired by [Wa_Immich_Tagger](https://github.com/mac12m99/Wa_Immich_Tagger) by mac12m99 — provided the initial Android DB query pattern
 - iOS backup reading approach inspired by [whatsapp-chat-exporter](https://github.com/KnugiHK/whatsapp-chat-exporter) by KnugiHK
+- Decryption powered by [wa-crypt-tools](https://github.com/eladnava/wa-crypt-tools) (Android) and [iphone-backup-decrypt](https://github.com/johanley/iphone-backup-decrypt) (iOS)
+- WebUI styled with [Pico CSS](https://picocss.com/)
 - Protobuf schema and wire tag definitions cross-referenced with [wa-proto](https://github.com/wppconnect-team/wa-proto) by WPPConnect and [Baileys](https://github.com/WhiskeySockets/Baileys) by WhiskeySockets
 
 ---
