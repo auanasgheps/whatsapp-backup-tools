@@ -10619,7 +10619,11 @@ class TestRichLinkPreviews:
         # Write sample thumbnail file on disk
         media_dir = tmp_path / "Media"
         media_dir.mkdir(parents=True, exist_ok=True)
-        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00" + b"\x00" * 32 + b"\xff\xd9"
+        fake_jpeg = (
+            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00"
+            + b"\x00" * 32
+            + b"\xff\xd9"
+        )
         (media_dir / "thumb_sample.thumb").write_bytes(fake_jpeg)
 
         archive_conn = make_archive_db(archive_path)
@@ -11593,7 +11597,9 @@ class TestExtendedMediaMap:
 
         arch_conn = sqlite3.connect(archive_path)
         arch_conn.execute("CREATE TABLE archive_copies (original_path TEXT, archive_path TEXT)")
-        arch_conn.execute("INSERT INTO archive_copies VALUES ('Media/WhatsApp Images/carousel_item_1.jpg', 'Archived/carousel_item_1.jpg')")
+        arch_conn.execute(
+            "INSERT INTO archive_copies VALUES ('Media/WhatsApp Images/carousel_item_1.jpg', 'Archived/carousel_item_1.jpg')"
+        )
         arch_conn.commit()
         arch_conn.close()
 
@@ -11612,3 +11618,219 @@ class TestExtendedMediaMap:
             assert m["media_size"] == 98765
             assert m["archive_path"] == "Archived/carousel_item_1.jpg"
 
+    def test_ios_quoted_extended_text_reply_and_self_reply(self, tmp_path):
+        """Test iOS quoted replies referencing extendedTextMessage (URLs) and self-replies without participant tags."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMETADATA BLOB,
+                ZMEDIAURL TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCREATIONDATE REAL,
+                ZCREATORJID TEXT,
+                ZPICTUREID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 1, '120363318993512318@g.us', 'Trans-Formation');
+            INSERT INTO ZWAGROUPMEMBER VALUES (10, 1, '90490749890629@lid', 1);
+            INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '90490749890629@lid', 'Andrea Cottino');
+        """)
+
+        def encode_varint(v):
+            res = bytearray()
+            while v > 0x7F:
+                res.append((v & 0x7F) | 0x80)
+                v >>= 7
+            res.append(v & 0x7F)
+            return bytes(res)
+
+        stanza_orig = b"STANZA_LINK_ORIG"
+        url_text = b"https://youtu.be/Lol2aji_OK0?si=7n9gGhFhSpP6tbd5"
+
+        # ExtendedTextMessage (subfield 6 in message container 19)
+        # subfield 1: text
+        # subfield 2: matched text
+        ex_payload = (
+            encode_varint((1 << 3) | 2)
+            + encode_varint(len(url_text))
+            + url_text
+            + encode_varint((2 << 3) | 2)
+            + encode_varint(len(url_text))
+            + url_text
+        )
+        t19_sub6 = encode_varint((6 << 3) | 2) + encode_varint(len(ex_payload)) + ex_payload
+
+        # Self-reply blob: contains wire tag 5 (q_stanza) and 19 (message), but OMITS tag 6 (participant)
+        metadata_self_reply = (
+            encode_varint((5 << 3) | 2)
+            + encode_varint(len(stanza_orig))
+            + stanza_orig
+            + encode_varint((19 << 3) | 2)
+            + encode_varint(len(t19_sub6))
+            + t19_sub6
+        )
+
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA, ZMEDIAURL) VALUES (1, NULL, NULL, NULL, NULL)"
+        )
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA, ZMEDIAURL) VALUES (2, NULL, NULL, ?, NULL)",
+            (metadata_self_reply,),
+        )
+
+        # Message 50: Original message with YouTube link sent by Andrea Cottino (ZGROUPMEMBER=10)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (50, 1, 0, 700000000.0, 'STANZA_LINK_ORIG', 7, 1, 10, NULL, 'Andrea Cottino', 'https://youtu.be/Lol2aji_OK0?si=7n9gGhFhSpP6tbd5', '120363318993512318@g.us')
+        """)
+
+        # Message 51: Self-reply sent by Andrea Cottino (ZGROUPMEMBER=10) referencing Message 50
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (51, 1, 0, 700000010.0, 'STANZA_SELF_REPLY', 0, 2, 10, NULL, 'Andrea Cottino', 'Guess what I am watching!', '120363318993512318@g.us')
+        """)
+
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=group")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 2
+            reply_msg = next(m for m in msgs if m["msg_id"] == 51)
+
+            # Quoted text must be extracted from extendedTextMessage (not empty!)
+            assert reply_msg["quoted_text"] == "https://youtu.be/Lol2aji_OK0?si=7n9gGhFhSpP6tbd5"
+            # Quoted sender must be inferred from the message sender for self-replies
+            assert reply_msg["quoted_sender"] == "Andrea Cottino"
+            assert reply_msg["quoted_msg_id"] == 50
+            assert reply_msg["quoted_ts"] == int((700000000.0 + 978307200) * 1000)
+
+    def test_ios_resolve_quoted_msg_ids_backfill_text_and_sender(self, tmp_path):
+        """Test _resolve_quoted_msg_ids backfills quoted_text and quoted_sender from live ZWAMESSAGE when empty."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        conn = sqlite3.connect(str(wa_path))
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZSTANZAID TEXT,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZISFROMME INTEGER,
+                ZPUSHNAME TEXT,
+                ZFROMJID TEXT,
+                ZMEDIAITEM INTEGER
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZTITLE TEXT
+            );
+            INSERT INTO ZWAMEDIAITEM VALUES (1, 'Caption photo');
+            INSERT INTO ZWAMESSAGE VALUES (10, 'STANZA_PARENT_1', 700000000.0, 1, NULL, 0, 'Alice', '1555123456@s.whatsapp.net', 1);
+            INSERT INTO ZWAMESSAGE VALUES (20, 'STANZA_PARENT_2', 700000050.0, 0, 'Original text from You', 1, 'You', NULL, NULL);
+        """)
+        conn.commit()
+
+        # Rows simulating incoming messages where ZMETADATA had quoted_stanza_id but missing text/sender
+        rows = [
+            {
+                "msg_id": 100,
+                "stanza_id": "STANZA_CHILD_100",
+                "quoted_stanza_id": "STANZA_PARENT_1",
+                "quoted_msg_id": None,
+                "quoted_text": "",
+                "quoted_sender": "",
+                "from_me": 0,
+                "sender": "Bob",
+            },
+            {
+                "msg_id": 101,
+                "stanza_id": "STANZA_CHILD_101",
+                "quoted_stanza_id": "STANZA_PARENT_2",
+                "quoted_msg_id": None,
+                "quoted_text": "",
+                "quoted_sender": "",
+                "from_me": 1,
+                "sender": "You",
+            },
+            # Row 102 quotes row 101 via local_map window
+            {
+                "msg_id": 102,
+                "stanza_id": "STANZA_CHILD_102",
+                "quoted_stanza_id": "STANZA_CHILD_101",
+                "quoted_msg_id": None,
+                "quoted_text": "",
+                "quoted_sender": "",
+                "from_me": 0,
+                "sender": "Charlie",
+                "text_body": "Replying to 101",
+            },
+        ]
+
+        # Give row 101 a text_body so row 102 can backfill from local_map
+        rows[1]["text_body"] = "I am message 101"
+
+        viewer._resolve_quoted_msg_ids(rows, "ios", conn, None)
+
+        # Row 100 resolved against ZWAMESSAGE (parent 10)
+        assert rows[0]["quoted_msg_id"] == 10
+        assert rows[0]["quoted_text"] == "Caption photo"
+        assert rows[0]["quoted_has_thumb"] == 1
+        assert rows[0]["quoted_sender"] == "Alice"
+
+        # Row 101 resolved against ZWAMESSAGE (parent 20)
+        assert rows[1]["quoted_msg_id"] == 20
+        assert rows[1]["quoted_text"] == "Original text from You"
+        assert rows[1]["quoted_sender"] == "You"
+
+        # Row 102 resolved against local_map (row 101)
+        assert rows[2]["quoted_msg_id"] == 101
+        assert rows[2]["quoted_text"] == "I am message 101"
+        assert rows[2]["quoted_sender"] == "You"
