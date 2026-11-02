@@ -2602,6 +2602,9 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                     if android_handler.has_vcard_support(cursor)
                     else None
                 )
+                if android_handler.has_extended_media_support(cursor):
+                    ext_query = android_handler.build_extended_media_query(args.limit, since_ms)
+                    query = f"SELECT * FROM ({query}) UNION ALL SELECT * FROM ({ext_query})"
                 group_subjects = dict(
                     cursor.execute(android_handler.build_group_subjects_query()).fetchall()
                 )

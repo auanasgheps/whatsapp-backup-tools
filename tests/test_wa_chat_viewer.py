@@ -10454,6 +10454,7 @@ class TestRichLinkPreviews:
                 Z_PK INTEGER PRIMARY KEY,
                 ZMEDIALOCALPATH TEXT,
                 ZTITLE TEXT,
+                ZMEDIAURL TEXT,
                 ZMETADATA BLOB
             );
             CREATE TABLE ZWAGROUPINFO (
@@ -10528,6 +10529,128 @@ class TestRichLinkPreviews:
             links = resp_links.get_json()
             assert len(links) == 1
             assert links[0]["link_title"] == "Welcome to Python.org"
+
+    def test_ios_link_preview_with_message_data_item(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZMEDIAURL TEXT,
+                ZMETADATA BLOB
+            );
+            CREATE TABLE ZWAGROUPINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCREATIONDATE REAL,
+                ZCREATORJID TEXT,
+                ZPICTUREID TEXT
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZISACTIVE INTEGER
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT
+            );
+            CREATE TABLE ZWAMESSAGEDATAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZINDEX INTEGER,
+                ZMESSAGE INTEGER,
+                ZTITLE TEXT,
+                ZSUMMARY TEXT,
+                ZMATCHEDTEXT TEXT,
+                ZTHUMBNAILPATH TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (1, 0, '15559876543@s.whatsapp.net', 'Bob');
+        """)
+        # Message 10: dedicated link (type 7) with ZWAMESSAGEDATAITEM thumbnail
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE, ZMETADATA) VALUES (1, NULL, 'Python Main Site', NULL)"
+        )
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (10, 1, 0, 700000000.0, 'STANZA_MDI_1', 7, 1, NULL, NULL, 'Bob', 'https://www.python.org', '15559876543@s.whatsapp.net')
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGEDATAITEM (Z_PK, ZINDEX, ZMESSAGE, ZTITLE, ZSUMMARY, ZMATCHEDTEXT, ZTHUMBNAILPATH)
+            VALUES (1, 0, 10, 'Python MDI Title', 'Python description from summary', 'https://www.python.org', 'Media/thumb_sample.thumb')
+        """)
+
+        # Message 11: plain text (type 0) with inline link extracted into ZWAMESSAGEDATAITEM
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
+            VALUES (11, 1, 0, 700000100.0, 'STANZA_MDI_2', 0, NULL, NULL, NULL, 'Bob', 'Visit wa.me/12345 to chat', '15559876543@s.whatsapp.net')
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGEDATAITEM (Z_PK, ZINDEX, ZMESSAGE, ZTITLE, ZSUMMARY, ZMATCHEDTEXT, ZTHUMBNAILPATH)
+            VALUES (2, 0, 11, 'WhatsApp Chat', 'Direct chat link', 'https://wa.me/12345', NULL)
+        """)
+        conn.commit()
+        conn.close()
+
+        # Write sample thumbnail file on disk
+        media_dir = tmp_path / "Media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00" + b"\x00" * 32 + b"\xff\xd9"
+        (media_dir / "thumb_sample.thumb").write_bytes(fake_jpeg)
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 2
+
+            m10 = next(m for m in msgs if m["msg_id"] == 10)
+            assert m10["media_type"] == "link"
+            assert m10["link_title"] == "Python Main Site"
+            assert m10["link_desc"] == "Python description from summary"
+            assert m10["link_url"] == "https://www.python.org"
+            assert m10["has_thumbnail"] == 1
+
+            m11 = next(m for m in msgs if m["msg_id"] == 11)
+            assert m11["media_type"] == "link"
+            assert m11["link_title"] == "WhatsApp Chat"
+            assert m11["link_desc"] == "Direct chat link"
+            assert m11["link_url"] == "https://wa.me/12345"
+
+            # Check thumbnail endpoint
+            thumb_resp = client.get("/api/thumbnail/10")
+            assert thumb_resp.status_code == 200
+            assert thumb_resp.mimetype == "image/jpeg"
+            assert thumb_resp.data == fake_jpeg
 
     def test_recent_messages_caches_link_preview_info(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
@@ -11174,6 +11297,7 @@ class TestRichLinkPreviews:
             thumb_reply = client.get("/api/thumbnail/100")
             assert thumb_reply.status_code == 200
             assert thumb_reply.data == fake_jpeg
+
             # Hit on quoted message bridged via reply
             thumb_orig = client.get("/api/thumbnail/10")
             assert thumb_orig.status_code == 200
@@ -11302,3 +11426,189 @@ class TestRichLinkPreviews:
             thumb_reply = client.get("/api/thumbnail/100")
             assert thumb_reply.status_code == 200
             assert thumb_reply.data == fake_jpeg
+
+
+# ---------------------------------------------------------------------------
+# Tests: Live Photo & Motion Photo Pairing
+# ---------------------------------------------------------------------------
+
+
+class TestLivePhotoPairing:
+    """Verify Android Motion Photo (type 11) and iOS Live Photo (type 12) pairing."""
+
+    def test_android_motion_photo_pairing(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                from_me INTEGER,
+                timestamp INTEGER,
+                text_data TEXT,
+                message_type INTEGER
+            );
+            CREATE TABLE message_media (
+                message_row_id INTEGER PRIMARY KEY,
+                file_path TEXT
+            );
+            CREATE TABLE message_association (
+                _id INTEGER PRIMARY KEY,
+                parent_message_row_id INTEGER,
+                child_message_row_id INTEGER,
+                association_type INTEGER
+            );
+
+            -- Parent image
+            INSERT INTO message VALUES (10, 1, 0, 1700000000000, '', 1);
+            INSERT INTO message_media VALUES (10, 'Media/WhatsApp Images/IMG_001.jpg');
+
+            -- Child companion motion clip
+            INSERT INTO message VALUES (11, 1, 0, 1700000000100, '', 3);
+            INSERT INTO message_media VALUES (11, 'Media/WhatsApp Video/VID_001.mp4');
+
+            -- Association (type 11 = Motion Photo)
+            INSERT INTO message_association VALUES (1, 10, 11, 11);
+        """)
+        conn.commit()
+
+        # Archive DB
+        arch_conn = sqlite3.connect(str(archive_path))
+        arch_conn.executescript("""
+            CREATE TABLE archive_copies (
+                original_path TEXT PRIMARY KEY,
+                archive_path TEXT
+            );
+            INSERT INTO archive_copies VALUES ('Media/WhatsApp Video/VID_001.mp4', 'Media/VID_001.mp4');
+        """)
+        arch_conn.commit()
+        arch_conn.close()
+
+        conn.execute("ATTACH DATABASE ? AS arch", (str(archive_path),))
+
+        rows = [
+            {"msg_id": 10, "media_type": "image", "archive_path": "Media/IMG_001.jpg"},
+            {"msg_id": 11, "media_type": "video", "archive_path": "Media/VID_001.mp4"},
+        ]
+
+        viewer._hydrate_live_photos(rows, "android", conn)
+
+        assert rows[0].get("is_live_photo") == 1
+        assert rows[0].get("live_photo_path") == "Media/VID_001.mp4"
+        assert rows[1].get("is_live_photo_video") == 1
+
+        conn.close()
+
+    def test_ios_live_photo_pairing(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        ext_path = tmp_path / "ExtChatDatabase.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZSTANZAID TEXT,
+                ZMEDIAITEM INTEGER
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT
+            );
+
+            INSERT INTO ZWAMESSAGE VALUES (10, 'STANZA_IMG', 1);
+            INSERT INTO ZWAMEDIAITEM VALUES (1, 'Media/IMG_001.jpg');
+
+            INSERT INTO ZWAMESSAGE VALUES (11, 'STANZA_VID', 2);
+            INSERT INTO ZWAMEDIAITEM VALUES (2, 'Media/VID_001.mp4');
+        """)
+        conn.commit()
+
+        ext_conn = sqlite3.connect(str(ext_path))
+        ext_conn.executescript("""
+            CREATE TABLE message_parent_association (
+                stanza_id TEXT,
+                parent_stanza_id TEXT,
+                type INTEGER
+            );
+            INSERT INTO message_parent_association VALUES ('STANZA_VID', 'STANZA_IMG', 12);
+        """)
+        ext_conn.commit()
+        ext_conn.close()
+
+        arch_conn = sqlite3.connect(str(archive_path))
+        arch_conn.executescript("""
+            CREATE TABLE archive_copies (
+                original_path TEXT PRIMARY KEY,
+                archive_path TEXT
+            );
+            INSERT INTO archive_copies VALUES ('Message/Media/VID_001.mp4', 'Media/VID_001.mp4');
+        """)
+        arch_conn.commit()
+        arch_conn.close()
+
+        conn.execute("ATTACH DATABASE ? AS ext", (str(ext_path),))
+        conn.execute("ATTACH DATABASE ? AS arch", (str(archive_path),))
+
+        rows = [
+            {"stanza_id": "STANZA_IMG", "msg_id": 10, "media_type": "image"},
+            {"stanza_id": "STANZA_VID", "msg_id": 11, "media_type": "video"},
+        ]
+
+        viewer._hydrate_live_photos(rows, "ios", conn)
+
+        assert rows[0].get("is_live_photo") == 1
+        assert rows[0].get("live_photo_path") == "Media/VID_001.mp4"
+        assert rows[1].get("is_live_photo_video") == 1
+
+        conn.close()
+
+
+class TestExtendedMediaMap:
+    def test_android_extended_media_data_hydration(self, tmp_path):
+        """Test that Android messages referencing extended_media_data via message_media_map are hydrated."""
+        db_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER, message_type INTEGER, text_data TEXT, from_me INTEGER, key_id TEXT);
+            CREATE TABLE message_media (message_row_id INTEGER PRIMARY KEY, file_path TEXT, mime_type TEXT, width INTEGER, height INTEGER, file_size INTEGER, media_name TEXT, media_duration INTEGER);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, text_data TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER);
+            CREATE TABLE message_media_map (_id INTEGER PRIMARY KEY AUTOINCREMENT, message_row_id INTEGER NOT NULL, chat_row_id INTEGER NOT NULL, media_row_id INTEGER NOT NULL);
+            CREATE TABLE extended_media_data (row_id INTEGER PRIMARY KEY AUTOINCREMENT, type INTEGER NOT NULL, direct_path TEXT, file_path TEXT, file_hash TEXT, file_size INTEGER, media_key BLOB, media_key_timestamp INTEGER, enc_file_hash TEXT, width INTEGER, height INTEGER, media_caption TEXT, transferred INTEGER, preview_path TEXT, external_url TEXT, mime_type TEXT, display_type INTEGER);
+
+            INSERT INTO chat VALUES (1, 1, 'Project Chat');
+            INSERT INTO jid VALUES (1, '15551234567', 's.whatsapp.net', '15551234567@s.whatsapp.net');
+            INSERT INTO message VALUES (100, 1, 1, 1700000000000, 1, 'Photo message', 0, 'STANZA_EXT_1');
+            INSERT INTO message_media_map VALUES (1, 100, 1, 50);
+            INSERT INTO extended_media_data (row_id, type, file_path, file_size, width, height, mime_type)
+            VALUES (50, 1, 'Media/WhatsApp Images/carousel_item_1.jpg', 98765, 1200, 800, 'image/jpeg');
+        """)
+        conn.commit()
+        conn.close()
+
+        arch_conn = sqlite3.connect(archive_path)
+        arch_conn.execute("CREATE TABLE archive_copies (original_path TEXT, archive_path TEXT)")
+        arch_conn.execute("INSERT INTO archive_copies VALUES ('Media/WhatsApp Images/carousel_item_1.jpg', 'Archived/carousel_item_1.jpg')")
+        arch_conn.commit()
+        arch_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=group")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            m = msgs[0]
+            assert m["msg_id"] == 100
+            assert m["media_type"] == "image"
+            assert m["media_width"] == 1200
+            assert m["media_height"] == 800
+            assert m["media_size"] == 98765
+            assert m["archive_path"] == "Archived/carousel_item_1.jpg"
+
