@@ -1660,6 +1660,54 @@ def _extract_ios_quoted_info(metadata_bytes: bytes | None) -> dict | None:
 
                             if sfield == 1:
                                 q_text = sdata.decode("utf-8", errors="replace")
+                            elif sfield == 6:
+                                ex_idx = 0
+                                ex_n = len(sdata)
+                                ex_text = None
+                                ex_matched = None
+                                while ex_idx < ex_n:
+                                    eval = 0
+                                    eshift = 0
+                                    while ex_idx < ex_n:
+                                        eb = sdata[ex_idx]
+                                        ex_idx += 1
+                                        eval |= (eb & 0x7F) << eshift
+                                        if not (eb & 0x80):
+                                            break
+                                        eshift += 7
+                                    ewire = eval & 7
+                                    efield = eval >> 3
+                                    if ewire == 0:
+                                        while ex_idx < ex_n and (sdata[ex_idx] & 0x80):
+                                            ex_idx += 1
+                                        ex_idx += 1
+                                    elif ewire == 2:
+                                        elen = 0
+                                        eshift = 0
+                                        while ex_idx < ex_n:
+                                            elb = sdata[ex_idx]
+                                            ex_idx += 1
+                                            elen |= (elb & 0x7F) << eshift
+                                            if not (elb & 0x80):
+                                                break
+                                            eshift += 7
+                                        if ex_idx + elen > ex_n:
+                                            break
+                                        edata = sdata[ex_idx : ex_idx + elen]
+                                        ex_idx += elen
+                                        if efield == 1:
+                                            ex_text = edata.decode("utf-8", errors="replace")
+                                        elif efield == 2 and not ex_text:
+                                            ex_matched = edata.decode("utf-8", errors="replace")
+                                        elif efield == 16 and edata:
+                                            q_has_thumb = True
+                                    elif ewire == 1:
+                                        ex_idx += 8
+                                    elif ewire == 5:
+                                        ex_idx += 4
+                                    else:
+                                        break
+                                q_text = ex_text or ex_matched or ""
                             elif sfield == 3:
                                 q_has_thumb = True
                                 im_idx = 0
@@ -1850,6 +1898,11 @@ def _hydrate_quoted_rows(
             sender_jid = q_info.get("quoted_sender")
             if sender_jid and not row.get("quoted_sender"):
                 extracted_senders[row["msg_id"]] = sender_jid
+            elif not row.get("quoted_sender"):
+                if row.get("from_me") == 1:
+                    row["quoted_sender"] = "You"
+                elif row.get("sender"):
+                    row["quoted_sender"] = row["sender"]
 
     if extracted_senders and wa_conn is not None:
         jids = list(set(extracted_senders.values()))
@@ -2482,7 +2535,12 @@ def _resolve_quoted_msg_ids(
             return
 
         local_map = {
-            r.get("stanza_id"): (r["msg_id"], r.get("timestamp_ms", 0))
+            r.get("stanza_id"): (
+                r["msg_id"],
+                r.get("timestamp_ms", 0),
+                r.get("text_body"),
+                r.get("sender"),
+            )
             for r in rows
             if r.get("stanza_id") and r.get("msg_id") is not None
         }
@@ -2490,9 +2548,13 @@ def _resolve_quoted_msg_ids(
         for r in unresolved:
             q_stanza = r["quoted_stanza_id"]
             if q_stanza in local_map:
-                r["quoted_msg_id"], loc_ts = local_map[q_stanza]
+                r["quoted_msg_id"], loc_ts, loc_text, loc_sender = local_map[q_stanza]
                 if not r.get("quoted_ts") and loc_ts:
                     r["quoted_ts"] = loc_ts
+                if not r.get("quoted_text") and loc_text:
+                    r["quoted_text"] = loc_text
+                if not r.get("quoted_sender") and loc_sender:
+                    r["quoted_sender"] = loc_sender
             else:
                 still_needed.add(q_stanza)
 
@@ -2503,13 +2565,28 @@ def _resolve_quoted_msg_ids(
             ph = ",".join("?" * len(still_needed))
             try:
                 pres_matches = pres_conn.execute(
-                    f"SELECT stanza_id, -rowid AS pres_id FROM preserved_messages WHERE stanza_id IN ({ph})",
+                    f"SELECT stanza_id, -rowid AS pres_id, timestamp_ms, text_body, sender FROM preserved_messages WHERE stanza_id IN ({ph})",
                     list(still_needed),
                 ).fetchall()
-                pres_map = {m["stanza_id"]: m["pres_id"] for m in pres_matches}
+                pres_map = {
+                    m["stanza_id"]: (
+                        m["pres_id"],
+                        m["timestamp_ms"],
+                        m["text_body"],
+                        m["sender"],
+                    )
+                    for m in pres_matches
+                }
                 for r in unresolved:
                     if r.get("quoted_msg_id") is None and r["quoted_stanza_id"] in pres_map:
-                        r["quoted_msg_id"] = pres_map[r["quoted_stanza_id"]]
+                        pid, pts, ptext, psender = pres_map[r["quoted_stanza_id"]]
+                        r["quoted_msg_id"] = pid
+                        if not r.get("quoted_ts") and pts:
+                            r["quoted_ts"] = pts
+                        if not r.get("quoted_text") and ptext:
+                            r["quoted_text"] = ptext
+                        if not r.get("quoted_sender") and psender:
+                            r["quoted_sender"] = psender
                         still_needed.discard(r["quoted_stanza_id"])
             except sqlite3.OperationalError:
                 pass
@@ -2529,23 +2606,82 @@ def _resolve_quoted_msg_ids(
                     for m in live_matches
                 }
             else:
+                tables = {
+                    row[0]
+                    for row in wa_conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                has_mi = "ZWAMEDIAITEM" in tables
+                mi_join = "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM" if has_mi else ""
+                mi_title_col = ", mi.ZTITLE AS media_title" if has_mi else ", NULL AS media_title"
                 live_matches = wa_conn.execute(
-                    f"SELECT ZSTANZAID AS stanza_id, Z_PK AS live_id, CAST((ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS ts, ZMESSAGETYPE AS mtype FROM ZWAMESSAGE WHERE ZSTANZAID IN ({ph})",
+                    f"""
+                    SELECT m.ZSTANZAID AS stanza_id,
+                           m.Z_PK AS live_id,
+                           CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS ts,
+                           m.ZMESSAGETYPE AS mtype,
+                           m.ZTEXT AS text,
+                           m.ZISFROMME AS from_me,
+                           COALESCE(m.ZPUSHNAME, m.ZFROMJID, '') AS raw_sender
+                           {mi_title_col}
+                    FROM ZWAMESSAGE m
+                    {mi_join}
+                    WHERE m.ZSTANZAID IN ({ph})
+                    """,
                     list(still_needed),
                 ).fetchall()
-                live_map = {
-                    m["stanza_id"]: (m["live_id"], m["ts"], m["mtype"]) for m in live_matches
-                }
+                live_map = {m["stanza_id"]: m for m in live_matches}
+
+            ios_type_labels = {
+                1: "📷 Photo",
+                38: "📷 Photo",
+                2: "🎥 Video",
+                39: "🎥 Video",
+                54: "🎥 Video",
+                3: "🎵 Audio",
+                53: "🎵 Audio",
+                11: "🎞️ GIF",
+                5: "📍 Location",
+                16: "📍 Live location",
+                15: "Sticker",
+                8: "📄 Document",
+                46: "Poll",
+            }
             for r in unresolved:
                 if r.get("quoted_msg_id") is None and r["quoted_stanza_id"] in live_map:
-                    live_id, live_ts, live_type = live_map[r["quoted_stanza_id"]]
-                    r["quoted_msg_id"] = live_id
-                    if not r.get("quoted_ts"):
-                        r["quoted_ts"] = live_ts
-                    if source_type == "android" and live_type in (1, 3, 9, 20, 26, 42, 43):
-                        r["quoted_has_thumb"] = 1
-                    elif source_type == "ios" and live_type in (1, 2, 8, 11, 15, 38, 39, 54):
-                        r["quoted_has_thumb"] = 1
+                    if source_type == "android":
+                        live_id, live_ts, live_type = live_map[r["quoted_stanza_id"]]
+                        r["quoted_msg_id"] = live_id
+                        if not r.get("quoted_ts"):
+                            r["quoted_ts"] = live_ts
+                        if live_type in (1, 3, 9, 20, 26, 42, 43):
+                            r["quoted_has_thumb"] = 1
+                    else:
+                        m_row = live_map[r["quoted_stanza_id"]]
+                        r["quoted_msg_id"] = m_row["live_id"]
+                        if not r.get("quoted_ts"):
+                            r["quoted_ts"] = m_row["ts"]
+                        live_type = m_row["mtype"]
+                        if live_type in (1, 2, 8, 11, 15, 38, 39, 54):
+                            r["quoted_has_thumb"] = 1
+                        if not r.get("quoted_text"):
+                            cand_text = (
+                                m_row["text"]
+                                or m_row["media_title"]
+                                or ios_type_labels.get(live_type, "")
+                            )
+                            if cand_text:
+                                r["quoted_text"] = cand_text
+                        if not r.get("quoted_sender"):
+                            if m_row["from_me"] == 1:
+                                r["quoted_sender"] = "You"
+                            elif m_row["raw_sender"]:
+                                raw_s = m_row["raw_sender"]
+                                phone = raw_s.split("@")[0] if "@" in raw_s else raw_s
+                                r["quoted_sender"] = f"+{phone}" if phone.isdigit() else phone
+                            elif r.get("from_me") == 0 and r.get("sender"):
+                                r["quoted_sender"] = r["sender"]
         except sqlite3.OperationalError:
             pass
     finally:
@@ -5435,9 +5571,19 @@ def create_app(output_root: Path, rescan: bool = False):
             "    ) emd_map ON emd_map.message_row_id = m._id\n"
         )
         android_file_path = "COALESCE(mm.file_path, emd_map.file_path)"
-        mm_width_col = "COALESCE(mm.width, emd_map.width, 0)" if has_mm_width else "COALESCE(emd_map.width, 0)"
-        mm_height_col = "COALESCE(mm.height, emd_map.height, 0)" if has_mm_height else "COALESCE(emd_map.height, 0)"
-        mm_size_col = "COALESCE(mm.file_size, emd_map.file_size, 0)" if has_mm_size else "COALESCE(emd_map.file_size, 0)"
+        mm_width_col = (
+            "COALESCE(mm.width, emd_map.width, 0)" if has_mm_width else "COALESCE(emd_map.width, 0)"
+        )
+        mm_height_col = (
+            "COALESCE(mm.height, emd_map.height, 0)"
+            if has_mm_height
+            else "COALESCE(emd_map.height, 0)"
+        )
+        mm_size_col = (
+            "COALESCE(mm.file_size, emd_map.file_size, 0)"
+            if has_mm_size
+            else "COALESCE(emd_map.file_size, 0)"
+        )
     else:
         emd_join = ""
         android_file_path = "mm.file_path"
@@ -6939,7 +7085,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     dict(r) for r in conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
                 ]
             _hydrate_link_preview_rows(rows, source_type)
-            _hydrate_live_photos(rows, source_type, wa)
+            _hydrate_live_photos(rows, source_type, conn)
             return jsonify(rows)
 
         types_set = {t.strip().lower() for t in types_raw.split(",") if t.strip()}
