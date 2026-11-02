@@ -1171,9 +1171,13 @@ def process_ios_link_thumbnails(
     thumb_dir_ensured = False
     thumb_dest_dir = os.path.join(output_root, "Whatsapp Databases", ".thumbnails")
 
-    for row in rows:
+    progress = ProgressReporter("Thumbnails", len(rows), logger, sys.stderr, 0.2)
+
+    for i, row in enumerate(rows, 1):
         _msg_id, timestamp_ms, thumb_path = row[0], row[1], row[2]
         if not thumb_path:
+            missing += 1
+            progress.update(i, {"Copied": copied, "Skipped": skipped, "Missing": missing})
             continue
 
         norm_path = thumb_path.replace("\\", "/")
@@ -1192,6 +1196,7 @@ def process_ios_link_thumbnails(
 
         if not src_thumb:
             missing += 1
+            progress.update(i, {"Copied": copied, "Skipped": skipped, "Missing": missing})
             continue
 
         thumb_filename = os.path.basename(norm_path)
@@ -1230,6 +1235,10 @@ def process_ios_link_thumbnails(
                 logger.warning(f"Failed to copy link thumbnail {src_thumb} -> {dest_thumb}: {e}")
         else:
             copied += 1
+
+        progress.update(i, {"Copied": copied, "Skipped": skipped, "Missing": missing})
+
+    progress.finish({"Copied": copied, "Skipped": skipped, "Missing": missing})
 
     if archive_conn is not None and not dry_run:
         archive_conn.commit()
