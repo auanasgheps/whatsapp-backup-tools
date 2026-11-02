@@ -706,12 +706,20 @@
     const units = [];
     for (let i = 0; i < list.length;) {
       const first = list[i];
+      if (first.is_live_photo_video) {
+        i++;
+        continue;
+      }
       if (isGrouableMedia(first)) {
         const run = [first];
         let j = i + 1;
         while (j < list.length) {
           const prev = run[run.length - 1];
           const curr = list[j];
+          if (curr.is_live_photo_video) {
+            j++;
+            continue;
+          }
           if (!isGrouableMedia(curr)) break;
           if (!sameSender(first, curr)) break;
           if (curr.timestamp_ms - prev.timestamp_ms > MEDIA_GROUP_GAP_MS) break;
@@ -1522,6 +1530,57 @@
       img.addEventListener('click', () => showLightbox(msg));
       _attachMediaScrollAnchor(img);
       wrap.appendChild(img);
+
+      if (msg.is_live_photo && msg.live_photo_path) {
+        wrap.classList.add('msg-live-photo');
+        const liveBadge = document.createElement('span');
+        liveBadge.className = 'msg-live-badge';
+        liveBadge.innerHTML = '<span class="live-icon">◎</span> LIVE';
+        liveBadge.title = 'Live Photo: hover or click to play motion';
+        wrap.appendChild(liveBadge);
+
+        let liveVid = null;
+
+        function startLivePlay() {
+          if (!liveVid) {
+            liveVid = document.createElement('video');
+            liveVid.className = 'live-photo-video';
+            liveVid.src = '/media/' + msg.live_photo_path;
+            liveVid.muted = true;
+            liveVid.loop = true;
+            liveVid.playsInline = true;
+            wrap.appendChild(liveVid);
+          }
+          liveVid.currentTime = 0;
+          liveVid.play().then(() => {
+            wrap.classList.add('is-live-playing');
+          }).catch(() => {});
+        }
+
+        function stopLivePlay() {
+          if (liveVid) {
+            liveVid.pause();
+            liveVid.currentTime = 0;
+            wrap.classList.remove('is-live-playing');
+          }
+        }
+
+        wrap.addEventListener('mouseenter', () => {
+          startLivePlay();
+        });
+        wrap.addEventListener('mouseleave', () => {
+          stopLivePlay();
+        });
+
+        liveBadge.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (wrap.classList.contains('is-live-playing')) {
+            stopLivePlay();
+          } else {
+            startLivePlay();
+          }
+        });
+      }
     } else if (mt === 'video') {
       const vid = document.createElement('video');
       vid.controls = true;
@@ -2131,6 +2190,42 @@
       _setupLightboxZoom(lb, media);
     }
     lb.appendChild(media);
+
+    if (msg.is_live_photo && msg.live_photo_path) {
+      const liveBtn = document.createElement('button');
+      liveBtn.className = 'lb-live-btn';
+      liveBtn.innerHTML = '<span class="live-icon">◎</span> LIVE';
+      liveBtn.title = 'Toggle Live Photo playback';
+      let isPlaying = false;
+      let lbVid = null;
+      liveBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        isPlaying = !isPlaying;
+        if (isPlaying) {
+          liveBtn.classList.add('active');
+          if (!lbVid) {
+            lbVid = document.createElement('video');
+            lbVid.className = 'lb-live-video';
+            lbVid.src = '/media/' + msg.live_photo_path;
+            lbVid.autoplay = true;
+            lbVid.loop = true;
+            lbVid.muted = true;
+            lbVid.playsInline = true;
+          }
+          media.style.display = 'none';
+          lb.insertBefore(lbVid, pathRow);
+        } else {
+          liveBtn.classList.remove('active');
+          if (lbVid) {
+            lbVid.pause();
+            lbVid.remove();
+            lbVid = null;
+          }
+          media.style.display = '';
+        }
+      });
+      lb.appendChild(liveBtn);
+    }
 
     const pathRow = document.createElement('div');
     pathRow.className = 'lb-path';

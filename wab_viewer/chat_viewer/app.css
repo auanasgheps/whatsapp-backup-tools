@@ -651,6 +651,94 @@
       }
     }
 
+    /* ---- live photo & motion photo ---- */
+    .msg-media.msg-live-photo {
+      position: relative;
+    }
+    .msg-live-badge {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(11, 20, 26, 0.72);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      z-index: 2;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .msg-live-badge:hover {
+      background: rgba(11, 20, 26, 0.9);
+      border-color: rgba(255, 255, 255, 0.8);
+    }
+    .msg-media.msg-live-photo.is-live-playing .msg-live-badge {
+      background: var(--accent, #00a884);
+      border-color: transparent;
+      color: #fff;
+    }
+    .msg-media .live-photo-video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: inherit;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .msg-media.is-live-playing .live-photo-video {
+      opacity: 1;
+    }
+    .lb-live-btn {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      padding: 6px 12px;
+      border-radius: 16px;
+      z-index: 100;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .lb-live-btn:hover {
+      background: rgba(0, 0, 0, 0.85);
+      border-color: rgba(255, 255, 255, 0.7);
+    }
+    .lb-live-btn.active {
+      background: var(--accent, #00a884);
+      border-color: transparent;
+      color: #fff;
+    }
+    .lb-live-video {
+      max-width: 90vw;
+      max-height: 85vh;
+      object-fit: contain;
+      user-select: none;
+    }
+
     /* ---- media grid (grouped media) ---- */
     .media-grid {
       display: grid;

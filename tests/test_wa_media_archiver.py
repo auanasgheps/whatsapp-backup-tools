@@ -150,21 +150,11 @@ class TestBuildQuery:
 
     def test_all_media_types_present(self):
         query = android_handler.build_query(None, None, False)
-        for path in [
-            "Media/WhatsApp Images/%",
-            "Media/WhatsApp Video/%",
-            "Media/WhatsApp Audio/%",
-            "Media/WhatsApp Voice Notes/%",
-            "Media/WhatsApp Video Notes/%",
-            "Media/WhatsApp Animated Gifs/%",
-            "Media/WhatsApp Documents/%",
-            "Media/WhatsApp Stickers/%",
-        ]:
-            assert path in query, f"Missing from query: {path}"
+        assert "Media/WhatsApp %" in query
+        assert "Media/.Statuses/%" in query
+        assert query.count("Media/WhatsApp %") == 2
 
     def test_stickers_included(self):
-        query = android_handler.build_query(None, None, False)
-        assert query.count("Media/WhatsApp Stickers/%") == 2
         assert "WhatsApp Stickers" in android_handler._MEDIA_SUBFOLDERS
 
     def test_limit_clause_included(self):
@@ -181,8 +171,8 @@ class TestBuildQuery:
 
     def test_both_union_blocks_have_documents(self):
         query = android_handler.build_query(None, None, False)
-        # 2 occurrences in WHERE clauses + 2 in CASE WHEN guards = 4
-        assert query.count("Media/WhatsApp Documents/%") == 4
+        # 2 occurrences in CASE WHEN guards (one per union block)
+        assert query.count("Media/WhatsApp Documents/%") == 2
 
     def test_limit_applies_to_combined_result(self):
         # LIMIT N//2 must appear twice (once per block), not on the outer wrapper
@@ -215,6 +205,26 @@ class TestBuildQuery:
     def test_group_subjects_query_has_no_date_filter(self):
         query = android_handler.build_group_subjects_query()
         assert "timestamp >=" not in query
+
+    def test_has_extended_media_support_empty_or_absent(self):
+        conn = sqlite3.connect(":memory:")
+        c = conn.cursor()
+        assert android_handler.has_extended_media_support(c) is False
+        conn.execute("CREATE TABLE message_media_map (row_id INTEGER)")
+        conn.execute("CREATE TABLE extended_media_data (row_id INTEGER)")
+        assert android_handler.has_extended_media_support(c) is False
+        conn.execute("INSERT INTO message_media_map VALUES (1)")
+        assert android_handler.has_extended_media_support(c) is True
+        conn.close()
+
+    def test_build_extended_media_query_structure(self):
+        query = android_handler.build_extended_media_query(50, 1700000000000)
+        assert "message_media_map" in query
+        assert "extended_media_data" in query
+        assert "LIMIT 25" in query
+        assert "1700000000000" in query
+        assert "Media/WhatsApp %" in query
+
 
 
 class TestGetMediaFilePaths:

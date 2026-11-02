@@ -1840,11 +1840,12 @@ def _hydrate_quoted_rows(
                 row["quoted_text"] = q_info["quoted_text"]
             if q_info.get("quoted_has_thumb"):
                 row["quoted_has_thumb"] = 1
-            row["link_title"] = None
-            row["link_url"] = None
-            row["link_desc"] = None
-            if row.get("media_type") == "text":
-                row["has_thumbnail"] = 0
+            if row.get("media_type") != "link" and row.get("raw_msg_type") != 7:
+                row["link_title"] = None
+                row["link_url"] = None
+                row["link_desc"] = None
+                if row.get("media_type") == "text":
+                    row["has_thumbnail"] = 0
 
             sender_jid = q_info.get("quoted_sender")
             if sender_jid and not row.get("quoted_sender"):
@@ -1950,6 +1951,132 @@ def _hydrate_link_preview_rows(rows: list[dict], source_type: str) -> None:
             m = re.search(r"https?://[^\s<>\"']+", row.get("text_body") or "")
             if m:
                 row["link_url"] = m.group(0).rstrip(".,;:!?)'\"")
+
+
+def _hydrate_live_photos(
+    rows: list[dict],
+    source_type: str,
+    wa_conn: sqlite3.Connection | None,
+) -> None:
+    """Hydrate Live Photo (iOS) and Motion Photo (Android) pairings."""
+    if not rows or wa_conn is None:
+        return
+
+    if source_type == "android":
+        mids = [r["msg_id"] for r in rows if r.get("msg_id")]
+        if not mids:
+            return
+        ph = ",".join("?" * len(mids))
+        try:
+            try:
+                p_rows = wa_conn.execute(
+                    f"""
+                    SELECT ma.parent_message_row_id, mm.file_path, ac.archive_path
+                    FROM message_association ma
+                    LEFT JOIN message_media mm ON mm.message_row_id = ma.child_message_row_id
+                    LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+                    WHERE ma.association_type = 11
+                      AND ma.parent_message_row_id IN ({ph})
+                    """,
+                    mids,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                p_rows = wa_conn.execute(
+                    f"""
+                    SELECT ma.parent_message_row_id, mm.file_path, NULL AS archive_path
+                    FROM message_association ma
+                    LEFT JOIN message_media mm ON mm.message_row_id = ma.child_message_row_id
+                    WHERE ma.association_type = 11
+                      AND ma.parent_message_row_id IN ({ph})
+                    """,
+                    mids,
+                ).fetchall()
+
+            parent_live_map = {}
+            for pr in p_rows:
+                path = pr[2] or pr[1]
+                if path:
+                    parent_live_map[pr[0]] = path
+
+            c_rows = wa_conn.execute(
+                f"""
+                SELECT child_message_row_id
+                FROM message_association
+                WHERE association_type = 11
+                  AND child_message_row_id IN ({ph})
+                """,
+                mids,
+            ).fetchall()
+            child_ids = {cr[0] for cr in c_rows}
+
+            for r in rows:
+                mid = r.get("msg_id")
+                if mid in parent_live_map:
+                    r["is_live_photo"] = 1
+                    r["live_photo_path"] = parent_live_map[mid]
+                if mid in child_ids:
+                    r["is_live_photo_video"] = 1
+        except sqlite3.OperationalError:
+            pass
+
+    elif source_type == "ios":
+        stanzas = [r["stanza_id"] for r in rows if r.get("stanza_id")]
+        if not stanzas:
+            return
+        ph = ",".join("?" * len(stanzas))
+        try:
+            try:
+                p_rows = wa_conn.execute(
+                    f"""
+                    SELECT mpa.parent_stanza_id, mi.ZMEDIALOCALPATH, ac.archive_path
+                    FROM ext.message_parent_association mpa
+                    JOIN ZWAMESSAGE m_c ON m_c.ZSTANZAID = mpa.stanza_id
+                    LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m_c.ZMEDIAITEM
+                    LEFT JOIN arch.archive_copies ac ON ac.original_path = 'Message/' || mi.ZMEDIALOCALPATH
+                    WHERE mpa.type = 12
+                      AND mpa.parent_stanza_id IN ({ph})
+                    """,
+                    stanzas,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                p_rows = wa_conn.execute(
+                    f"""
+                    SELECT mpa.parent_stanza_id, mi.ZMEDIALOCALPATH, NULL AS archive_path
+                    FROM ext.message_parent_association mpa
+                    JOIN ZWAMESSAGE m_c ON m_c.ZSTANZAID = mpa.stanza_id
+                    LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m_c.ZMEDIAITEM
+                    WHERE mpa.type = 12
+                      AND mpa.parent_stanza_id IN ({ph})
+                    """,
+                    stanzas,
+                ).fetchall()
+
+            parent_live_map = {}
+            for pr in p_rows:
+                path = pr[2] or (("Message/" + pr[1]) if pr[1] else None)
+                if path:
+                    parent_live_map[pr[0]] = path
+
+            c_rows = wa_conn.execute(
+                f"""
+                SELECT stanza_id
+                FROM ext.message_parent_association
+                WHERE type = 12
+                  AND stanza_id IN ({ph})
+                """,
+                stanzas,
+            ).fetchall()
+            child_stanzas = {cr[0] for cr in c_rows}
+
+            for r in rows:
+                sid = r.get("stanza_id")
+                if sid in parent_live_map:
+                    r["is_live_photo"] = 1
+                    r["live_photo_path"] = parent_live_map[sid]
+                if sid in child_stanzas:
+                    r["is_live_photo_video"] = 1
+        except sqlite3.OperationalError:
+            pass
 
 
 def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: list) -> None:
@@ -4729,6 +4856,12 @@ def create_app(output_root: Path, rescan: bool = False):
     has_ios_lat = False
     has_ios_lng = False
     _mi_cols = set()
+    _mdi_cols = set()
+    has_ios_mdi = False
+    has_ios_mdi_thumb = False
+    has_ios_mdi_matched = False
+    has_ios_mdi_title = False
+    has_ios_mdi_summary = False
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
         _wa_tables = {
@@ -4796,6 +4929,11 @@ def create_app(output_root: Path, rescan: bool = False):
             and "parent_message_row_id" in _mao_cols
         )
         has_mao_ts = "timestamp" in _mao_cols
+        has_message_media_map = (
+            "message_media_map" in _wa_tables
+            and "extended_media_data" in _wa_tables
+            and bool(_tmp_wa.execute("SELECT 1 FROM message_media_map LIMIT 1").fetchone())
+        )
         _jid_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(jid)").fetchall()}
             if "jid" in _wa_tables
@@ -4840,6 +4978,16 @@ def create_app(output_root: Path, rescan: bool = False):
         has_ml_duration = "live_location_share_duration" in _ml_cols
         has_ios_lat = "ZLATITUDE" in _mi_cols
         has_ios_lng = "ZLONGITUDE" in _mi_cols
+        _mdi_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGEDATAITEM)").fetchall()}
+            if "ZWAMESSAGEDATAITEM" in _wa_tables
+            else set()
+        )
+        has_ios_mdi = bool(_mdi_cols)
+        has_ios_mdi_thumb = "ZTHUMBNAILPATH" in _mdi_cols
+        has_ios_mdi_matched = "ZMATCHEDTEXT" in _mdi_cols
+        has_ios_mdi_title = "ZTITLE" in _mdi_cols
+        has_ios_mdi_summary = "ZSUMMARY" in _mdi_cols
         _zwa_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
             if "ZWAMESSAGE" in _wa_tables
@@ -4863,16 +5011,25 @@ def create_app(output_root: Path, rescan: bool = False):
         ios_filesize_col = "COALESCE(mi.ZFILESIZE, 0)" if has_ios_filesize else "0"
         ios_duration_col = "COALESCE(mi.ZMOVIEDURATION, 0)" if has_ios_duration else "0"
         ios_aspect_ratio_col = "COALESCE(mi.ZASPECTRATIO, 0.0)" if has_ios_aspect_ratio else "0.0"
-        ios_link_title = (
-            "CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZTITLE, '') END"
-            if has_ios_title
-            else "NULL"
-        )
-        ios_link_url = (
-            "CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZMEDIAURL, '') END"
-            if has_ios_mediaurl
-            else "NULL"
-        )
+        if has_ios_title and has_ios_mdi_title:
+            ios_link_title = "COALESCE(CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZTITLE, '') END, NULLIF(mdi.ZTITLE, ''))"
+        elif has_ios_title:
+            ios_link_title = "CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZTITLE, '') END"
+        elif has_ios_mdi_title:
+            ios_link_title = "NULLIF(mdi.ZTITLE, '')"
+        else:
+            ios_link_title = "NULL"
+
+        if has_ios_mediaurl and has_ios_mdi_matched:
+            ios_link_url = "COALESCE(CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZMEDIAURL, '') END, NULLIF(mdi.ZMATCHEDTEXT, ''))"
+        elif has_ios_mediaurl:
+            ios_link_url = "CASE WHEN m.ZMESSAGETYPE = 7 THEN NULLIF(mi.ZMEDIAURL, '') END"
+        elif has_ios_mdi_matched:
+            ios_link_url = "NULLIF(mdi.ZMATCHEDTEXT, '')"
+        else:
+            ios_link_url = "NULL"
+
+        ios_link_desc = "NULLIF(mdi.ZSUMMARY, '')" if has_ios_mdi_summary else "NULL"
         ios_raw_metadata = "mi.ZMETADATA" if has_ios_metadata else "NULL"
         ios_latitude_col = "mi.ZLATITUDE" if has_ios_lat else "NULL"
         ios_longitude_col = "mi.ZLONGITUDE" if has_ios_lng else "NULL"
@@ -4943,6 +5100,8 @@ def create_app(output_root: Path, rescan: bool = False):
             ios_thumb_arms.append("mi.ZXMPPTHUMBPATH IS NOT NULL")
         if "ZTHUMBNAILLOCALPATH" in _mi_cols:
             ios_thumb_arms.append("mi.ZTHUMBNAILLOCALPATH IS NOT NULL")
+        if has_ios_mdi and has_ios_mdi_thumb:
+            ios_thumb_arms.append("mdi.ZTHUMBNAILPATH IS NOT NULL")
         if "ZMETADATA" in _mi_cols:
             ios_thumb_arms.append(
                 "(m.ZMESSAGETYPE != 0 AND mi.ZMETADATA IS NOT NULL AND INSTR(mi.ZMETADATA, X'ffd8ff') > 0)"
@@ -4975,12 +5134,36 @@ def create_app(output_root: Path, rescan: bool = False):
     )
 """
         globals()["_BASE_IOS_FILTER_TS"] = globals()["_BASE_IOS_FILTER"]
+        if has_ios_mdi and has_ios_mdi_matched:
+            globals()["_IOS_IS_LINK"] = (
+                "(m.ZMESSAGETYPE = 7 OR (mdi.ZMATCHEDTEXT IS NOT NULL AND mdi.ZMATCHEDTEXT != '')"
+                " OR ((m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+                " AND m.ZTEXT IS NOT NULL"
+                " AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0"
+                "      OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)))"
+            )
+            ios_link_type_cond = "(m.ZTEXT IS NOT NULL AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0 OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)) OR (mdi.ZMATCHEDTEXT IS NOT NULL AND mdi.ZMATCHEDTEXT != '')"
+        else:
+            globals()["_IOS_IS_LINK"] = (
+                "(m.ZMESSAGETYPE = 7 OR ((m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)"
+                " AND m.ZTEXT IS NOT NULL"
+                " AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0"
+                "      OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)))"
+            )
+            ios_link_type_cond = "m.ZTEXT IS NOT NULL AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0 OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)"
+
         if has_ios_hd:
             globals()["_IOS_FILTER"] = globals()["_BASE_IOS_FILTER"] + _IOS_HD_DEDUP_CLAUSE
             globals()["_IOS_FILTER_TS"] = globals()["_BASE_IOS_FILTER_TS"] + _IOS_HD_DEDUP_CLAUSE
         else:
             globals()["_IOS_FILTER"] = globals()["_BASE_IOS_FILTER"]
             globals()["_IOS_FILTER_TS"] = globals()["_BASE_IOS_FILTER_TS"]
+
+        mdi_join = (
+            "    LEFT JOIN ZWAMESSAGEDATAITEM mdi ON mdi.ZMESSAGE = m.Z_PK AND mdi.ZINDEX = 0\n"
+            if has_ios_mdi
+            else ""
+        )
 
         globals()["_IOS_SELECT"] = f"""
     SELECT
@@ -5028,9 +5211,7 @@ def create_app(output_root: Path, rescan: bool = False):
             WHEN m.ZMESSAGETYPE = 46 THEN 'poll'
             WHEN m.ZMESSAGETYPE = 7 THEN 'link'
             WHEN m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0 THEN
-                CASE WHEN m.ZTEXT IS NOT NULL
-                      AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0
-                           OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)
+                CASE WHEN {ios_link_type_cond}
                      THEN 'link' ELSE 'text' END
             ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE('Message/' || mi.ZMEDIALOCALPATH, mi.ZTITLE)")}
         END                                                           AS media_type,
@@ -5094,7 +5275,7 @@ def create_app(output_root: Path, rescan: bool = False):
         {ios_aspect_ratio_col}                                       AS aspect_ratio,
         {ios_has_thumb_expr}                                         AS has_thumbnail,
         {ios_link_title}                                             AS link_title,
-        NULL                                                         AS link_desc,
+        {ios_link_desc}                                              AS link_desc,
         {ios_link_url}                                               AS link_url,
         0                                                            AS link_preview_type,
         {ios_latitude_col}                                           AS latitude,
@@ -5106,7 +5287,7 @@ def create_app(output_root: Path, rescan: bool = False):
         {ios_raw_metadata}                                           AS _raw_metadata
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
-    LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+{mdi_join}    LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
     LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
     LEFT JOIN ZWACHATSESSION cs_lid ON cs_lid.ZCONTACTJID = ({_IOS_SENDER_RAW})
     LEFT JOIN ZWAPROFILEPUSHNAME pp_lid ON pp_lid.ZJID = ({_IOS_SENDER_RAW})
@@ -5245,16 +5426,30 @@ def create_app(output_root: Path, rescan: bool = False):
         else "'msg_' || m._id"
     )
 
-    mm_width_col = "COALESCE(mm.width, 0)" if has_mm_width else "0"
-    mm_height_col = "COALESCE(mm.height, 0)" if has_mm_height else "0"
-    mm_size_col = "COALESCE(mm.file_size, 0)" if has_mm_size else "0"
+    if has_message_media_map:
+        emd_join = (
+            "    LEFT JOIN (\n"
+            "        SELECT mmm.message_row_id, emd.file_path, emd.mime_type, emd.width, emd.height, emd.file_size, emd.external_url\n"
+            "        FROM message_media_map mmm\n"
+            "        JOIN extended_media_data emd ON emd.row_id = mmm.media_row_id\n"
+            "    ) emd_map ON emd_map.message_row_id = m._id\n"
+        )
+        android_file_path = "COALESCE(mm.file_path, emd_map.file_path)"
+        mm_width_col = "COALESCE(mm.width, emd_map.width, 0)" if has_mm_width else "COALESCE(emd_map.width, 0)"
+        mm_height_col = "COALESCE(mm.height, emd_map.height, 0)" if has_mm_height else "COALESCE(emd_map.height, 0)"
+        mm_size_col = "COALESCE(mm.file_size, emd_map.file_size, 0)" if has_mm_size else "COALESCE(emd_map.file_size, 0)"
+    else:
+        emd_join = ""
+        android_file_path = "mm.file_path"
+        mm_width_col = "COALESCE(mm.width, 0)" if has_mm_width else "0"
+        mm_height_col = "COALESCE(mm.height, 0)" if has_mm_height else "0"
+        mm_size_col = "COALESCE(mm.file_size, 0)" if has_mm_size else "0"
+
     mm_duration_col = "COALESCE(mm.media_duration, 0)" if has_mm_duration else "0"
     mm_aspect_col = (
-        "CASE WHEN mm.height > 0 AND mm.width > 0 "
-        "THEN ROUND(CAST(mm.width AS REAL) / CAST(mm.height AS REAL), 3) "
+        f"CASE WHEN {mm_height_col} > 0 AND {mm_width_col} > 0 "
+        f"THEN ROUND(CAST({mm_width_col} AS REAL) / CAST({mm_height_col} AS REAL), 3) "
         "ELSE 0.0 END"
-        if (has_mm_width and has_mm_height)
-        else "0.0"
     )
 
     android_thumb_joins = ""
@@ -5474,11 +5669,11 @@ def create_app(output_root: Path, rescan: bool = False):
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
                            OR INSTR(LOWER(m.text_data), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
-            WHEN mm.file_path IS NULL AND m.message_type = 1 THEN 'image'
-            WHEN mm.file_path IS NULL AND m.message_type = 2 THEN 'audio'
-            WHEN mm.file_path IS NULL AND m.message_type IN (3, 28) THEN 'video'
-            WHEN mm.file_path IS NULL AND m.message_type = 9 THEN 'document'
-            ELSE {_MEDIA_TYPE_EXPR.format(col="COALESCE(mm.file_path, mm.media_name)")}
+            WHEN {android_file_path} IS NULL AND m.message_type = 1 THEN 'image'
+            WHEN {android_file_path} IS NULL AND m.message_type = 2 THEN 'audio'
+            WHEN {android_file_path} IS NULL AND m.message_type IN (3, 28) THEN 'video'
+            WHEN {android_file_path} IS NULL AND m.message_type = 9 THEN 'document'
+            ELSE {_MEDIA_TYPE_EXPR.format(col=f"COALESCE({android_file_path}, mm.media_name)")}
         END                                                          AS media_type,
         COALESCE(
             CASE WHEN {android_gif_cond} THEN '' END,
@@ -5535,7 +5730,7 @@ def create_app(output_root: Path, rescan: bool = False):
         {android_live_location_dur_col}                              AS live_location_share_duration
     FROM message m
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
-{android_thumb_joins}{android_text_join}{android_loc_join}{mvom_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
+{emd_join}{android_thumb_joins}{android_text_join}{android_loc_join}{mvom_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
     LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
     LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
     LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id
@@ -5552,17 +5747,17 @@ def create_app(output_root: Path, rescan: bool = False):
     LEFT JOIN _contacts_resolved con_s  ON con_s.clean_number  = {_clean_user_sql("COALESCE(j2.user, j.user)")}
     LEFT JOIN _contacts_resolved con_sq ON con_sq.clean_number = {_clean_user_sql("COALESCE(jq2.user, jq.user)")}
     LEFT JOIN arch.archive_copies ac ON ac.original_path IN (
-        COALESCE(mm.file_path, 'vcard:' || m._id),
-        REPLACE(COALESCE(mm.file_path, ''), '\\', '/'),
-        REPLACE(COALESCE(mm.file_path, ''), '/', '\\'),
-        CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
-             THEN SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10) END,
-        CASE WHEN mm.file_path LIKE 'WhatsApp/%' OR mm.file_path LIKE 'WhatsApp\\%'
-             THEN REPLACE(SUBSTR(REPLACE(mm.file_path, '\\', '/'), 10), '/', '\\') END,
-        CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
-             THEN 'WhatsApp/' || REPLACE(mm.file_path, '\\', '/') END,
-        CASE WHEN mm.file_path NOT LIKE 'WhatsApp/%' AND mm.file_path NOT LIKE 'WhatsApp\\%' AND mm.file_path IS NOT NULL
-             THEN 'WhatsApp\\' || REPLACE(mm.file_path, '/', '\\') END
+        COALESCE({android_file_path}, 'vcard:' || m._id),
+        REPLACE(COALESCE({android_file_path}, ''), '\\', '/'),
+        REPLACE(COALESCE({android_file_path}, ''), '/', '\\'),
+        CASE WHEN {android_file_path} LIKE 'WhatsApp/%' OR {android_file_path} LIKE 'WhatsApp\\%'
+             THEN SUBSTR(REPLACE({android_file_path}, '\\', '/'), 10) END,
+        CASE WHEN {android_file_path} LIKE 'WhatsApp/%' OR {android_file_path} LIKE 'WhatsApp\\%'
+             THEN REPLACE(SUBSTR(REPLACE({android_file_path}, '\\', '/'), 10), '/', '\\') END,
+        CASE WHEN {android_file_path} NOT LIKE 'WhatsApp/%' AND {android_file_path} NOT LIKE 'WhatsApp\\%' AND {android_file_path} IS NOT NULL
+             THEN 'WhatsApp/' || REPLACE({android_file_path}, '\\', '/') END,
+        CASE WHEN {android_file_path} NOT LIKE 'WhatsApp/%' AND {android_file_path} NOT LIKE 'WhatsApp\\%' AND {android_file_path} IS NOT NULL
+             THEN 'WhatsApp\\' || REPLACE({android_file_path}, '/', '\\') END
     )
 """
 
@@ -6476,6 +6671,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         _hydrate_poll_rows(rows, source_type, get_wa())
                         _hydrate_quoted_rows(rows, source_type, get_wa())
                         _hydrate_link_preview_rows(rows, source_type)
+                        _hydrate_live_photos(rows, source_type, get_wa())
                         pres = get_preserved()
                         if pres is not None:
                             pres_rows = _query_preserved_messages(
@@ -6598,6 +6794,7 @@ def create_app(output_root: Path, rescan: bool = False):
         _hydrate_poll_rows(rows, source_type, conn)
         _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
+        _hydrate_live_photos(rows, source_type, conn)
         pres = get_preserved()
         if pres is not None:
             pres_rows = _query_preserved_messages(pres, chat_id, chat_type, b_val, a_val, limit)
@@ -6690,6 +6887,7 @@ def create_app(output_root: Path, rescan: bool = False):
         _hydrate_poll_rows(combined, source_type, conn)
         _hydrate_quoted_rows(combined, source_type, conn)
         _hydrate_link_preview_rows(combined, source_type)
+        _hydrate_live_photos(combined, source_type, conn)
         pres = get_preserved()
         if pres is not None:
             pres_before = _query_preserved_messages(pres, chat_id, chat_type, ts + 1, None, half)
@@ -6741,6 +6939,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     dict(r) for r in conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
                 ]
             _hydrate_link_preview_rows(rows, source_type)
+            _hydrate_live_photos(rows, source_type, wa)
             return jsonify(rows)
 
         types_set = {t.strip().lower() for t in types_raw.split(",") if t.strip()}
@@ -6850,6 +7049,7 @@ def create_app(output_root: Path, rescan: bool = False):
         ]
         _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
+        _hydrate_live_photos(rows, source_type, conn)
         return jsonify(rows)
 
     @app.route("/api/media/links")
@@ -6886,6 +7086,7 @@ def create_app(output_root: Path, rescan: bool = False):
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
         _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
+        _hydrate_live_photos(rows, source_type, conn)
         return jsonify(rows)
 
     @app.route("/api/media/documents")
@@ -6908,6 +7109,7 @@ def create_app(output_root: Path, rescan: bool = False):
         rows = [dict(r) for r in conn.execute(sql, chat_params).fetchall()]
         _hydrate_quoted_rows(rows, source_type, conn)
         _hydrate_link_preview_rows(rows, source_type)
+        _hydrate_live_photos(rows, source_type, conn)
         return jsonify(rows)
 
     # ---- API: media count --------------------------------------------------
@@ -7030,6 +7232,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 ).fetchall()
             ]
             _hydrate_link_preview_rows(rows, source_type)
+            _hydrate_live_photos(rows, source_type, wa)
             results.extend(rows)
         elif live_rowids and wa is None:
             results.extend([dict(r) for r in idx_rows if r["rowid"] > 0])
@@ -9277,12 +9480,20 @@ def create_app(output_root: Path, rescan: bool = False):
                 thumb_cols.append("mi.ZXMPPTHUMBPATH")
             if "ZTHUMBNAILLOCALPATH" in _mi_cols:
                 thumb_cols.append("mi.ZTHUMBNAILLOCALPATH")
+            if has_ios_mdi and has_ios_mdi_thumb:
+                thumb_cols.append("mdi.ZTHUMBNAILPATH")
             if thumb_cols:
+                mdi_join_clause = (
+                    "LEFT JOIN ZWAMESSAGEDATAITEM mdi ON mdi.ZMESSAGE = m.Z_PK AND mdi.ZINDEX = 0"
+                    if (has_ios_mdi and has_ios_mdi_thumb)
+                    else ""
+                )
                 row = conn.execute(
                     f"""
                     SELECT {", ".join(thumb_cols)}
                     FROM ZWAMESSAGE m
                     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                    {mdi_join_clause}
                     WHERE m.Z_PK = ?
                     """,
                     (msg_id,),
@@ -9294,26 +9505,54 @@ def create_app(output_root: Path, rescan: bool = False):
                         else (
                             row["ZTHUMBNAILLOCALPATH"]
                             if "ZTHUMBNAILLOCALPATH" in _mi_cols and row["ZTHUMBNAILLOCALPATH"]
-                            else None
+                            else (
+                                row["ZTHUMBNAILPATH"]
+                                if (
+                                    has_ios_mdi
+                                    and has_ios_mdi_thumb
+                                    and "ZTHUMBNAILPATH" in row.keys()
+                                    and row["ZTHUMBNAILPATH"]
+                                )
+                                else None
+                            )
                         )
                     )
                     if thumb_path:
-                        cand_thumb = (
-                            output_root
-                            / "Whatsapp Databases"
-                            / ".thumbnails"
-                            / Path(thumb_path).name
-                        ).resolve()
-                        if cand_thumb.exists():
-                            try:
-                                thumb_bytes = cand_thumb.read_bytes()
-                            except OSError:
-                                pass
+                        cand_paths = [
+                            (
+                                output_root
+                                / "Whatsapp Databases"
+                                / ".thumbnails"
+                                / Path(thumb_path).name
+                            ).resolve(),
+                            (output_root / thumb_path).resolve(),
+                            (output_root / "Message" / thumb_path).resolve(),
+                        ]
+                        for app_domain in (
+                            "AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared",
+                            "AppDomainGroup-group.net.whatsapp.WhatsApp.shared",
+                        ):
+                            cand_paths.append((output_root / app_domain / thumb_path).resolve())
+
+                        for cand in cand_paths:
+                            if cand.exists():
+                                try:
+                                    thumb_bytes = cand.read_bytes()
+                                    if thumb_bytes:
+                                        break
+                                except OSError:
+                                    pass
+
                         if not thumb_bytes:
                             try:
                                 ac_row = conn.execute(
-                                    "SELECT archive_path FROM arch.archive_copies WHERE original_path IN (?, ?)",
-                                    (thumb_path, "Message/" + thumb_path),
+                                    "SELECT archive_path FROM arch.archive_copies WHERE original_path IN (?, ?, ?, ?)",
+                                    (
+                                        thumb_path,
+                                        "Message/" + thumb_path,
+                                        "Media/" + thumb_path,
+                                        Path(thumb_path).name,
+                                    ),
                                 ).fetchone()
                                 if ac_row and ac_row["archive_path"]:
                                     cand_ac = (output_root / ac_row["archive_path"]).resolve()
@@ -9324,13 +9563,6 @@ def create_app(output_root: Path, rescan: bool = False):
                                             pass
                             except sqlite3.OperationalError:
                                 pass
-                        if not thumb_bytes:
-                            cand = (output_root / thumb_path).resolve()
-                            if cand.exists():
-                                try:
-                                    thumb_bytes = cand.read_bytes()
-                                except OSError:
-                                    pass
 
             if not thumb_bytes and "ZMETADATA" in _mi_cols:
                 meta_row = conn.execute(
