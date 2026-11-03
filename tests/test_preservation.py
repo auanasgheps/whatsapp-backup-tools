@@ -312,6 +312,82 @@ def test_diff_and_extract_android_deleted_and_revoked(tmp_path: Path) -> None:
     assert by_key["key_revoked"]["preservation_reason"] == "revoked_by_sender"
 
 
+def test_diff_and_extract_android_stubs_and_tombstones_not_preserved(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_stubs.db"
+    new_db = tmp_path / "new_stubs.db"
+    arch_db = tmp_path / "arch_stubs.db"
+    _make_dummy_archive_db(arch_db)
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, '390000000001'), (2, '390000000002');
+
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (1, 1, NULL);
+
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                key_id TEXT,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            INSERT INTO message VALUES
+                (101, 1, 'key_sys_stub_transition', 1, 0, 100000, 7, NULL),
+                (102, 1, 'key_empty_text_transition', 1, 0, 100001, 0, ''),
+                (103, 1, 'key_revoked_purged', 1, 0, 100002, 15, ''),
+                (104, 1, 'key_empty_sys_purged', 1, 0, 100003, 7, NULL),
+                (105, 1, 'key_real_revoked', 1, 0, 100004, 0, 'Real message content');
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, '390000000001'), (2, '390000000002');
+
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            INSERT INTO chat VALUES (1, 1, NULL);
+
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                key_id TEXT,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            INSERT INTO message VALUES
+                (201, 1, 'key_sys_stub_transition', 1, 0, 100000, 15, ''),
+                (202, 1, 'key_empty_text_transition', 1, 0, 100001, 15, ''),
+                (205, 1, 'key_real_revoked', 1, 0, 100004, 15, '');
+        """)
+
+    extracted = preservation.diff_and_extract_android(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+
+    by_key = {r["stanza_id"]: r for r in extracted}
+
+    # Stubs that transitioned from type 7 or empty text to 15 must NOT be preserved
+    assert "key_sys_stub_transition" not in by_key
+    assert "key_empty_text_transition" not in by_key
+
+    # Already-revoked stubs or empty system messages that were purged must NOT be preserved as deleted_on_phone
+    assert "key_revoked_purged" not in by_key
+    assert "key_empty_sys_purged" not in by_key
+
+    # Legitimate message with real text that was revoked MUST be preserved
+    assert "key_real_revoked" in by_key
+    assert by_key["key_real_revoked"]["text_body"] == "Real message content"
+    assert by_key["key_real_revoked"]["preservation_reason"] == "revoked_by_sender"
+
+
 def test_diff_and_extract_android_chat_deleted(tmp_path: Path) -> None:
     old_db = tmp_path / "old_msgstore.db"
     new_db = tmp_path / "new_msgstore.db"
@@ -1043,6 +1119,83 @@ def test_diff_and_extract_ios(tmp_path: Path) -> None:
     assert by_key["ios_del"]["preservation_reason"] == "deleted_on_phone"
     assert "ios_rev" in by_key
     assert by_key["ios_rev"]["preservation_reason"] == "revoked_by_sender"
+
+
+def test_diff_and_extract_ios_stubs_not_preserved(tmp_path: Path) -> None:
+    old_db = tmp_path / "old_ios_stubs.sqlite"
+    new_db = tmp_path / "new_ios_stubs.sqlite"
+    arch_db = tmp_path / "arch_ios_stubs.db"
+    _make_dummy_archive_db(arch_db)
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZSTANZAID TEXT,
+                ZISFROMME INTEGER,
+                ZFROMJID TEXT,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER
+            );
+            INSERT INTO ZWAMESSAGE VALUES
+                (1, 1, 'ios_sys_stub', 0, 'partner@s.whatsapp.net', 1000.0, 6, NULL, 'Partner', NULL, NULL),
+                (2, 1, 'ios_empty_text_stub', 0, 'partner@s.whatsapp.net', 1001.0, 0, '', 'Partner', NULL, NULL),
+                (3, 1, 'ios_already_rev_purged', 0, 'partner@s.whatsapp.net', 1002.0, 14, '', 'Partner', NULL, NULL),
+                (4, 1, 'ios_real_rev', 0, 'partner@s.whatsapp.net', 1003.0, 0, 'Valid text', 'Partner', NULL, NULL);
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZSTANZAID TEXT,
+                ZISFROMME INTEGER,
+                ZFROMJID TEXT,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER
+            );
+            INSERT INTO ZWAMESSAGE VALUES
+                (1, 1, 'ios_sys_stub', 0, 'partner@s.whatsapp.net', 1000.0, 14, '', 'Partner', NULL, NULL),
+                (2, 1, 'ios_empty_text_stub', 0, 'partner@s.whatsapp.net', 1001.0, 14, '', 'Partner', NULL, NULL),
+                (4, 1, 'ios_real_rev', 0, 'partner@s.whatsapp.net', 1003.0, 14, '', 'Partner', NULL, NULL);
+        """)
+
+    extracted = preservation.diff_and_extract_ios(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    by_key = {r["stanza_id"]: r for r in extracted}
+    assert "ios_sys_stub" not in by_key
+    assert "ios_empty_text_stub" not in by_key
+    assert "ios_already_rev_purged" not in by_key
+    assert "ios_real_rev" in by_key
+    assert by_key["ios_real_rev"]["text_body"] == "Valid text"
+    assert by_key["ios_real_rev"]["preservation_reason"] == "revoked_by_sender"
 
 
 def test_diff_and_extract_ios_location_and_view_once(tmp_path: Path) -> None:
