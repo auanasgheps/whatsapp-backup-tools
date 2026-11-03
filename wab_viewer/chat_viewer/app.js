@@ -2400,13 +2400,10 @@
         const ts = parseInt(cell.dataset.ts || '0', 10);
         if (ts > 0 && ts < oldestTs) oldestTs = ts;
       }
-      if (oldestTs === Infinity) {
-        linksAllLoaded = true;
-        return;
-      }
+      const beforeParam = (oldestTs !== Infinity && oldestTs > 0) ? '&before=' + oldestTs : '';
       const qs = 'chat_id=' + encodeURIComponent(currentChat.id) +
                  '&chat_type=' + encodeURIComponent(currentChat.type) +
-                 '&limit=100&before=' + oldestTs;
+                 '&limit=100' + beforeParam;
       const res = await fetch('/api/media/links?' + qs);
       if (!res.ok) throw new Error('Failed to fetch more links');
       const items = await res.json();

@@ -4,8 +4,6 @@ import os
 import sqlite3
 
 from shared.schema_validator import (
-    _IOS_REQUIRED_COLUMNS,
-    _IOS_REQUIRED_TABLES,
     check_wa_schema,
     get_app_version,
 )
@@ -17,10 +15,6 @@ from shared.schema_validator import (
 
 # Seconds between 1970-01-01 (Unix epoch) and 2001-01-01 (Apple Core Data epoch)
 APPLE_EPOCH_OFFSET = 978307200
-
-_IOS_REQUIRED_TABLES = _IOS_REQUIRED_TABLES
-_IOS_REQUIRED_COLUMNS = _IOS_REQUIRED_COLUMNS
-
 
 ASSOCIATION_TYPE_IOS_HD_PHOTO = 10
 ASSOCIATION_TYPE_IOS_HD_VIDEO = 5
