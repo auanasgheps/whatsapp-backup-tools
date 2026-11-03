@@ -2000,6 +2000,14 @@ def _hydrate_link_preview_rows(rows: list[dict], source_type: str) -> None:
                 desc = _extract_ios_link_description(raw_meta)
                 if desc:
                     row["link_desc"] = desc
+        if (
+            source_type == "ios"
+            and raw_meta
+            and row.get("media_type") == "link"
+            and not row.get("has_thumbnail")
+            and b"\xff\xd8\xff" in raw_meta
+        ):
+            row["has_thumbnail"] = 1
         if not row.get("link_url") and (row.get("link_title") or row.get("media_type") == "link"):
             m = re.search(r"https?://[^\s<>\"']+", row.get("text_body") or "")
             if m:
@@ -2927,13 +2935,14 @@ def _stream_fts_rows(
             or text_body in ("true", "false")
         ):
             continue
-        if msg_type == 46 and not text_body:
+        if msg_type == 46:
             receipt = row["poll_receipt_info"] if "poll_receipt_info" in row.keys() else None
             if receipt:
                 parsed_poll = _parse_ios_poll_blob(bytes(receipt))
                 if parsed_poll:
                     opts_text = " ".join(parsed_poll["options"])
-                    text_body = f"{parsed_poll['question']} {opts_text}".strip()
+                    q = parsed_poll.get("question") or text_body
+                    text_body = f"{q} {opts_text}".strip()
         is_media = (
             row["message_type"] is not None
             and row["message_type"] != 0
@@ -7658,11 +7667,39 @@ def create_app(output_root: Path, rescan: bool = False):
 
     # ---- API: reaction details -----------------------------------------------
 
-    @app.route("/api/reaction_details/<int:message_id>")
+    @app.route("/api/reaction_details/<message_id>")
     def api_reaction_details(message_id):
+        try:
+            mid = int(message_id)
+        except (ValueError, TypeError):
+            return jsonify({"available": False}), 400
+
+        if mid < 0:
+            pres = get_preserved()
+            if pres is None:
+                return jsonify({"available": False})
+            pr_row = pres.execute(
+                "SELECT reactions, from_me, sender FROM preserved_messages WHERE rowid = ?",
+                (-mid,),
+            ).fetchone()
+            if not pr_row or not pr_row["reactions"]:
+                return jsonify({"available": False})
+            rx_list = [e.strip() for e in pr_row["reactions"].split(",") if e.strip()]
+            reactors = [
+                {
+                    "name": "You" if pr_row["from_me"] else (pr_row["sender"] or "Unknown"),
+                    "emoji": e,
+                    "from_me": int(pr_row["from_me"] or 0),
+                }
+                for e in rx_list
+            ]
+            return jsonify({"available": True, "total": len(reactors), "reactors": reactors})
+
         conn = get_wa()
         if conn is None:
             return jsonify({"available": False})
+
+        message_id = mid
 
         if source_type == "android":
             tables = {
@@ -9541,12 +9578,38 @@ def create_app(output_root: Path, rescan: bool = False):
     @app.route("/api/thumbnail/<msg_id>")
     def api_thumbnail(msg_id):
         conn = get_wa()
-        if conn is None:
-            return "Not found", 404
-
         int_msg_id: int | None = None
         with contextlib.suppress(ValueError, TypeError):
             int_msg_id = int(msg_id)
+
+        if int_msg_id is not None and int_msg_id < 0:
+            pres = get_preserved()
+            if pres is not None:
+                row = pres.execute(
+                    "SELECT stanza_id, archive_path FROM preserved_messages WHERE rowid = ?",
+                    (-int_msg_id,),
+                ).fetchone()
+                if row:
+                    if row["archive_path"]:
+                        cand = (output_root / row["archive_path"]).resolve()
+                        if cand.exists():
+                            try:
+                                data = cand.read_bytes()
+                                if data:
+                                    mime = "image/jpeg"
+                                    if cand.suffix.lower() == ".png":
+                                        mime = "image/png"
+                                    elif cand.suffix.lower() == ".webp":
+                                        mime = "image/webp"
+                                    return Response(data, mimetype=mime)
+                            except OSError:
+                                pass
+                    if row["stanza_id"] and conn is not None:
+                        int_msg_id = None
+                        msg_id = row["stanza_id"]
+
+        if conn is None:
+            return "Not found", 404
 
         if int_msg_id is None:
             # Stanza / string ID lookup fallback
