@@ -17,7 +17,11 @@ Preserved records are browsable in the web viewer as normal, labeled with the _P
 ⚠️ This feature is considered experimental as it has been tested only with simple scenarios.
 
 > 🔬 **Engineering for Protocol Fidelity & Long-Term Reliability**:
-> To ensure your archives stand the test of time, significant effort went into deeply mapping WhatsApp's internal database architectures, multi-database relationships, and binary protocols across both Android and iOS. This foundation unlocks full fidelity for complex entities, including those not yet implemented, while providing proactive resilience against WhatsApp schema changes and future updates.
+> To ensure your archives stand the test of time, significant effort went into deeply mapping WhatsApp's internal database architectures and functionality. This foundation unlocks full fidelity for complex entities, including those not yet implemented.
+
+> 📊 **WhatsApp Polls**: Polls on both Android and iOS are now rendered with extended information.
+
+> 🔗**Rich Link Previews**: Web links shared in chats now render authentic rich preview cards including the preview thumbnail if available.
 
 ---
 
@@ -42,7 +46,6 @@ Preserved records are browsable in the web viewer as normal, labeled with the _P
 - **Improved Missing Media Reporting for iOS**: The missing media report for iOS backups (`missing_media_report.csv`) now cleanly routes to your specified output directory while filtering out non-media system items.
 - **Clearer Extraction Logging & Backup Thumbnail Alerts**: Streamlined iOS backup extraction logging by reducing repetitive overwrite notices, and the archiver now informs you when an offline thumbnail was safely retained from the backup database for missing media.
 - **Resilient Incremental Merges**: Handled incomplete or truncated backup streams gracefully without aborting earlier valid records, and added auto-detection for database sequence and column variations during merge passes.
-- **Concise Deletion Validation Logs**: Summarized candidate deletion gate rejections into a single clean summary line, eliminating terminal noise while preserving full forensic details in debug logs.
 
 #### 🐛 Bug Fixes
 - **Sticker Categorization in Duplicate Reports**: Categorized `.webp` and `.was` stickers under the dedicated Stickers section at the end of duplicate reports across iOS and Android.
