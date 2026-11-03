@@ -41,6 +41,8 @@ Preserved records are browsable in the web viewer as normal, labeled with the _P
 - **iOS LID Contact Name Resolution**: Automatically resolves modern iOS Linked Identity (`@lid`) accounts to real phone numbers and contact names, preventing duplicate or unmapped contact folders.
 - **Improved Missing Media Reporting for iOS**: The missing media report for iOS backups (`missing_media_report.csv`) now cleanly routes to your specified output directory while filtering out non-media system items.
 - **Clearer Extraction Logging & Backup Thumbnail Alerts**: Streamlined iOS backup extraction logging by reducing repetitive overwrite notices, and the archiver now informs you when an offline thumbnail was safely retained from the backup database for missing media.
+- **Resilient Incremental Merges**: Handled incomplete or truncated backup streams gracefully without aborting earlier valid records, and added auto-detection for database sequence and column variations during merge passes.
+- **Concise Deletion Validation Logs**: Summarized candidate deletion gate rejections into a single clean summary line, eliminating terminal noise while preserving full forensic details in debug logs.
 
 #### 🐛 Bug Fixes
 - **Sticker Categorization in Duplicate Reports**: Categorized `.webp` and `.was` stickers under the dedicated Stickers section at the end of duplicate reports across iOS and Android.
@@ -63,6 +65,8 @@ Preserved records are browsable in the web viewer as normal, labeled with the _P
 #### ⚡ Improvements
 - **Responsive Settings Modal**: The Settings panel now smoothly adapts to small browser windows, split-screen views, and compact laptop screens with internal scrolling and a pinned header so controls remain accessible at any height.
 - **Quoted Media Reply Thumbnails & Captions**: Quoted replies to photos, videos, and documents now display preview thumbnails directly inside the reply box and preserve original media captions.
+- **Animated GIF Badges & Click-to-Loop**: Added dedicated GIF badges with click-to-play/pause toggle, automatic looping, and viewport intersection pausing for smoother browser performance.
+- **Poll Choices Full-Text Search**: Search now indexes both poll questions and individual poll choices/options across both Android and iOS backups.
 
 #### 🐛 Bug Fixes
 
