@@ -8574,8 +8574,14 @@ def create_app(output_root: Path, rescan: bool = False):
             else:
                 chat_pred, chat_params = _ios_chat_filter(chat_id)
                 live = conn.execute(
-                    f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts"
-                    f" FROM ({_IOS_SELECT} WHERE {chat_pred} {_IOS_FILTER_TS})",
+                    f"""
+                    SELECT
+                        MIN(CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)) AS first_ts,
+                        MAX(CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)) AS last_ts
+                    FROM ZWAMESSAGE m
+                    LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                    WHERE {chat_pred} {_IOS_FILTER_TS}
+                    """,
                     chat_params,
                 ).fetchone()
                 if live:
@@ -9532,18 +9538,42 @@ def create_app(output_root: Path, rescan: bool = False):
 
     # ---- API: thumbnail serving --------------------------------------------
 
-    @app.route("/api/thumbnail/<int:msg_id>")
+    @app.route("/api/thumbnail/<msg_id>")
     def api_thumbnail(msg_id):
         conn = get_wa()
         if conn is None:
             return "Not found", 404
+
+        int_msg_id: int | None = None
+        with contextlib.suppress(ValueError, TypeError):
+            int_msg_id = int(msg_id)
+
+        if int_msg_id is None:
+            # Stanza / string ID lookup fallback
+            if source_type == "android" and has_android_key_id:
+                row = conn.execute(
+                    "SELECT _id FROM message WHERE key_id = ? LIMIT 1", (str(msg_id),)
+                ).fetchone()
+                if row:
+                    int_msg_id = row[0]
+            elif source_type == "ios":
+                row = conn.execute(
+                    "SELECT Z_PK FROM ZWAMESSAGE WHERE ZSTANZAID = ? LIMIT 1", (str(msg_id),)
+                ).fetchone()
+                if row:
+                    int_msg_id = row[0]
+
+        if int_msg_id is None:
+            return "Thumbnail not found", 404
+
+        msg_id_val = int_msg_id
 
         thumb_bytes = None
         if source_type == "android":
             if has_message_thumbnail:
                 row = conn.execute(
                     "SELECT thumbnail FROM message_thumbnail WHERE message_row_id = ?",
-                    (msg_id,),
+                    (msg_id_val,),
                 ).fetchone()
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
@@ -9556,7 +9586,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     JOIN message_media mm ON mm.file_hash = mht.media_hash
                     WHERE mm.message_row_id = ?
                     """,
-                    (msg_id,),
+                    (msg_id_val,),
                 ).fetchone()
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
@@ -9564,7 +9594,7 @@ def create_app(output_root: Path, rescan: bool = False):
             if not thumb_bytes and has_message_quoted_media:
                 row = conn.execute(
                     "SELECT thumbnail FROM message_quoted_media WHERE message_row_id = ?",
-                    (msg_id,),
+                    (msg_id_val,),
                 ).fetchone()
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
@@ -9584,7 +9614,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     WHERE m._id = ? AND mqm.thumbnail IS NOT NULL
                     LIMIT 1
                     """,
-                    (msg_id,),
+                    (msg_id_val,),
                 ).fetchone()
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
@@ -9600,7 +9630,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         WHERE mq.message_row_id = ? AND mt.thumbnail IS NOT NULL
                         LIMIT 1
                         """,
-                        (msg_id,),
+                        (msg_id_val,),
                     ).fetchone()
                     if row and row["thumbnail"]:
                         thumb_bytes = row["thumbnail"]
@@ -9616,7 +9646,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         WHERE mq.message_row_id = ? AND mht.thumbnail IS NOT NULL
                         LIMIT 1
                         """,
-                        (msg_id,),
+                        (msg_id_val,),
                     ).fetchone()
                     if row and row["thumbnail"]:
                         thumb_bytes = row["thumbnail"]
@@ -9642,7 +9672,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     {mdi_join_clause}
                     WHERE m.Z_PK = ?
                     """,
-                    (msg_id,),
+                    (msg_id_val,),
                 ).fetchone()
                 if row:
                     thumb_path = (
@@ -9718,7 +9748,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
                     WHERE m.Z_PK = ?
                     """,
-                    (msg_id,),
+                    (msg_id_val,),
                 ).fetchone()
                 if meta_row and meta_row["ZMETADATA"]:
                     blob = meta_row["ZMETADATA"]
@@ -9730,16 +9760,18 @@ def create_app(output_root: Path, rescan: bool = False):
                                 thumb_bytes = blob[jpeg_idx : eoi_idx + 2]
                 if not thumb_bytes:
                     try:
+                        # 1. Check if another message replied to this message via ZPARENTMESSAGE
                         reply_row = conn.execute(
                             """
                             SELECT reply_mi.ZMETADATA
-                            FROM ZWAMESSAGE m
-                            JOIN ZWAMESSAGE reply_m ON INSTR(reply_mi.ZMETADATA, m.ZSTANZAID) > 0
+                            FROM ZWAMESSAGE reply_m
                             JOIN ZWAMEDIAITEM reply_mi ON reply_mi.Z_PK = reply_m.ZMEDIAITEM
-                            WHERE m.Z_PK = ? AND INSTR(reply_mi.ZMETADATA, X'ffd8ff') > 0
+                            WHERE reply_m.ZPARENTMESSAGE = ?
+                              AND reply_mi.ZMETADATA IS NOT NULL
+                              AND INSTR(reply_mi.ZMETADATA, X'ffd8ff') > 0
                             LIMIT 1
                             """,
-                            (msg_id,),
+                            (msg_id_val,),
                         ).fetchone()
                         if reply_row and reply_row[0]:
                             rblob = reply_row[0]
@@ -9749,6 +9781,55 @@ def create_app(output_root: Path, rescan: bool = False):
                                     e_idx = rblob.find(b"\xff\xd9", j_idx)
                                     if e_idx != -1:
                                         thumb_bytes = rblob[j_idx : e_idx + 2]
+
+                        # 2. Modern iOS: replies store parent stanza in reply_mi.ZMETADATA (scoped to same chat session)
+                        if not thumb_bytes:
+                            reply_row = conn.execute(
+                                """
+                                SELECT reply_mi.ZMETADATA
+                                FROM ZWAMESSAGE m
+                                JOIN ZWAMESSAGE reply_m ON reply_m.ZCHATSESSION = m.ZCHATSESSION
+                                JOIN ZWAMEDIAITEM reply_mi ON reply_mi.Z_PK = reply_m.ZMEDIAITEM
+                                WHERE m.Z_PK = ?
+                                  AND reply_mi.ZMETADATA IS NOT NULL
+                                  AND INSTR(reply_mi.ZMETADATA, m.ZSTANZAID) > 0
+                                  AND INSTR(reply_mi.ZMETADATA, X'ffd8ff') > 0
+                                LIMIT 1
+                                """,
+                                (msg_id_val,),
+                            ).fetchone()
+                            if reply_row and reply_row[0]:
+                                rblob = reply_row[0]
+                                if isinstance(rblob, bytes):
+                                    j_idx = rblob.find(b"\xff\xd8\xff")
+                                    if j_idx != -1:
+                                        e_idx = rblob.find(b"\xff\xd9", j_idx)
+                                        if e_idx != -1:
+                                            thumb_bytes = rblob[j_idx : e_idx + 2]
+
+                        # 2. Check if this message was a reply quoting a parent with thumbnail
+                        if not thumb_bytes:
+                            parent_row = conn.execute(
+                                """
+                                SELECT parent_mi.ZMETADATA
+                                FROM ZWAMESSAGE m
+                                JOIN ZWAMESSAGE parent_m ON parent_m.Z_PK = m.ZPARENTMESSAGE
+                                JOIN ZWAMEDIAITEM parent_mi ON parent_mi.Z_PK = parent_m.ZMEDIAITEM
+                                WHERE m.Z_PK = ?
+                                  AND parent_mi.ZMETADATA IS NOT NULL
+                                  AND INSTR(parent_mi.ZMETADATA, X'ffd8ff') > 0
+                                LIMIT 1
+                                """,
+                                (msg_id_val,),
+                            ).fetchone()
+                            if parent_row and parent_row[0]:
+                                rblob = parent_row[0]
+                                if isinstance(rblob, bytes):
+                                    j_idx = rblob.find(b"\xff\xd8\xff")
+                                    if j_idx != -1:
+                                        e_idx = rblob.find(b"\xff\xd9", j_idx)
+                                        if e_idx != -1:
+                                            thumb_bytes = rblob[j_idx : e_idx + 2]
                     except sqlite3.OperationalError:
                         pass
 

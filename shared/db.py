@@ -213,6 +213,6 @@ def extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
                 idx += 8
             else:
                 break
-    except Exception:
+    except (IndexError, ValueError, UnicodeDecodeError):
         pass
     return None

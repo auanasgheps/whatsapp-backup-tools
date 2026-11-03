@@ -3211,7 +3211,7 @@ def verify_message_deletion_candidates(
                 and ts is not None
                 and ts > (normalized_backup_ts + CLOCK_SKEW_TOLERANCE_MS)
             ):
-                logger.warning(
+                logger.debug(
                     "Rejected deletion of message %d (key_id=%s, ts=%d): timestamp exceeds backup creation date %d (Gate 1 Time Paradox)",
                     msg_id,
                     key_id,
@@ -3235,7 +3235,7 @@ def verify_message_deletion_candidates(
                 if intra_mapped_ids is not None and msg_id in intra_mapped_ids:
                     pass
                 else:
-                    logger.warning(
+                    logger.debug(
                         "Rejected deletion of message %d (key_id=%s): ID exceeds backup max sequence %d (Gate 2 Sequence Overflow)",
                         msg_id,
                         key_id,
@@ -3255,7 +3255,7 @@ def verify_message_deletion_candidates(
 
             # Gate 3: Stanza key integrity
             if has_key_id and (not key_id or not isinstance(key_id, str) or not key_id.strip()):
-                logger.warning(
+                logger.debug(
                     "Rejected deletion of message %d: missing or invalid stanza key (Gate 3 Invalid Key)",
                     msg_id,
                 )
@@ -3274,7 +3274,7 @@ def verify_message_deletion_candidates(
             # Gate 4: Active Chat Context check
             if has_chat_table and has_chat_row_id and chat_row_id is not None:
                 if chat_row_id not in existing_chat_ids:
-                    logger.warning(
+                    logger.debug(
                         "Rejected deletion of message %d (key_id=%s): references non-existent chat_row_id %d (Gate 4 Orphaned Chat Context)",
                         msg_id,
                         key_id,
@@ -3303,6 +3303,14 @@ def verify_message_deletion_candidates(
                     rejection_reason=None,
                 )
             )
+
+    rejected_count = len(audit_records) - len(verified_ids)
+    if rejected_count > 0:
+        logger.debug(
+            "Safeguarded %d candidate message deletion(s) via verification gates (%d verified).",
+            rejected_count,
+            len(verified_ids),
+        )
 
     return verified_ids, audit_records
 
