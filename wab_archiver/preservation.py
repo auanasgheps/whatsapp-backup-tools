@@ -745,6 +745,8 @@ def diff_and_extract_android(
                     )
                 )
             )
+            AND m.message_type NOT IN (15, 64)
+            AND NOT (m.message_type = 7 AND (m.text_data IS NULL OR m.text_data = ''))
         """
 
         sql_deleted_template = f"""
@@ -844,6 +846,16 @@ def diff_and_extract_android(
         """
 
         # 2. Identify revoked messages ("Delete for everyone", by sender or admin)
+        media_content_clause = (
+            "(mm.file_path IS NOT NULL OR mm.message_row_id IS NOT NULL)" if has_media else "0 = 1"
+        )
+        android_content_pred = f"""(
+            (m.text_data IS NOT NULL AND m.text_data != '')
+            OR {media_content_clause}
+            OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 20, 28, 42, 43, 66, 82)
+            OR {poll_pred}
+        )"""
+
         sql_revoked = f"""
             SELECT
                 m._id AS msg_id,
@@ -931,7 +943,9 @@ def diff_and_extract_android(
             {con_sq_join}
             {con_mscp_join}
             {ac_join}
-            WHERE m.message_type NOT IN (15, 64) AND cur.message_type IN (15, 64)
+            WHERE m.message_type NOT IN (7, 15, 64)
+              AND {android_content_pred}
+              AND cur.message_type IN (15, 64)
         """
 
         span = max_id - min_id + 1
@@ -2132,7 +2146,18 @@ def diff_and_extract_ios(
                     )
                 )
             )
+            AND m.ZMESSAGETYPE != 14
+            AND NOT (m.ZMESSAGETYPE IN (6, 10) AND (m.ZTEXT IS NULL OR m.ZTEXT = ''))
         """
+
+        ios_media_content_clause = (
+            "(mi.ZMEDIALOCALPATH IS NOT NULL OR mi.Z_PK IS NOT NULL)" if has_media else "0 = 1"
+        )
+        ios_content_pred = f"""(
+            (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
+            OR {ios_media_content_clause}
+            OR m.ZMESSAGETYPE IN (1, 2, 3, 4, 5, 8, 11, 15, 16, 38, 39, 46, 54)
+        )"""
 
         sql_revoked = f"""
             SELECT
@@ -2207,7 +2232,9 @@ def diff_and_extract_ios(
             {con_s_join}
             {con_sq_join}
             {ac_join}
-            WHERE m.ZMESSAGETYPE != 14 AND cur.ZMESSAGETYPE = 14
+            WHERE m.ZMESSAGETYPE NOT IN (6, 10, 14)
+              AND {ios_content_pred}
+              AND cur.ZMESSAGETYPE = 14
         """
 
         span = max_id - min_id + 1
@@ -3220,6 +3247,8 @@ def preserve_incremental_deletions(
             {mvom_join}
             {edit_join}
             WHERE m._id IN ({ph})
+              AND m.message_type NOT IN (15, 64)
+              AND NOT (m.message_type = 7 AND (m.text_data IS NULL OR m.text_data = ''))
         """
         cur.execute(sql_extract, sub_ids)
         cols = [d[0] for d in cur.description]
