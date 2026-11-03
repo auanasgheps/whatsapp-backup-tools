@@ -1343,17 +1343,17 @@ def read_delimited_messages_bin(messages_bin_path: str) -> list[dict]:
         data = f.read()
     stream = io.BytesIO(data)
     while True:
-        frame_len = parse_varint(stream)
-        if frame_len is None:
+        try:
+            frame_len = parse_varint(stream)
+            if frame_len is None:
+                break
+            frame_bytes = stream.read(frame_len)
+            if len(frame_bytes) < frame_len:
+                break
+            extracted = extract_messages_from_proto_frame(frame_bytes)
+            messages.extend(extracted)
+        except (ValueError, IndexError):
             break
-        frame_bytes = stream.read(frame_len)
-        if len(frame_bytes) < frame_len:
-            raise ValueError(
-                f"Truncated message frame in '{messages_bin_path}': "
-                f"expected {frame_len} bytes, got {len(frame_bytes)}"
-            )
-        extracted = extract_messages_from_proto_frame(frame_bytes)
-        messages.extend(extracted)
     return messages
 
 
@@ -1402,6 +1402,10 @@ def decrypt_increment_archive(
         raise
 
     key_obj = resolve_e2e_key(e2e_key, logger)
+    if key_obj is None:
+        raise ValueError(
+            f"Cannot decrypt increment '{encrypted_path}': no encryption key provided."
+        )
 
     with open(encrypted_path, "rb") as f:
         db_file = DatabaseFactory.from_file(f)
@@ -5836,21 +5840,27 @@ def merge_increments(
         cur = conn.cursor()
         jid_cols = {r[1] for r in cur.execute("PRAGMA table_info(jid)").fetchall()}
         has_raw_string = "raw_string" in jid_cols
+        has_server = "server" in jid_cols
         has_device = "device" in jid_cols
-        jid_sql = (
-            "SELECT user, server, _id, raw_string, device FROM jid "
-            "ORDER BY "
-            "CASE WHEN (raw_string = user || '@' || server OR raw_string IS NULL OR raw_string = '') AND (device IS NULL OR device = 0) THEN 0 "
-            "     WHEN device IS NULL OR device = 0 THEN 1 ELSE 2 END, "
-            "_id ASC"
-            if (has_raw_string and has_device)
-            else "SELECT user, server, _id, raw_string, 0 FROM jid ORDER BY _id ASC"
-            if has_raw_string
-            else "SELECT user, server, _id, '', 0 FROM jid ORDER BY _id ASC"
-        )
+        if has_server and has_raw_string and has_device:
+            jid_sql = (
+                "SELECT user, server, _id, raw_string, device FROM jid "
+                "ORDER BY "
+                "CASE WHEN (raw_string = user || '@' || server OR raw_string IS NULL OR raw_string = '') AND (device IS NULL OR device = 0) THEN 0 "
+                "     WHEN device IS NULL OR device = 0 THEN 1 ELSE 2 END, "
+                "_id ASC"
+            )
+        elif has_server and has_raw_string:
+            jid_sql = "SELECT user, server, _id, raw_string, 0 FROM jid ORDER BY _id ASC"
+        elif has_server:
+            jid_sql = "SELECT user, server, _id, '', 0 FROM jid ORDER BY _id ASC"
+        elif has_raw_string:
+            jid_sql = "SELECT user, '', _id, raw_string, 0 FROM jid ORDER BY _id ASC"
+        else:
+            jid_sql = "SELECT user, '', _id, '', 0 FROM jid ORDER BY _id ASC"
         for r in cur.execute(jid_sql).fetchall():
             u, s, jid_id, raw_str, _dev = r[0], r[1], r[2], r[3], r[4]
-            canonical_key = f"{u}@{s}"
+            canonical_key = f"{u}@{s}" if s else str(u)
             if canonical_key not in jid_cache:
                 jid_cache[canonical_key] = jid_id
             if u not in jid_cache:
@@ -5903,10 +5913,14 @@ def merge_increments(
                     chat_cache[r[0]] = r[1]
 
         jid_id_map: dict[int, int] = {}
-        # Capture baseline sequence from base DB before merging increments
-        cur.execute("SELECT seq FROM SQLITE_SEQUENCE WHERE name = 'message'")
-        seq_r = cur.fetchone()
-        phone_msg_seq = int(seq_r[0]) if seq_r and seq_r[0] is not None else None
+        phone_msg_seq = None
+        try:
+            cur.execute("SELECT seq FROM SQLITE_SEQUENCE WHERE name = 'message'")
+            seq_r = cur.fetchone()
+            if seq_r and seq_r[0] is not None:
+                phone_msg_seq = int(seq_r[0])
+        except sqlite3.OperationalError:
+            pass
         if phone_msg_seq is None:
             cur.execute("SELECT MAX(_id) FROM message")
             max_r = cur.fetchone()
