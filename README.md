@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_dark_1_shots_so.jpeg" alt="WhatsApp Backup Tools Viewer Hero" width="900"/>
+  <img src="docs/images/viewer_dark_1_shots_so.jpeg" alt="WhatsApp Backup Tools Viewer Hero" width="100%"/>
 </p>
 
 > **⚡️ 100% Local & Private** — No cloud accounts, no telemetry, no data leaves your machine. Full native support for **Android & iOS** backups on Windows, macOS, and Linux.
@@ -45,9 +45,9 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 
 
 **WhatsApp Backup Viewer screenshots**
-<p float="left">
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_dark_2_shots_so.jpeg" width="700" />
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_clean.png" width="700" /> 
+<p align="center">
+  <img src="docs/images/viewer_dark_2_shots_so.jpeg" alt="WhatsApp Backup Viewer - Dark Theme" width="49%" />
+  <img src="docs/images/viewer_clean.png" alt="WhatsApp Backup Viewer - Light Theme" width="49%" /> 
 </p>
 
 ---
