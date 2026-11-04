@@ -1,9 +1,3 @@
-# WhatsApp Backup Tools
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="120"/>
-</p>
-
 <p align="center">
   <a href="https://pypi.org/project/whatsapp-backup-tools/"><img src="https://img.shields.io/pypi/v/whatsapp-backup-tools" alt="PyPI Version"></a>
   <a href="https://github.com/auanasgheps/whatsapp-backup-tools/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/auanasgheps/whatsapp-backup-tools/tests.yml?branch=master&label=tests" alt="Tests Status"></a>
@@ -12,6 +6,12 @@
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Code style: ruff"></a>
   <a href="https://github.com/auanasgheps/whatsapp-backup-tools/blob/master/LICENSE"><img src="https://img.shields.io/github/license/auanasgheps/whatsapp-backup-tools" alt="License"></a>
 </p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="120"/>
+</p>
+
+# WhatsApp Backup Tools
 
 ## Overview
 
