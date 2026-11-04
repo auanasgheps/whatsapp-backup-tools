@@ -42,7 +42,10 @@ try:
         send_from_directory,
     )
 except ImportError:
-    sys.exit("Flask is not installed. Run: pip install flask")
+    Flask = None
+    Response = jsonify = make_response = render_template_string = request = send_from_directory = (
+        None
+    )
 
 from wab_viewer.chat_viewer.template import HTML_TEMPLATE
 
@@ -2793,9 +2796,12 @@ def _merge_preserved_chats(
             "SELECT chat_id, chat_type, newest_ts, subject FROM preserved_chats"
         ).fetchall()
     except sqlite3.OperationalError:
-        pres_chats = pres_conn.execute(
-            "SELECT chat_id, chat_type, newest_ts FROM preserved_chats"
-        ).fetchall()
+        try:
+            pres_chats = pres_conn.execute(
+                "SELECT chat_id, chat_type, newest_ts FROM preserved_chats"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            pres_chats = []
 
     for pc in pres_chats:
         cid = pc["chat_id"]
@@ -4331,6 +4337,8 @@ def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> li
 
 
 def create_app(output_root: Path, rescan: bool = False):
+    if Flask is None:
+        raise ImportError("Flask is not installed. Run: pip install flask")
     app = Flask(__name__)
 
     archive_db_path = get_archive_db_path(output_root)
@@ -4780,6 +4788,9 @@ def create_app(output_root: Path, rescan: bool = False):
             )
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute("PRAGMA cache_size = -32000")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            conn.execute("PRAGMA mmap_size = 268435456")
             _wa_local.pres_conn = conn
         return conn
 
