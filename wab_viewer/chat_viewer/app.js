@@ -22,6 +22,9 @@
     document.getElementById('date-picker-input').style.colorScheme = scheme;
     const sizeMap = { small: '13px', medium: '15px', large: '17px' };
     document.documentElement.style.setProperty('--font-size', sizeMap[prefs.font_size] || '15px');
+    const gridMap = { small: '280px', medium: '320px', large: '360px' };
+    document.documentElement.style.setProperty('--media-grid-size', gridMap[prefs.font_size] || '320px');
+    document.documentElement.dataset.fontSize = prefs.font_size || 'medium';
     document.querySelectorAll('.pref-btn').forEach(btn => {
       btn.classList.toggle('active', prefs[btn.dataset.pref] === btn.dataset.value);
     });
