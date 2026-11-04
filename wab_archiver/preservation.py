@@ -128,7 +128,7 @@ PRESERVED_SCHEMA_INDEXES = """
         ON preserved_messages(chat_id, timestamp_ms DESC);
 
     CREATE INDEX IF NOT EXISTS idx_pres_chat_type_ts
-        ON preserved_messages(chat_type, chat_id, timestamp_ms DESC);
+        ON preserved_messages(chat_id, chat_type, timestamp_ms DESC);
 
     CREATE INDEX IF NOT EXISTS idx_pres_stanza
         ON preserved_messages(stanza_id);
@@ -197,6 +197,25 @@ def get_preserved_db_path(output_root: str) -> str:
     return os.path.join(db_dir, PRESERVED_DB_NAME)
 
 
+def check_preserved_db_health(conn: sqlite3.Connection, logger: logging.Logger) -> None:
+    """Validate structural integrity and foreign key consistency of preserved_messages.db."""
+    results = conn.execute("PRAGMA quick_check").fetchall()
+    check_vals = [r[0] for r in results]
+    if check_vals != ["ok"]:
+        for val in check_vals:
+            logger.error(f"Preservation database integrity issue: {val}")
+        raise sqlite3.DatabaseError(f"Preservation database quick_check failed: {check_vals}")
+
+    issues = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if issues:
+        for table, rowid, parent, fkid in issues:
+            logger.error(
+                f"Foreign key violation in '{table}': rowid={rowid}, "
+                f"references '{parent}' (fk #{fkid})"
+            )
+        raise sqlite3.IntegrityError(f"Preservation database foreign_key_check failed: {issues}")
+
+
 def open_preservation_db(output_root: str) -> sqlite3.Connection:
     """Open or initialize preserved_messages.db with WAL mode and incremental vacuum."""
     db_path = get_preserved_db_path(output_root)
@@ -205,7 +224,17 @@ def open_preservation_db(output_root: str) -> sqlite3.Connection:
     conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -32000")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA mmap_size = 268435456")
     conn.executescript(PRESERVED_SCHEMA_TABLES)
+
+    # Align idx_pres_chat_type_ts to (chat_id, chat_type, timestamp_ms DESC) if previously created with (chat_type, chat_id, ...)
+    idx_info = conn.execute("PRAGMA index_info(idx_pres_chat_type_ts)").fetchall()
+    if idx_info and [col[2] for col in idx_info[:2]] == ["chat_type", "chat_id"]:
+        conn.execute("DROP INDEX idx_pres_chat_type_ts")
 
     # Automated schema migration check
     user_ver = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -249,6 +278,7 @@ def open_preservation_db(output_root: str) -> sqlite3.Connection:
 
     conn.executescript(PRESERVED_SCHEMA_INDEXES)
     conn.commit()
+    check_preserved_db_health(conn, logging.getLogger("wab_archiver.preservation"))
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -2629,14 +2659,38 @@ def record_preserved_messages(
     try:
         new_rows = []
         seen_keys = set()
+        unique_candidates = []
         for r in rows:
-            key = (r["chat_id"], r["stanza_id"])
-            if key in seen_keys:
-                continue
-            exists = pres_conn.execute(
-                "SELECT text_body, original_text_body, reactions, poll_data FROM preserved_messages WHERE chat_id = ? AND stanza_id = ? LIMIT 1",
-                key,
-            ).fetchone()
+            key = (str(r["chat_id"]), str(r["stanza_id"]))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_candidates.append(r)
+
+        cursor.execute("""
+            CREATE TEMP TABLE IF NOT EXISTS _cand_keys (
+                chat_id TEXT NOT NULL,
+                stanza_id TEXT NOT NULL,
+                PRIMARY KEY (chat_id, stanza_id)
+            ) WITHOUT ROWID
+        """)
+        cursor.execute("DELETE FROM _cand_keys")
+        cursor.executemany(
+            "INSERT INTO _cand_keys (chat_id, stanza_id) VALUES (?, ?)",
+            [(str(r["chat_id"]), str(r["stanza_id"])) for r in unique_candidates],
+        )
+        existing_records = cursor.execute("""
+            SELECT p.chat_id, p.stanza_id, p.text_body, p.original_text_body, p.reactions, p.poll_data
+            FROM preserved_messages p
+            JOIN _cand_keys k ON p.chat_id = k.chat_id AND p.stanza_id = k.stanza_id
+        """).fetchall()
+        existing_map = {
+            (row[0], row[1]): (row[2], row[3], row[4], row[5]) for row in existing_records
+        }
+        cursor.execute("DROP TABLE IF EXISTS _cand_keys")
+
+        for r in unique_candidates:
+            key = (str(r["chat_id"]), str(r["stanza_id"]))
+            exists = existing_map.get(key)
             if not exists:
                 normalized = {
                     "chat_id": str(r["chat_id"]),
@@ -2692,7 +2746,6 @@ def record_preserved_messages(
                     "_chat_members_json": r.get("_chat_members_json") or r.get("chat_members_json"),
                 }
                 new_rows.append(normalized)
-                seen_keys.add(key)
             else:
                 prev_text, prev_orig, prev_rx, prev_poll = (
                     exists[0],
@@ -2795,6 +2848,9 @@ def record_preserved_messages(
             ),
         )
         pres_conn.commit()
+        pres_conn.execute("PRAGMA optimize")
+        pres_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        check_preserved_db_health(pres_conn, logger)
         logger.info(
             f"Preservation complete: {newly_inserted} new message(s) preserved across "
             f"{len(affected_chats)} chat(s)."
@@ -2835,15 +2891,29 @@ def record_preserved_calls(
     try:
         new_calls = []
         seen_call_ids = set()
+        unique_calls = []
         for c in calls:
             call_id = str(c["call_id"])
-            if call_id in seen_call_ids:
-                continue
-            exists = pres_conn.execute(
-                "SELECT 1 FROM preserved_calls WHERE call_id = ? LIMIT 1",
-                (call_id,),
-            ).fetchone()
-            if not exists:
+            if call_id not in seen_call_ids:
+                seen_call_ids.add(call_id)
+                unique_calls.append(c)
+
+        existing_call_ids = set()
+        all_cids = list(seen_call_ids)
+        for i in range(0, len(all_cids), 900):
+            chunk = all_cids[i : i + 900]
+            ph = ",".join("?" * len(chunk))
+            found = {
+                r[0]
+                for r in cursor.execute(
+                    f"SELECT call_id FROM preserved_calls WHERE call_id IN ({ph})", chunk
+                ).fetchall()
+            }
+            existing_call_ids.update(found)
+
+        for c in unique_calls:
+            call_id = str(c["call_id"])
+            if call_id not in existing_call_ids:
                 new_calls.append(
                     {
                         "call_id": call_id,
@@ -2863,7 +2933,6 @@ def record_preserved_calls(
                         "source_platform": c.get("source_platform") or platform,
                     }
                 )
-                seen_call_ids.add(call_id)
 
         if new_calls:
             cursor.executemany(insert_sql, new_calls)
@@ -2887,6 +2956,9 @@ def record_preserved_calls(
             ),
         )
         pres_conn.commit()
+        pres_conn.execute("PRAGMA optimize")
+        pres_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        check_preserved_db_health(pres_conn, logger)
         logger.debug(f"Preservation complete: {newly_inserted} new call(s) preserved.")
         return newly_inserted
     except Exception as e:

@@ -3331,3 +3331,158 @@ def test_preserve_incremental_deletions_flow(tmp_path: Path) -> None:
         assert row[1] == "To be preserved"
         assert row[2] == "deleted_on_phone"
         assert row[3] == "5550100@s.whatsapp.net"
+
+
+def test_preserved_db_pragmas_and_health(tmp_path: Path) -> None:
+    """Verify that open_preservation_db sets memory and durability PRAGMAs and passes health check."""
+    conn = preservation.open_preservation_db(str(tmp_path))
+    try:
+        busy = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert busy == 5000
+
+        sync = conn.execute("PRAGMA synchronous").fetchone()[0]
+        # In SQLite, 1 corresponds to NORMAL
+        assert sync == 1
+
+        cache = conn.execute("PRAGMA cache_size").fetchone()[0]
+        assert cache == -32000
+
+        temp_store = conn.execute("PRAGMA temp_store").fetchone()[0]
+        # In SQLite, 2 corresponds to MEMORY
+        assert temp_store == 2
+
+        mmap = conn.execute("PRAGMA mmap_size").fetchone()[0]
+        assert mmap >= 268435456
+
+        # Health check must succeed without exception
+        preservation.check_preserved_db_health(conn, _TEST_LOGGER)
+
+        # Index order alignment: idx_pres_chat_type_ts must start with (chat_id, chat_type)
+        idx_info = conn.execute("PRAGMA index_info(idx_pres_chat_type_ts)").fetchall()
+        cols = [r[2] for r in idx_info]
+        assert cols[:2] == ["chat_id", "chat_type"]
+    finally:
+        conn.close()
+
+
+def test_check_preserved_db_health_failures(tmp_path: Path) -> None:
+    """Verify check_preserved_db_health raises DatabaseError on quick_check failure and IntegrityError on FK failure."""
+    db_file = tmp_path / "test_fk.db"
+    with sqlite3.connect(db_file) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, p_id INTEGER REFERENCES parent(id))"
+        )
+        # Insert child referencing non-existent parent with foreign_keys temporarily off to simulate inconsistency
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("INSERT INTO child VALUES (1, 999)")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.commit()
+
+        try:
+            preservation.check_preserved_db_health(conn, _TEST_LOGGER)
+            raise AssertionError("Expected IntegrityError for foreign key violation")
+        except sqlite3.IntegrityError:
+            pass
+
+
+def test_preserved_index_order_migration(tmp_path: Path) -> None:
+    """Verify existing preservation DB with old index column order is migrated and re-created."""
+    db_path = preservation.get_preserved_db_path(str(tmp_path))
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(preservation.PRESERVED_SCHEMA_TABLES)
+        # Create legacy index order (chat_type, chat_id, timestamp_ms DESC)
+        conn.execute(
+            "CREATE INDEX idx_pres_chat_type_ts ON preserved_messages(chat_type, chat_id, timestamp_ms DESC)"
+        )
+        conn.commit()
+
+        idx_info = conn.execute("PRAGMA index_info(idx_pres_chat_type_ts)").fetchall()
+        assert [r[2] for r in idx_info[:2]] == ["chat_type", "chat_id"]
+
+    # Re-open via open_preservation_db which must detect and re-align the index
+    reopened = preservation.open_preservation_db(str(tmp_path))
+    try:
+        new_info = reopened.execute("PRAGMA index_info(idx_pres_chat_type_ts)").fetchall()
+        assert [r[2] for r in new_info[:2]] == ["chat_id", "chat_type"]
+    finally:
+        reopened.close()
+
+
+def test_record_preserved_messages_batch_lookups(tmp_path: Path) -> None:
+    """Verify record_preserved_messages batch lookups handle inserts, edits, reactions, and maintenance."""
+    with preservation.open_preservation_db(str(tmp_path)) as pres_conn:
+        cand1 = {
+            "chat_id": "chat1",
+            "stanza_id": "STANZA_1",
+            "chat_type": "contact",
+            "timestamp_ms": 1700000000000,
+            "text_body": "Original text",
+        }
+        cand2 = {
+            "chat_id": "chat1",
+            "stanza_id": "STANZA_2",
+            "chat_type": "contact",
+            "timestamp_ms": 1700000001000,
+            "text_body": "Second message",
+        }
+        res = preservation.record_preserved_messages(
+            pres_conn, [cand1, cand2], "android", _TEST_LOGGER
+        )
+        assert res.messages == 2
+        assert res.chats == 1
+
+        # Now test updates to existing rows via batch lookup: cand1 edited, cand2 gets reactions
+        cand1_edited = {
+            "chat_id": "chat1",
+            "stanza_id": "STANZA_1",
+            "chat_type": "contact",
+            "timestamp_ms": 1700000000000,
+            "text_body": "Edited text",
+            "is_edited": 1,
+            "edited_ts": 1700000005000,
+        }
+        cand2_reacted = {
+            "chat_id": "chat1",
+            "stanza_id": "STANZA_2",
+            "chat_type": "contact",
+            "timestamp_ms": 1700000001000,
+            "text_body": "Second message",
+            "reactions": "👍",
+        }
+        res2 = preservation.record_preserved_messages(
+            pres_conn, [cand1_edited, cand2_reacted], "android", _TEST_LOGGER
+        )
+        assert res2.messages == 0  # No new messages
+
+        row1 = pres_conn.execute(
+            "SELECT text_body, original_text_body, is_edited FROM preserved_messages WHERE stanza_id = 'STANZA_1'"
+        ).fetchone()
+        assert row1[0] == "Edited text"
+        assert row1[1] == "Original text"
+        assert row1[2] == 1
+
+        row2 = pres_conn.execute(
+            "SELECT reactions FROM preserved_messages WHERE stanza_id = 'STANZA_2'"
+        ).fetchone()
+        assert row2[0] == "👍"
+
+
+def test_record_preserved_calls_batch_lookups(tmp_path: Path) -> None:
+    """Verify record_preserved_calls batch lookups insert new calls and ignore existing ones."""
+    with preservation.open_preservation_db(str(tmp_path)) as pres_conn:
+        call1 = {"call_id": "CALL_1", "chat_id": "chat1", "timestamp_ms": 1700000000000}
+        call2 = {"call_id": "CALL_2", "chat_id": "chat1", "timestamp_ms": 1700000001000}
+        inserted = preservation.record_preserved_calls(
+            pres_conn, [call1, call2], "android", _TEST_LOGGER
+        )
+        assert inserted == 2
+
+        # Re-recording same calls plus one new call
+        call3 = {"call_id": "CALL_3", "chat_id": "chat1", "timestamp_ms": 1700000002000}
+        inserted2 = preservation.record_preserved_calls(
+            pres_conn, [call1, call2, call3], "android", _TEST_LOGGER
+        )
+        assert inserted2 == 1
