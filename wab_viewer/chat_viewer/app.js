@@ -1055,7 +1055,7 @@
     senderEl.textContent = msg.sender || '';
     if (msg.sender && !msg.from_me && currentChat && currentChat.type === 'group') bubble.appendChild(senderEl);
 
-    if (msg.quoted_text && msg.media_type !== 'deleted') {
+    if ((msg.quoted_text || msg.quoted_stanza_id || msg.quoted_msg_id) && msg.media_type !== 'deleted') {
       const quote = document.createElement('div');
       quote.className = 'msg-quote';
       const qContent = document.createElement('div');
@@ -1066,7 +1066,7 @@
       qSender.textContent = qs || (currentChat && currentChat.type === 'contact' ? currentChat.display_name : '');
       const qText = document.createElement('div');
       qText.className = 'msg-quote-text';
-      qText.textContent = msg.quoted_text;
+      qText.textContent = msg.quoted_text || (msg.quoted_msg_id ? 'Quoted message' : '');
       qContent.appendChild(qSender);
       qContent.appendChild(qText);
       quote.appendChild(qContent);
@@ -1077,8 +1077,16 @@
         qThumb.alt = '';
         qThumb.loading = 'lazy';
         qThumb.decoding = 'async';
-        qThumb.src = '/api/thumbnail/' + (msg.quoted_msg_id || msg.msg_id);
-        qThumb.onerror = () => { qThumb.remove(); };
+        const primaryId = msg.quoted_msg_id || msg.msg_id;
+        const fallbackId = (msg.quoted_msg_id && msg.msg_id && msg.quoted_msg_id !== msg.msg_id) ? msg.msg_id : null;
+        qThumb.src = '/api/thumbnail/' + primaryId;
+        qThumb.onerror = () => {
+          if (fallbackId && qThumb.src.indexOf('/' + fallbackId) === -1) {
+            qThumb.src = '/api/thumbnail/' + fallbackId;
+          } else {
+            qThumb.remove();
+          }
+        };
         quote.appendChild(qThumb);
       }
 
