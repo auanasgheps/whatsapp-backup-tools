@@ -1,4 +1,22 @@
 <p align="center">
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="130"/>
+</p>
+
+<h1 align="center">WhatsApp Backup Tools</h1>
+
+<p align="center">
+  <strong>Your WhatsApp history, truly yours.</strong><br>
+  The complete local-first suite to automatically organize your media and explore your chats offline, just like WhatsApp Web.
+</p>
+
+<p align="center">
+  <a href="#features">Features</a> •
+  <a href="#installation--quick-start">Quick Start</a> •
+  <a href="#archive-structure">How It Works</a> •
+  <a href="#known-limitations">Limitations</a>
+</p>
+
+<p align="center">
   <a href="https://pypi.org/project/whatsapp-backup-tools/"><img src="https://img.shields.io/pypi/v/whatsapp-backup-tools" alt="PyPI Version"></a>
   <a href="https://github.com/auanasgheps/whatsapp-backup-tools/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/auanasgheps/whatsapp-backup-tools/tests.yml?branch=master&label=tests" alt="Tests Status"></a>
   <a href="https://github.com/auanasgheps/whatsapp-backup-tools/actions/workflows/tests.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/badges/tests.json" alt="Tests Count"></a>
@@ -7,11 +25,7 @@
   <a href="https://github.com/auanasgheps/whatsapp-backup-tools/blob/master/LICENSE"><img src="https://img.shields.io/github/license/auanasgheps/whatsapp-backup-tools" alt="License"></a>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="120"/>
-</p>
-
-<h1 align="center">WhatsApp Backup Tools</h1>
+> **⚡️ 100% Local & Private** — No cloud accounts, no telemetry, no data leaves your machine. Full native support for **Android & iOS** backups on Windows, macOS, and Linux.
 
 ## Overview
 
