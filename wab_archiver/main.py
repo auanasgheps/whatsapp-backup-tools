@@ -1716,7 +1716,7 @@ def parse_args() -> argparse.Namespace:
         description="Archive WhatsApp media into a structured folder hierarchy.",
     )
     parser.add_argument(
-        "--version", action="version", version=f"WhatsApp Backup Tools — Archiver v{_get_version()}"
+        "--version", action="version", version=f"WhatsApp Backup Tools - Archiver v{_get_version()}"
     )
 
     subs = parser.add_subparsers(dest="command", metavar="command")
@@ -2957,7 +2957,7 @@ def main():
 
     if args.command == "restore":
         logger.info(
-            f"=== WhatsApp Backup Tools — Archiver v{_get_version()} started (restore mode) ==="
+            f"=== WhatsApp Backup Tools - Archiver v{_get_version()} started (restore mode) ==="
         )
         if args.dry_run:
             logger.info("*** DRY RUN MODE — no files will be copied ***")
@@ -2966,7 +2966,7 @@ def main():
 
     if args.dry_run:
         logger.info("*** DRY RUN MODE — no files will be copied ***")
-    logger.info(f"=== WhatsApp Backup Tools — Archiver v{_get_version()} started ===")
+    logger.info(f"=== WhatsApp Backup Tools - Archiver v{_get_version()} started ===")
     run_forward_mode(args, logger)
 
 

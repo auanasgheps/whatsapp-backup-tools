@@ -5776,6 +5776,11 @@ class TestViewerEntrypoint:
         (tmp_path / "msgstore.db").touch()
         viewer.validate_output_root(tmp_path)
 
+        # Preserved-only archive validation passes even if live msgstore is absent
+        (tmp_path / "msgstore.db").unlink()
+        (tmp_path / "preserved_messages.db").touch()
+        viewer.validate_output_root(tmp_path)
+
     def test_resolve_browser_url(self):
         assert viewer.resolve_browser_url("0.0.0.0", 5000) == "http://127.0.0.1:5000"
         assert viewer.resolve_browser_url("::", 8080) == "http://127.0.0.1:8080"
