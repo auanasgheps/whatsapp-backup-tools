@@ -98,38 +98,39 @@ Explore and search your archived chats through a local web UI replicating WhatsA
 
 ## Archive Structure
 
-After a successful run, the archive is organised as follows:
+After a successful run, the archive is organised into a clean, human-readable hierarchy:
 
-```
-<output>/
-├── Contacts/
+```text
+📁 <output>/
+├── 👤 Contacts/
 │   ├── John Doe (0039123456789)/
 │   │   ├── 2023/
-│   │   │   ├── Received/
-│   │   │   └── Sent/
+│   │   │   ├── 📥 Received/
+│   │   │   └── 📤 Sent/
 │   │   └── 2024/
-│   │       ├── Received/
-│   │       └── Sent/
+│   │       ├── 📥 Received/
+│   │       └── 📤 Sent/
 │   └── Unknown (0044987654321)/
 │       └── 2022/
-│           └── Received/
-├── Groups/
+│           └── 📥 Received/
+├── 👥 Groups/
 │   ├── Family Chat/
 │   │   ├── 2023/
+│   │   │   └── 🖼️ IMG-20230115-WA0001_JohnDoe.jpg
 │   │   └── 2024/
+│   │       └── 🎥 VID-20240115-WA0002_Me.mp4
 │   └── Work Team/
 │       └── 2024/
-├── Whatsapp Databases/       ← Extracted/decrypted WhatsApp databases (iOS & Android)
-│   ├── ChatStorage.sqlite
-│   ├── ContactsV2.sqlite
-│   └── ...
-├── .wa_media_archiver.db
-├── preserved_messages.db     ← Preserved deleted messages & chats (when using -P)
-├── wab-archiver.log
-├── missing_media_report.csv
-├── duplicate_media_report.csv
-└── source_conflicts_report.csv  ← only when multiple --wa-root roots produce conflicting copies
+├── 🗄️ WhatsApp Databases/          # Decrypted ChatStorage.sqlite, msgstore.db, etc.
+├── 🛡️ preserved_messages.db        # Deleted messages, polls & edits (when using -P)
+├── ⚙️ .wa_media_archiver.db        # Archive cache & state tracking
+├── 📝 wab-archiver.log             # Execution audit log
+├── 📊 missing_media_report.csv     # Missing media report
+├── 📊 duplicate_media_report.csv   # Deduplicated media audit
+└── 📊 source_conflicts_report.csv  # Conflicting copies across backup roots (--wa-root)
 ```
+*Please note: the actual output does not contain these emojis, they have been added here only for readability purposes.*
+
 
 - Files in **Contacts** folders retain their original filename
 - Files in **Groups** folders have the sender name appended: `IMG-20230115-WA0001_JohnDoe.jpg`
