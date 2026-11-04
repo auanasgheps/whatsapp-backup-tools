@@ -11,7 +11,7 @@
   <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="120"/>
 </p>
 
-# WhatsApp Backup Tools
+<h1 align="center">WhatsApp Backup Tools</h1>
 
 ## Overview
 
