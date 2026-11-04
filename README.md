@@ -25,6 +25,10 @@
   <a href="https://github.com/auanasgheps/whatsapp-backup-tools/blob/master/LICENSE"><img src="https://img.shields.io/github/license/auanasgheps/whatsapp-backup-tools" alt="License"></a>
 </p>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_dark_1_shots_so.jpeg" alt="WhatsApp Backup Tools Viewer Hero" width="900"/>
+</p>
+
 > **⚡️ 100% Local & Private** — No cloud accounts, no telemetry, no data leaves your machine. Full native support for **Android & iOS** backups on Windows, macOS, and Linux.
 
 ## Overview
@@ -40,9 +44,9 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 > ⚠️ **These tools are designed to run on a backup copy of your WhatsApp data — never on live device files.** The archiver always makes a copy of your data.
 
 
-**Whatsapp Backup Viewer screenshots**
+**WhatsApp Backup Viewer screenshots**
 <p float="left">
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_dark.png" width="700" />
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_dark_2_shots_so.jpeg" width="700" />
   <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_clean.png" width="700" /> 
 </p>
 
