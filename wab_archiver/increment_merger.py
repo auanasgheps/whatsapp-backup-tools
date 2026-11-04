@@ -287,6 +287,63 @@ def extract_context_info(payload_fields: dict) -> dict | None:
             quoted_text = ""
             if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
                 q_thumb = sub[16][0][1]
+        elif 8 in q_fields:
+            sub = parse_wire_fields(q_fields[8][0][1])
+            is_ptt = bool(sub.get(6, [(0, 0)])[0][1]) if 6 in sub else False
+            quoted_text = "🎵 Voice message" if is_ptt else "🎵 Audio"
+            q_type = 2
+        elif 5 in q_fields:
+            sub = parse_wire_fields(q_fields[5][0][1])
+            loc_name = (
+                sub.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 3 in sub else ""
+            )
+            loc_addr = (
+                sub.get(4, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 4 in sub else ""
+            )
+            quoted_text = loc_name or loc_addr or "📍 Location"
+            q_type = 5
+            if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
+                q_thumb = sub[16][0][1]
+        elif 4 in q_fields:
+            sub = parse_wire_fields(q_fields[4][0][1])
+            c_name = (
+                sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 1 in sub else ""
+            )
+            quoted_text = c_name or "👤 Contact"
+            q_type = 4
+        elif any(t in q_fields for t in (49, 60, 64, 93, 111)):
+            p_tag = next(t for t in (49, 60, 64, 93, 111) if t in q_fields)
+            raw_p = q_fields[p_tag][0][1]
+            sub = parse_wire_fields(raw_p) if isinstance(raw_p, bytes) else {}
+            if 1 in sub and isinstance(sub[1][0][1], bytes):
+                try:
+                    inner_cand = parse_wire_fields(sub[1][0][1])
+                    nested_tag = next((t for t in (49, 60, 64, 93, 111) if t in inner_cand), None)
+                    if nested_tag is not None and isinstance(inner_cand[nested_tag][0][1], bytes):
+                        sub = parse_wire_fields(inner_cand[nested_tag][0][1])
+                    elif 2 in inner_cand and any(
+                        isinstance(opt[1], bytes) for opt in inner_cand.get(2, [])
+                    ):
+                        sub = inner_cand
+                except Exception:
+                    pass
+            poll_name = ""
+            if p_tag == 49 and 2 in sub and isinstance(sub[2][0][1], bytes):
+                poll_name = sub[2][0][1].decode("utf-8", errors="replace")
+            elif 1 in sub and isinstance(sub[1][0][1], bytes):
+                poll_name = sub[1][0][1].decode("utf-8", errors="replace")
+            elif 2 in sub and isinstance(sub[2][0][1], bytes):
+                poll_name = sub[2][0][1].decode("utf-8", errors="replace")
+            quoted_text = poll_name or "Poll"
+            q_type = 66
+
+    if (
+        not q_thumb
+        and 16 in ctx_fields
+        and isinstance(ctx_fields[16][0][1], bytes)
+        and ctx_fields[16][0][1]
+    ):
+        q_thumb = ctx_fields[16][0][1]
 
     if not stanza_id and not quoted_text and not participant and not q_thumb:
         return None
@@ -671,9 +728,21 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 if 16 in ext_fields and ext_fields[16][0][1]
                 else None
             )
-            if matched_text or canonical_url or description or title or jpeg_thumbnail:
+            if (
+                not jpeg_thumbnail
+                and 16 in fields
+                and isinstance(fields[16][0][1], bytes)
+                and fields[16][0][1]
+            ):
+                jpeg_thumbnail = fields[16][0][1]
+            target_url = canonical_url or matched_text
+            if not target_url and text_data:
+                m_url = re.search(r"https?://[^\s<>\"']+", text_data)
+                if m_url:
+                    target_url = m_url.group(0).rstrip(".,;:!?)'\"")
+            if target_url or description or title or jpeg_thumbnail:
                 link_preview_info = {
-                    "url": canonical_url or matched_text,
+                    "url": target_url,
                     "title": title,
                     "description": description,
                     "preview_type": preview_type,
@@ -3458,6 +3527,8 @@ def apply_message_deletions(
     has_edit = bool(get_table_columns(conn, "message_edit_info", schema_cache))
     has_media = bool(get_table_columns(conn, "message_media", schema_cache))
     has_quoted = bool(get_table_columns(conn, "message_quoted", schema_cache))
+    has_quoted_media = bool(get_table_columns(conn, "message_quoted_media", schema_cache))
+    has_quoted_text = bool(get_table_columns(conn, "message_quoted_text", schema_cache))
     has_receipt_user = bool(get_table_columns(conn, "receipt_user", schema_cache))
     has_secret = bool(get_table_columns(conn, "message_secret", schema_cache))
     has_text = bool(get_table_columns(conn, "message_text", schema_cache))
@@ -3537,6 +3608,16 @@ def apply_message_deletions(
         if has_quoted:
             cur.execute(
                 f"DELETE FROM message_quoted WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_quoted_media:
+            cur.execute(
+                f"DELETE FROM message_quoted_media WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_quoted_text:
+            cur.execute(
+                f"DELETE FROM message_quoted_text WHERE message_row_id IN ({placeholders})",
                 chunk,
             )
         if has_receipt_user:
@@ -4472,12 +4553,19 @@ def apply_messages_bin(
                         "UPDATE message_quoted_media SET message_row_id = ? WHERE message_row_id = ?",
                         (msg_row_id, old_id),
                     )
+                    cur.execute(
+                        "UPDATE message_quoted_text SET message_row_id = ? WHERE message_row_id = ?",
+                        (msg_row_id, old_id),
+                    )
                 except sqlite3.OperationalError:
                     pass
             else:
                 try:
                     cur.execute(
                         "DELETE FROM message_quoted_media WHERE message_row_id = ?", (old_id,)
+                    )
+                    cur.execute(
+                        "DELETE FROM message_quoted_text WHERE message_row_id = ?", (old_id,)
                     )
                 except sqlite3.OperationalError:
                     pass
@@ -4528,10 +4616,8 @@ def apply_messages_bin(
                     pass
             else:
                 try:
-                    cur.execute(
-                        "UPDATE message_thumbnail SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
+                    cur.execute("DELETE FROM message_text WHERE message_row_id = ?", (old_id,))
+                    cur.execute("DELETE FROM message_thumbnail WHERE message_row_id = ?", (old_id,))
                 except sqlite3.OperationalError:
                     pass
 
@@ -4736,17 +4822,30 @@ def apply_messages_bin(
                     [q_row_map[c] for c in valid_q_cols],
                 )
                 if qi.get("thumbnail"):
-                    mqm_cols = get_table_columns(conn, "message_quoted_media", schema_cache)
-                    if mqm_cols:
-                        mqm_map = {
+                    q_msg_type = qi.get("message_type", 0)
+                    mqt_cols = get_table_columns(conn, "message_quoted_text", schema_cache)
+                    if q_msg_type == 0 and mqt_cols:
+                        mqt_map = {
                             "message_row_id": msg_row_id,
                             "thumbnail": qi["thumbnail"],
                         }
-                        valid_mqm = [c for c in mqm_map if c in mqm_cols]
+                        valid_mqt = [c for c in mqt_map if c in mqt_cols]
                         cur.execute(
-                            f"INSERT OR REPLACE INTO message_quoted_media ({', '.join(valid_mqm)}) VALUES ({', '.join('?' for _ in valid_mqm)})",
-                            [mqm_map[c] for c in valid_mqm],
+                            f"INSERT OR REPLACE INTO message_quoted_text ({', '.join(valid_mqt)}) VALUES ({', '.join('?' for _ in valid_mqt)})",
+                            [mqt_map[c] for c in valid_mqt],
                         )
+                    else:
+                        mqm_cols = get_table_columns(conn, "message_quoted_media", schema_cache)
+                        if mqm_cols:
+                            mqm_map = {
+                                "message_row_id": msg_row_id,
+                                "thumbnail": qi["thumbnail"],
+                            }
+                            valid_mqm = [c for c in mqm_map if c in mqm_cols]
+                            cur.execute(
+                                f"INSERT OR REPLACE INTO message_quoted_media ({', '.join(valid_mqm)}) VALUES ({', '.join('?' for _ in valid_mqm)})",
+                                [mqm_map[c] for c in valid_mqm],
+                            )
 
         # Insert user receipts if present
         if msg.get("user_receipts") and msg_row_id:
@@ -4955,6 +5054,7 @@ def apply_messages_bin(
                                     pass
                                 for tbl, col in [
                                     ("message_quoted_media", "message_row_id"),
+                                    ("message_quoted_text", "message_row_id"),
                                     ("message_media", "message_row_id"),
                                     ("receipt_user", "message_row_id"),
                                     ("message_view_once_media", "message_row_id"),
@@ -5088,6 +5188,74 @@ def apply_messages_bin(
                                         )
                                     except sqlite3.OperationalError:
                                         pass
+
+                            if msg_item.get("quoted_info"):
+                                q_cols = get_table_columns(conn, "message_quoted", schema_cache)
+                                if q_cols:
+                                    f_qi = msg_item["quoted_info"]
+                                    f_q_part = f_qi.get("participant", "")
+                                    f_q_sender_id = 0
+                                    rem_jid = msg_item.get("remote_jid", "")
+                                    is_g = bool(rem_jid.endswith("@g.us"))
+                                    if is_g and f_q_part and f_qi.get("from_me") != 1:
+                                        try:
+                                            f_q_sender_id = resolve_or_create_jid(
+                                                conn, f_q_part, logger, jid_cache
+                                            )
+                                        except (ValueError, Exception):
+                                            f_q_sender_id = 0
+                                    f_q_stanza = f_qi.get("stanza_id") or ""
+                                    f_q_ts = key_ts_cache.get(f_q_stanza, 0)
+                                    f_q_fm = f_qi.get("from_me", 0)
+                                    if f_q_stanza and not f_q_ts:
+                                        cur.execute(
+                                            "SELECT timestamp, from_me, sender_jid_row_id FROM message WHERE key_id = ?",
+                                            (f_q_stanza,),
+                                        )
+                                        f_tr = cur.fetchone()
+                                        if f_tr and f_tr[0]:
+                                            f_q_ts = int(f_tr[0])
+                                            f_q_fm = int(f_tr[1] or 0)
+                                            f_q_sender_id = (
+                                                0
+                                                if f_q_fm == 1
+                                                else (int(f_tr[2]) if f_tr[2] is not None else 0)
+                                            )
+                                    f_q_map = {
+                                        "message_row_id": m_id,
+                                        "chat_row_id": fb_chat_id,
+                                        "parent_message_chat_row_id": fb_chat_id,
+                                        "text_data": f_qi.get("quoted_text", ""),
+                                        "from_me": f_q_fm,
+                                        "sender_jid_row_id": f_q_sender_id,
+                                        "key_id": f_q_stanza,
+                                        "timestamp": f_q_ts,
+                                        "message_type": f_qi.get("message_type", 0),
+                                    }
+                                    v_qc = [c for c in f_q_map if c in q_cols]
+                                    cur.execute(
+                                        f"INSERT OR REPLACE INTO message_quoted ({', '.join(v_qc)}) VALUES ({', '.join('?' for _ in v_qc)})",
+                                        [f_q_map[c] for c in v_qc],
+                                    )
+                                    if f_qi.get("thumbnail"):
+                                        f_q_type = f_qi.get("message_type", 0)
+                                        f_mqt_cols = get_table_columns(
+                                            conn, "message_quoted_text", schema_cache
+                                        )
+                                        if f_q_type == 0 and f_mqt_cols:
+                                            cur.execute(
+                                                "INSERT OR REPLACE INTO message_quoted_text (message_row_id, thumbnail) VALUES (?, ?)",
+                                                (m_id, f_qi["thumbnail"]),
+                                            )
+                                        else:
+                                            f_mqm_cols = get_table_columns(
+                                                conn, "message_quoted_media", schema_cache
+                                            )
+                                            if f_mqm_cols:
+                                                cur.execute(
+                                                    "INSERT OR REPLACE INTO message_quoted_media (message_row_id, thumbnail) VALUES (?, ?)",
+                                                    (m_id, f_qi["thumbnail"]),
+                                                )
 
                             if msg_item.get("embedded_poll_votes"):
                                 rem_jid = msg_item.get("remote_jid", "")

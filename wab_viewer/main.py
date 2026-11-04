@@ -573,6 +573,19 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                         "CREATE INDEX IF NOT EXISTS idx_message_quoted_media_row_id "
                         "ON message_quoted_media(message_row_id)"
                     )
+        if "idx_message_quoted_text_row_id" not in existing:
+            has_mqt = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_quoted_text'"
+            ).fetchone()
+            if has_mqt:
+                cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(message_quoted_text)").fetchall()
+                }
+                if "message_row_id" in cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_message_quoted_text_row_id "
+                        "ON message_quoted_text(message_row_id)"
+                    )
 
         # Database self-healing for Android: sanitize empty phantom messages and re-hide empty shadow chats
         has_android_msg = conn.execute(
@@ -1835,6 +1848,15 @@ def _hydrate_quoted_rows(
                             mids,
                         ).fetchall()
                     )
+                if "message_quoted_text" in tables and mids:
+                    ph = ",".join("?" * len(mids))
+                    has_thumb_mids.update(
+                        r[0]
+                        for r in wa_conn.execute(
+                            f"SELECT message_row_id FROM message_quoted_text WHERE message_row_id IN ({ph}) AND thumbnail IS NOT NULL",
+                            mids,
+                        ).fetchall()
+                    )
                 if q_mids:
                     ph_q = ",".join("?" * len(q_mids))
                     if "message_thumbnail" in tables:
@@ -1842,6 +1864,22 @@ def _hydrate_quoted_rows(
                             r[0]
                             for r in wa_conn.execute(
                                 f"SELECT message_row_id FROM message_thumbnail WHERE message_row_id IN ({ph_q}) AND thumbnail IS NOT NULL",
+                                q_mids,
+                            ).fetchall()
+                        )
+                    if "message_quoted_media" in tables:
+                        has_thumb_mids.update(
+                            r[0]
+                            for r in wa_conn.execute(
+                                f"SELECT message_row_id FROM message_quoted_media WHERE message_row_id IN ({ph_q}) AND thumbnail IS NOT NULL",
+                                q_mids,
+                            ).fetchall()
+                        )
+                    if "message_quoted_text" in tables:
+                        has_thumb_mids.update(
+                            r[0]
+                            for r in wa_conn.execute(
+                                f"SELECT message_row_id FROM message_quoted_text WHERE message_row_id IN ({ph_q}) AND thumbnail IS NOT NULL",
                                 q_mids,
                             ).fetchall()
                         )
@@ -2012,9 +2050,12 @@ def _hydrate_link_preview_rows(rows: list[dict], source_type: str) -> None:
         ):
             row["has_thumbnail"] = 1
         if not row.get("link_url") and (row.get("link_title") or row.get("media_type") == "link"):
-            m = re.search(r"https?://[^\s<>\"']+", row.get("text_body") or "")
+            m = re.search(r"(?:https?://|www\.)[^\s<>\"']+", row.get("text_body") or "")
             if m:
-                row["link_url"] = m.group(0).rstrip(".,;:!?)'\"")
+                extracted_url = m.group(0).rstrip(".,;:!?)'\"")
+                if extracted_url.startswith("www."):
+                    extracted_url = "https://" + extracted_url
+                row["link_url"] = extracted_url
 
 
 def _hydrate_live_photos(
@@ -4988,6 +5029,7 @@ def create_app(output_root: Path, rescan: bool = False):
     has_message_thumbnail = False
     has_media_hash_thumbnail = False
     has_message_quoted_media = False
+    has_message_quoted_text = False
     has_mm_width = False
     has_mm_height = False
     has_mm_size = False
@@ -5041,6 +5083,7 @@ def create_app(output_root: Path, rescan: bool = False):
         has_message_thumbnail = "message_thumbnail" in _wa_tables
         has_media_hash_thumbnail = "media_hash_thumbnail" in _wa_tables
         has_message_quoted_media = "message_quoted_media" in _wa_tables
+        has_message_quoted_text = "message_quoted_text" in _wa_tables
         _mq_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_quoted)").fetchall()}
             if "message_quoted" in _wa_tables
@@ -5635,12 +5678,27 @@ def create_app(output_root: Path, rescan: bool = False):
         android_has_thumb_arms.append(
             "(mqm.message_row_id IS NOT NULL AND mqm.thumbnail IS NOT NULL)"
         )
+    if has_message_quoted_text:
+        android_thumb_joins += (
+            "    LEFT JOIN message_quoted_text mqt ON mqt.message_row_id = m._id\n"
+        )
+        android_has_thumb_arms.append(
+            "(mqt.message_row_id IS NOT NULL AND mqt.thumbnail IS NOT NULL)"
+        )
     if has_message_quoted_media and has_mq_key_id and has_android_key_id:
         android_has_thumb_arms.append(
             "(m.message_type IN (1, 3, 9, 20, 26, 42, 43, 82) AND EXISTS ("
             "    SELECT 1 FROM message_quoted mq_orig "
             "    JOIN message_quoted_media mqm_orig ON mqm_orig.message_row_id = mq_orig.message_row_id "
             "    WHERE mq_orig.key_id = m.key_id AND mqm_orig.thumbnail IS NOT NULL"
+            "))"
+        )
+    if has_message_quoted_text and has_mq_key_id and has_android_key_id:
+        android_has_thumb_arms.append(
+            "(m.message_type = 0 AND EXISTS ("
+            "    SELECT 1 FROM message_quoted mq_orig "
+            "    JOIN message_quoted_text mqt_orig ON mqt_orig.message_row_id = mq_orig.message_row_id "
+            "    WHERE mq_orig.key_id = m.key_id AND mqt_orig.thumbnail IS NOT NULL"
             "))"
         )
 
@@ -5672,6 +5730,8 @@ def create_app(output_root: Path, rescan: bool = False):
             )
         if has_message_quoted_media:
             m_orig_join += "    LEFT JOIN message_quoted_media mqm_orig ON mqm_orig.message_row_id = m_orig._id\n"
+        if has_message_quoted_text:
+            m_orig_join += "    LEFT JOIN message_quoted_text mqt_orig ON mqt_orig.message_row_id = m_orig._id\n"
         quoted_msg_id_col = "m_orig._id"
         quoted_stanza_id_col = "mq.key_id"
         quoted_ts_col = "COALESCE(NULLIF(mq.timestamp, 0), m_orig.timestamp, 0)"
@@ -5679,6 +5739,8 @@ def create_app(output_root: Path, rescan: bool = False):
     quoted_thumb_conds = []
     if has_message_quoted_media:
         quoted_thumb_conds.append("(mqm.message_row_id IS NOT NULL AND mqm.thumbnail IS NOT NULL)")
+    if has_message_quoted_text:
+        quoted_thumb_conds.append("(mqt.message_row_id IS NOT NULL AND mqt.thumbnail IS NOT NULL)")
     if has_android_key_id and has_mq_key_id:
         if has_message_thumbnail:
             quoted_thumb_conds.append(
@@ -5691,6 +5753,10 @@ def create_app(output_root: Path, rescan: bool = False):
         if has_message_quoted_media:
             quoted_thumb_conds.append(
                 "(mqm_orig.message_row_id IS NOT NULL AND mqm_orig.thumbnail IS NOT NULL)"
+            )
+        if has_message_quoted_text:
+            quoted_thumb_conds.append(
+                "(mqt_orig.message_row_id IS NOT NULL AND mqt_orig.thumbnail IS NOT NULL)"
             )
         quoted_thumb_conds.append("(m_orig.message_type IN (1, 3, 9, 13, 20, 26, 42, 43))")
     if has_mq_msg_type:
@@ -9673,6 +9739,14 @@ def create_app(output_root: Path, rescan: bool = False):
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
 
+            if not thumb_bytes and has_message_quoted_text:
+                row = conn.execute(
+                    "SELECT thumbnail FROM message_quoted_text WHERE message_row_id = ?",
+                    (msg_id_val,),
+                ).fetchone()
+                if row and row["thumbnail"]:
+                    thumb_bytes = row["thumbnail"]
+
             if (
                 not thumb_bytes
                 and has_message_quoted_media
@@ -9693,6 +9767,21 @@ def create_app(output_root: Path, rescan: bool = False):
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
 
+            if not thumb_bytes and has_message_quoted_text and has_mq_key_id and has_android_key_id:
+                row = conn.execute(
+                    """
+                    SELECT mqt.thumbnail
+                    FROM message m
+                    JOIN message_quoted mq ON mq.key_id = m.key_id
+                    JOIN message_quoted_text mqt ON mqt.message_row_id = mq.message_row_id
+                    WHERE m._id = ? AND mqt.thumbnail IS NOT NULL
+                    LIMIT 1
+                    """,
+                    (msg_id_val,),
+                ).fetchone()
+                if row and row["thumbnail"]:
+                    thumb_bytes = row["thumbnail"]
+
             if not thumb_bytes and has_mq_key_id and has_android_key_id:
                 if has_message_thumbnail:
                     row = conn.execute(
@@ -9702,6 +9791,36 @@ def create_app(output_root: Path, rescan: bool = False):
                         JOIN message m_orig ON m_orig.key_id = mq.key_id
                         JOIN message_thumbnail mt ON mt.message_row_id = m_orig._id
                         WHERE mq.message_row_id = ? AND mt.thumbnail IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (msg_id_val,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
+
+                if not thumb_bytes and has_message_quoted_media:
+                    row = conn.execute(
+                        """
+                        SELECT mqm.thumbnail
+                        FROM message_quoted mq
+                        JOIN message m_orig ON m_orig.key_id = mq.key_id
+                        JOIN message_quoted_media mqm ON mqm.message_row_id = m_orig._id
+                        WHERE mq.message_row_id = ? AND mqm.thumbnail IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (msg_id_val,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
+
+                if not thumb_bytes and has_message_quoted_text:
+                    row = conn.execute(
+                        """
+                        SELECT mqt.thumbnail
+                        FROM message_quoted mq
+                        JOIN message m_orig ON m_orig.key_id = mq.key_id
+                        JOIN message_quoted_text mqt ON mqt.message_row_id = m_orig._id
+                        WHERE mq.message_row_id = ? AND mqt.thumbnail IS NOT NULL
                         LIMIT 1
                         """,
                         (msg_id_val,),
