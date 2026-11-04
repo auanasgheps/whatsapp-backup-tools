@@ -60,12 +60,12 @@ jobs:
           pytest tests/ -v --cov=wab_archiver --cov=wab_viewer --cov=shared --cov-report=term-missing --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY" --junitxml=junit.xml
 
       - name: Update Test Count Badge
-        if: success() && matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/master' && github.event_name == 'push'
+        if: success() && matrix.os == 'ubuntu-latest' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          mkdir -p .badge
+          git clone --depth 1 --branch badges https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git .badge
           python - << 'EOF'
           import json, xml.etree.ElementTree as ET
           try:
@@ -84,11 +84,8 @@ jobs:
               json.dump(data, f)
           EOF
           cd .badge
-          git init
-          git checkout -b badges
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
           git add tests.json
-          git commit -m "chore: update test count badge [skip ci]"
-          git push origin badges --force
+          git commit -m "chore: update test count badge [skip ci]" || exit 0
+          git push origin badges
