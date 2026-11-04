@@ -347,7 +347,7 @@ def parse_args():
         help="Enable verbose HTTP request logging (default: error only)",
     )
     p.add_argument(
-        "--version", action="version", version=f"WhatsApp Backup Tools — Viewer v{_get_version()}"
+        "--version", action="version", version=f"WhatsApp Backup Tools - Viewer v{_get_version()}"
     )
     args = p.parse_args()
     if not args.output_root:
@@ -9970,11 +9970,12 @@ def validate_output_root(output_root: Path) -> None:
         sys.exit(1)
 
     source_type, wa_db_path = _detect_source_db(output_root)
-    if not wa_db_path:
+    preserved_db_path = _detect_preserved_db(output_root)
+    if not wa_db_path and not preserved_db_path:
         print(f"Error: WhatsApp database not found in {output_root}", file=sys.stderr)
         print(
-            "Hint:  Ensure 'msgstore.db' (Android) or 'ChatStorage.sqlite' (iOS) is present "
-            "in the archive (e.g. in 'Whatsapp Databases' subfolder or root).",
+            "Hint:  Ensure 'msgstore.db' (Android), 'ChatStorage.sqlite' (iOS), or "
+            "'preserved_messages.db' is present in the archive (e.g. in 'Whatsapp Databases' subfolder or root).",
             file=sys.stderr,
         )
         sys.exit(1)

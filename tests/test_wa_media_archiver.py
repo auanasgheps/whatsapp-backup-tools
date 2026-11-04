@@ -6765,18 +6765,28 @@ class TestModuleTopLevelExecution:
     def test_python_version_guard(self):
         import runpy
 
-        with patch("sys.version_info", (3, 10)), patch("sys.stderr.write"):
-            with pytest.raises(SystemExit) as exc_info:
-                runpy.run_module("wab_archiver.main", run_name="_not_main_")
-            assert exc_info.value.code == 1
+        cached = sys.modules.pop("wab_archiver.main", None)
+        try:
+            with patch("sys.version_info", (3, 10)), patch("sys.stderr.write"):
+                with pytest.raises(SystemExit) as exc_info:
+                    runpy.run_module("wab_archiver.main", run_name="_not_main_")
+                assert exc_info.value.code == 1
+        finally:
+            if cached is not None:
+                sys.modules["wab_archiver.main"] = cached
 
     def test_main_guard_invoked(self):
         import runpy
 
-        with patch("sys.argv", ["wa", "--version"]):
-            with pytest.raises(SystemExit) as exc_info:
-                runpy.run_module("wab_archiver.main", run_name="__main__")
-            assert exc_info.value.code == 0
+        cached = sys.modules.pop("wab_archiver.main", None)
+        try:
+            with patch("sys.argv", ["wa", "--version"]):
+                with pytest.raises(SystemExit) as exc_info:
+                    runpy.run_module("wab_archiver.main", run_name="__main__")
+                assert exc_info.value.code == 0
+        finally:
+            if cached is not None:
+                sys.modules["wab_archiver.main"] = cached
 
 
 # ===========================================================================

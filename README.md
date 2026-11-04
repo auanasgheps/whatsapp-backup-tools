@@ -53,6 +53,7 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 Organise and preserve your WhatsApp media in a clean, human-readable structure.
 
 - **Structured & Human-Readable**: Organises media into `Contacts/` and `Groups/` sorted by year and `Sent/Received`, with original WhatsApp message timestamps preserved.
+- **Android Incremental Backup Merging**: Discovers, decrypts, and sequentially merges Android incremental backups (`msgstore-increment*.db.crypt14/15`) with full entity resolution for reactions, polls, pins, locations, and edits.
 - **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
 - **Deleted Message & Chat Preservation**: Seamlessly retains messages and chats deleted from your phone or revoked by senders across backup cycles (`-P`/`--preserve-deleted`), including call logs, interactive polls, shared locations, and progressive edit history.
@@ -275,7 +276,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 Handling personal communication archives requires high standards for data integrity and privacy. This project is built on three core engineering pillars:
 
-- **Strict Verification**: Over **570 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
+- **Strict Verification**: Over **990 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
 - **Domain Rigor**: Deep reverse-engineering of proprietary WhatsApp artifacts across both mobile operating systems (cryptographic pipelines, protobuf varints, and auxiliary databases), cross-checked against established open-source implementations to ensure structural accuracy.
 - **Developed with AI**: Modern AI coding tools were leveraged as pair programmers to accelerate implementation and broaden test coverage, strictly guided by human architectural design and verified against automated CI suites.
 
