@@ -44,10 +44,8 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 > ⚠️ **These tools are designed to run on a backup copy of your WhatsApp data — never on live device files.** The archiver always makes a copy of your data.
 
 
-**WhatsApp Backup Viewer screenshots**
 <p align="center">
-  <img src="docs/images/viewer_dark_2_shots_so.jpeg" alt="WhatsApp Backup Viewer - Dark Theme" width="49%" />
-  <img src="docs/images/viewer_clean.png" alt="WhatsApp Backup Viewer - Light Theme" width="49%" /> 
+  <img src="docs/images/group-demo-1.gif" alt="WhatsApp Backup Viewer Demo" width="100%" />
 </p>
 
 ---
