@@ -12,6 +12,9 @@ on:
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
 
+permissions:
+  contents: write
+
 jobs:
   lint:
     name: Lint & Format (Ruff)
@@ -54,4 +57,38 @@ jobs:
         run: |
           echo "### Test Coverage Summary (${{ matrix.os }})" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          pytest tests/ -v --cov=wab_archiver --cov=wab_viewer --cov=shared --cov-report=term-missing --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
+          pytest tests/ -v --cov=wab_archiver --cov=wab_viewer --cov=shared --cov-report=term-missing --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY" --junitxml=junit.xml
+
+      - name: Update Test Count Badge
+        if: success() && matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/master' && github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p .badge
+          python - << 'EOF'
+          import json, xml.etree.ElementTree as ET
+          try:
+              root = ET.parse('junit.xml').getroot()
+              total = sum(int(ts.attrib.get('tests', 0)) for ts in root.iter('testsuite'))
+              failures = sum(int(ts.attrib.get('failures', 0)) + int(ts.attrib.get('errors', 0)) for ts in root.iter('testsuite'))
+              skipped = sum(int(ts.attrib.get('skipped', 0)) for ts in root.iter('testsuite'))
+              passed = total - failures - skipped
+              msg = f"{passed} passed" if failures == 0 else f"{failures} failed"
+              color = "brightgreen" if failures == 0 else "red"
+          except Exception:
+              msg = "unknown"
+              color = "lightgrey"
+          data = {"schemaVersion": 1, "label": "tests", "message": msg, "color": color}
+          with open(".badge/tests.json", "w") as f:
+              json.dump(data, f)
+          EOF
+          cd .badge
+          git init
+          git checkout -b badges
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
+          git add tests.json
+          git commit -m "chore: update test count badge [skip ci]"
+          git push origin badges --force
