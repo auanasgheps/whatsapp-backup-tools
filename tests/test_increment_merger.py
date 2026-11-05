@@ -7232,3 +7232,168 @@ def test_merge_increments_atomic_staging_rollback(mock_db, tmp_path):
     with open(output_db, "rb") as f:
         final_bytes = f.read()
     assert final_bytes == initial_bytes
+
+
+def test_apply_messages_bin_edited_media_message(mock_db, tmp_path):
+    """Verify editing an existing message to media updates type, media table, and edit info."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_edit_info (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL UNIQUE,
+            original_key_id TEXT NOT NULL,
+            edited_timestamp INTEGER,
+            sender_timestamp INTEGER
+        );
+    """)
+
+    # Target parent message already in DB (row_id 100 from mock_db fixture)
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 0)
+        + _build_field(3, 2, b"INITIAL_KEY_1")
+    )
+    img_bytes = (
+        _build_field(1, 2, b"https://example.com/edited_photo.enc")
+        + _build_field(2, 2, b"image/jpeg")
+        + _build_field(3, 2, b"Updated photo caption")
+        + _build_field(4, 2, b"hash_12345678901234567890123456")
+        + _build_field(5, 0, 486005)
+    )
+    edited_msg_bytes = _build_field(3, 2, img_bytes)
+    edit_proto = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(10, 0, 1729000600000)
+        + _build_field(14, 2, edited_msg_bytes)
+    )
+    wmi_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"EDIT_MSG_KEY_1")
+    )
+    media_data = _build_field(1, 2, b"Media/WhatsApp Images/Sent/IMG-20261031-WA0002.jpg")
+    wmi_edit = (
+        _build_field(1, 2, wmi_key)
+        + _build_field(2, 2, _build_field(12, 2, edit_proto))
+        + _build_field(3, 0, 1729000600)
+        + _build_field(38, 2, media_data)
+    )
+
+    bin_path = str(tmp_path / "messages_edit_media.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_edit)) + wmi_edit)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, schema_cache)
+    conn.commit()
+
+    assert inserted == 1
+    # Verify message table updated to media type 1 and new caption
+    row = conn.execute("SELECT message_type, text_data FROM message WHERE _id = 100").fetchone()
+    assert row[0] == 1
+    assert row[1] == "Updated photo caption"
+
+    # Verify message_media populated
+    media_row = conn.execute(
+        "SELECT file_path, file_size, mime_type FROM message_media WHERE message_row_id = 100"
+    ).fetchone()
+    assert media_row is not None
+    assert media_row[0] == "Media/WhatsApp Images/Sent/IMG-20261031-WA0002.jpg"
+    assert media_row[1] == 486005
+    assert media_row[2] == "image/jpeg"
+
+    # Verify message_edit_info recorded
+    edit_info = conn.execute(
+        "SELECT original_key_id, edited_timestamp FROM message_edit_info WHERE message_row_id = 100"
+    ).fetchone()
+    assert edit_info is not None
+    assert edit_info[0] == "INITIAL_KEY_1"
+    assert edit_info[1] == 1729000600000
+    conn.close()
+
+
+def test_apply_messages_bin_intra_increment_edited_media_fallback(mock_db, tmp_path):
+    """Verify intra-increment edit where parent was never stored creates full media message in Pass 2."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_edit_info (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL UNIQUE,
+            original_key_id TEXT NOT NULL,
+            edited_timestamp INTEGER,
+            sender_timestamp INTEGER
+        );
+    """)
+
+    # Target key ABSENT_TARGET_KEY does NOT exist in DB
+    target_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"ABSENT_TARGET_KEY")
+    )
+    img_bytes = (
+        _build_field(1, 2, b"https://example.com/fallback_photo.enc")
+        + _build_field(2, 2, b"image/jpeg")
+        + _build_field(3, 2, b"Intra-increment photo caption")
+        + _build_field(4, 2, b"hash_abcdef12345678901234567890")
+        + _build_field(5, 0, 314159)
+    )
+    edited_msg_bytes = _build_field(3, 2, img_bytes)
+    edit_proto = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(10, 0, 1729000700000)
+        + _build_field(14, 2, edited_msg_bytes)
+    )
+    wmi_key = (
+        _build_field(1, 2, b"5550100@s.whatsapp.net")
+        + _build_field(2, 0, 1)
+        + _build_field(3, 2, b"EDIT_CONTAINER_KEY")
+    )
+    media_data = _build_field(1, 2, b"Media/WhatsApp Images/Sent/IMG-FALLBACK.jpg")
+    wmi_edit = (
+        _build_field(1, 2, wmi_key)
+        + _build_field(2, 2, _build_field(12, 2, edit_proto))
+        + _build_field(3, 0, 1729000700)
+        + _build_field(38, 2, media_data)
+    )
+
+    bin_path = str(tmp_path / "messages_intra_edit.bin")
+    with open(bin_path, "wb") as f:
+        f.write(_encode_varint(len(wmi_edit)) + wmi_edit)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, schema_cache)
+    conn.commit()
+
+    assert inserted == 1
+    # Verify message table has message_type 1 (not 0!) and caption
+    msg_row = conn.execute(
+        "SELECT _id, message_type, text_data, from_me FROM message WHERE key_id = 'EDIT_CONTAINER_KEY'"
+    ).fetchone()
+    assert msg_row is not None
+    row_id = msg_row[0]
+    assert msg_row[1] == 1
+    assert msg_row[2] == "Intra-increment photo caption"
+    assert msg_row[3] == 1
+
+    # Verify message_media populated with Tag 38 path and payload size
+    media_row = conn.execute(
+        "SELECT file_path, file_size, mime_type FROM message_media WHERE message_row_id = ?",
+        (row_id,),
+    ).fetchone()
+    assert media_row is not None
+    assert media_row[0] == "Media/WhatsApp Images/Sent/IMG-FALLBACK.jpg"
+    assert media_row[1] == 314159
+    assert media_row[2] == "image/jpeg"
+
+    # Verify message_edit_info
+    edit_info = conn.execute(
+        "SELECT original_key_id, edited_timestamp FROM message_edit_info WHERE message_row_id = ?",
+        (row_id,),
+    ).fetchone()
+    assert edit_info is not None
+    assert edit_info[0] == "ABSENT_TARGET_KEY"
+    assert edit_info[1] == 1729000700000
+    conn.close()
