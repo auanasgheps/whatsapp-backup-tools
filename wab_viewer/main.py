@@ -2741,6 +2741,23 @@ def _resolve_quoted_msg_ids(
             r.pop("quoted_stanza_id", None)
 
 
+def _has_preserved_content(msg: dict) -> bool:
+    """Check if a preserved message record contains actual preserved content."""
+    if msg.get("text_body") and msg["text_body"].strip():
+        return True
+    if msg.get("archive_path") or msg.get("original_path"):
+        return True
+    if msg.get("poll_data") or msg.get("poll"):
+        return True
+    if msg.get("latitude") is not None or msg.get("location_name"):
+        return True
+    if msg.get("vcard_data"):
+        return True
+    if msg.get("media_type") in ("image", "video", "audio", "document", "sticker", "gif"):
+        return True
+    return False
+
+
 def _merge_messages(
     live_rows: list[dict],
     pres_rows: list[dict],
@@ -2751,16 +2768,17 @@ def _merge_messages(
 
     Invariants:
     - Phase 1: Revoked/deleted placeholders (media_type == 'deleted') are re-hydrated
-      with pre-revocation preserved content.
+      with pre-revocation preserved content only if the preserved record has meaningful content.
     - Phase 2: Live non-deleted messages take absolute precedence. If a message is
       alive in the database, any duplicate preserved stub is discarded.
+    - Preserved rows with no content are discarded.
     - Matches on stanza_id (with fallback to timestamp/from_me when stanza_id is absent).
     - Preserved polls and options are deduped against live polls.
     """
     if not pres_rows:
         return live_rows[:limit]
     if not live_rows:
-        return pres_rows[:limit]
+        return [p for p in pres_rows if _has_preserved_content(p)][:limit]
 
     merged = list(live_rows)
     used_pres_indexes = set()
@@ -2768,6 +2786,8 @@ def _merge_messages(
     # Phase 1: Re-hydrate deleted/revoked stubs with preserved content
     for i, p in enumerate(pres_rows):
         if p.get("preservation_reason") in ("revoked_by_sender", "revoked_by_admin"):
+            if not _has_preserved_content(p):
+                continue
             p_stanza = p.get("stanza_id")
             p_ts = p.get("timestamp_ms", 0)
             p_fm = p.get("from_me", 0)
@@ -2788,6 +2808,8 @@ def _merge_messages(
     # Phase 2: Append preserved rows that do not exist in the live database
     for i, p in enumerate(pres_rows):
         if i in used_pres_indexes:
+            continue
+        if not _has_preserved_content(p):
             continue
         p_stanza = p.get("stanza_id")
         p_ts = p.get("timestamp_ms", 0)

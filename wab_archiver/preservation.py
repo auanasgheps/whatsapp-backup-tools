@@ -28,6 +28,23 @@ class PreservationResult(NamedTuple):
     chats: int
 
 
+def _has_preserved_content(msg: dict) -> bool:
+    """Check if a candidate preserved message record contains actual preserved content."""
+    if msg.get("text_body") and msg["text_body"].strip():
+        return True
+    if msg.get("archive_path") or msg.get("original_path"):
+        return True
+    if msg.get("poll_data") or msg.get("poll"):
+        return True
+    if msg.get("latitude") is not None or msg.get("location_name"):
+        return True
+    if msg.get("vcard_data"):
+        return True
+    if msg.get("media_type") in ("image", "video", "audio", "document", "sticker", "gif"):
+        return True
+    return False
+
+
 PRESERVED_SCHEMA_TABLES = """
     CREATE TABLE IF NOT EXISTS preserved_messages (
         chat_id                      TEXT NOT NULL,
@@ -1019,6 +1036,8 @@ def diff_and_extract_android(
 
             for r in conn.execute(sql_revoked):
                 row_dict = dict(r)
+                if not _has_preserved_content(row_dict):
+                    continue
                 row_dict["preserved_at"] = now_iso
                 row_dict["source_platform"] = "android"
                 row_dict["reactions"] = None
@@ -2301,6 +2320,8 @@ def diff_and_extract_ios(
 
             for r in conn.execute(sql_revoked):
                 row_dict = dict(r)
+                if not _has_preserved_content(row_dict):
+                    continue
                 row_dict["preserved_at"] = now_iso
                 row_dict["source_platform"] = "ios"
                 row_dict["reactions"] = None
@@ -2697,6 +2718,11 @@ def record_preserved_messages(
         cursor.execute("DROP TABLE IF EXISTS _cand_keys")
 
         for r in unique_candidates:
+            if r.get("preservation_reason") in (
+                "revoked_by_sender",
+                "revoked_by_admin",
+            ) and not _has_preserved_content(r):
+                continue
             key = (str(r["chat_id"]), str(r["stanza_id"]))
             exists = existing_map.get(key)
             if not exists:

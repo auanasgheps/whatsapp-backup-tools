@@ -3565,3 +3565,94 @@ def test_record_preserved_calls_batch_lookups(tmp_path: Path) -> None:
             pres_conn, [call1, call2, call3], "android", _TEST_LOGGER
         )
         assert inserted2 == 1
+
+
+def test_merge_messages_empty_revoked_not_preserved() -> None:
+    """Verify that a live revoked message matched against an empty preserved stub is not marked as preserved."""
+    from wab_viewer.main import _merge_messages
+
+    live_rows = [
+        {
+            "msg_id": 1825644,
+            "stanza_id": "STANZA_REVOKED_1",
+            "timestamp_ms": 1792161052000,
+            "from_me": 0,
+            "media_type": "deleted",
+            "text_body": "This message was deleted",
+        }
+    ]
+    empty_pres_rows = [
+        {
+            "msg_id": -1,
+            "stanza_id": "STANZA_REVOKED_1",
+            "timestamp_ms": 1792161052000,
+            "from_me": 0,
+            "media_type": "text",
+            "text_body": "",
+            "is_preserved": 1,
+            "preservation_reason": "revoked_by_sender",
+        }
+    ]
+
+    # Empty preserved stub should NOT re-hydrate the live deleted message
+    merged = _merge_messages(live_rows, empty_pres_rows, False, 50)
+    assert len(merged) == 1
+    assert merged[0]["msg_id"] == 1825644
+    assert merged[0]["media_type"] == "deleted"
+    assert merged[0]["text_body"] == "This message was deleted"
+    assert "is_preserved" not in merged[0] or merged[0].get("is_preserved") is None
+
+    # Preserved message with actual pre-revocation text SHOULD re-hydrate
+    hydrated_pres_rows = [
+        {
+            "msg_id": -1,
+            "stanza_id": "STANZA_REVOKED_1",
+            "timestamp_ms": 1792161052000,
+            "from_me": 0,
+            "media_type": "text",
+            "text_body": "Original pre-revocation text",
+            "is_preserved": 1,
+            "preservation_reason": "revoked_by_sender",
+        }
+    ]
+    merged2 = _merge_messages(live_rows, hydrated_pres_rows, False, 50)
+    assert len(merged2) == 1
+    assert merged2[0]["is_preserved"] == 1
+    assert merged2[0]["text_body"] == "Original pre-revocation text"
+
+
+def test_record_preserved_messages_empty_revoked_ignored(tmp_path: Path) -> None:
+    """Verify that record_preserved_messages discards revoked messages with no content."""
+    pres_conn = preservation.open_preservation_db(str(tmp_path))
+    try:
+        empty_revoked = {
+            "chat_id": "chat1",
+            "stanza_id": "REV_EMPTY_1",
+            "msg_id": 100,
+            "timestamp_ms": 1700000000000,
+            "from_me": 0,
+            "text_body": "",
+            "media_type": "text",
+            "preservation_reason": "revoked_by_sender",
+        }
+        valid_revoked = {
+            "chat_id": "chat1",
+            "stanza_id": "REV_VALID_1",
+            "msg_id": 101,
+            "timestamp_ms": 1700000001000,
+            "from_me": 0,
+            "text_body": "I had text before revoking",
+            "media_type": "text",
+            "preservation_reason": "revoked_by_sender",
+        }
+        res = preservation.record_preserved_messages(
+            pres_conn, [empty_revoked, valid_revoked], "android", _TEST_LOGGER
+        )
+        assert res.messages == 1
+
+        rows = pres_conn.execute("SELECT stanza_id, text_body FROM preserved_messages").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "REV_VALID_1"
+        assert rows[0][1] == "I had text before revoking"
+    finally:
+        pres_conn.close()
