@@ -776,7 +776,13 @@ def diff_and_extract_android(
                 )
             )
             AND m.message_type NOT IN (15, 64)
-            AND NOT (m.message_type = 7 AND (m.text_data IS NULL OR m.text_data = ''))
+            AND NOT (m.message_type = 7 AND (m.text_data IS NULL OR TRIM(m.text_data) = ''))
+            AND (
+                (m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
+                OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 20, 28, 42, 43, 66, 82)
+                OR {poll_pred}
+                OR (m.message_type = 7 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
+            )
         """
 
         sql_deleted_template = f"""
@@ -2082,6 +2088,16 @@ def diff_and_extract_ios(
         if old_count == 0 or min_id is None or max_id is None:
             return []
 
+        ios_media_content_clause = (
+            "(mi.ZMEDIALOCALPATH IS NOT NULL OR mi.Z_PK IS NOT NULL)" if has_media else "0 = 1"
+        )
+        ios_content_pred = f"""(
+            (m.ZTEXT IS NOT NULL AND TRIM(m.ZTEXT) != '')
+            OR {ios_media_content_clause}
+            OR m.ZMESSAGETYPE IN (1, 2, 3, 4, 5, 8, 11, 15, 16, 38, 39, 46, 54)
+            OR (m.ZMESSAGETYPE IN (6, 10) AND ((m.ZTEXT IS NOT NULL AND TRIM(m.ZTEXT) != '') OR {action_type_col} IS NOT NULL))
+        )"""
+
         sql_deleted = f"""
             SELECT
                 m.Z_PK AS msg_id,
@@ -2177,17 +2193,9 @@ def diff_and_extract_ios(
                 )
             )
             AND m.ZMESSAGETYPE != 14
-            AND NOT (m.ZMESSAGETYPE IN (6, 10) AND (m.ZTEXT IS NULL OR m.ZTEXT = ''))
+            AND NOT (m.ZMESSAGETYPE IN (6, 10) AND (m.ZTEXT IS NULL OR TRIM(m.ZTEXT) = '') AND {action_type_col} IS NULL)
+            AND {ios_content_pred}
         """
-
-        ios_media_content_clause = (
-            "(mi.ZMEDIALOCALPATH IS NOT NULL OR mi.Z_PK IS NOT NULL)" if has_media else "0 = 1"
-        )
-        ios_content_pred = f"""(
-            (m.ZTEXT IS NOT NULL AND m.ZTEXT != '')
-            OR {ios_media_content_clause}
-            OR m.ZMESSAGETYPE IN (1, 2, 3, 4, 5, 8, 11, 15, 16, 38, 39, 46, 54)
-        )"""
 
         sql_revoked = f"""
             SELECT
@@ -3217,6 +3225,10 @@ def preserve_incremental_deletions(
         else "(m.message_type = 66)"
     )
 
+    media_content_clause = (
+        "(mm.file_path IS NOT NULL OR mm.message_row_id IS NOT NULL)" if has_media else "0 = 1"
+    )
+
     media_type_expr = f"""CASE
         WHEN m.message_type = 7 THEN 'service'
         WHEN m.message_type IN (4, 14) THEN 'vcard'
@@ -3320,7 +3332,14 @@ def preserve_incremental_deletions(
             {edit_join}
             WHERE m._id IN ({ph})
               AND m.message_type NOT IN (15, 64)
-              AND NOT (m.message_type = 7 AND (m.text_data IS NULL OR m.text_data = ''))
+              AND NOT (m.message_type = 7 AND (m.text_data IS NULL OR TRIM(m.text_data) = ''))
+              AND (
+                  (m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
+                  OR {media_content_clause}
+                  OR m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 16, 20, 28, 42, 43, 66, 82)
+                  OR {poll_pred}
+                  OR (m.message_type = 7 AND m.text_data IS NOT NULL AND TRIM(m.text_data) != '')
+              )
         """
         cur.execute(sql_extract, sub_ids)
         cols = [d[0] for d in cur.description]

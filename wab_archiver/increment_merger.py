@@ -14,6 +14,8 @@ import zlib
 from dataclasses import dataclass
 from typing import Any
 
+from shared import db
+
 # ==============================================================================
 # increment_merger.py — WhatsApp Android Incremental Backup Merger
 #
@@ -1768,6 +1770,63 @@ def filter_active_increments(paths: list[str], base_filename: str | None) -> lis
     for inc_id, path in selected:
         seen[inc_id] = path
     return [seen[inc_id] for inc_id in sorted(seen.keys())]
+
+
+def validate_increment_sequence(
+    increment_paths: list[str],
+    logger: logging.Logger,
+) -> list[str]:
+    """Validate that increment files form a contiguous sequence starting from index 1.
+
+    If increment-1 is missing, raises ValueError because delta folding requires the initial increment.
+    If a gap occurs at index k+1, returns only the verified contiguous prefix [1..k],
+    and logs an error explaining the gap and the skipped increments.
+    """
+    if not increment_paths:
+        return []
+
+    pattern = re.compile(r"msgstore-increment-(\d+)")
+    parsed: list[tuple[int, str]] = []
+    for path in increment_paths:
+        entry = os.path.basename(path.replace("\\", "/"))
+        m = pattern.search(entry)
+        if m:
+            parsed.append((int(m.group(1)), path))
+
+    if not parsed:
+        return increment_paths
+
+    by_id: dict[int, str] = {}
+    for inc_id, path in sorted(parsed, key=lambda x: x[0]):
+        if inc_id not in by_id:
+            by_id[inc_id] = path
+
+    sorted_ids = sorted(by_id.keys())
+    if sorted_ids[0] != 1:
+        found_names = [os.path.basename(by_id[i]) for i in sorted_ids]
+        raise ValueError(
+            "Incremental backup sequence is broken: missing starting increment 'msgstore-increment-1'. "
+            f"Found increment(s) {found_names}, which cannot be applied to the base database without the initial increment."
+        )
+
+    valid_ids: list[int] = []
+    for expected_id in range(1, len(sorted_ids) + 1):
+        if expected_id in by_id:
+            valid_ids.append(expected_id)
+        else:
+            break
+
+    if len(valid_ids) < len(sorted_ids):
+        skipped_ids = [i for i in sorted_ids if i not in valid_ids]
+        missing_gap = valid_ids[-1] + 1
+        logger.error(
+            f"Incremental backup sequence is broken: missing increment {missing_gap}. "
+            f"Only merging verified contiguous increment(s) {[os.path.basename(by_id[i]) for i in valid_ids]}. "
+            f"Subsequent increment(s) {[os.path.basename(by_id[i]) for i in skipped_ids]} cannot be applied and have been skipped."
+        )
+        return [by_id[inc_id] for inc_id in valid_ids]
+
+    return [by_id[inc_id] for inc_id in sorted_ids]
 
 
 def find_increment_files(search_dir: str, base_filename: str | None = None) -> list[str]:
@@ -6239,13 +6298,13 @@ def merge_increments(
     os.makedirs(os.path.dirname(os.path.abspath(output_db_path)), exist_ok=True)
     os.makedirs(staging_dir, exist_ok=True)
 
-    if os.path.abspath(base_db_path) != os.path.abspath(output_db_path):
-        for ext in ("", "-wal", "-shm", "-journal"):
-            sidecar = output_db_path + ext
-            if os.path.exists(sidecar):
-                with contextlib.suppress(OSError):
-                    os.remove(sidecar)
-        shutil.copy2(base_db_path, output_db_path)
+    increment_paths = validate_increment_sequence(increment_paths, logger)
+    if not increment_paths:
+        return 0
+
+    staging_output_path = output_db_path + ".merging"
+    db.clean_sqlite_files(staging_output_path)
+    shutil.copy2(base_db_path, staging_output_path)
 
     total_inserted = 0
     total_deleted = 0
@@ -6256,7 +6315,8 @@ def merge_increments(
     chat_cache: dict[int, int] = {}
     schema_cache: dict[str, set[str]] = {}
 
-    with contextlib.closing(sqlite3.connect(output_db_path)) as conn:
+    conn = sqlite3.connect(staging_output_path)
+    try:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = OFF")
         conn.execute("PRAGMA temp_store = MEMORY")
@@ -6533,6 +6593,14 @@ def merge_increments(
             raise RuntimeError(
                 f"Database integrity check failed after merging increments: {integrity}"
             )
+
+        conn.close()
+        db.safe_replace_sqlite_db(staging_output_path, output_db_path)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            conn.close()
+        db.clean_sqlite_files(staging_output_path)
+        raise
 
     # Invalidate viewer recent messages cache if archive database exists in output directory
     out_parent = os.path.dirname(os.path.abspath(output_db_path))

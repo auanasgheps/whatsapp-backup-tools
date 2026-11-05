@@ -626,8 +626,11 @@ def _copy_or_skip(
         src_hash = None
         resolved = dest_path
 
-    os.makedirs(dest_dir, exist_ok=True)
+    os.makedirs(db.ensure_long_path(dest_dir), exist_ok=True)
     is_hardlink = 0
+
+    lp_resolved = db.ensure_long_path(resolved)
+    lp_src = db.ensure_long_path(src)
 
     if link_duplicates:
         if src_hash is None:
@@ -635,7 +638,7 @@ def _copy_or_skip(
         canonical = hash_to_canonical.get(src_hash)
         if canonical and canonical != resolved and os.path.isfile(canonical):
             try:
-                os.link(canonical, resolved)
+                os.link(db.ensure_long_path(canonical), lp_resolved)
                 is_hardlink = 1
                 logger.debug(f"LINKED: {canonical} -> {resolved}")
             except OSError as e:
@@ -643,14 +646,14 @@ def _copy_or_skip(
                     f"Could not hard link {canonical} -> {resolved} ({e}). Falling back to copy."
                 )
                 try:
-                    shutil.copy(src, resolved)
+                    shutil.copy(lp_src, lp_resolved)
                     logger.debug(f"COPIED (fallback): {src} -> {resolved}")
                 except Exception as copy_err:
                     logger.error(f"ERROR copying {src} -> {resolved}: {copy_err}")
                     return CopyResult(0, 0, 1, 0)
         else:
             try:
-                shutil.copy(src, resolved)
+                shutil.copy(lp_src, lp_resolved)
                 logger.debug(f"COPIED: {src} -> {resolved}")
             except Exception as e:
                 logger.error(f"ERROR copying {src} -> {resolved}: {e}")
@@ -658,7 +661,7 @@ def _copy_or_skip(
             hash_to_canonical[src_hash] = resolved
     else:
         try:
-            shutil.copy(src, resolved)
+            shutil.copy(lp_src, lp_resolved)
             logger.debug(f"COPIED: {src} -> {resolved}")
         except Exception as e:
             logger.error(f"ERROR copying {src} -> {resolved}: {e}")
@@ -2089,25 +2092,8 @@ def decrypt_msgstore(
     return output_path
 
 
-def _clean_sqlite_files(db_path: str) -> None:
-    """Remove a SQLite database file and any associated WAL, SHM, and rollback journal sidecars."""
-    for ext in ("", "-wal", "-shm", "-journal"):
-        target = db_path + ext
-        if os.path.exists(target):
-            with contextlib.suppress(OSError):
-                os.remove(target)
-
-
-def _safe_replace_sqlite_db(src: str, dst: str) -> None:
-    """Safely replace a SQLite database file and its sidecars atomically."""
-    _clean_sqlite_files(dst)
-    os.replace(src, dst)
-    for ext in ("-wal", "-shm", "-journal"):
-        src_sidecar = src + ext
-        dst_sidecar = dst + ext
-        if os.path.exists(src_sidecar):
-            with contextlib.suppress(OSError):
-                os.replace(src_sidecar, dst_sidecar)
+_clean_sqlite_files = db.clean_sqlite_files
+_safe_replace_sqlite_db = db.safe_replace_sqlite_db
 
 
 def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger) -> None:
@@ -2128,6 +2114,7 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
             all_increments = increment_merger.filter_active_increments(
                 all_increments, getattr(args, "msgstore", None)
             )
+            all_increments = increment_merger.validate_increment_sequence(all_increments, logger)
 
         if not is_encrypted and not all_increments:
             return
@@ -2948,6 +2935,11 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
 
 def main():
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                with contextlib.suppress(Exception):
+                    stream.reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()
     os.makedirs(args.output, exist_ok=True)
     log_path = args.log or os.path.join(args.output, "wab-archiver.log")
