@@ -202,6 +202,8 @@ def load_canonical_copies(conn: sqlite3.Connection, output_root: str) -> dict[by
     rows = conn.execute(
         "SELECT f.md5, ac.archive_path FROM files f "
         "JOIN archive_copies ac ON ac.original_path = f.original_path "
+        "WHERE f.md5 IS NOT NULL AND length(f.md5) > 0 "
+        "AND ac.archive_path NOT LIKE '%.thumbnails/%' "
         "ORDER BY ac.rowid ASC"
     ).fetchall()
     for md5_bytes, rel_path in rows:

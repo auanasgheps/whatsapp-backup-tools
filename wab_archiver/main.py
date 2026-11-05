@@ -326,6 +326,9 @@ def write_duplicate_report(
             SELECT f.md5, COUNT(DISTINCT ac.archive_path) AS total
             FROM files f
             JOIN archive_copies ac ON ac.original_path = f.original_path
+            WHERE f.md5 IS NOT NULL
+              AND length(f.md5) > 0
+              AND ac.archive_path NOT LIKE '%.thumbnails/%'
             GROUP BY f.md5
             HAVING total >= 2
         )
@@ -333,6 +336,7 @@ def write_duplicate_report(
         FROM dup_hashes dh
         JOIN files f ON f.md5 = dh.md5
         JOIN archive_copies ac ON ac.original_path = f.original_path
+        WHERE ac.archive_path NOT LIKE '%.thumbnails/%'
         GROUP BY dh.md5, dh.total, ac.archive_path
         ORDER BY dh.total DESC, dh.md5, ac.archive_path ASC
     """).fetchall()

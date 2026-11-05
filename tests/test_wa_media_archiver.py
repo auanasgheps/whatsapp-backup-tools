@@ -1519,6 +1519,139 @@ class TestWriteDuplicateReport:
         assert "2024-" in content
         assert "# --- PHOTOS & IMAGES" in content
 
+    def test_duplicate_report_excludes_thumbnails_and_empty_hashes(self, tmp_path, logger):
+        import hashlib
+
+        conn = arc.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+
+        # 1. Unhashed / empty-hashed thumbnails (empty bytes b"")
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)", ("Message/thumb1.thumb", b"")
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            (
+                "Message/thumb1.thumb",
+                "Whatsapp Databases/.thumbnails/thumb1.thumb",
+                0,
+                1718000000000,
+            ),
+        )
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)", ("Message/thumb2.thumb", b"")
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            (
+                "Message/thumb2.thumb",
+                "Whatsapp Databases/.thumbnails/thumb2.thumb",
+                0,
+                1718000000000,
+            ),
+        )
+
+        # 2. Hashed thumbnails that share an identical MD5
+        shared_thumb_md5 = hashlib.md5(b"shared_thumbnail_bytes").digest()
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            ("Message/thumb3.jpg", shared_thumb_md5),
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("Message/thumb3.jpg", "Whatsapp Databases/.thumbnails/thumb3.jpg", 0, 1718000000000),
+        )
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)",
+            ("Message/thumb4.jpg", shared_thumb_md5),
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("Message/thumb4.jpg", "Whatsapp Databases/.thumbnails/thumb4.jpg", 0, 1718000000000),
+        )
+
+        # 3. Legitimate user media duplicate
+        user_md5 = hashlib.md5(b"user_photo").digest()
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)", ("Media/photo.jpg", user_md5)
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("Media/photo.jpg", "Contacts/Alice (001)/2024/Received/photo.jpg", 0, 1718000000000),
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("Media/photo.jpg", "Groups/Friends/2024/photo_Alice.jpg", 1, 1718000000000),
+        )
+        conn.commit()
+
+        path = str(tmp_path / "dups_thumb_test.csv")
+        summary = wa.write_duplicate_report(path, conn, logger, None)
+        conn.close()
+
+        assert summary[0] == 1  # Exactly 1 duplicate group (the user media)
+        assert summary[1] == 2  # Exactly 2 files in that group
+        assert os.path.isfile(path)
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+
+        assert "Contacts/Alice (001)/2024/Received/photo.jpg" in content
+        assert "Groups/Friends/2024/photo_Alice.jpg" in content
+        assert ".thumbnails" not in content
+
+    def test_load_canonical_copies_excludes_thumbnails_and_empty_hashes(self, tmp_path):
+        import hashlib
+
+        conn = arc.open_archive_db(str(tmp_path))
+        cursor = conn.cursor()
+
+        thumb_dir = tmp_path / "Whatsapp Databases" / ".thumbnails"
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        thumb_file = thumb_dir / "thumb.jpg"
+        thumb_file.write_bytes(b"thumb_content")
+
+        user_dir = tmp_path / "Contacts" / "Bob"
+        user_dir.mkdir(parents=True, exist_ok=True)
+        user_file = user_dir / "pic.jpg"
+        user_file.write_bytes(b"user_content")
+
+        thumb_md5 = hashlib.md5(b"thumb_content").digest()
+        user_md5 = hashlib.md5(b"user_content").digest()
+
+        # Empty hash record
+        cursor.execute("INSERT INTO files (original_path, md5) VALUES (?, ?)", ("empty.jpg", b""))
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("empty.jpg", "Contacts/Bob/empty.jpg", 0, 1718000000000),
+        )
+
+        # Thumbnail record
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)", ("thumb.jpg", thumb_md5)
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("thumb.jpg", "Whatsapp Databases/.thumbnails/thumb.jpg", 0, 1718000000000),
+        )
+
+        # User media record
+        cursor.execute(
+            "INSERT INTO files (original_path, md5) VALUES (?, ?)", ("pic.jpg", user_md5)
+        )
+        cursor.execute(
+            "INSERT INTO archive_copies (original_path, archive_path, is_hardlink, timestamp_ms) VALUES (?, ?, ?, ?)",
+            ("pic.jpg", "Contacts/Bob/pic.jpg", 0, 1718000000000),
+        )
+        conn.commit()
+
+        canonical_map = arc.load_canonical_copies(conn, str(tmp_path))
+        conn.close()
+
+        assert b"" not in canonical_map
+        assert thumb_md5 not in canonical_map
+        assert user_md5 in canonical_map
+        assert canonical_map[user_md5] == str(user_file)
+
     def test_classify_media_type(self):
         from shared.db import classify_media_type
 
