@@ -1026,22 +1026,296 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 new_text = None
                 if 14 in proto_fields and isinstance(proto_fields[14][0][1], bytes):
                     edit_msg_fields = parse_wire_fields(proto_fields[14][0][1])
-                    unwrapped_edit, _ = unwrap_message_container(edit_msg_fields, 4)
+                    unwrapped_edit, edit_container_flags = unwrap_message_container(
+                        edit_msg_fields, 4
+                    )
+                    edit_vo = edit_container_flags.get("is_view_once", 0)
+
+                    # 1: conversation (plain text)
                     if 1 in unwrapped_edit:
+                        message_type = 0
                         new_text = unwrapped_edit[1][0][1].decode("utf-8", errors="replace")
+
+                    # 3: imageMessage
+                    elif 3 in unwrapped_edit:
+                        message_type = 42 if edit_vo else 1
+                        img_f = parse_wire_fields(unwrapped_edit[3][0][1])
+                        caption = (
+                            img_f.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 3 in img_f
+                            else None
+                        )
+                        new_text = caption
+                        mimetype = (
+                            img_f.get(2, [(2, b"image/jpeg")])[0][1].decode(
+                                "utf-8", errors="replace"
+                            )
+                            if 2 in img_f
+                            else "image/jpeg"
+                        )
+                        url = (
+                            img_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 1 in img_f
+                            else ""
+                        )
+                        file_sha256 = img_f.get(4, [(2, b"")])[0][1] if 4 in img_f else b""
+                        file_length = img_f.get(5, [(0, 0)])[0][1] if 5 in img_f else 0
+                        media_info = {
+                            "mime_type": mimetype,
+                            "file_size": file_length,
+                            "file_sha256": file_sha256,
+                            "media_name": caption,
+                            "message_url": url,
+                            "media_type": "image",
+                        }
+
+                    # 4: contactMessage
+                    elif 4 in unwrapped_edit:
+                        message_type = 4
+                        ct_f = parse_wire_fields(unwrapped_edit[4][0][1])
+                        new_text = (
+                            ct_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 1 in ct_f
+                            else None
+                        )
+                        vcard = (
+                            ct_f.get(2, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 2 in ct_f
+                            else None
+                        )
+
+                    # 5: locationMessage
+                    elif 5 in unwrapped_edit:
+                        message_type = 5
+                        loc_f = parse_wire_fields(unwrapped_edit[5][0][1])
+                        lat = (
+                            struct.unpack("<d", loc_f[1][0][1])[0]
+                            if 1 in loc_f and len(loc_f[1][0][1]) == 8
+                            else 0.0
+                        )
+                        lng = (
+                            struct.unpack("<d", loc_f[2][0][1])[0]
+                            if 2 in loc_f and len(loc_f[2][0][1]) == 8
+                            else 0.0
+                        )
+                        name = (
+                            loc_f.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 3 in loc_f
+                            else None
+                        )
+                        addr = (
+                            loc_f.get(4, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 4 in loc_f
+                            else None
+                        )
+                        new_text = name or addr or f"{lat}, {lng}"
+                        location_info = {
+                            "latitude": lat,
+                            "longitude": lng,
+                            "place_name": name,
+                            "place_address": addr,
+                        }
+
+                    # 6: extendedTextMessage
                     elif 6 in unwrapped_edit:
+                        message_type = 0
                         ext = parse_wire_fields(unwrapped_edit[6][0][1])
                         new_text = (
                             ext.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
                             if 1 in ext
                             else None
                         )
-                message_type = 0
+
+                    # 7: documentMessage
+                    elif 7 in unwrapped_edit:
+                        message_type = 9
+                        doc_f = parse_wire_fields(unwrapped_edit[7][0][1])
+                        title = (
+                            doc_f.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 3 in doc_f
+                            else None
+                        )
+                        fname = (
+                            doc_f.get(8, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 8 in doc_f
+                            else title
+                        )
+                        new_text = title or fname
+                        mimetype = (
+                            doc_f.get(2, [(2, b"application/octet-stream")])[0][1].decode(
+                                "utf-8", errors="replace"
+                            )
+                            if 2 in doc_f
+                            else "application/octet-stream"
+                        )
+                        url = (
+                            doc_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 1 in doc_f
+                            else ""
+                        )
+                        file_sha256 = doc_f.get(4, [(2, b"")])[0][1] if 4 in doc_f else b""
+                        file_length = doc_f.get(5, [(0, 0)])[0][1] if 5 in doc_f else 0
+                        media_info = {
+                            "mime_type": mimetype,
+                            "file_size": file_length,
+                            "file_sha256": file_sha256,
+                            "media_name": fname,
+                            "message_url": url,
+                            "media_type": "document",
+                        }
+
+                    # 8: audioMessage
+                    elif 8 in unwrapped_edit:
+                        message_type = 82 if edit_vo else 2
+                        aud_f = parse_wire_fields(unwrapped_edit[8][0][1])
+                        mimetype = (
+                            aud_f.get(2, [(2, b"audio/ogg")])[0][1].decode(
+                                "utf-8", errors="replace"
+                            )
+                            if 2 in aud_f
+                            else "audio/ogg"
+                        )
+                        url = (
+                            aud_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 1 in aud_f
+                            else ""
+                        )
+                        file_sha256 = aud_f.get(3, [(2, b"")])[0][1] if 3 in aud_f else b""
+                        file_length = aud_f.get(4, [(0, 0)])[0][1] if 4 in aud_f else 0
+                        media_info = {
+                            "mime_type": mimetype,
+                            "file_size": file_length,
+                            "file_sha256": file_sha256,
+                            "media_name": None,
+                            "message_url": url,
+                            "media_type": "audio",
+                        }
+
+                    # 9: videoMessage
+                    elif 9 in unwrapped_edit:
+                        message_type = 43 if edit_vo else 3
+                        vid_f = parse_wire_fields(unwrapped_edit[9][0][1])
+                        caption = (
+                            vid_f.get(7, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 7 in vid_f
+                            else None
+                        )
+                        new_text = caption
+                        mimetype = (
+                            vid_f.get(2, [(2, b"video/mp4")])[0][1].decode(
+                                "utf-8", errors="replace"
+                            )
+                            if 2 in vid_f
+                            else "video/mp4"
+                        )
+                        url = (
+                            vid_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 1 in vid_f
+                            else ""
+                        )
+                        file_sha256 = vid_f.get(3, [(2, b"")])[0][1] if 3 in vid_f else b""
+                        file_length = vid_f.get(4, [(0, 0)])[0][1] if 4 in vid_f else 0
+                        media_info = {
+                            "mime_type": mimetype,
+                            "file_size": file_length,
+                            "file_sha256": file_sha256,
+                            "media_name": caption,
+                            "message_url": url,
+                            "media_type": "video",
+                        }
+
+                    # 20: stickerMessage
+                    elif 20 in unwrapped_edit:
+                        message_type = 20
+                        stk_f = parse_wire_fields(unwrapped_edit[20][0][1])
+                        mimetype = (
+                            stk_f.get(5, [(2, b"image/webp")])[0][1].decode(
+                                "utf-8", errors="replace"
+                            )
+                            if 5 in stk_f
+                            else "image/webp"
+                        )
+                        url = (
+                            stk_f.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                            if 1 in stk_f
+                            else ""
+                        )
+                        file_sha256 = stk_f.get(2, [(2, b"")])[0][1] if 2 in stk_f else b""
+                        file_length = stk_f.get(9, [(0, 0)])[0][1] if 9 in stk_f else 0
+                        media_info = {
+                            "mime_type": mimetype,
+                            "file_size": file_length,
+                            "file_sha256": file_sha256,
+                            "media_name": None,
+                            "message_url": url,
+                            "media_type": "sticker",
+                        }
+
+                    # 64, 65, 66, 49, 93, 111: pollCreationMessage
+                    elif any(t in unwrapped_edit for t in (64, 65, 66, 49, 93, 111)):
+                        message_type = 66
+                        poll_tag = next(t for t in (64, 65, 66, 49, 93, 111) if t in unwrapped_edit)
+                        p_fields = parse_wire_fields(unwrapped_edit[poll_tag][0][1])
+                        p_name = ""
+                        p_opts = []
+                        tag3_has_options = False
+                        if 3 in p_fields and p_fields[3]:
+                            first_opt = p_fields[3][0][1]
+                            if isinstance(first_opt, bytes):
+                                try:
+                                    f_opt = parse_wire_fields(first_opt)
+                                    if 1 in f_opt:
+                                        tag3_has_options = True
+                                except Exception:
+                                    pass
+
+                        if tag3_has_options:
+                            if 2 in p_fields and isinstance(p_fields[2][0][1], bytes):
+                                p_name = p_fields[2][0][1].decode("utf-8", errors="replace")
+                            raw_opts = p_fields.get(3, [])
+                            selectable_count = (
+                                p_fields.get(4, [(0, 0)])[0][1] if 4 in p_fields else 0
+                            )
+                        else:
+                            if 1 in p_fields and isinstance(p_fields[1][0][1], bytes):
+                                p_name = p_fields[1][0][1].decode("utf-8", errors="replace")
+                            raw_opts = p_fields.get(2, [])
+                            selectable_count = (
+                                p_fields.get(3, [(0, 0)])[0][1] if 3 in p_fields else 0
+                            )
+
+                        for opt_t in raw_opts:
+                            if isinstance(opt_t[1], bytes):
+                                try:
+                                    of = parse_wire_fields(opt_t[1])
+                                    oname = (
+                                        of.get(1, [(2, b"")])[0][1].decode(
+                                            "utf-8", errors="replace"
+                                        )
+                                        if 1 in of
+                                        else ""
+                                    )
+                                    if oname:
+                                        p_opts.append(oname)
+                                except Exception:
+                                    pass
+                        new_text = p_name
+                        poll_info = {
+                            "name": p_name,
+                            "options": p_opts,
+                            "selectable_options_count": selectable_count,
+                        }
+
                 text_data = new_text
                 edit_info = {
                     "target_key_id": target_key.get("key_id", ""),
                     "new_text": new_text,
                     "edited_ts": edited_ts,
+                    "media_info": media_info,
+                    "message_type": message_type,
+                    "location_info": location_info,
+                    "vcard": vcard,
+                    "poll_info": poll_info,
                 }
 
         # 13: contactsArrayMessage
@@ -3370,6 +3644,52 @@ def apply_protocol_record(
                     "UPDATE message SET text_data = ? WHERE _id = ?",
                     (new_text, target_id),
                 )
+            new_mtype = msg.get("message_type") or msg.get("edit_info", {}).get("message_type")
+            if new_mtype is not None and new_mtype != 0:
+                cur.execute(
+                    "UPDATE message SET message_type = ? WHERE _id = ?",
+                    (new_mtype, target_id),
+                )
+            if msg.get("media_info"):
+                media = msg["media_info"]
+                file_hash_str = None
+                raw_hash = media.get("file_sha256")
+                if isinstance(raw_hash, bytes) and raw_hash:
+                    file_hash_str = base64.b64encode(raw_hash).decode("ascii")
+                file_path = msg.get("local_path")
+                media_cols = get_table_columns(conn, "message_media", schema_cache)
+                if media_cols:
+                    existing_mm = cur.execute(
+                        "SELECT file_path FROM message_media WHERE message_row_id = ?",
+                        (target_id,),
+                    ).fetchone()
+                    if existing_mm:
+                        cur.execute(
+                            """
+                            UPDATE message_media
+                            SET media_name = COALESCE(?, media_name),
+                                file_path = CASE WHEN (file_path IS NULL OR file_path = '') THEN COALESCE(?, file_path) ELSE file_path END
+                            WHERE message_row_id = ?
+                            """,
+                            (new_text or media.get("media_name"), file_path, target_id),
+                        )
+                    else:
+                        mm_map = {
+                            "message_row_id": target_id,
+                            "chat_row_id": chat_row_id,
+                            "file_path": file_path,
+                            "file_size": media.get("file_size", 0),
+                            "media_name": new_text or media.get("media_name"),
+                            "message_url": media.get("message_url", ""),
+                            "mime_type": media.get("mime_type", "application/octet-stream"),
+                            "file_hash": file_hash_str,
+                            "transferred": 1,
+                        }
+                        v_cols = [c for c in mm_map if c in media_cols]
+                        cur.execute(
+                            f"INSERT OR REPLACE INTO message_media ({', '.join(v_cols)}) VALUES ({', '.join('?' for _ in v_cols)})",
+                            [mm_map[c] for c in v_cols],
+                        )
             edit_cols = get_table_columns(conn, "message_edit_info", schema_cache)
             if edit_cols:
                 cur.execute(
@@ -5344,6 +5664,9 @@ def apply_messages_bin(
                             if fb_key_id:
                                 key_cache[fb_key_id] = m_id
                                 key_ts_cache[fb_key_id] = fb_ts
+                            if pending.target_key_id:
+                                key_cache[pending.target_key_id] = m_id
+                                key_ts_cache[pending.target_key_id] = fb_ts
 
                             old_id = existing_row_ids.get(fb_key_id) or existing_row_ids.get(
                                 pending.target_key_id
@@ -5449,8 +5772,10 @@ def apply_messages_bin(
                                     if media.get("file_sha256")
                                     else None
                                 )
-                                f_path = existing_media_paths.get(fb_key_id) or (
-                                    media.get("file_path") if media else None
+                                f_path = (
+                                    msg_item.get("local_path")
+                                    or existing_media_paths.get(fb_key_id)
+                                    or (media.get("file_path") if media else None)
                                 )
                                 if (
                                     not f_path
@@ -5463,7 +5788,7 @@ def apply_messages_bin(
                                     "chat_row_id": fb_chat_id,
                                     "file_path": f_path,
                                     "file_size": media.get("file_size"),
-                                    "media_name": media.get("media_name"),
+                                    "media_name": fb_text or media.get("media_name"),
                                     "message_url": media.get("message_url"),
                                     "mime_type": media.get("mime_type"),
                                     "file_hash": f_hash_str,
@@ -5472,6 +5797,51 @@ def apply_messages_bin(
                                 cur.execute(
                                     sql_insert_media,
                                     [media_row_map[c] for c in target_media_cols],
+                                )
+                            elif msg_item.get("local_path") and sql_insert_media:
+                                media_row_map = {
+                                    "message_row_id": m_id,
+                                    "chat_row_id": fb_chat_id,
+                                    "file_path": msg_item["local_path"],
+                                    "file_size": 0,
+                                    "media_name": fb_text,
+                                    "message_url": "",
+                                    "mime_type": (
+                                        "image/jpeg"
+                                        if fb_mtype == 1
+                                        else "application/octet-stream"
+                                    ),
+                                    "file_hash": None,
+                                    "transferred": 1,
+                                }
+                                cur.execute(
+                                    sql_insert_media,
+                                    [media_row_map[c] for c in target_media_cols],
+                                )
+
+                            if msg_item.get("location_info"):
+                                apply_location_record(
+                                    conn, m_id, msg_item["location_info"], schema_cache, logger
+                                )
+
+                            if msg_item.get("vcard") and has_vcard_table:
+                                cur.execute(
+                                    "INSERT INTO message_vcard (message_row_id, vcard) VALUES (?, ?)",
+                                    (m_id, msg_item["vcard"]),
+                                )
+
+                            if msg_item.get("poll_info"):
+                                p_rem_jid = msg_item.get("remote_jid", "")
+                                p_is_grp = bool(p_rem_jid.endswith("@g.us"))
+                                apply_poll_creation(
+                                    conn,
+                                    m_id,
+                                    msg_item["poll_info"],
+                                    schema_cache,
+                                    logger,
+                                    fb_chat_id,
+                                    p_is_grp,
+                                    jid_cache,
                                 )
 
                             if msg_item.get("link_preview_info"):
@@ -6505,6 +6875,7 @@ def merge_increments(
                 ("receipt_user", "message_row_id"),
                 ("message_system", "message_row_id"),
                 ("message_revoked", "message_row_id"),
+                ("message_edit_info", "message_row_id"),
             ]
             del_clauses = ["message_type = 0", "(text_data IS NULL OR TRIM(text_data) = '')"]
             for tbl, col in tables_to_check:
