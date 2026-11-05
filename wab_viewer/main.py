@@ -5030,6 +5030,7 @@ def create_app(output_root: Path, rescan: bool = False):
     has_media_hash_thumbnail = False
     has_message_quoted_media = False
     has_message_quoted_text = False
+    has_message_quoted_location = False
     has_mm_width = False
     has_mm_height = False
     has_mm_size = False
@@ -5084,6 +5085,7 @@ def create_app(output_root: Path, rescan: bool = False):
         has_media_hash_thumbnail = "media_hash_thumbnail" in _wa_tables
         has_message_quoted_media = "message_quoted_media" in _wa_tables
         has_message_quoted_text = "message_quoted_text" in _wa_tables
+        has_message_quoted_location = "message_quoted_location" in _wa_tables
         _mq_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_quoted)").fetchall()}
             if "message_quoted" in _wa_tables
@@ -9742,6 +9744,14 @@ def create_app(output_root: Path, rescan: bool = False):
             if not thumb_bytes and has_message_quoted_text:
                 row = conn.execute(
                     "SELECT thumbnail FROM message_quoted_text WHERE message_row_id = ?",
+                    (msg_id_val,),
+                ).fetchone()
+                if row and row["thumbnail"]:
+                    thumb_bytes = row["thumbnail"]
+
+            if not thumb_bytes and has_message_quoted_location:
+                row = conn.execute(
+                    "SELECT thumbnail FROM message_quoted_location WHERE message_row_id = ?",
                     (msg_id_val,),
                 ).fetchone()
                 if row and row["thumbnail"]:
