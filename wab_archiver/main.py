@@ -14,6 +14,7 @@ import atexit
 import contextlib
 import csv
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -471,7 +472,6 @@ def _infer_media_extension(mime_type: str | None) -> str:
         return ".aac"
     if "pdf" in mt:
         return ".pdf"
-    import mimetypes
 
     guessed = mimetypes.guess_extension(mime_type.split(";")[0].strip())
     return guessed or ""
@@ -1175,6 +1175,7 @@ def process_ios_link_thumbnails(
     thumb_dest_dir = os.path.join(output_root, "Whatsapp Databases", ".thumbnails")
 
     progress = ProgressReporter("Thumbnails", len(rows), logger, sys.stderr, 0.2)
+    arch_cursor = archive_conn.cursor() if archive_conn is not None else None
 
     for i, row in enumerate(rows, 1):
         _msg_id, timestamp_ms, thumb_path = row[0], row[1], row[2]
@@ -1226,7 +1227,7 @@ def process_ios_link_thumbnails(
                     }
                     for key_path in keys:
                         archive_db.record_file_archived(
-                            archive_conn.cursor(),
+                            arch_cursor,
                             key_path,
                             b"",
                             rel_path,
