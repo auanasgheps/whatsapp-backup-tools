@@ -4906,7 +4906,7 @@ def test_apply_messages_bin_surrogate_churn_poll(tmp_path):
     ).fetchone()
     assert new_msg is not None
     new_id = new_msg[0]
-    assert new_id != 100  # auto-increment produced a new surrogate ID
+    assert new_id == 100  # defensive merge preserves existing surrogate ID
     assert new_msg[1] == 66
     assert new_msg[2] == "Do you agree?"
 
@@ -6067,9 +6067,9 @@ def test_surrogate_churn_reparents_auxiliary_tables(tmp_path):
     new_row = cur.execute("SELECT _id FROM message WHERE key_id = 'MSG_CHURN_TARGET'").fetchone()
     assert new_row is not None
     new_id = new_row[0]
-    assert new_id != 10
+    assert new_id == 10  # defensive merge preserves existing surrogate ID
 
-    # Auxiliary tables re-pointed to new_id
+    # Auxiliary tables remain intact for new_id
     media_path = cur.execute(
         "SELECT file_path FROM message_media WHERE message_row_id = ?", (new_id,)
     ).fetchone()
@@ -6088,19 +6088,24 @@ def test_surrogate_churn_reparents_auxiliary_tables(tmp_path):
     assert read_ts is not None
     assert read_ts[0] == 1729000555
 
-    # No orphaned records pointing to old id 10
-    assert (
-        cur.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 10").fetchone()[0]
-        == 0
-    )
-    assert (
-        cur.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 10").fetchone()[0]
-        == 0
-    )
-    assert (
-        cur.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 10").fetchone()[0]
-        == 0
-    )
+    if new_id != 10:
+        # No orphaned records pointing to old id 10 if ID churned
+        assert (
+            cur.execute("SELECT COUNT(*) FROM message_media WHERE message_row_id = 10").fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            cur.execute("SELECT COUNT(*) FROM message_quoted WHERE message_row_id = 10").fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            cur.execute("SELECT COUNT(*) FROM receipt_user WHERE message_row_id = 10").fetchone()[0]
+            == 0
+        )
     conn.close()
 
 

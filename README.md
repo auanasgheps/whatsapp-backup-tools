@@ -269,6 +269,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
+- **Recent Android link previews and media thumbnails may be missing until the next full backup.** To save space and mobile data, WhatsApp's daily incremental backups only save message text and details, leaving out image previews. Once WhatsApp completes its next full base backup on your phone (typically created every 5 to 7 days, or when manually triggering a backup in WhatsApp settings), those missing previews will appear in your archive after running the archiver again. Because this tool runs 100% locally and offline, it never connects to WhatsApp servers to download missing previews.
 ### Viewer
 
 - **Timeline scope**: Call history logs are not rendered in the chat timeline.

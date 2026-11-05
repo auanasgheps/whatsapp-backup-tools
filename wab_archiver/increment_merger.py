@@ -238,6 +238,9 @@ def extract_context_info(payload_fields: dict) -> dict | None:
     q_from_me = 0
     q_type = 0
     q_thumb = None
+    q_media_info: dict | None = None
+    q_loc_info: dict | None = None
+    q_vcard: str | None = None
     if 3 in ctx_fields and isinstance(ctx_fields[3][0][1], bytes):
         raw_q_fields = parse_wire_fields(ctx_fields[3][0][1])
         q_fields, _ = unwrap_message_container(raw_q_fields, 4)
@@ -260,6 +263,26 @@ def extract_context_info(payload_fields: dict) -> dict | None:
             q_type = 1
             if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
                 q_thumb = sub[16][0][1]
+            q_media_info = {
+                "mime_type": sub.get(2, [(2, b"image/jpeg")])[0][1].decode(
+                    "utf-8", errors="replace"
+                )
+                if 2 in sub
+                else "image/jpeg",
+                "file_size": sub.get(5, [(0, 0)])[0][1] if 5 in sub else 0,
+                "file_sha256": sub.get(4, [(2, b"")])[0][1] if 4 in sub else b"",
+                "file_enc_sha256": sub.get(9, [(2, b"")])[0][1] if 9 in sub else b"",
+                "media_key": sub.get(8, [(2, b"")])[0][1] if 8 in sub else b"",
+                "direct_path": sub.get(11, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 11 in sub
+                else "",
+                "message_url": sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 1 in sub
+                else "",
+                "height": sub.get(6, [(0, 0)])[0][1] if 6 in sub else 0,
+                "width": sub.get(7, [(0, 0)])[0][1] if 7 in sub else 0,
+                "media_name": quoted_text,
+            }
         elif 7 in q_fields:
             sub = parse_wire_fields(q_fields[7][0][1])
             quoted_text = (
@@ -272,6 +295,24 @@ def extract_context_info(payload_fields: dict) -> dict | None:
             q_type = 9
             if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
                 q_thumb = sub[16][0][1]
+            q_media_info = {
+                "mime_type": sub.get(2, [(2, b"application/octet-stream")])[0][1].decode(
+                    "utf-8", errors="replace"
+                )
+                if 2 in sub
+                else "application/octet-stream",
+                "file_size": sub.get(5, [(0, 0)])[0][1] if 5 in sub else 0,
+                "file_sha256": sub.get(4, [(2, b"")])[0][1] if 4 in sub else b"",
+                "file_enc_sha256": sub.get(9, [(2, b"")])[0][1] if 9 in sub else b"",
+                "media_key": sub.get(8, [(2, b"")])[0][1] if 8 in sub else b"",
+                "direct_path": sub.get(11, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 11 in sub
+                else "",
+                "message_url": sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 1 in sub
+                else "",
+                "media_name": quoted_text,
+            }
         elif 9 in q_fields:
             sub = parse_wire_fields(q_fields[9][0][1])
             quoted_text = (
@@ -280,6 +321,25 @@ def extract_context_info(payload_fields: dict) -> dict | None:
             q_type = 3
             if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
                 q_thumb = sub[16][0][1]
+            q_media_info = {
+                "mime_type": sub.get(2, [(2, b"video/mp4")])[0][1].decode("utf-8", errors="replace")
+                if 2 in sub
+                else "video/mp4",
+                "file_size": sub.get(5, [(0, 0)])[0][1] if 5 in sub else 0,
+                "file_sha256": sub.get(4, [(2, b"")])[0][1] if 4 in sub else b"",
+                "file_enc_sha256": sub.get(9, [(2, b"")])[0][1] if 9 in sub else b"",
+                "media_key": sub.get(8, [(2, b"")])[0][1] if 8 in sub else b"",
+                "direct_path": sub.get(11, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 11 in sub
+                else "",
+                "message_url": sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 1 in sub
+                else "",
+                "height": sub.get(6, [(0, 0)])[0][1] if 6 in sub else 0,
+                "width": sub.get(7, [(0, 0)])[0][1] if 7 in sub else 0,
+                "media_duration": sub.get(8, [(0, 0)])[0][1] if 8 in sub else 0,
+                "media_name": quoted_text,
+            }
         elif 20 in q_fields or 26 in q_fields:
             stk_payload = q_fields[20][0][1] if 20 in q_fields else q_fields[26][0][1]
             sub = parse_wire_fields(stk_payload)
@@ -287,13 +347,49 @@ def extract_context_info(payload_fields: dict) -> dict | None:
             quoted_text = ""
             if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
                 q_thumb = sub[16][0][1]
+            q_media_info = {
+                "mime_type": sub.get(2, [(2, b"image/webp")])[0][1].decode(
+                    "utf-8", errors="replace"
+                )
+                if 2 in sub
+                else "image/webp",
+                "file_size": sub.get(5, [(0, 0)])[0][1] if 5 in sub else 0,
+                "file_sha256": sub.get(4, [(2, b"")])[0][1] if 4 in sub else b"",
+                "file_enc_sha256": sub.get(9, [(2, b"")])[0][1] if 9 in sub else b"",
+                "media_key": sub.get(8, [(2, b"")])[0][1] if 8 in sub else b"",
+                "direct_path": sub.get(11, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 11 in sub
+                else "",
+                "message_url": sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 1 in sub
+                else "",
+                "height": sub.get(6, [(0, 0)])[0][1] if 6 in sub else 0,
+                "width": sub.get(7, [(0, 0)])[0][1] if 7 in sub else 0,
+            }
         elif 8 in q_fields:
             sub = parse_wire_fields(q_fields[8][0][1])
             is_ptt = bool(sub.get(6, [(0, 0)])[0][1]) if 6 in sub else False
             quoted_text = "🎵 Voice message" if is_ptt else "🎵 Audio"
             q_type = 2
-        elif 5 in q_fields:
-            sub = parse_wire_fields(q_fields[5][0][1])
+            q_media_info = {
+                "mime_type": sub.get(2, [(2, b"audio/ogg")])[0][1].decode("utf-8", errors="replace")
+                if 2 in sub
+                else "audio/ogg",
+                "file_size": sub.get(4, [(0, 0)])[0][1] if 4 in sub else 0,
+                "file_sha256": sub.get(3, [(2, b"")])[0][1] if 3 in sub else b"",
+                "file_enc_sha256": sub.get(9, [(2, b"")])[0][1] if 9 in sub else b"",
+                "media_key": sub.get(7, [(2, b"")])[0][1] if 7 in sub else b"",
+                "direct_path": sub.get(10, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 10 in sub
+                else "",
+                "message_url": sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 1 in sub
+                else "",
+                "media_duration": sub.get(5, [(0, 0)])[0][1] if 5 in sub else 0,
+                "media_name": quoted_text,
+            }
+        elif 5 in q_fields or 18 in q_fields:
+            sub = parse_wire_fields(q_fields[5][0][1] if 5 in q_fields else q_fields[18][0][1])
             loc_name = (
                 sub.get(3, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 3 in sub else ""
             )
@@ -304,13 +400,32 @@ def extract_context_info(payload_fields: dict) -> dict | None:
             q_type = 5
             if 16 in sub and isinstance(sub[16][0][1], bytes) and sub[16][0][1]:
                 q_thumb = sub[16][0][1]
-        elif 4 in q_fields:
-            sub = parse_wire_fields(q_fields[4][0][1])
+            lat = (
+                struct.unpack("<d", sub[1][0][1])[0] if 1 in sub and len(sub[1][0][1]) == 8 else 0.0
+            )
+            lng = (
+                struct.unpack("<d", sub[2][0][1])[0] if 2 in sub and len(sub[2][0][1]) == 8 else 0.0
+            )
+            loc_url = (
+                sub.get(5, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 5 in sub else ""
+            )
+            q_loc_info = {
+                "latitude": lat,
+                "longitude": lng,
+                "place_name": loc_name or None,
+                "place_address": loc_addr or None,
+                "url": loc_url or None,
+                "thumbnail": q_thumb,
+            }
+        elif 4 in q_fields or 12 in q_fields:
+            sub = parse_wire_fields(q_fields[4][0][1] if 4 in q_fields else q_fields[12][0][1])
             c_name = (
                 sub.get(1, [(2, b"")])[0][1].decode("utf-8", errors="replace") if 1 in sub else ""
             )
             quoted_text = c_name or "👤 Contact"
             q_type = 4
+            if 2 in sub and isinstance(sub[2][0][1], bytes):
+                q_vcard = sub[2][0][1].decode("utf-8", errors="replace")
         elif any(t in q_fields for t in (49, 60, 64, 93, 111)):
             p_tag = next(t for t in (49, 60, 64, 93, 111) if t in q_fields)
             raw_p = q_fields[p_tag][0][1]
@@ -355,6 +470,9 @@ def extract_context_info(payload_fields: dict) -> dict | None:
         "from_me": q_from_me,
         "message_type": q_type,
         "thumbnail": q_thumb,
+        "media_info": q_media_info,
+        "location_info": q_loc_info,
+        "vcard": q_vcard,
     }
 
 
@@ -740,13 +858,55 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 m_url = re.search(r"https?://[^\s<>\"']+", text_data)
                 if m_url:
                     target_url = m_url.group(0).rstrip(".,;:!?)'\"")
-            if target_url or description or title or jpeg_thumbnail:
+            direct_path = (
+                ext_fields.get(19, [(2, b"")])[0][1].decode("utf-8", errors="replace")
+                if 19 in ext_fields and isinstance(ext_fields[19][0][1], bytes)
+                else None
+            )
+            thumb_sha256 = (
+                ext_fields[20][0][1]
+                if 20 in ext_fields and isinstance(ext_fields[20][0][1], bytes)
+                else None
+            )
+            thumb_enc_sha256 = (
+                ext_fields[21][0][1]
+                if 21 in ext_fields and isinstance(ext_fields[21][0][1], bytes)
+                else None
+            )
+            media_key = (
+                ext_fields[22][0][1]
+                if 22 in ext_fields and isinstance(ext_fields[22][0][1], bytes)
+                else None
+            )
+            media_key_ts = (
+                ext_fields[23][0][1]
+                if 23 in ext_fields and isinstance(ext_fields[23][0][1], int)
+                else None
+            )
+            thumb_height = (
+                ext_fields[24][0][1]
+                if 24 in ext_fields and isinstance(ext_fields[24][0][1], int)
+                else None
+            )
+            thumb_width = (
+                ext_fields[25][0][1]
+                if 25 in ext_fields and isinstance(ext_fields[25][0][1], int)
+                else None
+            )
+            if target_url or description or title or jpeg_thumbnail or direct_path:
                 link_preview_info = {
                     "url": target_url,
                     "title": title,
                     "description": description,
                     "preview_type": preview_type,
                     "thumbnail": jpeg_thumbnail,
+                    "thumbnail_direct_path": direct_path,
+                    "thumbnail_sha256": thumb_sha256,
+                    "thumbnail_enc_sha256": thumb_enc_sha256,
+                    "media_key": media_key,
+                    "media_key_timestamp": media_key_ts,
+                    "thumbnail_height": thumb_height,
+                    "thumbnail_width": thumb_width,
                 }
 
         # 7: documentMessage
@@ -3536,6 +3696,13 @@ def apply_message_deletions(
     has_view_once = bool(get_table_columns(conn, "message_view_once_media", schema_cache))
     has_revoked = bool(get_table_columns(conn, "message_revoked", schema_cache))
     has_system = bool(get_table_columns(conn, "message_system", schema_cache))
+    has_mms_thumb = bool(get_table_columns(conn, "mms_thumbnail_metadata", schema_cache))
+    has_quoted_loc = bool(get_table_columns(conn, "message_quoted_location", schema_cache))
+    has_quoted_vcard = bool(get_table_columns(conn, "message_quoted_vcard", schema_cache))
+    has_receipt_device = bool(get_table_columns(conn, "receipt_device", schema_cache))
+    has_link = bool(get_table_columns(conn, "message_link", schema_cache))
+    has_mentions = bool(get_table_columns(conn, "message_mentions", schema_cache))
+    has_quoted_mentions = bool(get_table_columns(conn, "message_quoted_mentions", schema_cache))
 
     for i in range(0, len(verified_ids), chunk_size):
         chunk = verified_ids[i : i + chunk_size]
@@ -3648,6 +3815,46 @@ def apply_message_deletions(
         if has_system:
             cur.execute(
                 f"DELETE FROM message_system WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_mms_thumb:
+            cur.execute(
+                f"DELETE FROM mms_thumbnail_metadata WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_quoted_loc:
+            cur.execute(
+                f"DELETE FROM message_quoted_location WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_quoted_vcard:
+            cur.execute(
+                f"DELETE FROM message_quoted_vcard WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_receipt_device:
+            cur.execute(
+                f"DELETE FROM receipt_device WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_link:
+            cur.execute(
+                f"DELETE FROM message_link WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_mentions:
+            cur.execute(
+                f"DELETE FROM message_mentions WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_quoted_mentions:
+            cur.execute(
+                f"DELETE FROM message_quoted_mentions WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_add_on:
+            cur.execute(
+                f"DELETE FROM message_add_on WHERE parent_message_row_id IN ({placeholders})",
                 chunk,
             )
 
@@ -4022,66 +4229,54 @@ def apply_messages_bin(
         if schema_cache is not None:
             schema_cache["message_revoked"] = {"exists"} if has_message_revoked_table else set()
 
-    # Fast batch deletion of conflicting messages by key_id
-    existing_media_paths: dict[str, str] = {}
+    has_mms_thumbnail_metadata = bool(
+        get_table_columns(conn, "mms_thumbnail_metadata", schema_cache)
+    )
+    has_quoted_loc_table = bool(get_table_columns(conn, "message_quoted_location", schema_cache))
+    has_quoted_vcard_table = bool(get_table_columns(conn, "message_quoted_vcard", schema_cache))
+    has_quoted_media_table = bool(get_table_columns(conn, "message_quoted_media", schema_cache))
+    has_quoted_text_table = bool(get_table_columns(conn, "message_quoted_text", schema_cache))
+    has_media_hash_thumbnail = bool(get_table_columns(conn, "media_hash_thumbnail", schema_cache))
+
+    # Defensive lookup of existing messages to preserve surrogate IDs, natural keys, and thumbnails
+    existing_messages: dict[str, tuple[int, int, int]] = {}  # key_id -> (_id, status, starred)
     existing_row_ids: dict[str, int] = {}
+    existing_media_paths: dict[str, str] = {}
     if "key_id" in msg_cols:
-        key_ids_to_delete = [
-            msg["key_id"]
-            for msg in messages
-            if msg.get("key_id")
-            and (
-                (msg.get("text_data") and msg["text_data"].strip())
-                or msg.get("media_info")
-                or msg.get("vcard")
-                or msg.get("poll_info")
-                or msg.get("location_info")
-                or msg.get("link_preview_info")
-                or msg.get("stub_type") is not None
-                or msg.get("message_type") in (15, 64)
-            )
-        ]
+        all_key_ids = [msg["key_id"] for msg in messages if msg.get("key_id")]
         chunk_size = 500
-        for i in range(0, len(key_ids_to_delete), chunk_size):
-            chunk = key_ids_to_delete[i : i + chunk_size]
+        for i in range(0, len(all_key_ids), chunk_size):
+            chunk = all_key_ids[i : i + chunk_size]
             placeholders = ", ".join("?" for _ in chunk)
             try:
-                for r_id, k_id in cur.execute(
-                    f"SELECT _id, key_id FROM message WHERE key_id IN ({placeholders})", chunk
+                for r_id, k_id, st, star in cur.execute(
+                    f"SELECT _id, key_id, status, starred FROM message WHERE key_id IN ({placeholders})",
+                    chunk,
                 ).fetchall():
+                    existing_messages[k_id] = (r_id, st or 0, star or 0)
                     existing_row_ids[k_id] = r_id
             except sqlite3.OperationalError:
                 pass
-            if media_cols:
-                try:
-                    for k_id, f_path in cur.execute(
-                        f"SELECT m.key_id, mm.file_path FROM message m "
-                        f"JOIN message_media mm ON mm.message_row_id = m._id "
-                        f"WHERE m.key_id IN ({placeholders}) AND mm.file_path IS NOT NULL",
-                        chunk,
-                    ).fetchall():
-                        if f_path:
+
+            if media_cols and "file_path" in (
+                get_table_columns(conn, "message_media", schema_cache) or set()
+            ):
+                old_chunk_ids = [existing_row_ids[k] for k in chunk if k in existing_row_ids]
+                if old_chunk_ids:
+                    id_placeholders = ", ".join("?" for _ in old_chunk_ids)
+                    try:
+                        for k_id, f_path in cur.execute(
+                            f"""
+                            SELECT m.key_id, mm.file_path
+                            FROM message m
+                            JOIN message_media mm ON mm.message_row_id = m._id
+                            WHERE m._id IN ({id_placeholders}) AND mm.file_path IS NOT NULL AND mm.file_path != ''
+                            """,
+                            old_chunk_ids,
+                        ).fetchall():
                             existing_media_paths[k_id] = f_path
-                except sqlite3.OperationalError:
-                    pass
-            old_chunk_ids = [existing_row_ids[k] for k in chunk if k in existing_row_ids]
-            if old_chunk_ids:
-                old_ph = ", ".join("?" for _ in old_chunk_ids)
-                try:
-                    cur.execute(
-                        f"DELETE FROM message_poll_option WHERE message_row_id IN ({old_ph})",
-                        old_chunk_ids,
-                    )
-                except sqlite3.OperationalError:
-                    pass
-                try:
-                    cur.execute(
-                        f"DELETE FROM message_poll WHERE message_row_id IN ({old_ph})",
-                        old_chunk_ids,
-                    )
-                except sqlite3.OperationalError:
-                    pass
-            cur.execute(f"DELETE FROM message WHERE key_id IN ({placeholders})", chunk)
+                    except sqlite3.OperationalError:
+                        pass
 
     # Pre-compute static message insert statement
     static_msg_keys = [
@@ -4396,362 +4591,53 @@ def apply_messages_bin(
                 inserted += 1
             continue
 
-        # Fallback delete for messages without key_id
-        if not msg.get("key_id") and "chat_row_id" in msg_cols:
+        msg_key = msg.get("key_id")
+        # --- Case A: Existing message update (Defensive, Non-Destructive) ---
+        if msg_key and msg_key in existing_messages:
+            msg_row_id, old_st, old_star = existing_messages[msg_key]
+            inserted += 1
+            new_st = max(old_st, msg.get("status", 0))
+            new_star = max(old_star, msg.get("starred", 0))
+            update_clauses = ["status = ?", "starred = ?"]
+            update_params = [new_st, new_star]
+
+            new_text = msg.get("text_data")
+            if new_text is not None and new_text.strip():
+                update_clauses.append("text_data = ?")
+                update_params.append(new_text)
+
+            new_type = msg.get("message_type")
+            if new_type is not None and new_type != 0:
+                update_clauses.append("message_type = ?")
+                update_params.append(new_type)
+
+            update_params.append(msg_row_id)
             cur.execute(
-                "DELETE FROM message WHERE chat_row_id = ? AND timestamp = ? AND from_me = ?",
-                (chat_row_id, msg["timestamp"], msg["from_me"]),
+                f"UPDATE message SET {', '.join(update_clauses)} WHERE _id = ?",
+                update_params,
             )
 
-        row_map = {
-            "chat_row_id": chat_row_id,
-            "from_me": msg["from_me"],
-            "key_id": msg["key_id"],
-            "sender_jid_row_id": sender_jid_row_id,
-            "timestamp": msg["timestamp"],
-            "message_type": msg["message_type"],
-            "text_data": msg["text_data"],
-            "starred": msg["starred"],
-            "status": msg["status"],
-        }
-        cur.execute(sql_insert_msg, [row_map[c] for c in target_msg_cols])
-        msg_row_id = cur.lastrowid
-        inserted += 1
-
-        if is_revoked:
-            if has_message_revoked_table and msg_row_id and msg.get("key_id"):
-                try:
-                    cur.execute(
-                        "INSERT OR REPLACE INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES (?, ?, ?, ?)",
-                        (msg_row_id, msg["key_id"], 0, msg["timestamp"]),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-            if msg_row_id:
+            if is_revoked:
+                cur.execute("UPDATE message SET message_type = 15 WHERE _id = ?", (msg_row_id,))
+                if has_message_revoked_table:
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES (?, ?, 0, ?)",
+                            (msg_row_id, msg_key, msg["timestamp"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
                 try:
                     cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (msg_row_id,))
                 except sqlite3.OperationalError:
                     pass
-        elif is_stub and has_message_system_table and msg_row_id and msg["message_type"] == 7:
-            try:
-                cur.execute(
-                    "INSERT OR REPLACE INTO message_system (message_row_id, action_type) VALUES (?, ?)",
-                    (msg_row_id, int(msg["stub_type"])),
-                )
-            except sqlite3.OperationalError:
-                pass
 
-        old_id = (
-            key_cache.get(msg["key_id"]) if msg.get("key_id") else None
-        ) or existing_row_ids.get(msg.get("key_id", ""))
-        if is_revoked and old_id:
-            try:
-                cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (old_id,))
-            except sqlite3.OperationalError:
-                pass
-        if old_id and msg_row_id and old_id != msg_row_id:
-            try:
-                cur.execute(
-                    "UPDATE message_add_on SET parent_message_row_id = ? WHERE parent_message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-            if msg.get("key_id"):
-                try:
-                    cur.execute("DELETE FROM message WHERE _id = ?", (old_id,))
-                except sqlite3.OperationalError:
-                    pass
-            try:
-                cur.execute(
-                    "UPDATE poll_name_hash_history SET poll_message_row_id = ? WHERE poll_message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cur.execute(
-                    "UPDATE reporting_info SET message_row_id = ? WHERE message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cur.execute(
-                    "UPDATE chat SET last_message_row_id = ? WHERE last_message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-                cur.execute(
-                    "UPDATE chat SET display_message_row_id = ? WHERE display_message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-                cur.execute(
-                    "UPDATE chat SET last_read_message_row_id = ? WHERE last_read_message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-
-            # Cascade surrogate ID re-parenting across all auxiliary tables
-            try:
-                cur.execute(
-                    "UPDATE receipt_user SET message_row_id = ? WHERE message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cur.execute(
-                    "UPDATE message_edit_info SET message_row_id = ? WHERE message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cur.execute(
-                    "UPDATE message_view_once_media SET message_row_id = ? WHERE message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cur.execute(
-                    "UPDATE message_secret SET message_row_id = ? WHERE message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                cur.execute(
-                    "UPDATE message_association SET message_row_id = ? WHERE message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-                cur.execute(
-                    "UPDATE message_association SET parent_message_row_id = ? WHERE parent_message_row_id = ?",
-                    (msg_row_id, old_id),
-                )
-            except sqlite3.OperationalError:
-                pass
-
-            if not msg.get("quoted_info"):
-                try:
-                    cur.execute(
-                        "UPDATE message_quoted SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-            else:
-                try:
-                    cur.execute("DELETE FROM message_quoted WHERE message_row_id = ?", (old_id,))
-                except sqlite3.OperationalError:
-                    pass
-
-            if not (msg.get("quoted_info") and msg["quoted_info"].get("thumbnail")):
-                try:
-                    cur.execute(
-                        "UPDATE message_quoted_media SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
-                    cur.execute(
-                        "UPDATE message_quoted_text SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-            else:
-                try:
-                    cur.execute(
-                        "DELETE FROM message_quoted_media WHERE message_row_id = ?", (old_id,)
-                    )
-                    cur.execute(
-                        "DELETE FROM message_quoted_text WHERE message_row_id = ?", (old_id,)
-                    )
-                except sqlite3.OperationalError:
-                    pass
-
-            if not msg.get("media_info") and not is_revoked:
-                try:
-                    cur.execute(
-                        "UPDATE message_media SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-            else:
-                try:
-                    cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (old_id,))
-                except sqlite3.OperationalError:
-                    pass
-
-            if not msg.get("location_info"):
-                try:
-                    cur.execute(
-                        "UPDATE message_location SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-
-            if not msg.get("vcard"):
-                try:
-                    cur.execute(
-                        "UPDATE message_vcard SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-
-            if not msg.get("link_preview_info"):
-                try:
-                    cur.execute(
-                        "UPDATE message_text SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
-                    cur.execute(
-                        "UPDATE message_thumbnail SET message_row_id = ? WHERE message_row_id = ?",
-                        (msg_row_id, old_id),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-            else:
-                try:
-                    cur.execute("DELETE FROM message_text WHERE message_row_id = ?", (old_id,))
-                    cur.execute("DELETE FROM message_thumbnail WHERE message_row_id = ?", (old_id,))
-                except sqlite3.OperationalError:
-                    pass
-
-        is_displayable = is_conversational or (is_group and msg["message_type"] == 7)
-        if (
-            is_displayable
-            and not is_add_on
-            and msg["timestamp"] >= max_ts_per_chat.get(chat_row_id, 0)
-        ):
-            max_ts_per_chat[chat_row_id] = msg["timestamp"]
-
-        if msg.get("key_id") and msg_row_id:
-            key_cache[msg["key_id"]] = msg_row_id
-            existing_row_ids[msg["key_id"]] = msg_row_id
-            if msg.get("timestamp"):
-                key_ts_cache[msg["key_id"]] = msg["timestamp"]
-
-        # Insert media record if present
-        if msg["media_info"] and sql_insert_media:
-            media = msg["media_info"]
-            file_hash_str = (
-                base64.b64encode(media["file_sha256"]).decode("ascii")
-                if media["file_sha256"]
-                else None
-            )
-
-            # Preserve existing on-device path or use native WMI Tag 38 local_path
-            file_path = existing_media_paths.get(msg.get("key_id", "")) or (
-                media.get("file_path") if media else None
-            )
-            if not file_path and media["media_type"] == "document" and media.get("media_name"):
-                file_path = f"Media/WhatsApp Documents/{media['media_name']}"
-
-            media_row_map = {
-                "message_row_id": msg_row_id,
-                "chat_row_id": chat_row_id,
-                "file_path": file_path,
-                "file_size": media["file_size"],
-                "media_name": media["media_name"],
-                "message_url": media["message_url"],
-                "mime_type": media["mime_type"],
-                "file_hash": file_hash_str,
-                "transferred": 1,
-            }
-            cur.execute(sql_insert_media, [media_row_map[c] for c in target_media_cols])
-
-        # Insert vcard record if present
-        if msg["vcard"] and has_vcard_table:
-            cur.execute(
-                "INSERT INTO message_vcard (message_row_id, vcard) VALUES (?, ?)",
-                (msg_row_id, msg["vcard"]),
-            )
-
-        # Insert view-once record if present
-        if msg.get("is_view_once") and has_view_once_table and msg_row_id:
-            try:
-                cur.execute(
-                    "INSERT OR REPLACE INTO message_view_once_media (message_row_id, state) VALUES (?, ?)",
-                    (msg_row_id, 2 if msg.get("from_me") else 1),
-                )
-            except sqlite3.OperationalError:
-                pass
-
-        # Insert link preview records if present
-        if msg.get("link_preview_info") and msg_row_id:
-            lp = msg["link_preview_info"]
-            if has_message_text_table:
-                try:
-                    cur.execute(
-                        """
-                        INSERT OR REPLACE INTO message_text
-                            (message_row_id, description, page_title, url, preview_type)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            msg_row_id,
-                            lp.get("description"),
-                            lp.get("title"),
-                            lp.get("url"),
-                            lp.get("preview_type", 0),
-                        ),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-            if has_message_thumbnail_table and lp.get("thumbnail"):
-                try:
-                    cur.execute(
-                        """
-                        INSERT OR REPLACE INTO message_thumbnail
-                            (message_row_id, thumbnail)
-                        VALUES (?, ?)
-                        """,
-                        (msg_row_id, lp["thumbnail"]),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-
-        # Apply location metadata if present
-        if msg.get("location_info") and msg_row_id:
-            apply_location_record(conn, msg_row_id, msg["location_info"], schema_cache, logger)
-            if has_message_thumbnail_table and msg["location_info"].get("thumbnail"):
-                try:
-                    cur.execute(
-                        """
-                        INSERT OR REPLACE INTO message_thumbnail
-                            (message_row_id, thumbnail)
-                        VALUES (?, ?)
-                        """,
-                        (msg_row_id, msg["location_info"]["thumbnail"]),
-                    )
-                except sqlite3.OperationalError:
-                    pass
-
-        # Apply poll creation metadata and embedded votes if present
-        if msg.get("poll_info") and msg_row_id:
-            apply_poll_creation(
-                conn,
-                msg_row_id,
-                msg["poll_info"],
-                schema_cache,
-                logger,
-                chat_row_id,
-                is_group,
-                jid_cache,
-            )
-        elif msg.get("embedded_poll_votes") and msg.get("key_id"):
-            parent_id = key_cache.get(msg["key_id"]) or find_message_row_id(
-                conn, msg["key_id"], key_cache
-            )
-            if parent_id:
-                apply_embedded_poll_votes(
+            # Apply poll creation metadata
+            if msg.get("poll_info"):
+                apply_poll_creation(
                     conn,
-                    parent_id,
-                    msg["embedded_poll_votes"],
+                    msg_row_id,
+                    msg["poll_info"],
                     schema_cache,
                     logger,
                     chat_row_id,
@@ -4759,93 +4645,458 @@ def apply_messages_bin(
                     jid_cache,
                 )
 
-        # Insert message_quoted record if present
-        if msg.get("quoted_info") and msg_row_id:
-            quoted_cols = get_table_columns(conn, "message_quoted", schema_cache)
-            if quoted_cols:
-                qi = msg["quoted_info"]
-                q_part = qi.get("participant", "")
-                if is_group and q_part and qi.get("from_me") != 1:
+            # Update media record if present
+            if msg.get("media_info") and sql_insert_media:
+                media = msg["media_info"]
+                file_path = existing_media_paths.get(msg_key) or msg.get("local_path")
+                raw_hash = media.get("file_sha256")
+                file_hash_str = (
+                    base64.b64encode(raw_hash).decode("ascii")
+                    if isinstance(raw_hash, bytes) and raw_hash
+                    else None
+                )
+                media_row_map = {
+                    "message_row_id": msg_row_id,
+                    "chat_row_id": chat_row_id,
+                    "file_path": file_path,
+                    "file_size": media["file_size"],
+                    "media_name": media["media_name"],
+                    "message_url": media["message_url"],
+                    "mime_type": media["mime_type"],
+                    "file_hash": file_hash_str,
+                    "transferred": 1,
+                }
+                cur.execute(
+                    f"INSERT OR REPLACE INTO message_media ({', '.join(target_media_cols)}) VALUES ({', '.join('?' for _ in target_media_cols)})",
+                    [media_row_map[c] for c in target_media_cols],
+                )
+
+            # Update location record if present
+            if msg.get("location_info"):
+                apply_location_record(conn, msg_row_id, msg["location_info"], schema_cache, logger)
+                if has_message_thumbnail_table and msg["location_info"].get("thumbnail"):
                     try:
-                        q_sender_id = resolve_or_create_jid(conn, q_part, logger, jid_cache)
-                    except (ValueError, Exception):
-                        q_sender_id = 0
-                else:
-                    q_sender_id = 0
-                q_stanza_id = qi.get("stanza_id") or msg.get("key_id", "") or ""
-                quoted_ts = key_ts_cache.get(q_stanza_id, 0)
-                q_from_me = qi.get("from_me", 0)
-                if q_stanza_id:
-                    cur.execute(
-                        "SELECT timestamp, from_me, sender_jid_row_id FROM message WHERE key_id = ?",
-                        (q_stanza_id,),
-                    )
-                    t_row = cur.fetchone()
-                    has_edit_tbl = bool(get_table_columns(conn, "message_edit_info", schema_cache))
-                    if not (t_row and t_row[0]) and has_edit_tbl:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_thumbnail (message_row_id, thumbnail) VALUES (?, ?)",
+                            (msg_row_id, msg["location_info"]["thumbnail"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+
+            # Update link preview records if present
+            if msg.get("link_preview_info"):
+                lp = msg["link_preview_info"]
+                if has_message_text_table:
+                    try:
                         cur.execute(
                             """
-                            SELECT m.timestamp, m.from_me, m.sender_jid_row_id
-                            FROM message m
-                            JOIN message_edit_info mei ON mei.message_row_id = m._id
-                            WHERE mei.original_key_id = ?
-                            LIMIT 1
+                            INSERT OR REPLACE INTO message_text
+                                (message_row_id, description, page_title, url, preview_type)
+                            VALUES (?, ?, ?, ?, ?)
                             """,
+                            (
+                                msg_row_id,
+                                lp.get("description"),
+                                lp.get("title"),
+                                lp.get("url"),
+                                lp.get("preview_type", 0),
+                            ),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if has_mms_thumbnail_metadata and lp.get("thumbnail_direct_path"):
+                    m_key = lp.get("media_key")
+                    m_ts = lp.get("media_key_timestamp") or 0
+                    t_w = lp.get("thumbnail_width") or 0
+                    t_h = lp.get("thumbnail_height") or 0
+                    enc_hash_b64 = (
+                        base64.b64encode(lp["thumbnail_enc_sha256"]).decode("ascii")
+                        if lp.get("thumbnail_enc_sha256")
+                        else None
+                    )
+                    hash_b64 = (
+                        base64.b64encode(lp["thumbnail_sha256"]).decode("ascii")
+                        if lp.get("thumbnail_sha256")
+                        else None
+                    )
+                    try:
+                        cur.execute(
+                            """
+                            INSERT OR IGNORE INTO mms_thumbnail_metadata
+                                (message_row_id, direct_path, media_key, media_key_timestamp, enc_thumb_hash, thumb_hash, thumb_width, thumb_height, transferred)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                            """,
+                            (
+                                msg_row_id,
+                                lp["thumbnail_direct_path"],
+                                m_key,
+                                m_ts,
+                                enc_hash_b64,
+                                hash_b64,
+                                t_w,
+                                t_h,
+                            ),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if has_message_thumbnail_table and lp.get("thumbnail"):
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_thumbnail (message_row_id, thumbnail) VALUES (?, ?)",
+                            (msg_row_id, lp["thumbnail"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+
+        # --- Case B: New message insertion ---
+        else:
+            if not msg_key and "chat_row_id" in msg_cols:
+                cur.execute(
+                    "DELETE FROM message WHERE chat_row_id = ? AND timestamp = ? AND from_me = ?",
+                    (chat_row_id, msg["timestamp"], msg["from_me"]),
+                )
+
+            row_map = {
+                "chat_row_id": chat_row_id,
+                "from_me": msg["from_me"],
+                "key_id": msg["key_id"],
+                "sender_jid_row_id": sender_jid_row_id,
+                "timestamp": msg["timestamp"],
+                "message_type": msg["message_type"],
+                "text_data": msg["text_data"],
+                "starred": msg["starred"],
+                "status": msg["status"],
+            }
+            cur.execute(sql_insert_msg, [row_map[c] for c in target_msg_cols])
+            msg_row_id = cur.lastrowid
+            inserted += 1
+            if msg_key:
+                existing_messages[msg_key] = (msg_row_id, msg["status"], msg["starred"])
+                existing_row_ids[msg_key] = msg_row_id
+
+            if is_revoked:
+                if has_message_revoked_table and msg_row_id and msg.get("key_id"):
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_revoked (message_row_id, revoked_key_id, admin_jid_row_id, revoke_timestamp) VALUES (?, ?, 0, ?)",
+                            (msg_row_id, msg["key_id"], msg["timestamp"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if msg_row_id:
+                    try:
+                        cur.execute(
+                            "DELETE FROM message_media WHERE message_row_id = ?", (msg_row_id,)
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+            elif is_stub and has_message_system_table and msg_row_id and msg["message_type"] == 7:
+                try:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO message_system (message_row_id, action_type) VALUES (?, ?)",
+                        (msg_row_id, int(msg["stub_type"])),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+            # Apply poll creation metadata
+            if msg.get("poll_info") and msg_row_id:
+                apply_poll_creation(
+                    conn,
+                    msg_row_id,
+                    msg["poll_info"],
+                    schema_cache,
+                    logger,
+                    chat_row_id,
+                    is_group,
+                    jid_cache,
+                )
+
+            # Insert media record
+            if msg.get("media_info") and sql_insert_media and msg_row_id:
+                media = msg["media_info"]
+                file_path = msg.get("local_path")
+                raw_hash = media.get("file_sha256")
+                file_hash_str = (
+                    base64.b64encode(raw_hash).decode("ascii")
+                    if isinstance(raw_hash, bytes) and raw_hash
+                    else None
+                )
+                media_row_map = {
+                    "message_row_id": msg_row_id,
+                    "chat_row_id": chat_row_id,
+                    "file_path": file_path,
+                    "file_size": media["file_size"],
+                    "media_name": media["media_name"],
+                    "message_url": media["message_url"],
+                    "mime_type": media["mime_type"],
+                    "file_hash": file_hash_str,
+                    "transferred": 1,
+                }
+                cur.execute(sql_insert_media, [media_row_map[c] for c in target_media_cols])
+
+            # Insert location record
+            if msg.get("location_info") and msg_row_id:
+                apply_location_record(conn, msg_row_id, msg["location_info"], schema_cache, logger)
+                if has_message_thumbnail_table and msg["location_info"].get("thumbnail"):
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_thumbnail (message_row_id, thumbnail) VALUES (?, ?)",
+                            (msg_row_id, msg["location_info"]["thumbnail"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+
+            # Insert vcard record
+            if msg.get("vcard") and has_vcard_table and msg_row_id:
+                cur.execute(
+                    "INSERT INTO message_vcard (message_row_id, vcard) VALUES (?, ?)",
+                    (msg_row_id, msg["vcard"]),
+                )
+
+            # Insert view-once record
+            if msg.get("is_view_once") and has_view_once_table and msg_row_id:
+                try:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO message_view_once_media (message_row_id, state) VALUES (?, ?)",
+                        (msg_row_id, 2 if msg.get("from_me") else 1),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+            # Insert link preview records
+            if msg.get("link_preview_info") and msg_row_id:
+                lp = msg["link_preview_info"]
+                if has_message_text_table:
+                    try:
+                        cur.execute(
+                            """
+                            INSERT OR REPLACE INTO message_text
+                                (message_row_id, description, page_title, url, preview_type)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                msg_row_id,
+                                lp.get("description"),
+                                lp.get("title"),
+                                lp.get("url"),
+                                lp.get("preview_type", 0),
+                            ),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if has_mms_thumbnail_metadata and lp.get("thumbnail_direct_path"):
+                    m_key = lp.get("media_key")
+                    m_ts = lp.get("media_key_timestamp") or 0
+                    t_w = lp.get("thumbnail_width") or 0
+                    t_h = lp.get("thumbnail_height") or 0
+                    enc_hash_b64 = (
+                        base64.b64encode(lp["thumbnail_enc_sha256"]).decode("ascii")
+                        if lp.get("thumbnail_enc_sha256")
+                        else None
+                    )
+                    hash_b64 = (
+                        base64.b64encode(lp["thumbnail_sha256"]).decode("ascii")
+                        if lp.get("thumbnail_sha256")
+                        else None
+                    )
+                    try:
+                        cur.execute(
+                            """
+                            INSERT OR IGNORE INTO mms_thumbnail_metadata
+                                (message_row_id, direct_path, media_key, media_key_timestamp, enc_thumb_hash, thumb_hash, thumb_width, thumb_height, transferred)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                            """,
+                            (
+                                msg_row_id,
+                                lp["thumbnail_direct_path"],
+                                m_key,
+                                m_ts,
+                                enc_hash_b64,
+                                hash_b64,
+                                t_w,
+                                t_h,
+                            ),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if has_message_thumbnail_table and lp.get("thumbnail"):
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_thumbnail (message_row_id, thumbnail) VALUES (?, ?)",
+                            (msg_row_id, lp["thumbnail"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+
+            # Insert message_quoted record and rich auxiliary tables
+            if msg.get("quoted_info") and msg_row_id:
+                quoted_cols = get_table_columns(conn, "message_quoted", schema_cache)
+                if quoted_cols:
+                    qi = msg["quoted_info"]
+                    q_part = qi.get("participant", "")
+                    if is_group and q_part and qi.get("from_me") != 1:
+                        try:
+                            q_sender_id = resolve_or_create_jid(conn, q_part, logger, jid_cache)
+                        except (ValueError, Exception):
+                            q_sender_id = 0
+                    else:
+                        q_sender_id = 0
+                    q_stanza_id = qi.get("stanza_id") or msg.get("key_id", "") or ""
+                    quoted_ts = key_ts_cache.get(q_stanza_id, 0)
+                    q_from_me = qi.get("from_me", 0)
+                    target_mid = None
+                    if q_stanza_id:
+                        cur.execute(
+                            "SELECT timestamp, from_me, sender_jid_row_id, _id FROM message WHERE key_id = ?",
                             (q_stanza_id,),
                         )
                         t_row = cur.fetchone()
-                    if t_row and t_row[0]:
-                        quoted_ts = int(t_row[0])
-                        key_ts_cache[q_stanza_id] = quoted_ts
-                        if t_row[1] is not None:
-                            q_from_me = int(t_row[1])
-                        if q_from_me == 1:
-                            q_sender_id = 0
-                        elif t_row[2] is not None:
-                            q_sender_id = int(t_row[2])
-                    else:
-                        pending_quotes.append((msg_row_id, q_stanza_id))
-                q_row_map = {
-                    "message_row_id": msg_row_id,
-                    "chat_row_id": chat_row_id,
-                    "parent_message_chat_row_id": chat_row_id,
-                    "text_data": qi.get("quoted_text", ""),
-                    "from_me": q_from_me,
-                    "sender_jid_row_id": q_sender_id,
-                    "key_id": q_stanza_id,
-                    "timestamp": quoted_ts,
-                    "message_type": qi.get("message_type", 0),
-                }
-                valid_q_cols = [c for c in q_row_map if c in quoted_cols]
-                cur.execute(
-                    f"INSERT INTO message_quoted ({', '.join(valid_q_cols)}) VALUES ({', '.join('?' for _ in valid_q_cols)})",
-                    [q_row_map[c] for c in valid_q_cols],
-                )
-                if qi.get("thumbnail"):
-                    q_msg_type = qi.get("message_type", 0)
-                    mqt_cols = get_table_columns(conn, "message_quoted_text", schema_cache)
-                    if q_msg_type == 0 and mqt_cols:
-                        mqt_map = {
-                            "message_row_id": msg_row_id,
-                            "thumbnail": qi["thumbnail"],
-                        }
-                        valid_mqt = [c for c in mqt_map if c in mqt_cols]
-                        cur.execute(
-                            f"INSERT OR REPLACE INTO message_quoted_text ({', '.join(valid_mqt)}) VALUES ({', '.join('?' for _ in valid_mqt)})",
-                            [mqt_map[c] for c in valid_mqt],
+                        has_edit_tbl = bool(
+                            get_table_columns(conn, "message_edit_info", schema_cache)
                         )
-                    else:
-                        mqm_cols = get_table_columns(conn, "message_quoted_media", schema_cache)
-                        if mqm_cols:
-                            mqm_map = {
-                                "message_row_id": msg_row_id,
-                                "thumbnail": qi["thumbnail"],
-                            }
-                            valid_mqm = [c for c in mqm_map if c in mqm_cols]
+                        if not (t_row and t_row[0]) and has_edit_tbl:
                             cur.execute(
-                                f"INSERT OR REPLACE INTO message_quoted_media ({', '.join(valid_mqm)}) VALUES ({', '.join('?' for _ in valid_mqm)})",
-                                [mqm_map[c] for c in valid_mqm],
+                                """
+                                SELECT m.timestamp, m.from_me, m.sender_jid_row_id, m._id
+                                FROM message m
+                                JOIN message_edit_info mei ON mei.message_row_id = m._id
+                                WHERE mei.original_key_id = ?
+                                LIMIT 1
+                                """,
+                                (q_stanza_id,),
                             )
+                            t_row = cur.fetchone()
+                        if t_row and t_row[0]:
+                            quoted_ts = int(t_row[0])
+                            key_ts_cache[q_stanza_id] = quoted_ts
+                            if t_row[1] is not None:
+                                q_from_me = int(t_row[1])
+                            if q_from_me == 1:
+                                q_sender_id = 0
+                            elif t_row[2] is not None:
+                                q_sender_id = int(t_row[2])
+                            target_mid = int(t_row[3])
+                        else:
+                            pending_quotes.append((msg_row_id, q_stanza_id))
+                    q_row_map = {
+                        "message_row_id": msg_row_id,
+                        "chat_row_id": chat_row_id,
+                        "parent_message_chat_row_id": chat_row_id,
+                        "text_data": qi.get("quoted_text", ""),
+                        "from_me": q_from_me,
+                        "sender_jid_row_id": q_sender_id,
+                        "key_id": q_stanza_id,
+                        "timestamp": quoted_ts,
+                        "message_type": qi.get("message_type", 0),
+                    }
+                    valid_q_cols = [c for c in q_row_map if c in quoted_cols]
+                    cur.execute(
+                        f"INSERT INTO message_quoted ({', '.join(valid_q_cols)}) VALUES ({', '.join('?' for _ in valid_q_cols)})",
+                        [q_row_map[c] for c in valid_q_cols],
+                    )
+
+                    q_msg_type = qi.get("message_type", 0)
+                    # Quoted location auxiliary table
+                    if has_quoted_loc_table and qi.get("location_info"):
+                        qli = qi["location_info"]
+                        ql_cols = get_table_columns(conn, "message_quoted_location", schema_cache)
+                        ql_map = {
+                            "message_row_id": msg_row_id,
+                            "latitude": qli.get("latitude", 0.0),
+                            "longitude": qli.get("longitude", 0.0),
+                            "place_name": qli.get("place_name"),
+                            "place_address": qli.get("place_address"),
+                            "url": qli.get("url"),
+                            "thumbnail": qli.get("thumbnail"),
+                        }
+                        valid_ql = [c for c in ql_map if c in ql_cols]
+                        cur.execute(
+                            f"INSERT OR REPLACE INTO message_quoted_location ({', '.join(valid_ql)}) VALUES ({', '.join('?' for _ in valid_ql)})",
+                            [ql_map[c] for c in valid_ql],
+                        )
+
+                    # Quoted vcard auxiliary table
+                    if has_quoted_vcard_table and qi.get("vcard"):
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_quoted_vcard (message_row_id, vcard) VALUES (?, ?)",
+                            (msg_row_id, qi["vcard"]),
+                        )
+
+                    # Quoted text thumbnail table
+                    if q_msg_type == 0 and has_quoted_text_table and qi.get("thumbnail"):
+                        cur.execute(
+                            "INSERT OR REPLACE INTO message_quoted_text (message_row_id, thumbnail) VALUES (?, ?)",
+                            (msg_row_id, qi["thumbnail"]),
+                        )
+
+                    # Quoted media table (images, videos, audio, documents, stickers)
+                    if has_quoted_media_table and (
+                        qi.get("media_info")
+                        or qi.get("thumbnail")
+                        or q_msg_type in (1, 2, 3, 9, 20, 26, 42, 43)
+                    ):
+                        q_thumb = qi.get("thumbnail")
+                        # Inherit thumbnail from target message if available in DB
+                        if not q_thumb and target_mid:
+                            if has_message_thumbnail_table:
+                                cur.execute(
+                                    "SELECT thumbnail FROM message_thumbnail WHERE message_row_id = ?",
+                                    (target_mid,),
+                                )
+                                mt_row = cur.fetchone()
+                                if mt_row and mt_row[0]:
+                                    q_thumb = mt_row[0]
+                            if not q_thumb and has_media_hash_thumbnail:
+                                cur.execute(
+                                    """
+                                    SELECT mht.thumbnail
+                                    FROM message_media mm
+                                    JOIN media_hash_thumbnail mht ON mht.media_hash = mm.file_hash
+                                    WHERE mm.message_row_id = ? AND mht.thumbnail IS NOT NULL
+                                    LIMIT 1
+                                    """,
+                                    (target_mid,),
+                                )
+                                mht_row = cur.fetchone()
+                                if mht_row and mht_row[0]:
+                                    q_thumb = mht_row[0]
+
+                        q_med = qi.get("media_info") or {}
+                        raw_q_hash = q_med.get("file_sha256")
+                        q_hash_b64 = (
+                            base64.b64encode(raw_q_hash).decode("ascii")
+                            if isinstance(raw_q_hash, bytes) and raw_q_hash
+                            else None
+                        )
+                        raw_q_enc = q_med.get("file_enc_sha256")
+                        q_enc_b64 = (
+                            base64.b64encode(raw_q_enc).decode("ascii")
+                            if isinstance(raw_q_enc, bytes) and raw_q_enc
+                            else None
+                        )
+                        mqm_cols = get_table_columns(conn, "message_quoted_media", schema_cache)
+                        mqm_map = {
+                            "message_row_id": msg_row_id,
+                            "thumbnail": q_thumb,
+                            "mime_type": q_med.get("mime_type"),
+                            "file_length": q_med.get("file_size") or 0,
+                            "file_size": q_med.get("file_size") or 0,
+                            "media_key": q_med.get("media_key"),
+                            "direct_path": q_med.get("direct_path"),
+                            "message_url": q_med.get("message_url"),
+                            "file_hash": q_hash_b64,
+                            "enc_file_hash": q_enc_b64,
+                            "media_duration": q_med.get("media_duration") or 0,
+                            "width": q_med.get("width") or 0,
+                            "height": q_med.get("height") or 0,
+                            "media_name": q_med.get("media_name"),
+                        }
+                        valid_mqm = [c for c in mqm_map if c in mqm_cols]
+                        cur.execute(
+                            f"INSERT OR REPLACE INTO message_quoted_media ({', '.join(valid_mqm)}) VALUES ({', '.join('?' for _ in valid_mqm)})",
+                            [mqm_map[c] for c in valid_mqm],
+                        )
 
         # Insert user receipts if present
         if msg.get("user_receipts") and msg_row_id:
@@ -5346,6 +5597,41 @@ def apply_messages_bin(
                     (q_ts, q_fm, q_s_id, q_msg_id),
                 )
                 recovered_quotes += 1
+                if target_mid and has_quoted_media_table:
+                    cur.execute(
+                        "SELECT thumbnail FROM message_quoted_media WHERE message_row_id = ?",
+                        (q_msg_id,),
+                    )
+                    mqm_row = cur.fetchone()
+                    if mqm_row and mqm_row[0] is None:
+                        inherited_thumb = None
+                        if has_message_thumbnail_table:
+                            cur.execute(
+                                "SELECT thumbnail FROM message_thumbnail WHERE message_row_id = ?",
+                                (target_mid,),
+                            )
+                            mt_row = cur.fetchone()
+                            if mt_row and mt_row[0]:
+                                inherited_thumb = mt_row[0]
+                        if not inherited_thumb and has_media_hash_thumbnail:
+                            cur.execute(
+                                """
+                                SELECT mht.thumbnail
+                                FROM message_media mm
+                                JOIN media_hash_thumbnail mht ON mht.media_hash = mm.file_hash
+                                WHERE mm.message_row_id = ? AND mht.thumbnail IS NOT NULL
+                                LIMIT 1
+                                """,
+                                (target_mid,),
+                            )
+                            mht_row = cur.fetchone()
+                            if mht_row and mht_row[0]:
+                                inherited_thumb = mht_row[0]
+                        if inherited_thumb:
+                            cur.execute(
+                                "UPDATE message_quoted_media SET thumbnail = ? WHERE message_row_id = ?",
+                                (inherited_thumb, q_msg_id),
+                            )
         if recovered_quotes > 0:
             logger.debug(
                 f"Two-pass quote reconciliation resolved {recovered_quotes} out-of-order quoted timestamp(s)."
