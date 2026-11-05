@@ -58,14 +58,18 @@ def build_ios_group_subjects_query() -> str:
     not just those active since --since.
     """
     return """
-        SELECT DISTINCT CAST(cs.Z_PK AS TEXT), cs.ZPARTNERNAME
+        SELECT CAST(cs.Z_PK AS TEXT), cs.ZPARTNERNAME
         FROM ZWACHATSESSION cs
-        JOIN ZWAMESSAGE m ON m.ZCHATSESSION = cs.Z_PK
-        JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
         WHERE cs.ZGROUPINFO IS NOT NULL
           AND cs.ZPARTNERNAME IS NOT NULL
-          AND mi.ZMEDIALOCALPATH IS NOT NULL
-          AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
+          AND EXISTS (
+              SELECT 1
+              FROM ZWAMESSAGE m
+              JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+              WHERE m.ZCHATSESSION = cs.Z_PK
+                AND mi.ZMEDIALOCALPATH IS NOT NULL
+                AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
+          )
     """
 
 
@@ -204,7 +208,7 @@ def build_ios_link_thumbnails_query(cursor: sqlite3.Cursor, since_ms: int | None
     if not unions:
         return "SELECT NULL AS message_id, NULL AS timestamp_ms, NULL AS thumb_path WHERE 0"
 
-    return f"SELECT DISTINCT message_id, timestamp_ms, thumb_path FROM ({' UNION '.join(unions)}) WHERE thumb_path IS NOT NULL"
+    return f"SELECT MIN(message_id) AS message_id, MAX(timestamp_ms) AS timestamp_ms, thumb_path FROM ({' UNION ALL '.join(unions)}) WHERE thumb_path IS NOT NULL GROUP BY thumb_path"
 
 
 def build_ios_query(
@@ -240,16 +244,22 @@ def build_ios_query(
     else:
         since_clause = ""
 
+    hd_cte = (
+        f"""WITH hd_parents AS (
+    SELECT mpa.parent_stanza_id AS stanza_id
+    FROM ext.message_parent_association mpa
+    JOIN ZWAMESSAGE m_hd ON m_hd.ZSTANZAID = mpa.stanza_id
+    JOIN ZWAMEDIAITEM mi_hd ON mi_hd.Z_PK = m_hd.ZMEDIAITEM
+    WHERE mpa.parent_stanza_id IS NOT NULL
+      AND mpa.type IN ({ASSOCIATION_TYPE_IOS_HD_PHOTO}, {ASSOCIATION_TYPE_IOS_HD_VIDEO})
+      AND mi_hd.ZMEDIALOCALPATH IS NOT NULL
+)
+"""
+        if hd_dedup
+        else ""
+    )
     hd_dedup_clause = (
-        f"""
-        AND NOT EXISTS (
-            SELECT 1 FROM ext.message_parent_association mpa
-            JOIN ZWAMESSAGE m_hd ON m_hd.ZSTANZAID = mpa.stanza_id
-            JOIN ZWAMEDIAITEM mi_hd ON mi_hd.Z_PK = m_hd.ZMEDIAITEM
-            WHERE mpa.parent_stanza_id = m.ZSTANZAID
-              AND mpa.type IN ({ASSOCIATION_TYPE_IOS_HD_PHOTO}, {ASSOCIATION_TYPE_IOS_HD_VIDEO})
-              AND mi_hd.ZMEDIALOCALPATH IS NOT NULL
-        )"""
+        "AND (m.ZSTANZAID IS NULL OR m.ZSTANZAID NOT IN (SELECT stanza_id FROM hd_parents))"
         if hd_dedup
         else ""
     )
@@ -317,7 +327,8 @@ def build_ios_query(
               {thumb_filter}
           )"""
 
-    return f"""
+    if limit:
+        return f"""{hd_cte}
 SELECT * FROM (
     SELECT * FROM (
         -- Group chats
@@ -378,6 +389,41 @@ SELECT * FROM (
         {block_limit_clause}
     )
 )
+"""
+
+    return f"""{hd_cte}
+SELECT
+    m.Z_PK                                                         AS message_id,
+    CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+    {file_path_expr},
+    {mime_type_expr},
+    CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
+    CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN cs.ZPARTNERNAME ELSE NULL END AS chat_subject,
+    CASE
+         WHEN cs.ZGROUPINFO IS NOT NULL THEN
+             CASE
+                 WHEN gm.ZMEMBERJID IS NOT NULL AND INSTR(gm.ZMEMBERJID, '@') > 0
+                 THEN SUBSTR(gm.ZMEMBERJID, 1, INSTR(gm.ZMEMBERJID, '@') - 1)
+                 WHEN gm.ZMEMBERJID IS NOT NULL
+                 THEN gm.ZMEMBERJID
+                 ELSE m.ZPUSHNAME END
+         ELSE
+             CASE WHEN INSTR(cs.ZCONTACTJID, '@') > 0
+                  THEN SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1)
+                  ELSE cs.ZCONTACTJID END
+    END                                                            AS sender,
+    m.ZISFROMME                                                    AS key_from_me,
+    mi.ZMEDIAURL                                                   AS message_url,
+    {media_name_expr}{thumb_col}
+FROM ZWAMESSAGE m
+JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
+LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+WHERE (cs.ZGROUPINFO IS NULL OR cs.ZPARTNERNAME IS NOT NULL)
+  {msg_type_filter}
+  {media_filter}
+  {since_clause}
+  {hd_dedup_clause}
 """
 
 
