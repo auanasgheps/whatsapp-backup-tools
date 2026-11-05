@@ -7156,3 +7156,79 @@ def test_apply_messages_bin_resolves_quoted_to_edited_parent(mock_db, tmp_path):
     # Timestamp and sender resolved via message_edit_info join
     assert row[0] == 1729000050000
     conn.close()
+
+
+def test_validate_increment_sequence_contiguous():
+    paths = [
+        "msgstore-increment-1.db.crypt15",
+        "msgstore-increment-2.db.crypt15",
+        "msgstore-increment-3.db.crypt15",
+    ]
+    res = increment_merger.validate_increment_sequence(paths, logger)
+    assert res == paths
+
+
+def test_validate_increment_sequence_missing_first():
+    paths = [
+        "msgstore-increment-2.db.crypt15",
+        "msgstore-increment-3.db.crypt15",
+    ]
+    with pytest.raises(ValueError, match="missing starting increment 'msgstore-increment-1'"):
+        increment_merger.validate_increment_sequence(paths, logger)
+
+
+def test_validate_increment_sequence_gap(caplog):
+    paths = [
+        "msgstore-increment-1.db.crypt15",
+        "msgstore-increment-2.db.crypt15",
+        "msgstore-increment-4.db.crypt15",
+        "msgstore-increment-5.db.crypt15",
+    ]
+    with caplog.at_level(logging.ERROR):
+        res = increment_merger.validate_increment_sequence(paths, logger)
+    # Only contiguous prefix 1..2 is returned
+    assert res == [
+        "msgstore-increment-1.db.crypt15",
+        "msgstore-increment-2.db.crypt15",
+    ]
+    assert "missing increment 3" in caplog.text
+    assert (
+        "Subsequent increment(s) ['msgstore-increment-4.db.crypt15', 'msgstore-increment-5.db.crypt15'] cannot be applied"
+        in caplog.text
+    )
+
+
+def test_merge_increments_atomic_staging_rollback(mock_db, tmp_path):
+    output_db = str(tmp_path / "final_output.db")
+    staging_dir = str(tmp_path / "staging")
+    shutil.copy2(mock_db, output_db)
+
+    # Initial snapshot checksum
+    with open(output_db, "rb") as f:
+        initial_bytes = f.read()
+
+    # Pass an invalid increment that fails decryption/unpacking
+    bad_inc = str(tmp_path / "msgstore-increment-1.db.crypt15")
+    with open(bad_inc, "wb") as f:
+        f.write(b"not a valid zip or crypt archive")
+
+    with pytest.raises(Exception):
+        increment_merger.merge_increments(
+            mock_db,
+            [bad_inc],
+            None,
+            output_db,
+            staging_dir,
+            logger,
+            None,
+        )
+
+    # Assert .merging staging db and sidecars are completely purged
+    assert not os.path.exists(output_db + ".merging")
+    assert not os.path.exists(output_db + ".merging-wal")
+    assert not os.path.exists(output_db + ".merging-shm")
+
+    # Assert output_db remains untouched and identical to base
+    with open(output_db, "rb") as f:
+        final_bytes = f.read()
+    assert final_bytes == initial_bytes

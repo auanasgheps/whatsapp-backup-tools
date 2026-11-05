@@ -10122,6 +10122,11 @@ def validate_output_root(output_root: Path) -> None:
 
 
 def main():
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                with contextlib.suppress(Exception):
+                    stream.reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()
     raw_path = args.output_root
     output_root = Path(raw_path).expanduser().resolve()

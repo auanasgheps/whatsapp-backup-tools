@@ -1198,6 +1198,85 @@ def test_diff_and_extract_ios_stubs_not_preserved(tmp_path: Path) -> None:
     assert by_key["ios_real_rev"]["preservation_reason"] == "revoked_by_sender"
 
 
+def test_diff_and_extract_ios_deleted_on_phone_excludes_purged_and_empty_stubs(
+    tmp_path: Path,
+) -> None:
+    old_db = tmp_path / "old_ios_purged.sqlite"
+    new_db = tmp_path / "new_ios_purged.sqlite"
+    arch_db = tmp_path / "arch_ios_purged.db"
+    _make_dummy_archive_db(arch_db)
+
+    with sqlite3.connect(old_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZSTANZAID TEXT,
+                ZISFROMME INTEGER,
+                ZFROMJID TEXT,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZGROUPEVENTTYPE INTEGER
+            );
+            INSERT INTO ZWAMESSAGE VALUES
+                (1, 1, 'ios_purged_stub', 0, 'partner@s.whatsapp.net', 1000.0, 0, '', 'Partner', NULL, NULL, NULL),
+                (2, 1, 'ios_empty_sys_stub', 0, 'partner@s.whatsapp.net', 1001.0, 6, NULL, 'Partner', NULL, NULL, NULL),
+                (3, 1, 'ios_sys_notice_e2e', 0, 'partner@s.whatsapp.net', 1002.0, 6, 'Messages are end-to-end encrypted', 'Partner', NULL, NULL, NULL),
+                (4, 1, 'ios_valid_user_msg', 0, 'partner@s.whatsapp.net', 1003.0, 0, 'Hello world', 'Partner', NULL, NULL, NULL);
+        """)
+
+    with sqlite3.connect(new_db) as conn:
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZGROUPINFO INTEGER
+            );
+            INSERT INTO ZWACHATSESSION VALUES (1, 'partner@s.whatsapp.net', 'Partner', NULL);
+
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZSTANZAID TEXT,
+                ZISFROMME INTEGER,
+                ZFROMJID TEXT,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZPUSHNAME TEXT,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZGROUPEVENTTYPE INTEGER
+            );
+        """)
+
+    extracted = preservation.diff_and_extract_ios(
+        str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
+    )
+    by_key = {r["stanza_id"]: r for r in extracted}
+    assert "ios_purged_stub" not in by_key
+    assert "ios_empty_sys_stub" not in by_key
+    assert "ios_sys_notice_e2e" in by_key
+    assert by_key["ios_sys_notice_e2e"]["media_type"] == "service"
+    assert by_key["ios_sys_notice_e2e"]["text_body"] == "Messages are end-to-end encrypted"
+    assert "ios_valid_user_msg" in by_key
+    assert by_key["ios_valid_user_msg"]["text_body"] == "Hello world"
+    assert by_key["ios_valid_user_msg"]["media_type"] == "text"
+
+
 def test_diff_and_extract_ios_location_and_view_once(tmp_path: Path) -> None:
     old_db = tmp_path / "old_chatstorage.sqlite"
     new_db = tmp_path / "new_chatstorage.sqlite"

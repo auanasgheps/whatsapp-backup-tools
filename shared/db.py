@@ -1,5 +1,7 @@
+import contextlib
 import os
 import re
+import sys
 
 
 def sanitize_filename(name: str) -> str:
@@ -216,3 +218,35 @@ def extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
     except (IndexError, ValueError, UnicodeDecodeError):
         pass
     return None
+
+
+def clean_sqlite_files(db_path: str) -> None:
+    """Remove a SQLite database file and any associated WAL, SHM, and rollback journal sidecars."""
+    for ext in ("", "-wal", "-shm", "-journal"):
+        target = db_path + ext
+        if os.path.exists(target):
+            with contextlib.suppress(OSError):
+                os.remove(target)
+
+
+def safe_replace_sqlite_db(src: str, dst: str) -> None:
+    """Safely replace a SQLite database file and its sidecars atomically."""
+    clean_sqlite_files(dst)
+    os.replace(src, dst)
+    for ext in ("-wal", "-shm", "-journal"):
+        src_sidecar = src + ext
+        dst_sidecar = dst + ext
+        if os.path.exists(src_sidecar):
+            with contextlib.suppress(OSError):
+                os.replace(src_sidecar, dst_sidecar)
+
+
+def ensure_long_path(path: str) -> str:
+    """Ensure path is safe for Windows extended-length file I/O (>260 chars)."""
+    if sys.platform == "win32" and len(path) >= 240 and not path.startswith("\\\\?\\"):
+        abs_p = os.path.abspath(path)
+        if not abs_p.startswith("\\\\?\\"):
+            if abs_p.startswith("\\\\"):
+                return "\\\\?\\UNC\\" + abs_p[2:]
+            return "\\\\?\\" + abs_p
+    return path
