@@ -758,7 +758,7 @@ def diff_and_extract_android(
             return []
 
         # 1. Identify missing messages (deleted on device)
-        sql_check_deleted = """
+        sql_check_deleted = f"""
             SELECT m._id
             FROM old_db.message m
             WHERE m._id >= ? AND m._id < ? AND (
