@@ -437,7 +437,7 @@
       el.dataset.id = chat.id;
       el.dataset.type = chat.type;
       const tagHtml = chat.is_preserved_only
-        ? '<span class="chat-preserved-tag" title="Preserved from previous backup (chat deleted on device)">Preserved</span>'
+        ? '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
         : '';
       el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
       el.addEventListener('click', () => selectChat(chat, el));
@@ -1139,13 +1139,14 @@
       presSpan.className = 'msg-preserved';
       presSpan.textContent = 'Preserved';
       const reasonLabel = msg.preservation_reason === 'revoked_by_sender'
-        ? 'Preserved from previous backup (revoked by sender)'
+        ? 'Revoked by sender'
         : (msg.preservation_reason === 'chat_deleted'
-          ? 'Preserved from previous backup (chat deleted on device)'
-          : 'Preserved from previous backup (deleted on device)');
+          ? 'Chat deleted on device'
+          : 'Deleted on device');
       const presTs = typeof msg.preserved_at === 'number' ? msg.preserved_at * 1000 : Date.parse(msg.preserved_at);
-      const presDate = !isNaN(presTs) ? ' on ' + fmtTime(presTs) : '';
-      presSpan.title = reasonLabel + presDate;
+      const presDate = !isNaN(presTs) ? fmtTime(presTs) : (msg.preserved_at || '');
+      const backupPrefix = presDate ? `Preserved from backup (${presDate})` : 'Preserved from backup';
+      presSpan.title = `${backupPrefix} • ${reasonLabel}`;
       meta.appendChild(presSpan);
     }
     if (msg.is_edited && msg.media_type !== 'deleted') {
@@ -4135,9 +4136,10 @@
         ? 'Revoked by sender'
         : (presInfo.reason === 'chat_deleted' ? 'Chat deleted on device' : 'Deleted on device');
       const presTs = typeof presInfo.at === 'number' ? presInfo.at * 1000 : Date.parse(presInfo.at);
-      const atText = !isNaN(presTs) ? fmtTime(presTs) : (presInfo.at || 'Unknown');
+      const atText = !isNaN(presTs) ? fmtTime(presTs) : (presInfo.at || '');
       const platformText = presInfo.platform ? (' • ' + esc(presInfo.platform)) : '';
-      html += `<div class="msg-details-row"><span class="msg-details-label">Preserved</span><span class="msg-details-value">${reasonText} (${atText})${platformText}</span></div>`;
+      const backupPrefix = atText ? `Preserved from backup (${atText})` : 'Preserved from backup';
+      html += `<div class="msg-details-row"><span class="msg-details-label">Preserved</span><span class="msg-details-value">${backupPrefix} • ${reasonText}${platformText}</span></div>`;
     }
 
     if (editInfo && (editInfo.original_text || editInfo.edited_ts)) {
