@@ -3355,11 +3355,36 @@ def test_diff_and_extract_android_link_preview(tmp_path: Path) -> None:
 
 
 def test_diff_and_extract_ios_link_preview(tmp_path: Path) -> None:
-    """Verify iOS link preview metadata in ZWAMEDIAITEM is preserved in service_metadata."""
+    """Verify iOS link preview metadata, on-disk thumbnails, and embedded ZMETADATA thumbnails are preserved."""
     old_db = tmp_path / "old_chatstorage.sqlite"
     new_db = tmp_path / "new_chatstorage.sqlite"
     arch_db = tmp_path / "arch.db"
     _make_dummy_archive_db(arch_db)
+
+    # Prepare on-disk thumbnail file for message 1
+    disk_thumb_bytes = (
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+    )
+    thumb_dir = tmp_path / "Message" / "Thumbnail"
+    thumb_dir.mkdir(parents=True)
+    thumb_file = thumb_dir / "preview1.jpg"
+    thumb_file.write_bytes(disk_thumb_bytes)
+
+    # Message 2 embedded thumbnail bytes
+    embedded_thumb_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF_EMBEDDED\xff\xd9"
+
+    # Message 4 archive_copies thumbnail file
+    ac_thumb_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF_ARCHIVE_COPIES\xff\xd9"
+    ac_dir = tmp_path / "custom_archive"
+    ac_dir.mkdir(parents=True)
+    ac_file = ac_dir / "thumb_ac.jpg"
+    ac_file.write_bytes(ac_thumb_bytes)
+    with sqlite3.connect(arch_db) as aconn:
+        aconn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES (?, ?)",
+            ("Message/Thumbnail/ac.jpg", "custom_archive/thumb_ac.jpg"),
+        )
+        aconn.commit()
 
     for p in (old_db, new_db):
         with sqlite3.connect(p) as conn:
@@ -3368,7 +3393,22 @@ def test_diff_and_extract_ios_link_preview(tmp_path: Path) -> None:
                     Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER
                 );
                 CREATE TABLE ZWAMEDIAITEM (
-                    Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT, ZMEDIALOCALPATH TEXT, ZMETADATA BLOB
+                    Z_PK INTEGER PRIMARY KEY,
+                    ZTITLE TEXT,
+                    ZMEDIALOCALPATH TEXT,
+                    ZMEDIAURL TEXT,
+                    ZXMPPTHUMBPATH TEXT,
+                    ZTHUMBNAILLOCALPATH TEXT,
+                    ZMETADATA BLOB
+                );
+                CREATE TABLE ZWAMESSAGEDATAITEM (
+                    Z_PK INTEGER PRIMARY KEY,
+                    ZMESSAGE INTEGER,
+                    ZINDEX INTEGER,
+                    ZTITLE TEXT,
+                    ZSUMMARY TEXT,
+                    ZMATCHEDTEXT TEXT,
+                    ZTHUMBNAILPATH TEXT
                 );
                 CREATE TABLE ZWAMESSAGE (
                     Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZSTANZAID TEXT,
@@ -3380,26 +3420,90 @@ def test_diff_and_extract_ios_link_preview(tmp_path: Path) -> None:
             """)
 
     with sqlite3.connect(old_db) as conn:
+        # Message 1: Disk thumbnail referenced via ZXMPPTHUMBPATH
         desc_bytes = b"iOS page snippet"
-        metadata_blob = b"\x1a" + bytes([len(desc_bytes)]) + desc_bytes
+        metadata_blob1 = b"\x1a" + bytes([len(desc_bytes)]) + desc_bytes
         conn.execute(
-            "INSERT INTO ZWAMEDIAITEM VALUES (1, 'iOS Title', NULL, ?)",
-            (metadata_blob,),
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZTITLE, ZMEDIALOCALPATH, ZMEDIAURL, ZXMPPTHUMBPATH, ZTHUMBNAILLOCALPATH, ZMETADATA) VALUES (1, 'iOS Title', NULL, 'https://example.org', 'Thumbnail/preview1.jpg', NULL, ?)",
+            (metadata_blob1,),
         )
         conn.execute("""
-            INSERT INTO ZWAMESSAGE VALUES (1, 1, 'ios_link_key', 0, 'partner@s.whatsapp.net', 1000.0, 7, 'https://example.org', 'Partner', 1, NULL)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZSTANZAID, ZISFROMME, ZFROMJID, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZPUSHNAME, ZMEDIAITEM, ZGROUPMEMBER)
+            VALUES (1, 1, 'ios_link_disk', 0, 'partner@s.whatsapp.net', 1000.0, 7, 'https://example.org', 'Partner', 1, NULL)
+        """)
+
+        # Message 2: Embedded JPEG thumbnail inside ZMETADATA
+        metadata_blob2 = b"\x1a\x07Snippet" + embedded_thumb_bytes
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZTITLE, ZMEDIALOCALPATH, ZMEDIAURL, ZXMPPTHUMBPATH, ZTHUMBNAILLOCALPATH, ZMETADATA) VALUES (2, 'Embedded Preview', NULL, 'https://embedded.org', NULL, NULL, ?)",
+            (metadata_blob2,),
+        )
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZSTANZAID, ZISFROMME, ZFROMJID, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZPUSHNAME, ZMEDIAITEM, ZGROUPMEMBER)
+            VALUES (2, 1, 'ios_link_embedded', 0, 'partner@s.whatsapp.net', 1001.0, 7, 'https://embedded.org', 'Partner', 2, NULL)
+        """)
+
+        # Message 3: Plain text type 0 with URL, populated via ZWAMESSAGEDATAITEM without thumbnail
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZSTANZAID, ZISFROMME, ZFROMJID, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZPUSHNAME, ZMEDIAITEM, ZGROUPMEMBER)
+            VALUES (3, 1, 'ios_link_mdi', 0, 'partner@s.whatsapp.net', 1002.0, 0, 'Check https://apple.com', 'Partner', 3, NULL)
+        """)
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZTITLE, ZMEDIALOCALPATH, ZMEDIAURL, ZXMPPTHUMBPATH, ZTHUMBNAILLOCALPATH, ZMETADATA) VALUES (3, NULL, NULL, NULL, NULL, NULL, NULL)"
+        )
+        conn.execute("""
+            INSERT INTO ZWAMESSAGEDATAITEM (Z_PK, ZMESSAGE, ZINDEX, ZTITLE, ZSUMMARY, ZMATCHEDTEXT, ZTHUMBNAILPATH)
+            VALUES (1, 3, 0, 'Apple', 'Think Different', 'https://apple.com', NULL)
+        """)
+
+        # Message 4: Resolved via archive_copies mapping
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZTITLE, ZMEDIALOCALPATH, ZMEDIAURL, ZXMPPTHUMBPATH, ZTHUMBNAILLOCALPATH, ZMETADATA) VALUES (4, 'AC Title', NULL, 'https://archive.org', 'Thumbnail/ac.jpg', NULL, NULL)"
+        )
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZSTANZAID, ZISFROMME, ZFROMJID, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZPUSHNAME, ZMEDIAITEM, ZGROUPMEMBER)
+            VALUES (4, 1, 'ios_link_ac', 0, 'partner@s.whatsapp.net', 1003.0, 7, 'https://archive.org', 'Partner', 4, NULL)
         """)
         conn.commit()
 
     extracted = preservation.diff_and_extract_ios(
         str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
     )
-    assert len(extracted) == 1
-    meta = json.loads(extracted[0]["service_metadata"])
-    assert "link_preview" in meta
-    assert meta["link_preview"]["title"] == "iOS Title"
-    assert meta["link_preview"]["desc"] == "iOS page snippet"
-    assert meta["link_preview"]["url"] == "https://example.org"
+    assert len(extracted) == 4
+    by_key = {r["stanza_id"]: r for r in extracted}
+
+    # Verify Message 1 (disk thumbnail)
+    meta1 = json.loads(by_key["ios_link_disk"]["service_metadata"])
+    assert "link_preview" in meta1
+    assert meta1["link_preview"]["title"] == "iOS Title"
+    assert meta1["link_preview"]["desc"] == "iOS page snippet"
+    assert meta1["link_preview"]["url"] == "https://example.org"
+    assert "thumbnail_b64" in meta1["link_preview"]
+    assert base64.b64decode(meta1["link_preview"]["thumbnail_b64"]) == disk_thumb_bytes
+
+    # Verify Message 2 (embedded protobuf thumbnail)
+    meta2 = json.loads(by_key["ios_link_embedded"]["service_metadata"])
+    assert "link_preview" in meta2
+    assert meta2["link_preview"]["title"] == "Embedded Preview"
+    assert meta2["link_preview"]["url"] == "https://embedded.org"
+    assert "thumbnail_b64" in meta2["link_preview"]
+    assert base64.b64decode(meta2["link_preview"]["thumbnail_b64"]) == embedded_thumb_bytes
+
+    # Verify Message 3 (ZWAMESSAGEDATAITEM fallback without thumbnail)
+    meta3 = json.loads(by_key["ios_link_mdi"]["service_metadata"])
+    assert "link_preview" in meta3
+    assert meta3["link_preview"]["title"] == "Apple"
+    assert meta3["link_preview"]["desc"] == "Think Different"
+    assert meta3["link_preview"]["url"] == "https://apple.com"
+    assert "thumbnail_b64" not in meta3["link_preview"]
+
+    # Verify Message 4 (archive_copies thumbnail resolution)
+    meta4 = json.loads(by_key["ios_link_ac"]["service_metadata"])
+    assert "link_preview" in meta4
+    assert meta4["link_preview"]["title"] == "AC Title"
+    assert meta4["link_preview"]["url"] == "https://archive.org"
+    assert "thumbnail_b64" in meta4["link_preview"]
+    assert base64.b64decode(meta4["link_preview"]["thumbnail_b64"]) == ac_thumb_bytes
 
 
 def test_preserve_incremental_deletions_flow(tmp_path: Path) -> None:

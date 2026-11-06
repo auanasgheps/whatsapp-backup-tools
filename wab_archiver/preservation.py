@@ -7,6 +7,7 @@ import re
 import sqlite3
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import NamedTuple
 
 from shared.db import extract_ios_link_description
@@ -482,6 +483,205 @@ def hydrate_android_link_previews(
                             "preview_type": 0,
                         }
                     lp_map[tr[0]]["thumbnail_b64"] = tb_b64
+
+    for r in candidate_rows:
+        mid = r.get("msg_id")
+        if mid in lp_map:
+            lp_data = lp_map[mid]
+            if not lp_data.get("url") and r.get("text_body"):
+                m_url = re.search(r"(?:https?://|www\.)[^\s<>\"']+", r["text_body"])
+                if m_url:
+                    cand_url = m_url.group(0).rstrip(".,;:!?)'\"")
+                    if cand_url.startswith("www."):
+                        cand_url = "https://" + cand_url
+                    lp_data["url"] = cand_url
+
+            existing_meta = {}
+            if r.get("service_metadata"):
+                try:
+                    existing_meta = json.loads(r["service_metadata"])
+                except Exception:
+                    pass
+            existing_meta["link_preview"] = lp_data
+            r["service_metadata"] = json.dumps(
+                existing_meta, ensure_ascii=False, separators=(",", ":")
+            )
+
+
+def _resolve_ios_thumbnail_bytes(
+    thumb_path: str | None,
+    metadata_blob: bytes | None,
+    archive_root: Path,
+    old_db_dir: Path,
+    conn: sqlite3.Connection,
+    has_arch_copies: bool,
+) -> bytes | None:
+    """Resolve iOS thumbnail bytes from on-disk files or embedded protobuf metadata."""
+    if thumb_path:
+        clean_path = thumb_path.replace("\\", "/").lstrip("/")
+        clean_name = Path(clean_path).name
+        cand_paths: list[Path] = [
+            (archive_root / "Whatsapp Databases" / ".thumbnails" / clean_name).resolve(),
+            (archive_root / clean_path).resolve(),
+            (archive_root / "Message" / clean_path).resolve(),
+            (
+                archive_root / "AppDomainGroup-group.net.whatsapp.WhatsApp.shared" / clean_path
+            ).resolve(),
+            (
+                archive_root / "AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared" / clean_path
+            ).resolve(),
+            (old_db_dir / ".thumbnails" / clean_name).resolve(),
+            (old_db_dir / clean_path).resolve(),
+            (old_db_dir / "Message" / clean_path).resolve(),
+        ]
+
+        for cand in cand_paths:
+            if cand.is_file():
+                try:
+                    data = cand.read_bytes()
+                    if data:
+                        return data
+                except OSError:
+                    pass
+
+        if has_arch_copies:
+            with contextlib.suppress(sqlite3.OperationalError):
+                ac_row = conn.execute(
+                    "SELECT archive_path FROM arch.archive_copies WHERE original_path IN (?, ?, ?, ?)",
+                    (
+                        clean_path,
+                        "Message/" + clean_path,
+                        "Media/" + clean_path,
+                        clean_name,
+                    ),
+                ).fetchone()
+                if ac_row and ac_row[0]:
+                    cand_ac = (archive_root / ac_row[0]).resolve()
+                    if cand_ac.is_file():
+                        try:
+                            data = cand_ac.read_bytes()
+                            if data:
+                                return data
+                        except OSError:
+                            pass
+
+    if metadata_blob and isinstance(metadata_blob, (bytes, bytearray)):
+        jpeg_idx = metadata_blob.find(b"\xff\xd8\xff")
+        if jpeg_idx != -1:
+            eoi_idx = metadata_blob.find(b"\xff\xd9", jpeg_idx)
+            if eoi_idx != -1:
+                return bytes(metadata_blob[jpeg_idx : eoi_idx + 2])
+
+    return None
+
+
+def hydrate_ios_link_previews(
+    conn: sqlite3.Connection,
+    extracted_rows: list[dict],
+    old_tables: set[str],
+    mi_cols: set[str],
+    has_arch_copies: bool,
+    archive_root: Path,
+    old_db_dir: Path,
+) -> None:
+    """Hydrate rich link preview metadata and thumbnail bytes into service_metadata for iOS messages."""
+    if not extracted_rows or "ZWAMEDIAITEM" not in old_tables:
+        return
+
+    candidate_rows = [
+        r for r in extracted_rows if r.get("media_type") == "link" or r.get("raw_msg_type") == 7
+    ]
+    if not candidate_rows:
+        return
+
+    has_mdi = "ZWAMESSAGEDATAITEM" in old_tables
+    mdi_cols = (
+        {r[1] for r in conn.execute("PRAGMA old_db.table_info(ZWAMESSAGEDATAITEM)").fetchall()}
+        if has_mdi
+        else set()
+    )
+
+    lp_title_col = "mi.ZTITLE" if "ZTITLE" in mi_cols else "NULL"
+    lp_url_col = "mi.ZMEDIAURL" if "ZMEDIAURL" in mi_cols else "NULL"
+    lp_meta_col = "mi.ZMETADATA" if "ZMETADATA" in mi_cols else "NULL"
+    lp_xmpp_thumb = "mi.ZXMPPTHUMBPATH" if "ZXMPPTHUMBPATH" in mi_cols else "NULL"
+    lp_local_thumb = "mi.ZTHUMBNAILLOCALPATH" if "ZTHUMBNAILLOCALPATH" in mi_cols else "NULL"
+
+    has_mdi_thumb = "ZTHUMBNAILPATH" in mdi_cols
+    has_mdi_summary = "ZSUMMARY" in mdi_cols
+    has_mdi_title = "ZTITLE" in mdi_cols
+    has_mdi_matched = "ZMATCHEDTEXT" in mdi_cols
+
+    mdi_thumb_col = "mdi.ZTHUMBNAILPATH" if has_mdi_thumb else "NULL"
+    mdi_summary_col = "mdi.ZSUMMARY" if has_mdi_summary else "NULL"
+    mdi_title_col = "mdi.ZTITLE" if has_mdi_title else "NULL"
+    mdi_matched_col = "mdi.ZMATCHEDTEXT" if has_mdi_matched else "NULL"
+
+    mdi_join = (
+        "LEFT JOIN old_db.ZWAMESSAGEDATAITEM mdi ON mdi.ZMESSAGE = m.Z_PK AND mdi.ZINDEX = 0"
+        if has_mdi
+        else ""
+    )
+
+    pks = [r["msg_id"] for r in candidate_rows]
+    chunk_size = 500
+    lp_map: dict[int, dict] = {}
+
+    for i in range(0, len(pks), chunk_size):
+        chunk = pks[i : i + chunk_size]
+        ph = ",".join("?" * len(chunk))
+        sql = f"""
+            SELECT m.Z_PK,
+                   {lp_title_col},
+                   {lp_url_col},
+                   {lp_meta_col},
+                   {lp_xmpp_thumb},
+                   {lp_local_thumb},
+                   {mdi_thumb_col},
+                   {mdi_summary_col},
+                   {mdi_title_col},
+                   {mdi_matched_col}
+            FROM old_db.ZWAMESSAGE m
+            JOIN old_db.ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+            {mdi_join}
+            WHERE m.Z_PK IN ({ph})
+        """
+        for lpr in conn.execute(sql, chunk).fetchall():
+            mid = lpr[0]
+            mi_title = lpr[1]
+            mi_url = lpr[2]
+            mi_meta = lpr[3]
+            mi_xmpp_thumb = lpr[4]
+            mi_local_thumb = lpr[5]
+            mdi_thumb = lpr[6]
+            mdi_summary = lpr[7]
+            mdi_title = lpr[8]
+            mdi_matched = lpr[9]
+
+            resolved_title = mdi_title or mi_title or None
+            resolved_desc = extract_ios_link_description(mi_meta) or mdi_summary or None
+            resolved_url = mi_url or mdi_matched or None
+            thumb_path = mi_xmpp_thumb or mi_local_thumb or mdi_thumb or None
+
+            thumb_bytes = _resolve_ios_thumbnail_bytes(
+                thumb_path,
+                mi_meta,
+                archive_root,
+                old_db_dir,
+                conn,
+                has_arch_copies,
+            )
+
+            tb_b64 = base64.b64encode(thumb_bytes).decode("ascii") if thumb_bytes else None
+
+            lp_map[mid] = {
+                "title": resolved_title,
+                "desc": resolved_desc,
+                "url": resolved_url,
+                "preview_type": 0,
+            }
+            if tb_b64:
+                lp_map[mid]["thumbnail_b64"] = tb_b64
 
     for r in candidate_rows:
         mid = r.get("msg_id")
@@ -1884,6 +2084,12 @@ def diff_and_extract_ios(
         conn.execute("ATTACH DATABASE ? AS arch", (archive_db_path,))
         _ensure_ios_diff_indexes(conn)
 
+        arch_p = Path(archive_db_path).resolve()
+        archive_root = (
+            arch_p.parent.parent if arch_p.parent.name == "Whatsapp Databases" else arch_p.parent
+        )
+        old_db_dir = Path(old_db_path).resolve().parent
+
         old_tables = {
             r[0]
             for r in conn.execute(
@@ -2470,56 +2676,16 @@ def diff_and_extract_ios(
                         separators=(",", ":"),
                     )
 
-            # Hydrate iOS link preview service metadata
-            if "ZWAMEDIAITEM" in old_tables and extracted_rows:
-                link_candidates = [
-                    r
-                    for r in extracted_rows
-                    if r.get("media_type") == "link" or r.get("raw_msg_type") == 7
-                ]
-                if link_candidates:
-                    pks = [r["msg_id"] for r in link_candidates]
-                    chunk_size_lp = 900
-                    lp_map = {}
-                    lp_title_col = "mi.ZTITLE" if "ZTITLE" in mi_cols else "NULL"
-                    lp_url_col = "mi.ZMEDIAURL" if "ZMEDIAURL" in mi_cols else "NULL"
-                    lp_meta_col = "mi.ZMETADATA" if "ZMETADATA" in mi_cols else "NULL"
-                    for i in range(0, len(pks), chunk_size_lp):
-                        chunk = pks[i : i + chunk_size_lp]
-                        ph = ",".join("?" * len(chunk))
-                        lp_rows = conn.execute(
-                            f"""
-                            SELECT m.Z_PK, {lp_title_col}, {lp_url_col}, {lp_meta_col}
-                            FROM old_db.ZWAMESSAGE m
-                            JOIN old_db.ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
-                            WHERE m.Z_PK IN ({ph})
-                            """,
-                            chunk,
-                        ).fetchall()
-                        for lpr in lp_rows:
-                            lp_map[lpr[0]] = {
-                                "title": lpr[1],
-                                "desc": extract_ios_link_description(lpr[3]),
-                                "url": lpr[2],
-                                "preview_type": 0,
-                            }
-                    for r in link_candidates:
-                        if r["msg_id"] in lp_map:
-                            lp_data = lp_map[r["msg_id"]]
-                            if not lp_data.get("url") and r.get("text_body"):
-                                m_url = re.search(r"https?://[^\s]+", r["text_body"])
-                                if m_url:
-                                    lp_data["url"] = m_url.group(0)
-                            existing_meta = {}
-                            if r.get("service_metadata"):
-                                try:
-                                    existing_meta = json.loads(r["service_metadata"])
-                                except Exception:
-                                    pass
-                            existing_meta["link_preview"] = lp_data
-                            r["service_metadata"] = json.dumps(
-                                existing_meta, ensure_ascii=False, separators=(",", ":")
-                            )
+            # Hydrate iOS link preview metadata and thumbnail bytes
+            hydrate_ios_link_previews(
+                conn,
+                extracted_rows,
+                old_tables,
+                mi_cols,
+                has_arch_copies,
+                archive_root,
+                old_db_dir,
+            )
 
             progress.finish({"deleted": deleted_count, "revoked": revoked_count})
         except Exception:
