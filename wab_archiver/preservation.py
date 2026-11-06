@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import json
 import logging
@@ -424,6 +425,88 @@ def _ensure_ios_diff_indexes(conn: sqlite3.Connection) -> None:
         )
 
 
+def hydrate_android_link_previews(
+    conn: sqlite3.Connection,
+    extracted_rows: list[dict],
+    table_prefix: str,
+    has_message_text: bool,
+    has_message_thumbnail: bool,
+) -> None:
+    """Hydrate rich link preview metadata and thumbnail bytes into service_metadata for Android messages."""
+    if not extracted_rows or (not has_message_text and not has_message_thumbnail):
+        return
+
+    candidate_rows = [r for r in extracted_rows if r.get("media_type") in ("link", "text")]
+    if not candidate_rows:
+        return
+
+    m_ids = [r["msg_id"] for r in candidate_rows]
+    chunk_size = 500
+    lp_map: dict[int, dict] = {}
+
+    if has_message_text:
+        for i in range(0, len(m_ids), chunk_size):
+            chunk = m_ids[i : i + chunk_size]
+            ph = ",".join("?" * len(chunk))
+            sql = f"""
+                SELECT message_row_id, page_title, description, url, preview_type
+                FROM {table_prefix}message_text
+                WHERE message_row_id IN ({ph})
+            """
+            for mtr in conn.execute(sql, chunk).fetchall():
+                lp_map[mtr[0]] = {
+                    "title": mtr[1],
+                    "desc": mtr[2],
+                    "url": mtr[3],
+                    "preview_type": mtr[4] or 0,
+                }
+
+    if has_message_thumbnail:
+        for i in range(0, len(m_ids), chunk_size):
+            chunk = m_ids[i : i + chunk_size]
+            ph = ",".join("?" * len(chunk))
+            sql = f"""
+                SELECT message_row_id, thumbnail
+                FROM {table_prefix}message_thumbnail
+                WHERE message_row_id IN ({ph}) AND thumbnail IS NOT NULL
+            """
+            for tr in conn.execute(sql, chunk).fetchall():
+                thumb_bytes = tr[1]
+                if thumb_bytes:
+                    tb_b64 = base64.b64encode(thumb_bytes).decode("ascii")
+                    if tr[0] not in lp_map:
+                        lp_map[tr[0]] = {
+                            "title": None,
+                            "desc": None,
+                            "url": None,
+                            "preview_type": 0,
+                        }
+                    lp_map[tr[0]]["thumbnail_b64"] = tb_b64
+
+    for r in candidate_rows:
+        mid = r.get("msg_id")
+        if mid in lp_map:
+            lp_data = lp_map[mid]
+            if not lp_data.get("url") and r.get("text_body"):
+                m_url = re.search(r"(?:https?://|www\.)[^\s<>\"']+", r["text_body"])
+                if m_url:
+                    cand_url = m_url.group(0).rstrip(".,;:!?)'\"")
+                    if cand_url.startswith("www."):
+                        cand_url = "https://" + cand_url
+                    lp_data["url"] = cand_url
+
+            existing_meta = {}
+            if r.get("service_metadata"):
+                try:
+                    existing_meta = json.loads(r["service_metadata"])
+                except Exception:
+                    pass
+            existing_meta["link_preview"] = lp_data
+            r["service_metadata"] = json.dumps(
+                existing_meta, ensure_ascii=False, separators=(",", ":")
+            )
+
+
 def diff_and_extract_android(
     old_db_path: str, new_db_path: str, archive_db_path: str, logger: logging.Logger
 ) -> list[dict]:
@@ -482,6 +565,8 @@ def diff_and_extract_android(
         has_cur_revoked = "message_revoked" in cur_tables
         has_arch_contacts = "contacts" in arch_tables
         has_arch_copies = "archive_copies" in arch_tables
+        has_message_text = "message_text" in old_tables
+        has_message_thumbnail = "message_thumbnail" in old_tables
 
         msg_cols = (
             {r[1] for r in conn.execute("PRAGMA old_db.table_info(message)").fetchall()}
@@ -1244,44 +1329,14 @@ def diff_and_extract_android(
                         meta_dict, ensure_ascii=False, separators=(",", ":")
                     )
 
-            # Hydrate link preview metadata from old_db.message_text
-            if "message_text" in old_tables and extracted_rows:
-                mt_msg_ids = [
-                    r["msg_id"] for r in extracted_rows if r.get("media_type") in ("link", "text")
-                ]
-                if mt_msg_ids:
-                    chunk_size_mt = 900
-                    mt_map = {}
-                    for i in range(0, len(mt_msg_ids), chunk_size_mt):
-                        chunk = mt_msg_ids[i : i + chunk_size_mt]
-                        ph = ",".join("?" * len(chunk))
-                        mt_rows = conn.execute(
-                            f"""
-                            SELECT message_row_id, page_title, description, url, preview_type
-                            FROM old_db.message_text
-                            WHERE message_row_id IN ({ph})
-                            """,
-                            chunk,
-                        ).fetchall()
-                        for mtr in mt_rows:
-                            mt_map[mtr[0]] = {
-                                "title": mtr[1],
-                                "desc": mtr[2],
-                                "url": mtr[3],
-                                "preview_type": mtr[4] or 0,
-                            }
-                    for r in extracted_rows:
-                        if r["msg_id"] in mt_map:
-                            existing_meta = {}
-                            if r.get("service_metadata"):
-                                try:
-                                    existing_meta = json.loads(r["service_metadata"])
-                                except Exception:
-                                    pass
-                            existing_meta["link_preview"] = mt_map[r["msg_id"]]
-                            r["service_metadata"] = json.dumps(
-                                existing_meta, ensure_ascii=False, separators=(",", ":")
-                            )
+            # Hydrate link preview metadata and thumbnail from old_db.message_text / message_thumbnail
+            hydrate_android_link_previews(
+                conn,
+                extracted_rows,
+                "old_db.",
+                has_message_text,
+                has_message_thumbnail,
+            )
 
             # 8. Hydrate deleted group member roster
             if has_group_participants and extracted_rows:
@@ -3096,6 +3151,8 @@ def preserve_incremental_deletions(
     has_jid_map = "jid_map" in tables
     has_chat = "chat" in tables
     has_jid = "jid" in tables
+    has_message_text = "message_text" in tables
+    has_message_thumbnail = "message_thumbnail" in tables
 
     msg_cols = (
         {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
@@ -3400,6 +3457,14 @@ def preserve_incremental_deletions(
                 for row in extracted_rows:
                     if row["msg_id"] in rx_map:
                         row["reactions"] = rx_map[row["msg_id"]]
+
+    hydrate_android_link_previews(
+        conn,
+        extracted_rows,
+        "",
+        has_message_text,
+        has_message_thumbnail,
+    )
 
     with contextlib.closing(open_preservation_db(output_root)) as pres_conn:
         res = record_preserved_messages(pres_conn, extracted_rows, "android", logger)

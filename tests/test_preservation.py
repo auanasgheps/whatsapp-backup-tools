@@ -2,6 +2,7 @@
 Tests for WhatsApp message preservation across archival runs.
 """
 
+import base64
 import json
 import logging
 import os
@@ -3277,11 +3278,13 @@ def test_viewer_chat_info_preserved_roster_and_calls(tmp_path: Path) -> None:
 
 
 def test_diff_and_extract_android_link_preview(tmp_path: Path) -> None:
-    """Verify Android link preview metadata in message_text is preserved in service_metadata."""
+    """Verify Android link preview metadata and thumbnail in message_text/message_thumbnail are preserved."""
     old_db = tmp_path / "old_msgstore.db"
     new_db = tmp_path / "new_msgstore.db"
     arch_db = tmp_path / "arch.db"
     _make_dummy_archive_db(arch_db)
+
+    dummy_thumb = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb"
 
     for p in (old_db, new_db):
         with sqlite3.connect(p) as conn:
@@ -3300,6 +3303,10 @@ def test_diff_and_extract_android_link_preview(tmp_path: Path) -> None:
                     url TEXT,
                     preview_type INTEGER
                 );
+                CREATE TABLE message_thumbnail (
+                    message_row_id INTEGER PRIMARY KEY,
+                    thumbnail BLOB
+                );
                 INSERT INTO jid VALUES (1, 'alice', 'alice@s.whatsapp.net');
                 INSERT INTO chat VALUES (1, 1);
             """)
@@ -3311,18 +3318,40 @@ def test_diff_and_extract_android_link_preview(tmp_path: Path) -> None:
         conn.execute("""
             INSERT INTO message_text VALUES (1, 'Page description', 'Page Title', 'https://example.com', 1)
         """)
+        conn.execute(
+            "INSERT INTO message_thumbnail VALUES (1, ?)",
+            (dummy_thumb,),
+        )
+        # Message 2 has null URL in message_text, relies on regex fallback from text_data
+        conn.execute("""
+            INSERT INTO message VALUES (2, 1, 0, 1, 'key_link_2', 1001, 0, 'See https://github.com/test')
+        """)
+        conn.execute("""
+            INSERT INTO message_text VALUES (2, 'Git repo', 'GitHub', NULL, 0)
+        """)
         conn.commit()
 
     extracted = preservation.diff_and_extract_android(
         str(old_db), str(new_db), str(arch_db), _TEST_LOGGER
     )
-    assert len(extracted) == 1
-    meta = json.loads(extracted[0]["service_metadata"])
-    assert "link_preview" in meta
-    assert meta["link_preview"]["title"] == "Page Title"
-    assert meta["link_preview"]["desc"] == "Page description"
-    assert meta["link_preview"]["url"] == "https://example.com"
-    assert meta["link_preview"]["preview_type"] == 1
+    assert len(extracted) == 2
+    row1 = next(r for r in extracted if r["stanza_id"] == "key_link_1")
+    meta1 = json.loads(row1["service_metadata"])
+    assert "link_preview" in meta1
+    assert meta1["link_preview"]["title"] == "Page Title"
+    assert meta1["link_preview"]["desc"] == "Page description"
+    assert meta1["link_preview"]["url"] == "https://example.com"
+    assert meta1["link_preview"]["preview_type"] == 1
+    assert "thumbnail_b64" in meta1["link_preview"]
+    assert base64.b64decode(meta1["link_preview"]["thumbnail_b64"]) == dummy_thumb
+
+    row2 = next(r for r in extracted if r["stanza_id"] == "key_link_2")
+    meta2 = json.loads(row2["service_metadata"])
+    assert "link_preview" in meta2
+    assert meta2["link_preview"]["title"] == "GitHub"
+    assert meta2["link_preview"]["desc"] == "Git repo"
+    assert meta2["link_preview"]["url"] == "https://github.com/test"
+    assert meta2["link_preview"]["preview_type"] == 0
 
 
 def test_diff_and_extract_ios_link_preview(tmp_path: Path) -> None:
@@ -3410,6 +3439,183 @@ def test_preserve_incremental_deletions_flow(tmp_path: Path) -> None:
         assert row[1] == "To be preserved"
         assert row[2] == "deleted_on_phone"
         assert row[3] == "5550100@s.whatsapp.net"
+
+
+def test_preserve_incremental_deletions_link_preview(tmp_path: Path) -> None:
+    """Verify preserve_incremental_deletions captures message_text and message_thumbnail into service_metadata."""
+    db_file = tmp_path / "test_msgstore.db"
+    dummy_thumb = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb"
+
+    with sqlite3.connect(db_file) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                from_me INTEGER,
+                key_id TEXT,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            CREATE TABLE message_text (
+                message_row_id INTEGER PRIMARY KEY,
+                description TEXT,
+                page_title TEXT,
+                url TEXT,
+                preview_type INTEGER
+            );
+            CREATE TABLE message_thumbnail (
+                message_row_id INTEGER PRIMARY KEY,
+                thumbnail BLOB
+            );
+            INSERT INTO jid VALUES (1, '5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
+            INSERT INTO chat VALUES (1, 1, 'Test Chat');
+            INSERT INTO message VALUES (101, 1, 0, 'INC_LINK_KEY_101', 1, 1729000100000, 0, 'Check https://python.org');
+            INSERT INTO message_text VALUES (101, 'Python official website', 'Python.org', 'https://python.org', 1);
+        """)
+        conn.execute("INSERT INTO message_thumbnail VALUES (101, ?)", (dummy_thumb,))
+        conn.commit()
+
+        count = preservation.preserve_incremental_deletions(
+            conn, [101], str(tmp_path), _TEST_LOGGER
+        )
+        assert count == 1
+
+    pres_db = Path(preservation.get_preserved_db_path(str(tmp_path)))
+    assert pres_db.exists()
+    with sqlite3.connect(pres_db) as pconn:
+        row = pconn.execute(
+            "SELECT stanza_id, service_metadata FROM preserved_messages WHERE stanza_id = 'INC_LINK_KEY_101'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "INC_LINK_KEY_101"
+        meta = json.loads(row[1])
+        assert "link_preview" in meta
+        assert meta["link_preview"]["title"] == "Python.org"
+        assert meta["link_preview"]["desc"] == "Python official website"
+        assert meta["link_preview"]["url"] == "https://python.org"
+        assert meta["link_preview"]["preview_type"] == 1
+        assert "thumbnail_b64" in meta["link_preview"]
+        assert base64.b64decode(meta["link_preview"]["thumbnail_b64"]) == dummy_thumb
+
+
+def test_viewer_preserved_link_preview_and_thumbnail_endpoint(tmp_path: Path) -> None:
+    """Verify viewer unpacks link preview fields and serves thumbnail from service_metadata."""
+    from wab_viewer.main import create_app
+
+    output_root = tmp_path / "archive"
+    db_dir = output_root / "Whatsapp Databases"
+    db_dir.mkdir(parents=True)
+
+    arch_db = output_root / ".wa_media_archiver.db"
+    _make_dummy_archive_db(arch_db)
+
+    dummy_thumb = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb"
+    dummy_b64 = base64.b64encode(dummy_thumb).decode("ascii")
+
+    # Live database with chat
+    live_db = db_dir / "msgstore.db"
+    with sqlite3.connect(live_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            INSERT INTO jid VALUES (1, 'contact_link');
+
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER DEFAULT 4000, display_message_row_id INTEGER DEFAULT 1);
+            INSERT INTO chat VALUES (1, 1, NULL, 0, 4000, 1);
+
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY,
+                chat_row_id INTEGER,
+                key_id TEXT,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER,
+                message_type INTEGER,
+                text_data TEXT
+            );
+            CREATE TABLE message_media (
+                _id INTEGER PRIMARY KEY,
+                message_row_id INTEGER,
+                file_path TEXT,
+                media_name TEXT
+            );
+            CREATE TABLE message_quoted (
+                message_row_id INTEGER PRIMARY KEY,
+                text_data TEXT,
+                from_me INTEGER DEFAULT 0,
+                sender_jid_row_id INTEGER,
+                timestamp INTEGER DEFAULT 0
+            );
+            CREATE TABLE jid_map (
+                lid_row_id INTEGER,
+                jid_row_id INTEGER
+            );
+            INSERT INTO message VALUES (1, 1, 'live_1', 0, 1, 1000, 0, 'Hello');
+        """)
+
+    # Preserved database with a preserved link message
+    pres_conn = preservation.open_preservation_db(str(output_root))
+    link_meta = {
+        "link_preview": {
+            "title": "Example Domain",
+            "desc": "Illustrative examples",
+            "url": "https://example.com",
+            "preview_type": 1,
+            "thumbnail_b64": dummy_b64,
+        }
+    }
+    rows = [
+        {
+            "chat_id": "contact_link",
+            "chat_type": "contact",
+            "stanza_id": "k_preserved_link",
+            "msg_id": 99,
+            "timestamp_ms": 2000,
+            "sender": "Alice",
+            "from_me": 0,
+            "text_body": "Here is https://example.com",
+            "media_type": "link",
+            "media_name": "",
+            "archive_path": None,
+            "quoted_text": "",
+            "service_metadata": json.dumps(link_meta),
+            "preservation_reason": "deleted_on_phone",
+        }
+    ]
+    preservation.record_preserved_messages(pres_conn, rows, "android", _TEST_LOGGER)
+    pres_conn.close()
+
+    app = create_app(output_root)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    # 1. Test /api/messages returns link preview fields and has_thumbnail: 1
+    resp = client.get("/api/messages?chat_id=contact_link&chat_type=contact")
+    assert resp.status_code == 200
+    messages = resp.get_json()
+    pres_msg = next((m for m in messages if m.get("is_preserved") == 1), None)
+    assert pres_msg is not None
+    assert pres_msg["link_title"] == "Example Domain"
+    assert pres_msg["link_desc"] == "Illustrative examples"
+    assert pres_msg["link_url"] == "https://example.com"
+    assert pres_msg["link_preview_type"] == 1
+    assert pres_msg["has_thumbnail"] == 1
+    assert pres_msg["msg_id"] < 0
+
+    # 2. Test /api/thumbnail/<negative_id> serves decoded JPEG thumbnail
+    thumb_resp = client.get(f"/api/thumbnail/{pres_msg['msg_id']}")
+    assert thumb_resp.status_code == 200
+    assert thumb_resp.mimetype == "image/jpeg"
+    assert thumb_resp.data == dummy_thumb
+
+    # 3. Test /api/thumbnail/<stanza_id> fallback works
+    thumb_stanza_resp = client.get(f"/api/thumbnail/{pres_msg['stanza_id']}")
+    assert thumb_stanza_resp.status_code == 200
+    assert thumb_stanza_resp.mimetype == "image/jpeg"
+    assert thumb_stanza_resp.data == dummy_thumb
 
 
 def test_preserved_db_pragmas_and_health(tmp_path: Path) -> None:

@@ -2548,6 +2548,7 @@ def _query_preserved_messages(
         d["link_desc"] = None
         d["link_url"] = None
         d["link_preview_type"] = 0
+        d["has_thumbnail"] = 0
         if d.get("service_metadata"):
             try:
                 sm = (
@@ -2561,8 +2562,17 @@ def _query_preserved_messages(
                     d["link_desc"] = lp.get("desc")
                     d["link_url"] = lp.get("url")
                     d["link_preview_type"] = int(lp.get("preview_type", 0) or 0)
+                    if lp.get("thumbnail_b64"):
+                        d["has_thumbnail"] = 1
             except Exception:
                 pass
+        if not d.get("link_url") and (d.get("link_title") or d.get("media_type") == "link"):
+            m = re.search(r"(?:https?://|www\.)[^\s<>\"']+", d.get("text_body") or "")
+            if m:
+                cand_url = m.group(0).rstrip(".,;:!?)'\"")
+                if cand_url.startswith("www."):
+                    cand_url = "https://" + cand_url
+                d["link_url"] = cand_url
         d.pop("rowid", None)
         d.pop("action_type", None)
         d.pop("participant_name", None)
@@ -9686,12 +9696,16 @@ def create_app(output_root: Path, rescan: bool = False):
         if int_msg_id is not None and int_msg_id < 0:
             pres = get_preserved()
             if pres is not None:
+                pres_cols = {
+                    r[1] for r in pres.execute("PRAGMA table_info(preserved_messages)").fetchall()
+                }
+                sm_col = ", service_metadata" if "service_metadata" in pres_cols else ""
                 row = pres.execute(
-                    "SELECT stanza_id, archive_path FROM preserved_messages WHERE rowid = ?",
+                    f"SELECT stanza_id, archive_path{sm_col} FROM preserved_messages WHERE rowid = ?",
                     (-int_msg_id,),
                 ).fetchone()
                 if row:
-                    if row["archive_path"]:
+                    if "archive_path" in pres_cols and row["archive_path"]:
                         cand = (output_root / row["archive_path"]).resolve()
                         if cand.exists():
                             try:
@@ -9705,6 +9719,21 @@ def create_app(output_root: Path, rescan: bool = False):
                                     return Response(data, mimetype=mime)
                             except OSError:
                                 pass
+                    if "service_metadata" in pres_cols and row["service_metadata"]:
+                        try:
+                            sm = (
+                                json.loads(row["service_metadata"])
+                                if isinstance(row["service_metadata"], str)
+                                else row["service_metadata"]
+                            )
+                            if isinstance(sm, dict) and "link_preview" in sm:
+                                tb_b64 = sm["link_preview"].get("thumbnail_b64")
+                                if tb_b64:
+                                    thumb_data = base64.b64decode(tb_b64)
+                                    if thumb_data:
+                                        return Response(thumb_data, mimetype="image/jpeg")
+                        except Exception:
+                            pass
                     if row["stanza_id"] and conn is not None:
                         int_msg_id = None
                         msg_id = row["stanza_id"]
@@ -9728,6 +9757,31 @@ def create_app(output_root: Path, rescan: bool = False):
                     int_msg_id = row[0]
 
         if int_msg_id is None:
+            pres = get_preserved()
+            if pres is not None:
+                pres_cols = {
+                    r[1] for r in pres.execute("PRAGMA table_info(preserved_messages)").fetchall()
+                }
+                if "service_metadata" in pres_cols:
+                    pres_row = pres.execute(
+                        "SELECT service_metadata FROM preserved_messages WHERE stanza_id = ? LIMIT 1",
+                        (str(msg_id),),
+                    ).fetchone()
+                    if pres_row and pres_row["service_metadata"]:
+                        try:
+                            sm = (
+                                json.loads(pres_row["service_metadata"])
+                                if isinstance(pres_row["service_metadata"], str)
+                                else pres_row["service_metadata"]
+                            )
+                            if isinstance(sm, dict) and "link_preview" in sm:
+                                tb_b64 = sm["link_preview"].get("thumbnail_b64")
+                                if tb_b64:
+                                    thumb_data = base64.b64decode(tb_b64)
+                                    if thumb_data:
+                                        return Response(thumb_data, mimetype="image/jpeg")
+                        except Exception:
+                            pass
             return "Thumbnail not found", 404
 
         msg_id_val = int_msg_id
