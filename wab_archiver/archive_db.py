@@ -46,6 +46,7 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             timestamp_ms   INTEGER,
             PRIMARY KEY (original_path, archive_path)
         );
+        CREATE INDEX IF NOT EXISTS idx_archive_copies_path ON archive_copies(archive_path);
         CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
         CREATE TABLE IF NOT EXISTS recent_messages (
             chat_id        TEXT NOT NULL,
@@ -64,6 +65,7 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             reactions      TEXT,
             is_edited      INTEGER NOT NULL DEFAULT 0,
             edited_ts      INTEGER,
+            is_view_once   INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -96,8 +98,12 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")
     if "edited_ts" not in existing_recent:
         conn.execute("ALTER TABLE recent_messages ADD COLUMN edited_ts INTEGER")
-    if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
-        conn.execute("PRAGMA user_version = 2")
+    if "is_view_once" not in existing_recent:
+        conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_view_once INTEGER NOT NULL DEFAULT 0"
+        )
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 3:
+        conn.execute("PRAGMA user_version = 3")
     conn.commit()
     return conn
 
@@ -196,6 +202,8 @@ def load_canonical_copies(conn: sqlite3.Connection, output_root: str) -> dict[by
     rows = conn.execute(
         "SELECT f.md5, ac.archive_path FROM files f "
         "JOIN archive_copies ac ON ac.original_path = f.original_path "
+        "WHERE f.md5 IS NOT NULL AND length(f.md5) > 0 "
+        "AND ac.archive_path NOT LIKE '%.thumbnails/%' "
         "ORDER BY ac.rowid ASC"
     ).fetchall()
     for md5_bytes, rel_path in rows:

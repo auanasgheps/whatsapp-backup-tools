@@ -17,32 +17,39 @@ This writes `example-config.toml` next to the package. Open it, fill in your val
 ### Format
 
 ```toml
+# =============================================================================
 # wab-archiver config
-# All paths can be absolute or relative to where you run the script.
+# All paths can be absolute or relative to where you run the command.
+# =============================================================================
 
-output     = "/path/to/archive"
+# --- Archive Destination & General Settings ---
+output     = "/path/to/archive"         # Destination folder for the archive (required)
+# log      = ""                         # Custom log file path (default: <output>/wab-archiver.log)
+# debug    = false                      # Enable debug logging in the log file (default: false, INFO level)
+# timezone = ""                         # IANA timezone (e.g. Europe/Rome, UTC) for folders & reports
+# business = false                      # Target WhatsApp Business instead of regular WhatsApp
 
-# Optional settings — uncomment to activate:
-# msgstore  = "msgstore.db"
-# e2e_key   = ""
-# wa_root   = ""              # single source folder
-# wa_root   = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]  # multiple source folders
-# contacts  = ""
-# log       = ""
-# business  = false
-# timezone  = ""          # e.g. Europe/Rome
-# since     = ""          # e.g. 2024-01-01
-# link_duplicates = false # hardlink duplicate media files across chats
+# --- Archiving Features & Filtering ---
+# preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
+# link_duplicates  = true               # Hardlink duplicate media across chats instead of copying bytes to save disk space
+# since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 
-# Android — pull via ADB (wab-archiver archive --from-adb; see setup-android.md)
-# from_adb  = false
-# pull_media = false
-# staging    = ""         # permanent copy of phone storage (treated as wa_root, copied to output)
+# --- Source: Android (Local Files & Folders) ---
+# msgstore = "msgstore.db"              # Path to msgstore.db or msgstore.db.crypt15
+# e2e_key  = ""                         # 64-char hex key for encrypted .crypt15 backups
+# contacts = ""                         # Path to contacts CSV or exported wa_contacts
+# wa_root  = "/path/to/WhatsApp"        # Single source folder (containing Media/)
+# wa_root  = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]  # Multiple source folders
 
-# iOS
-# ios_backup   = ""
-# ios_password = ""
-# ios_contacts = ""
+# --- Source: Android (ADB Mode — USB Connection) ---
+# from_adb   = false                    # Pull msgstore and contacts automatically via ADB
+# pull_media = false                    # Also pull media files from phone storage via ADB
+# staging    = ""                       # Permanent local phone backup folder (copied to output)
+
+# --- Source: iOS (iPhone Backup) ---
+# ios_backup   = ""                     # Path to iPhone backup folder (containing Manifest.db)
+# ios_password = ""                     # Password for encrypted iPhone backup
+# ios_contacts = ""                     # Path to ContactsV2.sqlite (auto-extracted from backup if omitted)
 ```
 
 > 💡 **Windows users:** You can paste Windows paths directly (e.g. `C:\Users\...`). The archiver automatically converts backslashes to forward slashes and updates the config file in place.
@@ -76,7 +83,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
                      [--business] [--pull-media] [--staging PATH]
                      -o PATH [-l PATH] [--timezone TZ] [--config PATH]
                      [--dry-run] [--limit N] [--since DATE]
-                     [--link-duplicates]
+                     [--link-duplicates] [-P]
 ```
 
 | Argument | Required | Description |
@@ -94,19 +101,21 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--staging PATH` | If `--pull-media` | Permanent local folder where ADB-pulled media is stored (phone backup). Treated as `--wa-root`; files are copied to `--output` and never deleted |
 | `-o`, `--output PATH` | **Yes** | Destination folder for the archive |
 | `-l`, `--log PATH` | No | Custom log file path. Defaults to `<output>/wab-archiver.log` |
+| `-v`, `--debug` | No | Enable debug logging in the log file (defaults to `INFO` level without this flag). Aliased as `--verbose` |
 | `--timezone TZ` | No | [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) for year folders and report timestamps. **Windows users: requires `pip install tzdata`** |
 | `--config PATH` | No | Path to a TOML config file. Auto-detects `config.toml` if omitted |
 | `--dry-run` | No | Simulate the run without copying any files |
 | `--limit N` | No | Cap rows returned per chat type. Total rows ≤ N. Useful for test runs |
 | `--since DATE` | No | Only archive media from messages sent or received on or after this date (`YYYY-MM-DD`) |
 | `--link-duplicates` | No | Hardlink duplicate media files across chats instead of copying bytes, saving disk space. Gracefully falls back to copying if the destination filesystem does not support hardlinks (e.g. exFAT, FAT32, unsupported network shares) |
+| `-P`, `--preserve-deleted` | No | Preserve messages deleted on the phone ("Delete for Me"), messages revoked by sender ("Delete for Everyone"), and deleted chats from previous backup runs into `preserved_messages.db` |
 
 ### `restore`
 
 Reconstruct the original `Media/` tree from an archive (Android only).
 
 ```
-wab-archiver restore -o PATH [-l PATH] [--dry-run] [--config PATH]
+wab-archiver restore -o PATH [-l PATH] [-v] [--dry-run] [--config PATH]
 ```
 
 ### `config`
@@ -249,6 +258,18 @@ wab-archiver archive \
 >
 > ⚠️ **File Modification Timestamps:** Because filesystem hardlinks share the same record on disk, updating a hardlinked file's modification time updates it across all linked paths. When duplicate media is forwarded across different dates, the file modification timestamp (`mtime`) on disk will reflect the timestamp of the most recent message. To preserve the exact date context for every copy, the archiver records the original message timestamp of each duplicate in `.wa_media_archiver.db` and exports it in the `original_timestamp` column of `duplicate_media_report.csv`.
 
+#### Preserve Deleted Messages (`-P`, `--preserve-deleted`)
+
+By default, the archiver reflects your current backup database. If you delete messages or chats from your phone between backup runs, passing `-P` / `--preserve-deleted` retains any messages that are missing from the current run into `preserved_messages.db`:
+
+```bash
+wab-archiver archive \
+  --config config.toml \
+  --preserve-deleted
+```
+
+> 💡 Preserved messages, sender-revoked messages ("Delete for Everyone"), voice and video calls (`preserved_calls`), interactive polls, shared locations, view-once media metadata, and pre-edited message drafts are retained into `preserved_messages.db` across backup cycles. Preserved content and deleted chats are automatically surfaced in the viewer with visual badges, progressive edit disclosure, and bidirectional reply linking. The archiver logs the exact counts during execution and in the completion run summary (`Preserved: X message(s) across Y chat(s)`).
+
 #### iOS — pre-extracted mode
 
 Only use this mode if you know what you are doing.
@@ -267,11 +288,12 @@ wab-archiver archive \
 
 | File | Description |
 |---|---|
-| `wab-archiver.log` | Full run log including all copied, skipped, and missing files |
+| `wab-archiver.log` | Run log (INFO level by default, or DEBUG when `-v`/`--debug` is enabled) |
 | `missing_media_report.csv` | Structured report of all media referenced in the DB but not found on disk. Useful for manual recovery from old backups |
-| `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths. One row per path, sortable by `file_count`. Includes columns `link_status` (`hardlink` if sharing physical storage, `duplicate_copy` if an independent physical file) and `original_timestamp` (message timestamp formatted in run timezone, preserving original file date context for hardlinks). Only written when duplicates exist |
+| `duplicate_media_report.csv` | Report of media files with identical content at multiple archive paths, organized into clear visual sections by media type (Photos & Images, Videos, Documents, Audio, Animated GIFs, Contacts, Stickers) so high-value duplicates are highlighted first. Includes columns `media_type`, `group_id` (continuous numbering across sections), `file_count`, `archived_path`, `md5_hex`, `link_status` (`hardlink` or `duplicate_copy`), and `original_timestamp` (message timestamp formatted in run timezone). Only written when duplicates exist |
 | `source_conflicts_report.csv` | Written when multiple `--wa-root` roots contain different versions of the same file. Only written when conflicts exist |
 | `.wa_media_archiver.db` | SQLite database storing all persistent state: contact folder index, group folder index, and the file archive map. Health checks run automatically on every open. Do not delete unless you want to reset all tracking |
+| `preserved_messages.db` | SQLite database storing preserved messages, sender-revoked messages, call history (`preserved_calls`), and deleted chats with participant rosters across backup cycles. Only written when `-P` / `--preserve-deleted` is enabled |
 | `adb_conflicts_report.csv` | Written when `--pull-media` finds a file with the same name but different content on the device vs the archive. Only written when conflicts exist; resolve manually |
 | `restore_report.csv` | Written by restore mode when issues are encountered. Not written if there are no issues |
 
@@ -279,7 +301,7 @@ wab-archiver archive \
 
 ## Restore Mode
 
-Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly inside the archive folder, without needing the original device or database.
+Restore mode reconstructs the flat `WhatsApp/Media/` folder structure and restores the latest WhatsApp database (`Databases/msgstore.db`) directly inside the archive folder, without needing the original device or database.
 
 > ⚠️ **Android archives only.** iOS media cannot be restored this way.
 
@@ -287,12 +309,13 @@ Restore mode reconstructs the flat `WhatsApp/Media/` folder structure directly i
 wab-archiver restore --output /path/to/output
 ```
 
-The reconstructed tree is written to `<output>/Media/`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
+The reconstructed tree is written to `<output>/Media/` and `<output>/Databases/msgstore.db`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
 
-**How it works:** During every real (non-dry-run) forward run, the archiver records each original `file_path` and the archive path it was copied to in `.wa_media_archiver.db`. Restore mode reads this data and copies each unique original file back to its original relative path. If the same file was archived from multiple chats, it is restored exactly once.
+**How it works:** During every real (non-dry-run) forward run, the archiver records each original `file_path` and the archive path it was copied to in `.wa_media_archiver.db`. Restore mode reads this data and copies each unique original file back to its original relative path. If the same file was archived from multiple chats, it is restored exactly once. In addition, the latest database from `Whatsapp Databases/msgstore.db` is restored to `Databases/msgstore.db`.
 
 **Behavior & Limitations:**
 - Restored files are reconstructed as independent physical copies (never hardlinks) to faithfully recreate the original phone filesystem layout
+- The latest WhatsApp database (`msgstore.db`) is automatically restored to `<output>/Databases/msgstore.db` alongside media files
 - Virtual contact cards (`.vcf`) are ignored during restore mode since they were generated from database records rather than files on the phone
 - Restored file timestamps reflect the WhatsApp message timestamp (same as in the archive), not the original on-device creation date
 - If a forward run was filtered with `--since` or `--limit`, the restore index only covers what was actually archived

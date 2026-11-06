@@ -1,4 +1,7 @@
+import contextlib
+import os
 import re
+import sys
 
 
 def sanitize_filename(name: str) -> str:
@@ -20,9 +23,9 @@ def build_contact_folder_name(display_name: str, number: str) -> str:
     """Build folder name: 'Display Name (00391234567890)' or 'Unknown (00391234567890)'."""
     formatted = format_phone(number)
     if not display_name or display_name == number:
-        label = f"Unknown ({formatted})"
+        label = f"Unknown ({formatted})" if formatted else "Unknown Contact"
     else:
-        label = f"{display_name} ({formatted})"
+        label = f"{display_name} ({formatted})" if formatted else display_name
     return sanitize_filename(label)
 
 
@@ -80,3 +83,170 @@ def resolve_vcard_display_name(raw_name: str | None, vcard_text: str | None) -> 
         return cleaned
 
     return "Contact"
+
+
+def classify_media_type(path: str | None, fallback_path: str | None) -> str:
+    """Classify a file path or filename into a standard media category.
+
+    Categories returned:
+        'image', 'video', 'document', 'audio', 'gif', 'sticker', 'vcard'
+    """
+    candidates = [p for p in (path, fallback_path) if p]
+    if not candidates:
+        return "document"
+
+    norm_candidates = [p.lower().replace("\\", "/") for p in candidates]
+
+    # 1. Contact cards / vCards
+    for p in norm_candidates:
+        if p.endswith(".vcf") or p.startswith("vcard:"):
+            return "vcard"
+
+    # 2. Stickers (WhatsApp Stickers folder, stk- prefix, .was/.webp sticker files)
+    for p in norm_candidates:
+        if "/documents/" in p or "whatsapp documents" in p:
+            continue
+        fname = os.path.basename(p)
+        if (
+            "/stickers/" in p
+            or "whatsapp stickers" in p
+            or (fname.startswith("stk-") and (p.endswith(".webp") or p.endswith(".was")))
+            or ("sticker" in p and p.endswith(".webp"))
+            or p.endswith(".webp")
+            or p.endswith(".was")
+        ):
+            return "sticker"
+
+    # 3. Animated GIFs (WhatsApp Animated Gifs folder, gif- prefix, .gif extension)
+    for p in norm_candidates:
+        fname = os.path.basename(p)
+        if (
+            p.endswith(".gif")
+            or "/animated gifs/" in p
+            or "whatsapp animated gifs" in p
+            or fname.startswith("gif-")
+        ):
+            return "gif"
+
+    # 4. Extension-based classification
+    for p in norm_candidates:
+        ext = os.path.splitext(p)[1]
+        if ext in (".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".bmp"):
+            return "image"
+        if ext in (".mp4", ".mov", ".avi", ".mkv", ".3gp", ".m4v"):
+            return "video"
+        if ext in (".mp3", ".ogg", ".aac", ".opus", ".m4a", ".wav", ".amr"):
+            return "audio"
+        if ext in (
+            ".pdf",
+            ".doc",
+            ".docx",
+            ".xls",
+            ".xlsx",
+            ".ppt",
+            ".pptx",
+            ".txt",
+            ".csv",
+            ".rtf",
+            ".zip",
+            ".rar",
+            ".7z",
+            ".tar",
+            ".gz",
+        ):
+            return "document"
+
+    # 5. Folder structure fallback (Android / iOS / general media folders)
+    for p in norm_candidates:
+        if "whatsapp images" in p or "/images/" in p or "/photos/" in p:
+            return "image"
+        if "whatsapp video" in p or "/video/" in p or "/videos/" in p:
+            return "video"
+        if (
+            "whatsapp audio" in p
+            or "whatsapp voice notes" in p
+            or "/audio/" in p
+            or "/voice notes/" in p
+        ):
+            return "audio"
+        if "whatsapp documents" in p or "/documents/" in p or "/docs/" in p:
+            return "document"
+        if "sticker" in p:
+            return "sticker"
+        if "gif" in p:
+            return "gif"
+
+    return "document"
+
+
+def extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
+    """Extract page description string from wire tag 3 of an iOS ZMETADATA protobuf blob."""
+    if not metadata_bytes or not isinstance(metadata_bytes, (bytes, bytearray)):
+        return None
+    try:
+        idx = 0
+        n = len(metadata_bytes)
+        while idx < n:
+            b = metadata_bytes[idx]
+            idx += 1
+            wire_type = b & 7
+            field_num = b >> 3
+            if wire_type == 0:
+                while idx < n and (metadata_bytes[idx] & 0x80):
+                    idx += 1
+                idx += 1
+            elif wire_type == 2:
+                length = 0
+                shift = 0
+                while idx < n:
+                    lb = metadata_bytes[idx]
+                    idx += 1
+                    length |= (lb & 0x7F) << shift
+                    if not (lb & 0x80):
+                        break
+                    shift += 7
+                if field_num == 3:
+                    desc_bytes = metadata_bytes[idx : idx + length]
+                    return desc_bytes.decode("utf-8", errors="replace")
+                idx += length
+            elif wire_type == 5:
+                idx += 4
+            elif wire_type == 1:
+                idx += 8
+            else:
+                break
+    except (IndexError, ValueError, UnicodeDecodeError):
+        pass
+    return None
+
+
+def clean_sqlite_files(db_path: str) -> None:
+    """Remove a SQLite database file and any associated WAL, SHM, and rollback journal sidecars."""
+    for ext in ("", "-wal", "-shm", "-journal"):
+        target = db_path + ext
+        if os.path.exists(target):
+            with contextlib.suppress(OSError):
+                os.remove(target)
+
+
+def safe_replace_sqlite_db(src: str, dst: str) -> None:
+    """Safely replace a SQLite database file and its sidecars atomically."""
+    clean_sqlite_files(dst)
+    os.replace(src, dst)
+    for ext in ("-wal", "-shm", "-journal"):
+        src_sidecar = src + ext
+        dst_sidecar = dst + ext
+        if os.path.exists(src_sidecar):
+            with contextlib.suppress(OSError):
+                os.replace(src_sidecar, dst_sidecar)
+
+
+def ensure_long_path(path: str) -> str:
+    """Ensure path is safe for Windows extended-length file I/O (>260 chars)."""
+    if sys.platform == "win32" and len(path) >= 240 and not path.startswith("\\\\?\\"):
+        abs_p = os.path.abspath(path)
+        if not abs_p.startswith("\\\\?\\"):
+            if abs_p.startswith("\\\\"):
+                return "\\\\?\\UNC\\" + abs_p[2:]
+            return "\\\\?\\" + abs_p
+    return path

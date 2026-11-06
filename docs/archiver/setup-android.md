@@ -19,6 +19,8 @@ When asked, create the end-to-end encrypted backup.
 
 > If this step is skipped, the `.crypt15` backup file cannot be decrypted and the archiver will not work on a non-rooted device.
 
+> 💡 **Automatic Incremental Backups Replay**: In E2E encrypted backups, WhatsApp generates daily delta snapshots (`msgstore-increment-*.db.crypt15`) between full backups (`msgstore.db.crypt15`). When running `--from-adb` or placing increments in your `Databases/` folder, the archiver automatically discovers, decrypts, and replays all daily message deltas, reactions, polls, pins, locations, and edits into a consolidated database.
+
 ---
 
 ## Your WhatsApp Media Folder
@@ -143,6 +145,8 @@ wab-archiver archive \
 ```
 
 The archiver pulls the encrypted backup and contacts directly from the device and decrypts on the fly. No separate steps needed.
+
+> 💡 **Connection Troubleshooting & Authorization Recovery:** If your phone is unauthorized, offline, or multiple devices are connected, the archiver diagnoses the exact connection state. For unauthorized devices, it offers to restart the ADB server on the spot to re-prompt the "Allow USB debugging" dialog on your phone.
 
 > 💡 On Windows, replace `\` with `` ` `` (PowerShell) or `^` (cmd.exe).
 

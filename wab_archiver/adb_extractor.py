@@ -1,11 +1,15 @@
 import csv
+import logging
 import os
+import posixpath
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
 
+from .increment_merger import filter_active_increments
 from .progress import ProgressReporter
 
 _MSGSTORE_PATH = (
@@ -42,7 +46,24 @@ def check_adb(logger) -> bool:
     return False
 
 
-def check_device_connected(logger) -> bool:
+def _parse_adb_devices(stdout: str) -> list[tuple[str, str]]:
+    devices = []
+    for line in stdout.splitlines():
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("*") or trimmed.startswith("List of devices"):
+            continue
+        parts = trimmed.split()
+        if len(parts) >= 2:
+            serial = parts[0]
+            if parts[1] == "no" and len(parts) >= 3 and parts[2].startswith("permission"):
+                state = "no permissions"
+            else:
+                state = parts[1]
+            devices.append((serial, state))
+    return devices
+
+
+def _query_adb_devices(logger) -> list[tuple[str, str]] | None:
     try:
         result = subprocess.run(
             ["adb", "devices"],
@@ -51,18 +72,131 @@ def check_device_connected(logger) -> bool:
         )
     except subprocess.CalledProcessError as e:
         logger.error(f"'adb devices' failed: {e.stderr.decode(errors='replace').strip()}")
+        return None
+    return _parse_adb_devices(result.stdout.decode(errors="replace"))
+
+
+def _confirm_restart_prompt(prompt: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    try:
+        response = input(prompt)
+        return response.strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
         return False
 
-    lines = result.stdout.decode(errors="replace").splitlines()
-    connected = [line for line in lines if line.strip().endswith("device")]
-    if connected:
+
+def _prompt_user_to_continue(prompt: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    try:
+        input(prompt)
+        return True
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def _restart_adb_server(logger) -> None:
+    logger.info("Restarting ADB server...")
+    try:
+        subprocess.run(
+            ["adb", "kill-server"],
+            check=True,
+            capture_output=True,
+            timeout=_ADB_TIMEOUT,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"'adb kill-server' warning: {e}")
+    time.sleep(2)
+
+
+def check_device_connected(logger) -> bool:
+    devices = _query_adb_devices(logger)
+    if devices is None:
+        return False
+
+    if not devices:
+        logger.error(
+            "No Android device detected over USB or Wi-Fi. Ensure:\n"
+            "  1. The device is connected via a data-capable USB cable\n"
+            "  2. USB debugging is enabled in Settings > Developer options"
+        )
+        return False
+
+    if len(devices) > 1:
+        summary = ", ".join(f"{s} ({st})" for s, st in devices)
+        logger.error(
+            f"Multiple Android devices detected: {summary}.\n"
+            "  Disconnect all devices except the one you wish to archive."
+        )
+        return False
+
+    serial, state = devices[0]
+    if state == "device":
+        logger.info(f"Android device connected and authorized: {serial}")
         return True
 
+    if state == "unauthorized":
+        logger.warning(
+            f"Android device '{serial}' is connected but unauthorized "
+            "(the USB debugging authorization prompt was not accepted on the phone)."
+        )
+        prompt_msg = "Restart ADB server to re-trigger authorization prompt on your phone? [y/N]: "
+        if _confirm_restart_prompt(prompt_msg):
+            logger.info("Restarting ADB server... Please ensure your phone screen is unlocked.")
+            _restart_adb_server(logger)
+            _query_adb_devices(logger)
+            continue_prompt = (
+                "Unlock your phone, tap 'Allow USB debugging' (check 'Always allow'), "
+                "then press Enter to continue: "
+            )
+            if not _prompt_user_to_continue(continue_prompt):
+                logger.error("Authorization check cancelled by user.")
+                return False
+            devices_after = _query_adb_devices(logger)
+            if devices_after and len(devices_after) == 1 and devices_after[0][1] == "device":
+                logger.info(f"Android device connected and authorized: {devices_after[0][0]}")
+                return True
+            logger.error(
+                f"Device '{serial}' is still unauthorized.\n"
+                "  1. Unlock your phone screen and look for the 'Allow USB debugging' prompt\n"
+                "  2. In Settings > Developer options, tap 'Revoke USB debugging authorizations'\n"
+                "  3. Ensure USB connection mode is set to 'File Transfer (MTP)' rather than 'Charge only'"
+            )
+            return False
+
+        logger.error(
+            f"Android device '{serial}' is connected but unauthorized.\n"
+            "  Unlock your phone and accept the 'Allow USB debugging' prompt "
+            "(check 'Always allow from this computer')."
+        )
+        return False
+
+    if state == "offline":
+        logger.error(
+            f"Android device '{serial}' is connected but offline.\n"
+            "  Reconnect the USB cable, toggle USB debugging off and on in Developer options, "
+            "or restart the ADB server ('adb kill-server')."
+        )
+        return False
+
+    if state == "no permissions":
+        logger.error(
+            f"Android device '{serial}' detected, but ADB lacks host permissions to access it.\n"
+            "  Check your USB permissions or driver (on Linux, check udev rules / plugdev group)."
+        )
+        return False
+
+    if state in ("recovery", "sideload", "bootloader"):
+        logger.error(
+            f"Android device '{serial}' is in '{state}' mode.\n"
+            "  Normal Android OS is required for WhatsApp extraction."
+        )
+        return False
+
     logger.error(
-        "No Android device detected. Ensure:\n"
-        "  1. USB debugging is enabled on the device (Settings > Developer options)\n"
-        "  2. The device is connected via USB\n"
-        "  3. You have authorised the connection on the phone when prompted"
+        f"Android device '{serial}' is in unexpected state '{state}'.\n"
+        "  Reconnect the device and ensure USB debugging is enabled."
     )
     return False
 
@@ -80,14 +214,129 @@ def pull_msgstore(output_dir: str, business: bool = False, logger=None) -> str:
         )
     except subprocess.CalledProcessError as e:
         if logger:
-            logger.error(
-                f"ADB pull failed.\n"
-                f"  {e.stderr.decode(errors='replace').strip()}\n"
-                f"  Make sure the device is connected, USB debugging is enabled, "
-                f"and the connection is authorised on the phone."
-            )
+            stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
+            if "does not exist" in stderr or "No such file" in stderr:
+                logger.error(
+                    f"WhatsApp backup file not found on device at '{remote}'.\n"
+                    "  Ensure 'End-to-end encrypted backup' is enabled in WhatsApp "
+                    "(Settings > Chats > Chat backup) and a backup has been created."
+                )
+            elif "Permission denied" in stderr or "open failed" in stderr:
+                logger.error(f"Permission denied accessing '{remote}' on device.")
+            elif "device offline" in stderr or "device not found" in stderr:
+                logger.error(f"Android device disconnected or went offline during pull: {stderr}")
+            else:
+                logger.error(f"ADB pull failed: {stderr}")
         raise
     return dest
+
+
+def enumerate_remote_backup_files(
+    business: bool, logger: logging.Logger
+) -> tuple[str | None, list[str]]:
+    """Discover the base msgstore.db.crypt15 and any msgstore-increment-*.crypt15 on the device."""
+
+    remote_dir = (
+        posixpath.dirname(_MSGSTORE_BUSINESS_PATH)
+        if business
+        else posixpath.dirname(_MSGSTORE_PATH)
+    )
+
+    logger.info(f"Checking for database backups in {remote_dir}...")
+    try:
+        result = _run_adb(
+            ["adb", "shell", f'ls -1 "{remote_dir}"'],
+            logger,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to list remote backups in {remote_dir}: {e}")
+        return None, []
+
+    lines = result.stdout.decode(errors="replace").splitlines()
+    base_file = None
+    rotated_base_candidates = []
+    remote_inc_candidates = []
+    inc_pattern = re.compile(r"msgstore-increment-(\d+)")
+    rotated_base_pattern = re.compile(
+        r"^msgstore-(\d{4}-\d{2}-\d{2}(?:\.\d+)?)\.db\.crypt(?:14|15)$"
+    )
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line in ("msgstore.db.crypt15", "msgstore.db.crypt14"):
+            base_file = f"{remote_dir}/{line}"
+        elif rotated_base_pattern.match(line):
+            rotated_base_candidates.append(f"{remote_dir}/{line}")
+        elif inc_pattern.search(line) and (line.endswith(".crypt15") or line.endswith(".crypt14")):
+            remote_inc_candidates.append(f"{remote_dir}/{line}")
+
+    if base_file is None and rotated_base_candidates:
+        rotated_base_candidates.sort()
+        base_file = rotated_base_candidates[-1]
+
+    sorted_inc_paths = filter_active_increments(remote_inc_candidates, base_file)
+
+    if len(remote_inc_candidates) > len(sorted_inc_paths):
+        logger.info(
+            f"Filtered {len(remote_inc_candidates)} remote increments down to "
+            f"{len(sorted_inc_paths)} active generation increment(s)."
+        )
+
+    if base_file is None:
+        logger.warning(f"Base msgstore backup not found in {remote_dir}.")
+    else:
+        logger.info(
+            f"Found base backup '{posixpath.basename(base_file)}' and "
+            f"{len(sorted_inc_paths)} active incremental backup(s)."
+        )
+
+    return base_file, sorted_inc_paths
+
+
+def pull_msgstore_and_increments(
+    staging_dir: str, business: bool, logger: logging.Logger
+) -> tuple[str, list[str]]:
+    """Pull the base msgstore database and all active incremental diffs into staging_dir."""
+
+    base_remote, inc_remotes = enumerate_remote_backup_files(business, logger)
+    if base_remote is None:
+        local_base = pull_msgstore(staging_dir, business, logger)
+        return local_base, []
+
+    os.makedirs(staging_dir, exist_ok=True)
+    local_base = os.path.join(staging_dir, posixpath.basename(base_remote))
+    logger.info(f"Pulling base msgstore '{posixpath.basename(base_remote)}'...")
+    try:
+        subprocess.run(
+            ["adb", "pull", base_remote, local_base],
+            check=True,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
+        logger.error(f"Failed to pull base backup from '{base_remote}' via ADB: {stderr}")
+        raise
+
+    local_increments = []
+    for inc_remote in inc_remotes:
+        inc_name = posixpath.basename(inc_remote)
+        local_inc = os.path.join(staging_dir, inc_name)
+        logger.info(f"Pulling increment '{inc_name}'...")
+        try:
+            subprocess.run(
+                ["adb", "pull", inc_remote, local_inc],
+                check=True,
+                stderr=subprocess.PIPE,
+            )
+            local_increments.append(local_inc)
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode(errors="replace").strip() if e.stderr else ""
+            logger.error(f"Failed to pull increment '{inc_remote}' via ADB: {stderr}")
+            raise
+
+    return local_base, local_increments
 
 
 def pull_contacts(output_dir: str, logger=None) -> str:

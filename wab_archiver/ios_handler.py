@@ -3,6 +3,11 @@ import logging
 import os
 import sqlite3
 
+from shared.schema_validator import (
+    check_wa_schema,
+    get_app_version,
+)
+
 # ==============================================================================
 # ios_handler.py — WhatsApp iOS schema handling
 # Knows nothing about the iPhone backup format; handles only WhatsApp DB schema.
@@ -11,57 +16,17 @@ import sqlite3
 # Seconds between 1970-01-01 (Unix epoch) and 2001-01-01 (Apple Core Data epoch)
 APPLE_EPOCH_OFFSET = 978307200
 
-_IOS_REQUIRED_TABLES = {"ZWAMESSAGE", "ZWACHATSESSION", "ZWAMEDIAITEM", "ZWAGROUPMEMBER"}
-
-_IOS_REQUIRED_COLUMNS = {
-    "ZWAMESSAGE": {
-        "Z_PK",
-        "ZMESSAGEDATE",
-        "ZISFROMME",
-        "ZCHATSESSION",
-        "ZMEDIAITEM",
-        "ZGROUPMEMBER",
-        "ZPUSHNAME",
-    },
-    "ZWACHATSESSION": {
-        "Z_PK",
-        "ZCONTACTJID",
-        "ZGROUPINFO",
-        "ZPARTNERNAME",
-        "ZCONTACTABID",
-        "ZLASTMESSAGEDATE",
-    },
-    "ZWAMEDIAITEM": {
-        "Z_PK",
-        "ZMEDIALOCALPATH",
-        "ZMEDIAURL",
-        "ZTITLE",
-    },
-    "ZWAGROUPMEMBER": {
-        "Z_PK",
-        "ZMEMBERJID",
-    },
-}
+ASSOCIATION_TYPE_IOS_HD_PHOTO = 10
+ASSOCIATION_TYPE_IOS_HD_VIDEO = 5
 
 
 def validate_ios_schema(cursor: sqlite3.Cursor, logger: logging.Logger):
     """Abort with a clear error if any required iOS table or column is missing."""
-    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    missing_tables = _IOS_REQUIRED_TABLES - tables
-    if missing_tables:
-        logger.error(f"iOS schema validation failed — missing tables: {sorted(missing_tables)}")
+    tool_version = get_app_version()
+    result = check_wa_schema(cursor, "ios", tool_version)
+    if not result.is_valid:
+        logger.error(result.banner)
         raise SystemExit(1)
-
-    for table, required_cols in _IOS_REQUIRED_COLUMNS.items():
-        actual_cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
-        missing_cols = required_cols - actual_cols
-        if missing_cols:
-            logger.error(
-                f"iOS schema validation failed — missing columns in '{table}': "
-                f"{sorted(missing_cols)}"
-            )
-            raise SystemExit(1)
-
     logger.info("iOS schema validated.")
 
 
@@ -93,14 +58,18 @@ def build_ios_group_subjects_query() -> str:
     not just those active since --since.
     """
     return """
-        SELECT DISTINCT CAST(cs.Z_PK AS TEXT), cs.ZPARTNERNAME
+        SELECT CAST(cs.Z_PK AS TEXT), cs.ZPARTNERNAME
         FROM ZWACHATSESSION cs
-        JOIN ZWAMESSAGE m ON m.ZCHATSESSION = cs.Z_PK
-        JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
         WHERE cs.ZGROUPINFO IS NOT NULL
           AND cs.ZPARTNERNAME IS NOT NULL
-          AND mi.ZMEDIALOCALPATH IS NOT NULL
-          AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
+          AND EXISTS (
+              SELECT 1
+              FROM ZWAMESSAGE m
+              JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+              WHERE m.ZCHATSESSION = cs.Z_PK
+                AND mi.ZMEDIALOCALPATH IS NOT NULL
+                AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
+          )
     """
 
 
@@ -140,7 +109,7 @@ def check_ios_hd_association(
             return False
 
         has_hd = cursor.execute(
-            "SELECT 1 FROM ext.message_parent_association WHERE type IN (10, 5) LIMIT 1"
+            f"SELECT 1 FROM ext.message_parent_association WHERE type IN ({ASSOCIATION_TYPE_IOS_HD_PHOTO}, {ASSOCIATION_TYPE_IOS_HD_VIDEO}) LIMIT 1"
         ).fetchone()
         if has_hd:
             logger.info(
@@ -155,22 +124,118 @@ def check_ios_hd_association(
         return False
 
 
-def build_ios_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> str:
+def has_ios_column(cursor: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
+    """Return True if table_name exists and contains column_name."""
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if table_name not in tables:
+        return False
+    cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table_name})")}
+    return column_name in cols
+
+
+def get_ios_schema_features(cursor: sqlite3.Cursor) -> tuple[bool, bool, bool, bool]:
+    """Return (has_thumb, has_msg_type, has_vcard, has_text) from cursor schema."""
+    has_thumb = has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
+    has_msg_type = has_ios_column(cursor, "ZWAMESSAGE", "ZMESSAGETYPE")
+    has_vcard = has_ios_column(cursor, "ZWAMEDIAITEM", "ZVCARDSTRING")
+    has_text = has_ios_column(cursor, "ZWAMESSAGE", "ZTEXT")
+    return has_thumb, has_msg_type, has_vcard, has_text
+
+
+def has_ios_thumb_support(cursor: sqlite3.Cursor) -> bool:
+    """Return True if ZWAMEDIAITEM table exists and has ZXMPPTHUMBPATH column."""
+    return has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
+
+
+def has_ios_link_thumbnails_support(cursor: sqlite3.Cursor) -> bool:
+    """Return True if ChatStorage.sqlite contains ZWAMESSAGEDATAITEM or ZWAMEDIAITEM with thumbnail paths."""
+    has_mdi = has_ios_column(cursor, "ZWAMESSAGEDATAITEM", "ZTHUMBNAILPATH")
+    has_xmpp = has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
+    return has_mdi or has_xmpp
+
+
+def build_ios_link_thumbnails_query(cursor: sqlite3.Cursor, since_ms: int | None) -> str:
+    """
+    Build query to extract distinct link thumbnail candidate paths from ChatStorage.sqlite.
+    Returns:
+        message_id   — ZWAMESSAGE.Z_PK
+        timestamp_ms — Unix epoch milliseconds
+        thumb_path   — relative file path formatted as 'Message/Media/...'
+    """
+    has_mdi = has_ios_column(cursor, "ZWAMESSAGEDATAITEM", "ZTHUMBNAILPATH")
+    has_xmpp = has_ios_column(cursor, "ZWAMEDIAITEM", "ZXMPPTHUMBPATH")
+
+    if since_ms is not None:
+        ios_since = (since_ms / 1000.0) - APPLE_EPOCH_OFFSET
+        since_clause = f"AND m.ZMESSAGEDATE >= {ios_since}"
+    else:
+        since_clause = ""
+
+    unions: list[str] = []
+    if has_mdi:
+        unions.append(f"""
+        SELECT
+            m.Z_PK AS message_id,
+            CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+            CASE
+                WHEN mdi.ZTHUMBNAILPATH LIKE 'Message/%' THEN mdi.ZTHUMBNAILPATH
+                ELSE 'Message/' || mdi.ZTHUMBNAILPATH
+            END AS thumb_path
+        FROM ZWAMESSAGEDATAITEM mdi
+        JOIN ZWAMESSAGE m ON m.Z_PK = mdi.ZMESSAGE
+        WHERE mdi.ZTHUMBNAILPATH IS NOT NULL
+          AND mdi.ZTHUMBNAILPATH != ''
+          {since_clause}
+        """)
+
+    if has_xmpp:
+        unions.append(f"""
+        SELECT
+            m.Z_PK AS message_id,
+            CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+            CASE
+                WHEN mi.ZXMPPTHUMBPATH LIKE 'Message/%' THEN mi.ZXMPPTHUMBPATH
+                ELSE 'Message/' || mi.ZXMPPTHUMBPATH
+            END AS thumb_path
+        FROM ZWAMESSAGE m
+        JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+        WHERE m.ZMESSAGETYPE = 7
+          AND mi.ZXMPPTHUMBPATH IS NOT NULL
+          AND mi.ZXMPPTHUMBPATH != ''
+          {since_clause}
+        """)
+
+    if not unions:
+        return "SELECT NULL AS message_id, NULL AS timestamp_ms, NULL AS thumb_path WHERE 0"
+
+    return f"SELECT MIN(message_id) AS message_id, MAX(timestamp_ms) AS timestamp_ms, thumb_path FROM ({' UNION ALL '.join(unions)}) WHERE thumb_path IS NOT NULL GROUP BY thumb_path"
+
+
+def build_ios_query(
+    limit: int | None,
+    since_ms: int | None,
+    hd_dedup: bool,
+    has_thumb: bool,
+    has_msg_type: bool,
+    has_vcard: bool,
+    has_text: bool,
+) -> str:
     """
     Main iOS media extraction query. Returns the same 10 columns as the Android
-    query so process_rows() is unchanged.
+    query so process_rows() is unchanged, with an optional 11th column for thumb_path.
 
     Columns:
         message_id   — ZWAMESSAGE.Z_PK
         timestamp_ms — (ZMESSAGEDATE + 978307200) * 1000 as Unix epoch ms
         file_path    — 'Message/' || ZMEDIALOCALPATH  (matches Manifest.db relativePath)
-        mime_type    — NULL (ZWAMEDIAITEM has no ZMIMETYPE)
+        mime_type    — ZWAMEDIAITEM.ZVCARDSTRING or derived from ZMESSAGETYPE
         chat_row_id  — ZWACHATSESSION.Z_PK cast to text
         chat_subject — ZPARTNERNAME for groups, NULL for 1-to-1
         sender       — phone number stripped from JID
         key_from_me  — ZWAMESSAGE.ZISFROMME
         message_url  — ZWAMEDIAITEM.ZMEDIAURL
-        media_name   — ZWAMEDIAITEM.ZTITLE (original filename for documents)
+        media_name   — ZWAMESSAGE.ZTEXT / ZWAMEDIAITEM.ZTITLE (original filename for documents)
+        thumb_path   — 'Message/' || ZXMPPTHUMBPATH (optional 11th column)
     """
     block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
     if since_ms is not None:
@@ -179,29 +244,99 @@ def build_ios_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> 
     else:
         since_clause = ""
 
+    hd_cte = (
+        f"""WITH hd_parents AS (
+    SELECT mpa.parent_stanza_id AS stanza_id
+    FROM ext.message_parent_association mpa
+    JOIN ZWAMESSAGE m_hd ON m_hd.ZSTANZAID = mpa.stanza_id
+    JOIN ZWAMEDIAITEM mi_hd ON mi_hd.Z_PK = m_hd.ZMEDIAITEM
+    WHERE mpa.parent_stanza_id IS NOT NULL
+      AND mpa.type IN ({ASSOCIATION_TYPE_IOS_HD_PHOTO}, {ASSOCIATION_TYPE_IOS_HD_VIDEO})
+      AND mi_hd.ZMEDIALOCALPATH IS NOT NULL
+)
+"""
+        if hd_dedup
+        else ""
+    )
     hd_dedup_clause = (
-        """
-        AND NOT EXISTS (
-            SELECT 1 FROM ext.message_parent_association mpa
-            JOIN ZWAMESSAGE m_hd ON m_hd.ZSTANZAID = mpa.stanza_id
-            JOIN ZWAMEDIAITEM mi_hd ON mi_hd.Z_PK = m_hd.ZMEDIAITEM
-            WHERE mpa.parent_stanza_id = m.ZSTANZAID
-              AND mpa.type IN (10, 5)
-              AND mi_hd.ZMEDIALOCALPATH IS NOT NULL
-        )"""
+        "AND (m.ZSTANZAID IS NULL OR m.ZSTANZAID NOT IN (SELECT stanza_id FROM hd_parents))"
         if hd_dedup
         else ""
     )
 
-    return f"""
+    thumb_col = (
+        ",\n            CASE WHEN mi.ZXMPPTHUMBPATH IS NOT NULL THEN 'Message/' || mi.ZXMPPTHUMBPATH ELSE NULL END AS thumb_path"
+        if has_thumb
+        else ""
+    )
+    thumb_filter = "OR mi.ZXMPPTHUMBPATH IS NOT NULL" if has_thumb else ""
+    file_path_expr = "CASE WHEN mi.ZMEDIALOCALPATH IS NOT NULL THEN 'Message/' || mi.ZMEDIALOCALPATH ELSE NULL END AS file_path"
+
+    if has_msg_type and has_vcard:
+        mime_type_expr = """CASE
+                 WHEN mi.ZVCARDSTRING IS NOT NULL AND mi.ZVCARDSTRING != '' THEN mi.ZVCARDSTRING
+                 WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image/jpeg'
+                 WHEN m.ZMESSAGETYPE IN (3, 53) THEN 'audio/ogg'
+                 WHEN m.ZMESSAGETYPE IN (2, 39, 54) THEN 'video/mp4'
+                 WHEN m.ZMESSAGETYPE = 11 THEN 'image/gif'
+                 WHEN m.ZMESSAGETYPE = 15 THEN 'image/webp'
+                 ELSE 'application/octet-stream' END AS mime_type"""
+    elif has_msg_type:
+        mime_type_expr = """CASE
+                 WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image/jpeg'
+                 WHEN m.ZMESSAGETYPE IN (3, 53) THEN 'audio/ogg'
+                 WHEN m.ZMESSAGETYPE IN (2, 39, 54) THEN 'video/mp4'
+                 WHEN m.ZMESSAGETYPE = 11 THEN 'image/gif'
+                 WHEN m.ZMESSAGETYPE = 15 THEN 'image/webp'
+                 ELSE 'application/octet-stream' END AS mime_type"""
+    elif has_vcard:
+        mime_type_expr = """CASE
+                 WHEN mi.ZVCARDSTRING IS NOT NULL AND mi.ZVCARDSTRING != '' THEN mi.ZVCARDSTRING
+                 ELSE NULL END AS mime_type"""
+    else:
+        mime_type_expr = (
+            "NULL                                                           AS mime_type"
+        )
+
+    if has_msg_type and has_text:
+        media_name_expr = """CASE
+                 WHEN m.ZMESSAGETYPE = 8 OR mi.ZMEDIALOCALPATH LIKE '%Documents%'
+                 THEN COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))
+                 ELSE NULL END AS media_name"""
+    elif has_msg_type:
+        media_name_expr = """CASE
+                 WHEN m.ZMESSAGETYPE = 8 OR mi.ZMEDIALOCALPATH LIKE '%Documents%'
+                 THEN mi.ZTITLE
+                 ELSE NULL END AS media_name"""
+    elif has_text:
+        media_name_expr = (
+            "COALESCE(NULLIF(m.ZTEXT, ''), NULLIF(mi.ZTITLE, ''))          AS media_name"
+        )
+    else:
+        media_name_expr = (
+            "mi.ZTITLE                                                      AS media_name"
+        )
+
+    if has_msg_type:
+        msg_type_filter = "AND m.ZMESSAGETYPE IN (1, 2, 3, 8, 11, 15, 38, 39, 54)"
+        media_filter = "AND (mi.ZMEDIALOCALPATH NOT LIKE '%@status%' OR mi.ZMEDIALOCALPATH IS NULL)"
+    else:
+        msg_type_filter = ""
+        media_filter = f"""AND (
+              (mi.ZMEDIALOCALPATH IS NOT NULL AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%')
+              {thumb_filter}
+          )"""
+
+    if limit:
+        return f"""{hd_cte}
 SELECT * FROM (
     SELECT * FROM (
         -- Group chats
         SELECT
             m.Z_PK                                                         AS message_id,
             CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
-            'Message/' || mi.ZMEDIALOCALPATH                               AS file_path,
-            NULL                                                           AS mime_type,
+            {file_path_expr},
+            {mime_type_expr},
             CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
             cs.ZPARTNERNAME                                                AS chat_subject,
             CASE
@@ -212,16 +347,15 @@ SELECT * FROM (
                  ELSE m.ZPUSHNAME END                                      AS sender,
             m.ZISFROMME                                                    AS key_from_me,
             mi.ZMEDIAURL                                                   AS message_url,
-            CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
-                 THEN mi.ZTITLE END                                        AS media_name
+            {media_name_expr}{thumb_col}
         FROM ZWAMESSAGE m
         JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
         JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
         LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
         WHERE cs.ZGROUPINFO IS NOT NULL
-          AND mi.ZMEDIALOCALPATH IS NOT NULL
-          AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
           AND cs.ZPARTNERNAME IS NOT NULL
+          {msg_type_filter}
+          {media_filter}
           {since_clause}
           {hd_dedup_clause}
         {block_limit_clause}
@@ -234,8 +368,8 @@ SELECT * FROM (
         SELECT
             m.Z_PK                                                         AS message_id,
             CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
-            'Message/' || mi.ZMEDIALOCALPATH                               AS file_path,
-            NULL                                                           AS mime_type,
+            {file_path_expr},
+            {mime_type_expr},
             CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
             NULL                                                           AS chat_subject,
             CASE WHEN INSTR(cs.ZCONTACTJID, '@') > 0
@@ -243,19 +377,53 @@ SELECT * FROM (
                  ELSE cs.ZCONTACTJID END                                    AS sender,
             m.ZISFROMME                                                    AS key_from_me,
             mi.ZMEDIAURL                                                   AS message_url,
-            CASE WHEN mi.ZMEDIALOCALPATH LIKE '%Documents%'
-                 THEN mi.ZTITLE END                                        AS media_name
+            {media_name_expr}{thumb_col}
         FROM ZWAMESSAGE m
         JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
         JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
         WHERE cs.ZGROUPINFO IS NULL
-          AND mi.ZMEDIALOCALPATH IS NOT NULL
-          AND mi.ZMEDIALOCALPATH NOT LIKE '%@status%'
+          {msg_type_filter}
+          {media_filter}
           {since_clause}
           {hd_dedup_clause}
         {block_limit_clause}
     )
 )
+"""
+
+    return f"""{hd_cte}
+SELECT
+    m.Z_PK                                                         AS message_id,
+    CAST((m.ZMESSAGEDATE + {APPLE_EPOCH_OFFSET}) * 1000 AS INTEGER) AS timestamp_ms,
+    {file_path_expr},
+    {mime_type_expr},
+    CAST(cs.Z_PK AS TEXT)                                          AS chat_row_id,
+    CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN cs.ZPARTNERNAME ELSE NULL END AS chat_subject,
+    CASE
+         WHEN cs.ZGROUPINFO IS NOT NULL THEN
+             CASE
+                 WHEN gm.ZMEMBERJID IS NOT NULL AND INSTR(gm.ZMEMBERJID, '@') > 0
+                 THEN SUBSTR(gm.ZMEMBERJID, 1, INSTR(gm.ZMEMBERJID, '@') - 1)
+                 WHEN gm.ZMEMBERJID IS NOT NULL
+                 THEN gm.ZMEMBERJID
+                 ELSE m.ZPUSHNAME END
+         ELSE
+             CASE WHEN INSTR(cs.ZCONTACTJID, '@') > 0
+                  THEN SUBSTR(cs.ZCONTACTJID, 1, INSTR(cs.ZCONTACTJID, '@') - 1)
+                  ELSE cs.ZCONTACTJID END
+    END                                                            AS sender,
+    m.ZISFROMME                                                    AS key_from_me,
+    mi.ZMEDIAURL                                                   AS message_url,
+    {media_name_expr}{thumb_col}
+FROM ZWAMESSAGE m
+JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
+JOIN ZWAMEDIAITEM   mi ON mi.Z_PK = m.ZMEDIAITEM
+LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
+WHERE (cs.ZGROUPINFO IS NULL OR cs.ZPARTNERNAME IS NOT NULL)
+  {msg_type_filter}
+  {media_filter}
+  {since_clause}
+  {hd_dedup_clause}
 """
 
 
@@ -396,12 +564,49 @@ def build_ios_number_map(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict
         raw_pairs = cursor.fetchall()
     except sqlite3.OperationalError as e:
         logger.warning(f"iOS number-change query unavailable ({e}); skipping consolidation.")
-        return {}
-
-    if not raw_pairs:
-        return {}
+        raw_pairs = []
 
     direct = {old: new for old, new in raw_pairs if old and new}
+    try:
+        cs_cols = {r[1] for r in cursor.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if "ZCONTACTIDENTIFIER" in cs_cols:
+            lid_pairs = cursor.execute("""
+                SELECT
+                    CASE WHEN INSTR(ZCONTACTJID, '@') > 0
+                         THEN SUBSTR(ZCONTACTJID, 1, INSTR(ZCONTACTJID, '@') - 1)
+                         ELSE ZCONTACTJID END,
+                    CASE WHEN INSTR(ZCONTACTIDENTIFIER, '@') > 0
+                         THEN SUBSTR(ZCONTACTIDENTIFIER, 1, INSTR(ZCONTACTIDENTIFIER, '@') - 1)
+                         ELSE ZCONTACTIDENTIFIER END
+                FROM ZWACHATSESSION
+                WHERE ZCONTACTJID LIKE '%@lid'
+                  AND ZCONTACTIDENTIFIER LIKE '%@s.whatsapp.net'
+            """).fetchall()
+            for lid, phone in lid_pairs:
+                if lid and phone:
+                    direct[lid] = phone
+
+            lid_pairs_inv = cursor.execute("""
+                SELECT
+                    CASE WHEN INSTR(ZCONTACTIDENTIFIER, '@') > 0
+                         THEN SUBSTR(ZCONTACTIDENTIFIER, 1, INSTR(ZCONTACTIDENTIFIER, '@') - 1)
+                         ELSE ZCONTACTIDENTIFIER END,
+                    CASE WHEN INSTR(ZCONTACTJID, '@') > 0
+                         THEN SUBSTR(ZCONTACTJID, 1, INSTR(ZCONTACTJID, '@') - 1)
+                         ELSE ZCONTACTJID END
+                FROM ZWACHATSESSION
+                WHERE ZCONTACTJID LIKE '%@s.whatsapp.net'
+                  AND ZCONTACTIDENTIFIER LIKE '%@lid'
+            """).fetchall()
+            for lid, phone in lid_pairs_inv:
+                if lid and phone:
+                    direct[lid] = phone
+    except sqlite3.OperationalError as e:
+        logger.debug(f"ZCONTACTIDENTIFIER LID mapping query unavailable ({e}); skipping.")
+
+    if not direct:
+        return {}
+
     cyclic: set[str] = set()
 
     def resolve(number, visited=None):
@@ -464,6 +669,9 @@ def load_ios_contacts(sqlite_path: str, logger: logging.Logger) -> dict[str, str
 
     try:
         with contextlib.closing(sqlite3.connect(sqlite_path)) as conn:
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(ZWAADDRESSBOOKCONTACT)").fetchall()
+            }
             rows = conn.execute("""
                 SELECT SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1),
                        ZFULLNAME
@@ -471,12 +679,51 @@ def load_ios_contacts(sqlite_path: str, logger: logging.Logger) -> dict[str, str
                 WHERE ZWHATSAPPID LIKE '%@s.whatsapp.net'
                   AND ZFULLNAME IS NOT NULL
             """).fetchall()
+            contacts = {number: name for number, name in rows if number}
+
+            if "ZLID" in cols:
+                lid_rows = conn.execute("""
+                    SELECT SUBSTR(ZLID, 1, INSTR(ZLID, '@') - 1),
+                           ZFULLNAME
+                    FROM ZWAADDRESSBOOKCONTACT
+                    WHERE ZLID LIKE '%@lid'
+                      AND ZFULLNAME IS NOT NULL
+                """).fetchall()
+                for lid, name in lid_rows:
+                    if lid and name:
+                        contacts.setdefault(lid, name)
     except sqlite3.OperationalError as e:
         logger.warning(f"Could not read iOS contacts ({e}); proceeding without names.")
         return {}
-
-    contacts = {number: name for number, name in rows if number}
     unique_contacts = len({name for name in contacts.values() if name})
     logger.info(f"Loaded {len(contacts)} phone number(s) across {unique_contacts} iOS contact(s).")
     contacts.setdefault("0", "WhatsApp")
     return contacts
+
+
+def load_ios_lid_map(sqlite_path: str, logger: logging.Logger) -> dict[str, str]:
+    """
+    Load LID -> phone_number mapping from ContactsV2.sqlite (ZWAADDRESSBOOKCONTACT).
+    Returns {lid_prefix: phone_number}.
+    """
+    if not sqlite_path or not os.path.isfile(sqlite_path):
+        return {}
+
+    try:
+        with contextlib.closing(sqlite3.connect(sqlite_path)) as conn:
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(ZWAADDRESSBOOKCONTACT)").fetchall()
+            }
+            if "ZLID" not in cols or "ZWHATSAPPID" not in cols:
+                return {}
+            rows = conn.execute("""
+                SELECT SUBSTR(ZLID, 1, INSTR(ZLID, '@') - 1),
+                       SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
+                FROM ZWAADDRESSBOOKCONTACT
+                WHERE ZLID LIKE '%@lid'
+                  AND ZWHATSAPPID LIKE '%@s.whatsapp.net'
+            """).fetchall()
+            return {lid: phone for lid, phone in rows if lid and phone}
+    except sqlite3.OperationalError as e:
+        logger.debug(f"Could not read iOS ContactsV2 LID mapping ({e}).")
+        return {}

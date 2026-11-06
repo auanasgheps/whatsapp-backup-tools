@@ -22,6 +22,9 @@
     document.getElementById('date-picker-input').style.colorScheme = scheme;
     const sizeMap = { small: '13px', medium: '15px', large: '17px' };
     document.documentElement.style.setProperty('--font-size', sizeMap[prefs.font_size] || '15px');
+    const gridMap = { small: '280px', medium: '320px', large: '360px' };
+    document.documentElement.style.setProperty('--media-grid-size', gridMap[prefs.font_size] || '320px');
+    document.documentElement.dataset.fontSize = prefs.font_size || 'medium';
     document.querySelectorAll('.pref-btn').forEach(btn => {
       btn.classList.toggle('active', prefs[btn.dataset.pref] === btn.dataset.value);
     });
@@ -400,11 +403,22 @@
   }
 
   const MEDIA_LABELS = {image:'📷 Photo', video:'🎥 Video', audio:'🎵 Voice message',
-                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link'};
+                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link',
+                        location:'📍 Location', live_location:'📍 Live location', vcard:'👤 Contact'};
   function chatPreview(chat) {
     const prefix = chat.last_msg_from_me ? 'You: ' : '';
     if (chat.last_msg_type === 'service') {
       return esc(chat.last_msg_preview || '…');
+    }
+    if (chat.last_msg_type === 'deleted') {
+      return '<span class="deleted-preview">🚫 ' + esc(chat.last_msg_preview || 'This message was deleted') + '</span>';
+    }
+    if (chat.last_msg_type === 'poll') {
+      return prefix + '📊 ' + esc(chat.last_msg_preview || 'Poll');
+    }
+    if (chat.is_view_once) {
+      const voLabel = chat.last_msg_type === 'video' ? 'Video' : (chat.last_msg_type === 'audio' ? 'Voice message' : 'Photo');
+      return prefix + '<span class="vo-preview">① ' + voLabel + '</span>';
     }
     if (chat.last_msg_type !== 'text') {
       return prefix + (MEDIA_LABELS[chat.last_msg_type] || '📎 Media');
@@ -422,7 +436,10 @@
       el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
       el.dataset.id = chat.id;
       el.dataset.type = chat.type;
-      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
+      const tagHtml = chat.is_preserved_only
+        ? '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
+        : '';
+      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
       el.addEventListener('click', () => selectChat(chat, el));
       list.appendChild(el);
     });
@@ -442,6 +459,7 @@
     msgList = [];
     noMoreOlder = false;
     noMoreNewer = true;
+    isUserAtBottom = true;
 
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
@@ -454,6 +472,11 @@
     document.getElementById('search-results').innerHTML = '';
 
     // reset in-chat search and date picker when switching chats
+    if (_jumpAbortController) {
+      _jumpAbortController.abort();
+    }
+    hideJumpHud();
+    scroll.classList.remove('is-navigating');
     document.getElementById('chat-search-input').value = '';
     document.getElementById('chat-search-clear').style.display = 'none';
     clearChatSearch();
@@ -470,8 +493,6 @@
       suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
       suppressScroll = false;
-      await _awaitImagesSettled(scroll, 1500);
-      if (gen !== _loadGen) return;
     } catch (err) {
       console.error('Failed to load chat messages:', err);
     } finally {
@@ -493,6 +514,7 @@
   let _loadGen = 0;
   let noMoreOlder = false;
   let noMoreNewer = false;
+  let isUserAtBottom = true;
 
   function showSpinner(position) {
     const el = document.createElement('div');
@@ -549,12 +571,15 @@
       }
 
       suppressScroll = true;
-      const anchor = captureAnchor(direction);
-      mergePage(msgs);
-      pruneList(direction);
-      renderWindow();
-      restoreAnchor(anchor);
-      suppressScroll = false;
+      try {
+        const anchor = captureAnchor(direction);
+        mergePage(msgs);
+        pruneList(direction);
+        renderWindow();
+        restoreAnchor(anchor);
+      } finally {
+        suppressScroll = false;
+      }
 
     } catch (err) {
       removeSpinner(direction === 'older' ? 'top' : 'bottom');
@@ -575,7 +600,7 @@
   const MEDIA_GROUP_MIN = 4;
 
   function isGrouableMedia(msg) {
-    return msg.archive_path && (msg.media_type === 'image' || msg.media_type === 'video');
+    return !msg.is_view_once && msg.archive_path && (msg.media_type === 'image' || msg.media_type === 'video' || msg.media_type === 'gif');
   }
 
   function sameSender(a, b) {
@@ -647,6 +672,24 @@
         msgList.push(m);
       }
     }
+    // Discard any preserved duplicates when matching non-deleted live messages are present
+    const liveStanzas = new Set();
+    const liveKeys = new Set();
+    for (const m of msgList) {
+      if (!m.is_preserved && m.media_type !== 'deleted') {
+        if (m.stanza_id) liveStanzas.add(m.stanza_id);
+        liveKeys.add(`${m.timestamp_ms}_${m.from_me ? 1 : 0}`);
+      }
+    }
+    if (liveStanzas.size > 0 || liveKeys.size > 0) {
+      msgList = msgList.filter(m => {
+        if (m.is_preserved) {
+          if (m.stanza_id && liveStanzas.has(m.stanza_id)) return false;
+          if (liveKeys.has(`${m.timestamp_ms}_${m.from_me ? 1 : 0}`)) return false;
+        }
+        return true;
+      });
+    }
     msgList.sort((a, b) => (a.timestamp_ms - b.timestamp_ms) || ((a.sort_id ?? a.msg_id) - (b.sort_id ?? b.msg_id)) || (a.msg_id - b.msg_id));
   }
 
@@ -666,12 +709,20 @@
     const units = [];
     for (let i = 0; i < list.length;) {
       const first = list[i];
+      if (first.is_live_photo_video) {
+        i++;
+        continue;
+      }
       if (isGrouableMedia(first)) {
         const run = [first];
         let j = i + 1;
         while (j < list.length) {
           const prev = run[run.length - 1];
           const curr = list[j];
+          if (curr.is_live_photo_video) {
+            j++;
+            continue;
+          }
           if (!isGrouableMedia(curr)) break;
           if (!sameSender(first, curr)) break;
           if (curr.timestamp_ms - prev.timestamp_ms > MEDIA_GROUP_GAP_MS) break;
@@ -707,31 +758,62 @@
     }
   }
 
+  function flashHighlightRow(row) {
+    if (!row) return;
+    const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
+    if (bubble) {
+      bubble.classList.remove('search-jump-highlight');
+      void bubble.offsetWidth;
+      bubble.classList.add('search-jump-highlight');
+      const timer = setTimeout(() => bubble.classList.remove('search-jump-highlight'), 1200);
+      bubble.addEventListener('animationend', () => {
+        clearTimeout(timer);
+        bubble.classList.remove('search-jump-highlight');
+      }, { once: true });
+    }
+  }
+
   async function jumpToMessage(msg) {
     const inWin = rowForMsgId(msg.msg_id);
-    if (inWin) { inWin.scrollIntoView({ behavior: 'instant', block: 'center' }); return inWin; }
-    await jumpToTimestamp(msg.timestamp_ms, msg.msg_id);
-    const row = rowForMsgId(msg.msg_id);
-    if (row) {
+    if (inWin) {
       suppressScroll = true;
-      row.scrollIntoView({ behavior: 'instant', block: 'center' });
+      inWin.scrollIntoView({ behavior: 'instant', block: 'center' });
       suppressScroll = false;
+      flashHighlightRow(inWin);
+      return inWin;
     }
+    const row = await jumpToTimestamp(msg.timestamp_ms, msg.msg_id, true);
     return row;
   }
 
   function _attachMediaScrollAnchor(mediaEl) {
     mediaEl.addEventListener('load', () => {
       const scroll = document.getElementById('message-scroll');
-      if (!scroll) return;
-      const distFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
-      if (distFromBottom < 40) {
-        suppressScroll = true;
-        scroll.scrollTop = scroll.scrollHeight;
-        suppressScroll = false;
-      }
+      if (!scroll || !isUserAtBottom) return;
+      suppressScroll = true;
+      scroll.scrollTop = scroll.scrollHeight;
+      suppressScroll = false;
     });
   }
+
+  const gifViewportObserver = typeof IntersectionObserver !== 'undefined'
+    ? new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          const vid = entry.target;
+          const container = vid.closest('.msg-gif');
+          if (!container) continue;
+          if (!entry.isIntersecting) {
+            if (!vid.paused) {
+              vid.pause();
+            }
+          } else {
+            if (container.classList.contains('is-playing') && vid.paused) {
+              vid.play().catch(() => {});
+            }
+          }
+        }
+      }, { threshold: 0.05 })
+    : null;
 
   function renderMediaGrid(group) {
     const grid = document.createElement('div');
@@ -748,7 +830,7 @@
       const src = '/media/' + msg.archive_path;
       const mt = msg.media_type;
 
-      if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
+      if (mt === 'image' || mt === 'sticker') {
         const img = document.createElement('img');
         img.src = src;
         img.loading = 'lazy';
@@ -756,11 +838,25 @@
         img.addEventListener('click', () => showLightboxForGroup(group, idx));
         _attachMediaScrollAnchor(img);
         wrap.appendChild(img);
-      } else if (mt === 'video') {
+      } else if (mt === 'video' || mt === 'gif') {
         const vid = document.createElement('video');
-        vid.controls = true;
+        vid.controls = (mt === 'video');
         vid.preload = 'none';
         vid.src = src;
+        if (mt === 'gif') {
+          vid.muted = true;
+          vid.playsInline = true;
+          vid.loop = true;
+          const badgeWrap = document.createElement('div');
+          badgeWrap.className = 'msg-gif-badge-wrap';
+          badgeWrap.setAttribute('aria-hidden', 'true');
+          const badge = document.createElement('div');
+          badge.className = 'msg-gif-badge';
+          badge.textContent = 'GIF';
+          badgeWrap.appendChild(badge);
+          wrap.appendChild(badgeWrap);
+        }
+        vid.addEventListener('click', () => showLightboxForGroup(group, idx));
         wrap.appendChild(vid);
         const probe = document.createElement('video');
         probe.src = src;
@@ -774,7 +870,7 @@
           vid.poster = canvas.toDataURL('image/jpeg', 0.8);
           probe.src = '';
           const scroll = document.getElementById('message-scroll');
-          if (scroll && (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40)) {
+          if (scroll && isUserAtBottom) {
             suppressScroll = true;
             scroll.scrollTop = scroll.scrollHeight;
             suppressScroll = false;
@@ -813,6 +909,7 @@
       if (suppressScroll) return;
       hideMsgDetails();
       const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
+      isUserAtBottom = atBottom;
       btn.classList.toggle('visible', !atBottom);
       if (scroll.scrollTop < 100) {
         if (loading) return;
@@ -822,7 +919,14 @@
         loadMessages('newer');
       }
     });
+    scroll.addEventListener('wheel', function (e) {
+      if (e.deltaY < 0 && scroll.scrollTop < 100) {
+        if (loading || noMoreOlder) return;
+        loadMessages('older');
+      }
+    }, { passive: true });
     btn.addEventListener('click', async () => {
+      isUserAtBottom = true;
       if (noMoreNewer) {
         await _pinToBottom(_loadGen);
         return;
@@ -836,7 +940,6 @@
       suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
       suppressScroll = false;
-      await _awaitImagesSettled(scroll, 1500);
       if (gen !== _loadGen) return;
       await _pinToBottom(gen);
     });
@@ -885,10 +988,20 @@
         const editedSpan = document.createElement('span');
         editedSpan.className = 'msg-edited';
         editedSpan.textContent = 'Edited';
-        const editedTs = unit.members.find(m => m.edited_ts)?.edited_ts;
-        if (editedTs) {
-          editedSpan.title = 'Edited: ' + fmtTime(editedTs);
+        const editedMember = unit.members.find(m => m.edited_ts || m.original_text_body);
+        if (editedMember && editedMember.edited_ts) {
+          editedSpan.title = 'Edited: ' + fmtTime(editedMember.edited_ts);
         }
+        editedSpan.addEventListener('click', e => {
+          e.stopPropagation();
+          showMsgDetails(
+            null,
+            editedSpan,
+            null,
+            null,
+            editedMember ? { original_text: editedMember.original_text_body || null, edited_ts: editedMember.edited_ts || null } : null
+          );
+        });
         meta.appendChild(editedSpan);
       }
       meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
@@ -899,7 +1012,22 @@
     }
 
     const msg = unit.msg;
+    if (currentChat && currentChat.type === 'contact' && msg.media_type === 'service') {
+      if (
+        !msg.text_body ||
+        !msg.text_body.trim() ||
+        msg.text_body.includes('subject') ||
+        msg.text_body.includes('description') ||
+        msg.text_body.includes('deleted')
+      ) {
+        msg.media_type = 'deleted';
+        msg.text_body = msg.from_me ? 'You deleted this message' : 'This message was deleted';
+      }
+    }
     if (msg.media_type === 'service') {
+      if (!msg.text_body || !msg.text_body.trim()) {
+        return document.createDocumentFragment();
+      }
       const row = document.createElement('div');
       row.className = 'msg-row service';
       row.dataset.msgId = String(msg.msg_id);
@@ -927,22 +1055,52 @@
     senderEl.textContent = msg.sender || '';
     if (msg.sender && !msg.from_me && currentChat && currentChat.type === 'group') bubble.appendChild(senderEl);
 
-    if (msg.quoted_text) {
+    if ((msg.quoted_text || msg.quoted_stanza_id || msg.quoted_msg_id) && msg.media_type !== 'deleted') {
       const quote = document.createElement('div');
       quote.className = 'msg-quote';
+      const qContent = document.createElement('div');
+      qContent.className = 'msg-quote-content';
       const qSender = document.createElement('div');
       qSender.className = 'msg-quote-sender';
       const qs = msg.quoted_sender;
       qSender.textContent = qs || (currentChat && currentChat.type === 'contact' ? currentChat.display_name : '');
       const qText = document.createElement('div');
       qText.className = 'msg-quote-text';
-      qText.textContent = msg.quoted_text;
-      quote.appendChild(qSender);
-      quote.appendChild(qText);
-      if (msg.quoted_ts) {
+      qText.textContent = msg.quoted_text || (msg.quoted_msg_id ? 'Quoted message' : '');
+      qContent.appendChild(qSender);
+      qContent.appendChild(qText);
+      quote.appendChild(qContent);
+
+      if (msg.quoted_has_thumb && (msg.quoted_msg_id || msg.msg_id)) {
+        const qThumb = document.createElement('img');
+        qThumb.className = 'msg-quote-thumb';
+        qThumb.alt = '';
+        qThumb.loading = 'lazy';
+        qThumb.decoding = 'async';
+        const primaryId = msg.quoted_msg_id || msg.msg_id;
+        const fallbackId = (msg.quoted_msg_id && msg.msg_id && msg.quoted_msg_id !== msg.msg_id) ? msg.msg_id : null;
+        qThumb.src = '/api/thumbnail/' + primaryId;
+        qThumb.onerror = () => {
+          if (fallbackId && qThumb.src.indexOf('/' + fallbackId) === -1) {
+            qThumb.src = '/api/thumbnail/' + fallbackId;
+          } else {
+            qThumb.remove();
+          }
+        };
+        quote.appendChild(qThumb);
+      }
+
+      if (msg.quoted_msg_id || msg.quoted_ts) {
         quote.style.cursor = 'pointer';
         quote.title = 'Jump to original message';
-        quote.addEventListener('click', () => jumpToTimestamp(msg.quoted_ts, null));
+        quote.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (msg.quoted_msg_id) {
+            jumpToMessage({ msg_id: msg.quoted_msg_id, timestamp_ms: msg.quoted_ts });
+          } else {
+            jumpToTimestamp(msg.quoted_ts, null, true);
+          }
+        });
       }
       bubble.appendChild(quote);
     }
@@ -955,7 +1113,10 @@
       badge.textContent = 'You';
       meta.appendChild(badge);
     }
-    const showInfo = msg.from_me ? !!msg.msg_id : !!msg.archive_path;
+    const showInfo = (msg.from_me && !msg.is_preserved && !!msg.msg_id && msg.media_type !== 'deleted') ||
+                     (!!msg.archive_path && msg.media_type !== 'deleted') ||
+                     !!msg.is_preserved ||
+                     (msg.is_edited && !!msg.original_text_body);
     if (showInfo) {
       const infoBtn = document.createElement('span');
       infoBtn.className = 'msg-info-btn';
@@ -963,34 +1124,100 @@
       infoBtn.textContent = 'ⓘ';
       infoBtn.addEventListener('click', e => {
         e.stopPropagation();
-        showMsgDetails(msg.from_me ? msg.msg_id : null, infoBtn, msg.archive_path || null);
+        showMsgDetails(
+          (msg.from_me && !msg.is_preserved) ? msg.msg_id : null,
+          infoBtn,
+          msg.archive_path || null,
+          msg.is_preserved ? { reason: msg.preservation_reason, at: msg.preserved_at, platform: msg.source_platform || null } : null,
+          msg.is_edited ? { original_text: msg.original_text_body || null, edited_ts: msg.edited_ts || null } : null
+        );
       });
       meta.appendChild(infoBtn);
     }
-    if (msg.is_edited) {
+    if (msg.is_preserved) {
+      const presSpan = document.createElement('span');
+      presSpan.className = 'msg-preserved';
+      presSpan.textContent = 'Preserved';
+      const reasonLabel = msg.preservation_reason === 'revoked_by_sender'
+        ? 'Revoked by sender'
+        : (msg.preservation_reason === 'chat_deleted'
+          ? 'Chat deleted on device'
+          : 'Deleted on device');
+      const presTs = typeof msg.preserved_at === 'number' ? msg.preserved_at * 1000 : Date.parse(msg.preserved_at);
+      const presDate = !isNaN(presTs) ? fmtTime(presTs) : (msg.preserved_at || '');
+      const backupPrefix = presDate ? `Preserved from backup (${presDate})` : 'Preserved from backup';
+      presSpan.title = `${backupPrefix} • ${reasonLabel}`;
+      meta.appendChild(presSpan);
+    }
+    if (msg.is_edited && msg.media_type !== 'deleted') {
       const editedSpan = document.createElement('span');
       editedSpan.className = 'msg-edited';
       editedSpan.textContent = 'Edited';
       if (msg.edited_ts) {
         editedSpan.title = 'Edited: ' + fmtTime(msg.edited_ts);
       }
+      editedSpan.addEventListener('click', e => {
+        e.stopPropagation();
+        showMsgDetails(
+          (msg.from_me && !msg.is_preserved) ? msg.msg_id : null,
+          editedSpan,
+          msg.archive_path || null,
+          msg.is_preserved ? { reason: msg.preservation_reason, at: msg.preserved_at, platform: msg.source_platform || null } : null,
+          { original_text: msg.original_text_body || null, edited_ts: msg.edited_ts || null }
+        );
+      });
       meta.appendChild(editedSpan);
     }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
-    if (msg.media_type === 'text' || !msg.archive_path) {
+    if (msg.media_type === 'deleted') {
+      bubble.classList.add('deleted');
+      const delEl = document.createElement('div');
+      delEl.className = 'msg-deleted-content';
+      const icon = document.createElement('span');
+      icon.className = 'deleted-icon';
+      icon.textContent = '⃠';
+      const txt = document.createElement('span');
+      txt.className = 'deleted-text';
+      txt.textContent = msg.text_body || 'This message was deleted';
+      delEl.appendChild(icon);
+      delEl.appendChild(document.createTextNode(' '));
+      delEl.appendChild(txt);
+      bubble.appendChild(delEl);
+    } else if (msg.is_view_once && !msg.archive_path) {
+      bubble.classList.add('view-once-opened');
+      const voEl = document.createElement('div');
+      voEl.className = 'msg-view-once-pill';
+      const voIcon = document.createElement('span');
+      voIcon.className = 'vo-icon';
+      voIcon.textContent = '①';
+      const voLabel = document.createElement('span');
+      voLabel.className = 'vo-label';
+      const typeLabel = msg.media_type === 'video' ? 'Video' : (msg.media_type === 'audio' ? 'Voice message' : 'Photo');
+      voLabel.textContent = typeLabel + ' · Opened';
+      voEl.appendChild(voIcon);
+      voEl.appendChild(voLabel);
+      bubble.appendChild(voEl);
+    } else if (msg.media_type === 'poll') {
+      bubble.appendChild(renderPoll(msg));
+    } else if (msg.media_type === 'location' || msg.media_type === 'live_location') {
+      bubble.appendChild(renderLocation(msg));
+    } else if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
-        const txt = document.createElement('div');
-        txt.className = 'msg-text msg-unavailable';
-        const icon = msg.media_type === 'image' ? '🖼️' : msg.media_type === 'video' ? '🎥' :
-                     msg.media_type === 'audio' ? '🎵' : msg.media_type === 'sticker' ? '🩹' :
-                     msg.media_type === 'gif' ? '🎞️' : msg.media_type === 'vcard' ? '📇' : '📄';
-        txt.innerHTML = esc(icon) + ' ' + highlight(msg.text_body || 'Media not available', '');
-        bubble.appendChild(txt);
+        bubble.appendChild(renderMissingMedia(msg));
+        if (msg.text_body && msg.media_type !== 'vcard') {
+          const cap = document.createElement('div');
+          cap.className = 'msg-caption';
+          cap.innerHTML = highlight(msg.text_body, '');
+          bubble.appendChild(cap);
+        }
       } else {
         const txt = document.createElement('div');
         txt.className = 'msg-text';
         txt.innerHTML = highlight(msg.text_body, '');
         bubble.appendChild(txt);
+        if (msg.link_title || msg.link_url || msg.link_desc) {
+          bubble.appendChild(renderLinkPreview(msg));
+        }
       }
     } else {
       const mediaEl = renderMedia(msg);
@@ -1005,7 +1232,7 @@
 
     bubble.appendChild(meta);
 
-    if (msg.reactions) {
+    if (msg.reactions && msg.media_type !== 'deleted') {
       const emojis = msg.reactions.split(',').filter(Boolean);
       if (emojis.length) {
         row.classList.add('has-reactions');
@@ -1038,14 +1265,275 @@
     return row;
   }
 
+  function extractDomain(url) {
+    if (!url) return '';
+    try {
+      const u = new URL(url);
+      return u.hostname.replace(/^www\./, '').toUpperCase();
+    } catch {
+      return '';
+    }
+  }
+
+  function renderLinkPreview(msg) {
+    const card = document.createElement('div');
+    const isBanner = Number(msg.link_preview_type) === 1;
+    card.className = 'msg-link-preview' + (isBanner ? ' banner' : ' compact');
+
+    const anchor = document.createElement('a');
+    anchor.className = 'link-preview-anchor';
+    anchor.href = msg.link_url || '#';
+    anchor.target = '_blank';
+    anchor.rel = 'noopener noreferrer';
+    const domain = extractDomain(msg.link_url);
+    const ariaTitle = msg.link_title || domain || 'Web page';
+    anchor.setAttribute('aria-label', 'Link preview: ' + ariaTitle);
+
+    if (msg.has_thumbnail && msg.msg_id) {
+      const mediaBox = document.createElement('div');
+      mediaBox.className = 'link-preview-media';
+      const img = document.createElement('img');
+      img.className = 'link-preview-thumb';
+      img.src = '/api/thumbnail/' + msg.msg_id;
+      img.alt = '';
+      img.loading = 'lazy';
+      img.onerror = () => {
+        mediaBox.style.display = 'none';
+      };
+      mediaBox.appendChild(img);
+      anchor.appendChild(mediaBox);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'link-preview-body';
+
+    if (domain) {
+      const domEl = document.createElement('div');
+      domEl.className = 'link-preview-domain';
+      domEl.textContent = domain;
+      body.appendChild(domEl);
+    }
+
+    if (msg.link_title) {
+      const titleEl = document.createElement('div');
+      titleEl.className = 'link-preview-title';
+      titleEl.textContent = msg.link_title;
+      body.appendChild(titleEl);
+    }
+
+    if (msg.link_desc) {
+      const descEl = document.createElement('div');
+      descEl.className = 'link-preview-desc';
+      descEl.textContent = msg.link_desc;
+      body.appendChild(descEl);
+    }
+
+    anchor.appendChild(body);
+    card.appendChild(anchor);
+    return card;
+  }
+
+  function renderMissingMedia(msg) {
+    const card = document.createElement('div');
+    card.className = 'media-missing-card';
+
+    let ratio = msg.aspect_ratio || 0;
+    if (!ratio && msg.media_width > 0 && msg.media_height > 0) {
+      ratio = msg.media_width / msg.media_height;
+    }
+    if (ratio > 0) {
+      card.style.aspectRatio = ratio.toFixed(3);
+    } else if (msg.media_type === 'video' || msg.media_type === 'gif') {
+      card.style.aspectRatio = '16 / 9';
+    } else if (msg.media_type === 'image') {
+      card.style.aspectRatio = '4 / 3';
+    }
+
+    if (msg.has_thumbnail) {
+      const img = document.createElement('img');
+      img.className = 'media-blurred-bg';
+      img.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+      img.loading = 'lazy';
+      img.alt = '';
+      img.onerror = () => {
+        img.style.display = 'none';
+      };
+      card.appendChild(img);
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'media-missing-overlay';
+
+    const badge = document.createElement('div');
+    badge.className = 'media-missing-badge';
+    const icon = msg.media_type === 'video' ? '🎥' :
+                 msg.media_type === 'audio' ? '🎵' :
+                 msg.media_type === 'sticker' ? '🩹' :
+                 msg.media_type === 'gif' ? '🎞️' :
+                 msg.media_type === 'vcard' ? '📇' :
+                 msg.media_type === 'document' ? '📄' : '🖼️';
+    badge.textContent = icon;
+    overlay.appendChild(badge);
+
+    const info = document.createElement('div');
+    info.className = 'media-missing-info';
+
+    const label = document.createElement('div');
+    label.className = 'media-missing-label';
+    label.textContent = msg.media_type === 'video' ? 'Video' :
+                        msg.media_type === 'gif' ? 'GIF' :
+                        msg.media_type === 'audio' ? 'Audio' :
+                        msg.media_type === 'document' ? 'Document' :
+                        msg.media_type === 'sticker' ? 'Sticker' : 'Photo';
+    info.appendChild(label);
+
+    const sizeStr = _formatBytes(msg.media_size);
+    let durStr = '';
+    if (msg.media_duration && msg.media_duration > 0) {
+      const mins = Math.floor(msg.media_duration / 60);
+      const secs = msg.media_duration % 60;
+      durStr = mins + ':' + (secs < 10 ? '0' : '') + secs;
+    }
+
+    const metaParts = [];
+    if (sizeStr) metaParts.push(sizeStr);
+    if (durStr) metaParts.push(durStr);
+    if (metaParts.length > 0) {
+      const meta = document.createElement('div');
+      meta.className = 'media-missing-meta';
+      meta.textContent = metaParts.join(' · ');
+      info.appendChild(meta);
+    }
+
+    overlay.appendChild(info);
+    card.appendChild(overlay);
+    return card;
+  }
+
+  function renderGif(msg) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-media msg-gif';
+    wrap.setAttribute('tabindex', '0');
+    wrap.setAttribute('aria-label', 'Animated GIF: click to play');
+
+    let ratio = msg.aspect_ratio || 0;
+    if (!ratio && msg.media_width > 0 && msg.media_height > 0) {
+      ratio = msg.media_width / msg.media_height;
+    }
+    if (ratio > 0) {
+      wrap.style.aspectRatio = ratio.toFixed(3);
+    }
+
+    const src = '/media/' + msg.archive_path;
+    const isImageGif = (msg.archive_path || '').toLowerCase().endsWith('.gif');
+    if (isImageGif) {
+      const img = document.createElement('img');
+      img.src = src;
+      img.loading = 'lazy';
+      img.addEventListener('click', () => showLightbox(msg));
+      wrap.appendChild(img);
+      return wrap;
+    }
+
+    const vid = document.createElement('video');
+    vid.className = 'msg-gif-video';
+    vid.preload = 'metadata';
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.loop = true;
+    vid.src = src;
+
+    const probe = document.createElement('video');
+    probe.src = src;
+    probe.muted = true;
+    probe.preload = 'metadata';
+    probe.addEventListener('loadeddata', () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = probe.videoWidth;
+      canvas.height = probe.videoHeight;
+      canvas.getContext('2d').drawImage(probe, 0, 0);
+      vid.poster = canvas.toDataURL('image/jpeg', 0.8);
+      probe.src = '';
+      const scroll = document.getElementById('message-scroll');
+      if (scroll && isUserAtBottom) {
+        suppressScroll = true;
+        scroll.scrollTop = scroll.scrollHeight;
+        suppressScroll = false;
+      }
+    }, { once: true });
+    probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
+
+    const badgeWrap = document.createElement('div');
+    badgeWrap.className = 'msg-gif-badge-wrap';
+    badgeWrap.setAttribute('aria-hidden', 'true');
+    const badge = document.createElement('div');
+    badge.className = 'msg-gif-badge';
+    badge.textContent = 'GIF';
+    badgeWrap.appendChild(badge);
+
+    function toggleGif() {
+      if (vid.paused) {
+        vid.play().then(() => {
+          wrap.classList.add('is-playing');
+          wrap.setAttribute('aria-label', 'Animated GIF: click to pause');
+        }).catch(() => {});
+      } else {
+        vid.pause();
+        wrap.classList.remove('is-playing');
+        wrap.setAttribute('aria-label', 'Animated GIF: click to play');
+      }
+    }
+
+    wrap.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleGif();
+    });
+
+    wrap.addEventListener('keydown', (e) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleGif();
+      }
+    });
+
+    if (gifViewportObserver) {
+      gifViewportObserver.observe(vid);
+    }
+
+    wrap.appendChild(vid);
+    wrap.appendChild(badgeWrap);
+
+    if (msg.is_view_once) {
+      const voBadge = document.createElement('span');
+      voBadge.className = 'msg-view-once-badge';
+      voBadge.innerHTML = '<span class="vo-icon">①</span> View Once';
+      wrap.appendChild(voBadge);
+    }
+
+    return wrap;
+  }
+
   function renderMedia(msg) {
+    if (msg.media_type === 'gif') {
+      return renderGif(msg);
+    }
+
     const wrap = document.createElement('div');
     wrap.className = 'msg-media';
     const path = msg.archive_path;
     const src = '/media/' + path;
     const mt = msg.media_type;
 
-    if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
+    let ratio = msg.aspect_ratio || 0;
+    if (!ratio && msg.media_width > 0 && msg.media_height > 0) {
+      ratio = msg.media_width / msg.media_height;
+    }
+    if (ratio > 0) {
+      wrap.style.aspectRatio = ratio.toFixed(3);
+    }
+
+    if (mt === 'image' || mt === 'sticker') {
       if (mt === 'sticker') wrap.classList.add('sticker');
       const img = document.createElement('img');
       img.src = src;
@@ -1054,6 +1542,57 @@
       img.addEventListener('click', () => showLightbox(msg));
       _attachMediaScrollAnchor(img);
       wrap.appendChild(img);
+
+      if (msg.is_live_photo && msg.live_photo_path) {
+        wrap.classList.add('msg-live-photo');
+        const liveBadge = document.createElement('span');
+        liveBadge.className = 'msg-live-badge';
+        liveBadge.innerHTML = '<span class="live-icon">◎</span> LIVE';
+        liveBadge.title = 'Live Photo: hover or click to play motion';
+        wrap.appendChild(liveBadge);
+
+        let liveVid = null;
+
+        function startLivePlay() {
+          if (!liveVid) {
+            liveVid = document.createElement('video');
+            liveVid.className = 'live-photo-video';
+            liveVid.src = '/media/' + msg.live_photo_path;
+            liveVid.muted = true;
+            liveVid.loop = true;
+            liveVid.playsInline = true;
+            wrap.appendChild(liveVid);
+          }
+          liveVid.currentTime = 0;
+          liveVid.play().then(() => {
+            wrap.classList.add('is-live-playing');
+          }).catch(() => {});
+        }
+
+        function stopLivePlay() {
+          if (liveVid) {
+            liveVid.pause();
+            liveVid.currentTime = 0;
+            wrap.classList.remove('is-live-playing');
+          }
+        }
+
+        wrap.addEventListener('mouseenter', () => {
+          startLivePlay();
+        });
+        wrap.addEventListener('mouseleave', () => {
+          stopLivePlay();
+        });
+
+        liveBadge.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (wrap.classList.contains('is-live-playing')) {
+            stopLivePlay();
+          } else {
+            startLivePlay();
+          }
+        });
+      }
     } else if (mt === 'video') {
       const vid = document.createElement('video');
       vid.controls = true;
@@ -1073,7 +1612,7 @@
         vid.poster = canvas.toDataURL('image/jpeg', 0.8);
         probe.src = '';
         const scroll = document.getElementById('message-scroll');
-        if (scroll && (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 40)) {
+        if (scroll && isUserAtBottom) {
           suppressScroll = true;
           scroll.scrollTop = scroll.scrollHeight;
           suppressScroll = false;
@@ -1130,7 +1669,315 @@
       a.innerHTML = `<span class="doc-icon">📄</span><span>${esc(msg.media_name || 'Download')}</span>`;
       wrap.appendChild(a);
     }
+    if (msg.is_view_once) {
+      const voBadge = document.createElement('span');
+      voBadge.className = 'msg-view-once-badge';
+      voBadge.innerHTML = '<span class="vo-icon">①</span> View Once';
+      wrap.appendChild(voBadge);
+    }
     return wrap;
+  }
+
+  function formatCoordinates(lat, lng) {
+    const latNum = Number(lat);
+    const lngNum = Number(lng);
+    if (isNaN(latNum) || isNaN(lngNum)) return (lat || '') + ', ' + (lng || '');
+    const latDir = latNum >= 0 ? 'N' : 'S';
+    const lngDir = lngNum >= 0 ? 'E' : 'W';
+    return Math.abs(latNum).toFixed(4) + '° ' + latDir + ', ' + Math.abs(lngNum).toFixed(4) + '° ' + lngDir;
+  }
+
+  function renderLocation(msg) {
+    const isLive = msg.media_type === 'live_location'
+      || msg.raw_msg_type === 16
+      || Boolean(Number(msg.live_location_share_duration) > 0);
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-location-wrap';
+
+    const card = document.createElement('div');
+    card.className = 'msg-location-card' + (isLive ? ' is-live-location' : ' is-static-location');
+
+    // 1. Map Header (Pre-rendered thumbnail from DB or offline vector fallback)
+    const mapHeader = document.createElement('div');
+    mapHeader.className = 'location-map-header';
+
+    const typeChip = document.createElement('div');
+    typeChip.className = 'location-map-type-chip' + (isLive ? ' is-live' : ' is-static');
+    typeChip.innerHTML = isLive
+      ? '<span class="live-pulse-dot" aria-hidden="true"></span><span>Live Location</span>'
+      : '<span class="loc-pin-icon" aria-hidden="true">📍</span><span>Location</span>';
+    mapHeader.appendChild(typeChip);
+
+    const fallbackVector = () => {
+      const existingHint = mapHeader.querySelector('.location-map-hover-hint');
+      const existingChip = mapHeader.querySelector('.location-map-type-chip');
+      mapHeader.innerHTML = '';
+      if (existingChip) {
+        mapHeader.appendChild(existingChip);
+      }
+      const svgWrap = document.createElement('div');
+      svgWrap.className = 'location-vector-map' + (isLive ? ' is-live' : '');
+      svgWrap.innerHTML = `
+        <svg viewBox="0 0 320 180" xmlns="http://www.w3.org/2000/svg" class="location-map-svg" aria-hidden="true">
+          <defs>
+            <pattern id="locGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+              <path d="M 40 0 L 0 0 0 40" fill="none" stroke="currentColor" stroke-width="0.75" stroke-opacity="0.18" />
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="currentColor" class="map-bg" />
+          <rect width="100%" height="100%" fill="url(#locGrid)" />
+          <path d="M-10 60 Q 90 40 180 80 T 330 110" fill="none" stroke="currentColor" stroke-width="5" stroke-opacity="0.32" />
+          <path d="M 70 -10 Q 120 70 160 190" fill="none" stroke="currentColor" stroke-width="3" stroke-opacity="0.25" />
+          <path d="M 230 -10 Q 200 80 250 190" fill="none" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.2" />
+          <circle cx="160" cy="90" r="${isLive ? 32 : 24}" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-opacity="0.35" class="location-ping-ring" />
+          ${isLive ? '<circle cx="160" cy="90" r="16" fill="var(--accent)" fill-opacity="0.2" />' : ''}
+          ${isLive 
+            ? '<circle cx="160" cy="90" r="6" fill="var(--accent)" />'
+            : '<path d="M 160 76 C 153.4 76 148 81.4 148 88 C 148 97 160 108 160 108 C 160 108 172 97 172 88 C 172 81.4 166.6 76 160 76 Z" fill="#ea4335" /><circle cx="160" cy="87" r="3.5" fill="#fff" />'
+          }
+        </svg>
+      `;
+      mapHeader.appendChild(svgWrap);
+      if (existingHint) {
+        mapHeader.appendChild(existingHint);
+      }
+    };
+
+    if (msg.has_thumbnail) {
+      const img = document.createElement('img');
+      img.className = 'location-map-thumb';
+      img.loading = 'lazy';
+      img.alt = msg.location_name || (isLive ? 'Live Location' : 'Location map');
+      img.src = '/api/thumbnail/' + msg.msg_id;
+      img.addEventListener('error', fallbackVector, { once: true });
+      mapHeader.appendChild(img);
+    } else {
+      fallbackVector();
+    }
+
+    if (msg.latitude && msg.longitude) {
+      mapHeader.classList.add('is-interactive');
+      mapHeader.setAttribute('role', 'button');
+      mapHeader.setAttribute('tabindex', '0');
+      mapHeader.setAttribute('aria-haspopup', 'dialog');
+      mapHeader.setAttribute('aria-label', (msg.location_name ? (msg.location_name + ' — ') : '') + 'Open in Maps');
+      mapHeader.title = 'Click to open in maps';
+
+      const hoverHint = document.createElement('div');
+      hoverHint.className = 'location-map-hover-hint';
+      hoverHint.innerHTML = '<span class="hover-hint-icon" aria-hidden="true">🗺️</span><span>Open in Maps</span> <span class="hover-hint-arrow" aria-hidden="true">↗</span>';
+      mapHeader.appendChild(hoverHint);
+
+      const triggerMapChooser = (e) => {
+        e.stopPropagation();
+        openMapChooser({
+          latitude: msg.latitude,
+          longitude: msg.longitude,
+          name: msg.location_name,
+          address: msg.location_address,
+          isLive: isLive
+        }, mapHeader);
+      };
+
+      mapHeader.addEventListener('click', triggerMapChooser);
+      mapHeader.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          triggerMapChooser(e);
+        }
+      });
+    }
+
+    card.appendChild(mapHeader);
+
+    // 2. Details (Venue Name, Address, Status, Timestamps, Coordinates)
+    const details = document.createElement('div');
+    details.className = 'location-details';
+
+    if (isLive) {
+      const liveBadge = document.createElement('div');
+      liveBadge.className = 'location-live-badge';
+      liveBadge.innerHTML = '<span class="live-dot" aria-hidden="true"></span><span class="live-label">Live location ended</span>';
+      details.appendChild(liveBadge);
+
+      if (msg.live_location_share_duration || msg.timestamp_ms) {
+        const timeInfo = document.createElement('div');
+        timeInfo.className = 'location-time-info';
+        let durStr = '';
+        const dur = Number(msg.live_location_share_duration) || 0;
+        if (dur >= 3600) {
+          const hrs = Math.round((dur / 3600) * 10) / 10;
+          durStr = hrs + (hrs === 1 ? ' hr' : ' hrs');
+        } else if (dur > 0) {
+          durStr = Math.round(dur / 60) + ' min';
+        }
+
+        let endStr = '';
+        if (msg.timestamp_ms && dur > 0) {
+          const endDate = new Date(Number(msg.timestamp_ms) + dur * 1000);
+          endStr = 'Ended at ' + endDate.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        }
+
+        const summary = [durStr ? ('Shared for ' + durStr) : '', endStr].filter(Boolean).join(' · ');
+        if (summary) {
+          timeInfo.textContent = summary;
+          details.appendChild(timeInfo);
+        }
+      }
+
+      if (msg.latitude && msg.longitude) {
+        const coordsEl = document.createElement('div');
+        coordsEl.className = 'location-coords-sub';
+        coordsEl.textContent = formatCoordinates(msg.latitude, msg.longitude);
+        details.appendChild(coordsEl);
+      }
+    } else {
+      if (msg.location_name) {
+        const nameEl = document.createElement('div');
+        nameEl.className = 'location-name';
+        nameEl.textContent = msg.location_name;
+        details.appendChild(nameEl);
+      } else {
+        const nameEl = document.createElement('div');
+        nameEl.className = 'location-name';
+        nameEl.textContent = 'Pinned location';
+        details.appendChild(nameEl);
+      }
+      if (msg.location_address) {
+        const addrEl = document.createElement('div');
+        addrEl.className = 'location-address';
+        addrEl.textContent = msg.location_address;
+        details.appendChild(addrEl);
+      }
+      if (msg.latitude && msg.longitude) {
+        const coordsEl = document.createElement('div');
+        coordsEl.className = 'location-coords-sub';
+        coordsEl.textContent = formatCoordinates(msg.latitude, msg.longitude);
+        details.appendChild(coordsEl);
+      }
+    }
+
+    card.appendChild(details);
+    wrap.appendChild(card);
+
+    if (msg.text_body) {
+      const cleanBody = msg.text_body.trim();
+      const isDuplicate = cleanBody === msg.location_name
+        || cleanBody === msg.location_address
+        || cleanBody === 'Location'
+        || cleanBody === 'Pinned location'
+        || cleanBody === 'Live Location'
+        || cleanBody.startsWith('Live Location');
+      if (!isDuplicate && cleanBody) {
+        const cap = document.createElement('div');
+        cap.className = 'msg-caption';
+        cap.innerHTML = highlight(cleanBody, '');
+        wrap.appendChild(cap);
+      }
+    }
+
+    return wrap;
+  }
+
+  function renderPoll(msg) {
+    const poll = msg.poll || {
+      question: msg.text_body || 'Poll',
+      multiple_answers: false,
+      total_votes: 0,
+      total_voters: 0,
+      options: [],
+    };
+
+    const container = document.createElement('div');
+    container.className = 'msg-poll';
+    container.setAttribute('role', 'group');
+    container.setAttribute('aria-label', 'Poll: ' + (poll.question || 'Poll'));
+
+    const header = document.createElement('div');
+    header.className = 'msg-poll-header';
+
+    const q = document.createElement('div');
+    q.className = 'msg-poll-question';
+    q.innerHTML = highlight(poll.question || 'Poll', '');
+    header.appendChild(q);
+
+    const badge = document.createElement('div');
+    badge.className = 'msg-poll-badge';
+    badge.textContent = poll.multiple_answers ? 'Multiple choice' : 'Single choice';
+    header.appendChild(badge);
+
+    container.appendChild(header);
+
+    const optionsList = document.createElement('div');
+    optionsList.className = 'msg-poll-options';
+
+    const totalVotes = poll.total_votes || 0;
+
+    for (const opt of poll.options || []) {
+      const optEl = document.createElement('div');
+      optEl.className = 'msg-poll-option' + (opt.user_selected ? ' user-selected' : '');
+
+      const optVotes = (opt.vote_count !== undefined ? opt.vote_count : opt.votes) || 0;
+      const pct = totalVotes > 0 ? Math.round((optVotes / totalVotes) * 100) : 0;
+
+      const fill = document.createElement('div');
+      fill.className = 'msg-poll-option-fill';
+      fill.style.width = pct + '%';
+      fill.setAttribute('role', 'progressbar');
+      fill.setAttribute('aria-valuenow', String(pct));
+      fill.setAttribute('aria-valuemin', '0');
+      fill.setAttribute('aria-valuemax', '100');
+      optEl.appendChild(fill);
+
+      const content = document.createElement('div');
+      content.className = 'msg-poll-option-content';
+
+      const titleEl = document.createElement('span');
+      titleEl.className = 'msg-poll-option-title';
+      if (opt.user_selected) {
+        const checkIcon = document.createElement('span');
+        checkIcon.className = 'msg-poll-check';
+        checkIcon.textContent = '✓ ';
+        titleEl.appendChild(checkIcon);
+      }
+      const nameSpan = document.createElement('span');
+      nameSpan.innerHTML = highlight(opt.name || '', '');
+      titleEl.appendChild(nameSpan);
+      content.appendChild(titleEl);
+
+      const countEl = document.createElement('span');
+      countEl.className = 'msg-poll-option-count';
+      countEl.textContent = String(optVotes);
+      content.appendChild(countEl);
+
+      optEl.appendChild(content);
+      optionsList.appendChild(optEl);
+    }
+
+    container.appendChild(optionsList);
+
+    const footer = document.createElement('div');
+    footer.className = 'msg-poll-footer';
+
+    const totalEl = document.createElement('span');
+    totalEl.className = 'msg-poll-total';
+    const vCount = poll.total_voters !== undefined ? poll.total_voters : totalVotes;
+    totalEl.textContent = vCount === 1 ? '1 vote' : vCount + ' votes';
+    footer.appendChild(totalEl);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'msg-poll-view-votes-btn';
+    btn.textContent = 'View votes';
+    btn.setAttribute('aria-haspopup', 'dialog');
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      showPollDetails(msg.msg_id, btn);
+    });
+    footer.appendChild(btn);
+
+    container.appendChild(footer);
+    return container;
   }
 
   let lightboxItems = [];
@@ -1341,10 +2188,13 @@
     lb.appendChild(tsEl);
 
     let media;
-    if (mt === 'video') {
+    if ((mt === 'video' || mt === 'gif') && !src.toLowerCase().endsWith('.gif')) {
       media = document.createElement('video');
-      media.controls = true;
+      media.controls = (mt === 'video');
       media.autoplay = true;
+      media.loop = true;
+      media.muted = (mt === 'gif');
+      media.playsInline = true;
       media.src = src;
     } else {
       media = document.createElement('img');
@@ -1352,6 +2202,42 @@
       _setupLightboxZoom(lb, media);
     }
     lb.appendChild(media);
+
+    if (msg.is_live_photo && msg.live_photo_path) {
+      const liveBtn = document.createElement('button');
+      liveBtn.className = 'lb-live-btn';
+      liveBtn.innerHTML = '<span class="live-icon">◎</span> LIVE';
+      liveBtn.title = 'Toggle Live Photo playback';
+      let isPlaying = false;
+      let lbVid = null;
+      liveBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        isPlaying = !isPlaying;
+        if (isPlaying) {
+          liveBtn.classList.add('active');
+          if (!lbVid) {
+            lbVid = document.createElement('video');
+            lbVid.className = 'lb-live-video';
+            lbVid.src = '/media/' + msg.live_photo_path;
+            lbVid.autoplay = true;
+            lbVid.loop = true;
+            lbVid.muted = true;
+            lbVid.playsInline = true;
+          }
+          media.style.display = 'none';
+          lb.insertBefore(lbVid, pathRow);
+        } else {
+          liveBtn.classList.remove('active');
+          if (lbVid) {
+            lbVid.pause();
+            lbVid.remove();
+            lbVid = null;
+          }
+          media.style.display = '';
+        }
+      });
+      lb.appendChild(liveBtn);
+    }
 
     const pathRow = document.createElement('div');
     pathRow.className = 'lb-path';
@@ -1404,10 +2290,13 @@
   let archiveViewActive = false;
   let currentGalleryItems = [];
   let activeTypes = new Set();   // empty = show all; populated = show only those types
-  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type
-  const SECONDARY_TYPES = new Set(['link', 'document']);  // hidden by default, toggle exclusive
+  let defaultActiveTypes = new Set();  // restored when deselecting a secondary type or sticker
+  const SECONDARY_TYPES = new Set(['link', 'document']);  // non-media types, fetched separately
+  const DEFAULT_DESELECTED_TYPES = new Set(['sticker', 'link', 'document']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
   let galleryLoadingMore = false;
+  let linksAllLoaded = false;
+  let linksLoadingMore = false;
   let galleryBackfillGen = 0;
   let gallerySentinel = null;
   let galleryObserver = null;
@@ -1508,11 +2397,58 @@
     }
   }
 
+  async function _loadMoreLinks() {
+    if (archiveViewActive || linksAllLoaded || linksLoadingMore || !currentChat) return;
+    linksLoadingMore = true;
+    const grid = document.getElementById('media-gallery-grid');
+    try {
+      const linkCells = grid ? [...grid.querySelectorAll('.gallery-item[data-type="link"]')] : [];
+      if (!linkCells.length) {
+        linksAllLoaded = true;
+        return;
+      }
+      let oldestTs = Infinity;
+      for (const cell of linkCells) {
+        const ts = parseInt(cell.dataset.ts || '0', 10);
+        if (ts > 0 && ts < oldestTs) oldestTs = ts;
+      }
+      const beforeParam = (oldestTs !== Infinity && oldestTs > 0) ? '&before=' + oldestTs : '';
+      const qs = 'chat_id=' + encodeURIComponent(currentChat.id) +
+                 '&chat_type=' + encodeURIComponent(currentChat.type) +
+                 '&limit=100' + beforeParam;
+      const res = await fetch('/api/media/links?' + qs);
+      if (!res.ok) throw new Error('Failed to fetch more links');
+      const items = await res.json();
+      if (items.length < 100) linksAllLoaded = true;
+      for (const msg of items) {
+        _insertGalleryGridItem(grid, msg);
+      }
+      _syncMonthHeaders();
+    } catch (err) {
+      console.error('Failed to load more links:', err);
+    } finally {
+      linksLoadingMore = false;
+    }
+  }
+
   function _checkGalleryLoadMore() {
-    if (archiveViewActive || galleryAllLoaded || galleryLoadingMore) return;
+    if (archiveViewActive) return;
     const grid = document.getElementById('media-gallery-grid');
     if (!grid) return;
 
+    if (!linksAllLoaded && !linksLoadingMore && (activeTypes.has('link') || activeTypes.size === 0)) {
+      const linkCells = grid.querySelectorAll('.gallery-item[data-type="link"]:not(.type-hidden)');
+      const oldestLinkCell = linkCells[linkCells.length - 1];
+      if (oldestLinkCell) {
+        const cellRect = oldestLinkCell.getBoundingClientRect();
+        const gridRect = grid.getBoundingClientRect();
+        if (cellRect.top <= gridRect.bottom + 800) {
+          _loadMoreLinks();
+        }
+      }
+    }
+
+    if (galleryAllLoaded || galleryLoadingMore) return;
     const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
     if (!mediaTypesActive) return;
 
@@ -1620,7 +2556,11 @@
     if (!container) return;
 
     const cRect = container.getBoundingClientRect();
-    const videoCells = [...container.querySelectorAll('.gallery-item[data-type="video"][data-hydrated="true"]')];
+    const videoCells = [
+      ...container.querySelectorAll(
+        '.gallery-item[data-type="video"][data-hydrated="true"], .gallery-item[data-type="gif"][data-hydrated="true"]'
+      )
+    ];
     for (const cell of videoCells) {
       const archivePath = cell.dataset.archivePath;
       if (!archivePath) continue;
@@ -1760,15 +2700,21 @@
       return;
     }
 
-    if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
+    if (mt === 'image' || mt === 'sticker') {
       img.src = src;
-    } else if (mt === 'video') {
+    } else if (mt === 'video' || mt === 'gif') {
       const archivePath = cell.dataset.archivePath;
       if (videoThumbCache.has(archivePath)) {
         img.src = videoThumbCache.get(archivePath);
       } else {
         scheduleVisibleVideoExtraction();
       }
+    } else if (mt === 'link') {
+      img.src = src;
+      img.onerror = () => {
+        const box = cell.querySelector('.gallery-rich-link-media');
+        if (box) box.innerHTML = '<span class="gallery-rich-link-fallback-icon">🔗</span>';
+      };
     }
   }
 
@@ -1783,7 +2729,7 @@
       return;
     }
 
-    if (mt === 'video') {
+    if (mt === 'video' || mt === 'gif') {
       cancelVideoThumbnail(cell);
     }
     img.src = EMPTY_GALLERY_PIX;
@@ -1821,7 +2767,7 @@
     cell.dataset.type = mt;
     cell.dataset.ts = String(msg.timestamp_ms || 0);
 
-    if (mt === 'image' || mt === 'gif' || mt === 'sticker') {
+    if (mt === 'image' || mt === 'sticker') {
       cell.dataset.src = src;
       cell.dataset.hydrated = 'false';
       const img = document.createElement('img');
@@ -1832,7 +2778,7 @@
       lightboxItems.push(msg);
       img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx); });
       cell.appendChild(img);
-    } else if (mt === 'video') {
+    } else if (mt === 'video' || mt === 'gif') {
       cell.dataset.src = src;
       cell.dataset.archivePath = msg.archive_path;
       cell.dataset.hydrated = 'false';
@@ -1851,22 +2797,77 @@
       d.addEventListener('click', () => window.open(src, '_blank'));
       cell.appendChild(d);
     } else if (mt === 'link') {
-      const urlMatch = msg.text_body.match(/https?:\/\/[^\s<>"]+/);
-      const url = urlMatch ? urlMatch[0] : msg.text_body;
-      cell.classList.add('gallery-link-card');
-      const a = document.createElement('a');
-      a.className = 'gallery-link-url';
-      a.href = url;
-      a.title = url;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      a.textContent = url;
-      const meta = document.createElement('div');
-      meta.className = 'gallery-link-meta';
-      meta.textContent = (msg.sender || 'You') + ' · ' + new Date(msg.timestamp_ms).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
-      cell.appendChild(a);
-      cell.appendChild(meta);
-      cell.addEventListener('click', e => { if (!e.target.closest('a')) window.open(url, '_blank'); });
+      const urlMatch = (msg.text_body || '').match(/https?:\/\/[^\s<>"]+/);
+      const rawUrl = msg.link_url || (urlMatch ? urlMatch[0] : '') || msg.text_body || '';
+      const url = rawUrl.replace(/[.,;:!?)'"]+$/, '');
+      const domain = extractDomain(url);
+
+      cell.classList.add('gallery-link-card', 'gallery-rich-link-card');
+
+      const mediaBox = document.createElement('div');
+      mediaBox.className = 'gallery-rich-link-media';
+
+      if (msg.has_thumbnail && msg.msg_id) {
+        cell.dataset.src = '/api/thumbnail/' + msg.msg_id;
+        cell.dataset.hydrated = 'false';
+        const img = document.createElement('img');
+        img.className = 'gallery-thumb gallery-rich-link-thumb';
+        img.src = EMPTY_GALLERY_PIX;
+        img.alt = '';
+        mediaBox.appendChild(img);
+      } else {
+        mediaBox.innerHTML = '<span class="gallery-rich-link-fallback-icon">🔗</span>';
+      }
+      cell.appendChild(mediaBox);
+
+      const body = document.createElement('div');
+      body.className = 'gallery-rich-link-body';
+
+      if (domain) {
+        const domEl = document.createElement('div');
+        domEl.className = 'gallery-rich-link-domain';
+        domEl.textContent = domain;
+        body.appendChild(domEl);
+      }
+
+      const titleText = msg.link_title || domain || url || 'Link';
+      const titleEl = document.createElement('a');
+      titleEl.className = 'gallery-rich-link-title' + (!msg.link_desc ? ' no-desc' : '');
+      titleEl.href = url || '#';
+      titleEl.target = '_blank';
+      titleEl.rel = 'noopener noreferrer';
+      titleEl.title = titleText;
+      titleEl.textContent = titleText;
+      titleEl.setAttribute('aria-label', 'Open link: ' + titleText);
+      body.appendChild(titleEl);
+
+      if (msg.link_desc) {
+        const descEl = document.createElement('div');
+        descEl.className = 'gallery-rich-link-desc';
+        descEl.title = msg.link_desc;
+        descEl.textContent = msg.link_desc;
+        body.appendChild(descEl);
+      }
+
+      const metaEl = document.createElement('div');
+      metaEl.className = 'gallery-rich-link-meta';
+      const dateStr = new Date(msg.timestamp_ms).toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric'
+      });
+      const senderStr = msg.sender || 'You';
+      const metaText = senderStr + ' · ' + dateStr + (url ? ' · ' + url : '');
+      metaEl.textContent = metaText;
+      metaEl.title = metaText;
+      body.appendChild(metaEl);
+
+      cell.appendChild(body);
+      cell.addEventListener('click', e => {
+        if (!e.target.closest('a') && !e.target.closest('.gallery-goto')) {
+          if (url && url !== '#') window.open(url, '_blank');
+        }
+      });
     } else if (mt === 'document') {
       cell.classList.add('gallery-link-card');
       const name = document.createElement('div');
@@ -1898,6 +2899,9 @@
     btn.textContent = '→ in chat';
     btn.addEventListener('click', e => {
       e.stopPropagation();
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '⏳ in chat';
       closeMediaGallery();
       jumpToMessage(msg);
     });
@@ -1982,60 +2986,82 @@
     activeTypes = new Set();
     galleryAllLoaded = false;
     galleryLoadingMore = false;
+    linksAllLoaded = false;
+    linksLoadingMore = false;
 
-    // fetch counts, documents, and links in parallel, then render media
-    const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
-    const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
-    const [counts, docItems, linkItems] = await Promise.all([
-      fetch('/api/media/count?' + qs).then(r => r.json()),
-      fetch('/api/media/documents?' + qs).then(r => r.json()),
-      fetch('/api/media/links?' + qs).then(r => r.json()),
-    ]);
-    stats.innerHTML = '';
-    if (counts.total) {
-      stats.appendChild(_makeStatPill('total', counts.total, null, counts.total - counts.archived));
-      for (const t of typeOrder) {
-        const d = counts.by_type[t];
-        if (!d) continue;
-        stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
+    try {
+      // fetch counts, documents, and links in parallel, then render media
+      const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
+      const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
+      const [counts, docItems, linkItems] = await Promise.all([
+        fetch('/api/media/count?' + qs).then(r => {
+          if (!r.ok) throw new Error('Failed to fetch media count');
+          return r.json();
+        }),
+        fetch('/api/media/documents?' + qs).then(r => {
+          if (!r.ok) throw new Error('Failed to fetch documents');
+          return r.json();
+        }),
+        fetch('/api/media/links?' + qs + '&limit=100').then(r => {
+          if (!r.ok) throw new Error('Failed to fetch links');
+          return r.json();
+        }),
+      ]);
+      if (linkItems.length < 100) linksAllLoaded = true;
+      stats.innerHTML = '';
+      if (counts.total) {
+        const totalMissing = Object.values(counts.by_type || {}).reduce((acc, d) => acc + (d.missing || 0), 0);
+        stats.appendChild(_makeStatPill('total', counts.total, null, totalMissing));
+        for (const t of typeOrder) {
+          const d = counts.by_type[t];
+          if (!d) continue;
+          stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
+        }
+        // secondary types (links, documents) and stickers are hidden by default
+        const hasDeselected = typeOrder.some(t => DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
+        const defaultTypes = typeOrder.filter(t => !DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
+        if (hasDeselected && defaultTypes.length > 0) {
+          defaultTypes.forEach(t => activeTypes.add(t));
+          defaultActiveTypes = new Set(activeTypes);
+        } else {
+          defaultActiveTypes = new Set();
+        }
+        _syncStatPills();
       }
-      // secondary types (links, documents) are hidden by default
-      const hasSecondary = typeOrder.some(t => SECONDARY_TYPES.has(t) && counts.by_type[t]);
-      if (hasSecondary) {
-        typeOrder.filter(t => !SECONDARY_TYPES.has(t) && counts.by_type[t]).forEach(t => activeTypes.add(t));
-        defaultActiveTypes = new Set(activeTypes);
-      } else {
-        defaultActiveTypes = new Set();
+
+      grid.innerHTML = '';
+
+      // attach IntersectionObserver sentinel at bottom of grid
+      gallerySentinel = document.createElement('div');
+      gallerySentinel.style.height = '1px';
+      grid.appendChild(gallerySentinel);
+      galleryObserver = new IntersectionObserver(entries => {
+        if (entries[0].isIntersecting) {
+          const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
+          _loadGalleryPage(oldest);
+          if (activeTypes.has('link') || activeTypes.size === 0) {
+            _loadMoreLinks();
+          }
+        }
+      }, { root: grid, threshold: 0.1 });
+      galleryObserver.observe(gallerySentinel);
+
+      getGalleryMediaObserver();
+
+      await _loadGalleryPage(null);
+
+      if (!currentGalleryItems.length && !docItems.length && !linkItems.length) {
+        grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
+        return;
       }
-      _syncStatPills();
-    }
 
-    grid.innerHTML = '';
-
-    // attach IntersectionObserver sentinel at bottom of grid
-    gallerySentinel = document.createElement('div');
-    gallerySentinel.style.height = '1px';
-    grid.appendChild(gallerySentinel);
-    galleryObserver = new IntersectionObserver(entries => {
-      if (entries[0].isIntersecting) {
-        const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
-        _loadGalleryPage(oldest);
+      // append document and link cards; hidden when secondary types are filtered out by default
+      for (const msg of [...docItems, ...linkItems]) {
+        _insertGalleryGridItem(grid, msg);
       }
-    }, { root: grid, threshold: 0.1 });
-    galleryObserver.observe(gallerySentinel);
-
-    getGalleryMediaObserver();
-
-    await _loadGalleryPage(null);
-
-    if (!currentGalleryItems.length && !docItems.length && !linkItems.length) {
-      grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
-      return;
-    }
-
-    // append document and link cards; hidden when secondary types are filtered out by default
-    for (const msg of [...docItems, ...linkItems]) {
-      _insertGalleryGridItem(grid, msg);
+    } catch (err) {
+      console.error('Failed to load media gallery:', err);
+      grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">Failed to load media gallery.</div>';
     }
     _syncMonthHeaders();
   }
@@ -2052,7 +3078,9 @@
                   '&chat_type=' + encodeURIComponent(currentChat.type) +
                   typesParam +
                   (before != null ? '&before=' + before : '');
-      const items = await fetch(url).then(r => r.json());
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to fetch media');
+      const items = await res.json();
       if (items.length < 100) galleryAllLoaded = true;
       currentGalleryItems.push(...items);
 
@@ -2139,8 +3167,8 @@
       } else {
         activeTypes.clear();
       }
-    } else if (SECONDARY_TYPES.has(type) && defaultActiveTypes.size > 0) {
-      // Secondary type (link, document): toggle exclusive ↔ default state
+    } else if (DEFAULT_DESELECTED_TYPES.has(type) && defaultActiveTypes.size > 0) {
+      // Default-deselected type (link, document, sticker): toggle exclusive ↔ default state
       if (activeTypes.has(type)) {
         activeTypes = new Set(defaultActiveTypes);
       } else {
@@ -2168,6 +3196,9 @@
     scheduleVisibleVideoExtraction();
     const gen = ++galleryBackfillGen;
     _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen);
+    if (activeTypes.has('link')) {
+      _checkGalleryLoadMore();
+    }
   }
 
   function _applyTypeFilter() {
@@ -2398,7 +3429,7 @@
         const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
         if (el2) {
           await selectChat(chat, el2);
-          const row = await jumpToTimestamp(r.timestamp_ms, null);
+          const row = await jumpToTimestamp(r.timestamp_ms, null, true);
           if (row) {
             const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
             if (bubble) {
@@ -2544,7 +3575,7 @@
       highlightMessageRow(existing);
       return;
     }
-    await jumpToTimestamp(result.timestamp_ms, result.msg_id);
+    await jumpToTimestamp(result.timestamp_ms, result.msg_id, true);
     const loaded = rowForMsgId(result.msg_id);
     if (loaded) highlightMessageRow(loaded);
   }
@@ -2572,7 +3603,7 @@
     btn.disabled = true;
     btn.setAttribute('aria-busy', 'true');
     try {
-      await jumpToTimestamp(new Date(val).getTime(), null);
+      await jumpToTimestamp(new Date(val).getTime(), null, false);
     } finally {
       btn.disabled = false;
       btn.removeAttribute('aria-busy');
@@ -2585,82 +3616,222 @@
     document.getElementById('date-clear-btn').style.display = 'none';
   });
 
-  // Resolve once every <img> in container has finished loading (or errored),
-  // capped by timeoutMs so slow or broken sources never stall indefinitely.
-  function _awaitImagesSettled(container, timeoutMs) {
-    const pending = [...container.querySelectorAll('img')].filter(img => !img.complete);
-    if (!pending.length) return Promise.resolve();
-    return Promise.all(pending.map(img => new Promise(resolve => {
-      const done = () => resolve();
-      img.addEventListener('load', done, { once: true });
-      img.addEventListener('error', done, { once: true });
-      setTimeout(done, timeoutMs);
-    })));
-  }
-
-  // Scroll to bottom and hold it there as media loads and layout stabilizes.
-  // Snaps each animation frame until the position holds steady (3 stable frames)
-  // or 1000 ms have passed. Bails immediately if a newer load superseded this one.
+  // Scroll to bottom and hold it there as lazy media loads and shifts layout.
+  // Re-snaps whenever images finish loading or layout dimensions change,
+  // until layout holds steady or 1500 ms have passed. Bails immediately if a newer load superseded this one
+  // or if the user manually initiates scrolling.
   async function _pinToBottom(gen) {
     const scroll = document.getElementById('message-scroll');
+    if (!scroll) return;
+
     const snap = () => {
       suppressScroll = true;
       scroll.scrollTop = scroll.scrollHeight;
       suppressScroll = false;
     };
     snap();
-    const deadline = performance.now() + 1000;
-    let stable = 0;
-    while (performance.now() < deadline && stable < 3) {
-      await new Promise(r => requestAnimationFrame(r));
-      if (gen !== _loadGen) return;
-      const before = scroll.scrollTop;
+
+    let done = false;
+    let ro = null;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      if (ro) ro.disconnect();
+      scroll.removeEventListener('wheel', onUserScroll, { capture: true });
+      scroll.removeEventListener('touchstart', onUserScroll, { capture: true });
+      scroll.removeEventListener('pointerdown', onUserScroll, { capture: true });
+      pendingImgs.forEach(img => {
+        img.removeEventListener('load', onMediaLoad);
+        img.removeEventListener('error', onMediaLoad);
+      });
+    };
+
+    const onUserScroll = () => {
+      isUserAtBottom = (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight) < 100;
+      cleanup();
+    };
+
+    scroll.addEventListener('wheel', onUserScroll, { capture: true, passive: true });
+    scroll.addEventListener('touchstart', onUserScroll, { capture: true, passive: true });
+    scroll.addEventListener('pointerdown', onUserScroll, { capture: true, passive: true });
+
+    const pendingImgs = [...scroll.querySelectorAll('img')].filter(img => !img.complete);
+    const onMediaLoad = () => {
+      if (done || gen !== _loadGen) return;
       snap();
-      stable = Math.abs(scroll.scrollTop - before) < 2 ? stable + 1 : 0;
+    };
+    pendingImgs.forEach(img => {
+      img.addEventListener('load', onMediaLoad, { once: true });
+      img.addEventListener('error', onMediaLoad, { once: true });
+    });
+
+    if (window.ResizeObserver) {
+      ro = new ResizeObserver(() => {
+        if (done || gen !== _loadGen) return;
+        snap();
+      });
+      ro.observe(scroll);
     }
+
+    const start = performance.now();
+    while (!done && performance.now() - start < 1500) {
+      if (gen !== _loadGen) {
+        cleanup();
+        return;
+      }
+      await new Promise(r => requestAnimationFrame(r));
+    }
+    cleanup();
   }
 
   // Center targetEl and hold it there as lazy media above it loads and shifts layout.
-  // Re-centers each animation frame until the position holds steady (3 stable frames)
-  // or 1500 ms have passed. Bails immediately if a newer load superseded this one.
+  // Re-centers whenever images finish loading or layout dimensions change,
+  // until layout holds steady or 1500 ms have passed. Bails immediately if a newer load superseded this one.
   async function _pinToMsg(targetEl, gen) {
     const scroll = document.getElementById('message-scroll');
+    if (!scroll || !targetEl) return;
+
     const recenter = () => {
       suppressScroll = true;
       targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
       suppressScroll = false;
     };
     recenter();
-    const deadline = performance.now() + 1500;
-    let stable = 0;
-    while (performance.now() < deadline && stable < 3) {
-      await new Promise(r => requestAnimationFrame(r));
-      if (gen !== _loadGen) return;
-      const before = scroll.scrollTop;
+
+    let done = false;
+    let ro = null;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      if (ro) ro.disconnect();
+      scroll.removeEventListener('wheel', onUserScroll, { capture: true });
+      scroll.removeEventListener('touchstart', onUserScroll, { capture: true });
+      scroll.removeEventListener('pointerdown', onUserScroll, { capture: true });
+      pendingImgs.forEach(img => {
+        img.removeEventListener('load', onMediaLoad);
+        img.removeEventListener('error', onMediaLoad);
+      });
+    };
+
+    const onUserScroll = () => {
+      cleanup();
+    };
+
+    const onMediaLoad = () => {
+      if (done || gen !== _loadGen) return;
       recenter();
-      stable = Math.abs(scroll.scrollTop - before) < 2 ? stable + 1 : 0;
+    };
+
+    scroll.addEventListener('wheel', onUserScroll, { capture: true, passive: true });
+    scroll.addEventListener('touchstart', onUserScroll, { capture: true, passive: true });
+    scroll.addEventListener('pointerdown', onUserScroll, { capture: true, passive: true });
+
+    const pendingImgs = Array.from(scroll.querySelectorAll('img')).filter(img => !img.complete);
+    pendingImgs.forEach(img => {
+      img.addEventListener('load', onMediaLoad, { once: true });
+      img.addEventListener('error', onMediaLoad, { once: true });
+    });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        if (done || gen !== _loadGen) return;
+        recenter();
+      });
+      ro.observe(scroll);
+      if (targetEl) ro.observe(targetEl);
     }
+
+    const deadline = performance.now() + 1500;
+    while (!done && performance.now() < deadline) {
+      await new Promise(r => requestAnimationFrame(r));
+      if (gen !== _loadGen) {
+        cleanup();
+        return;
+      }
+      if (pendingImgs.length === 0 || pendingImgs.every(img => img.complete)) {
+        if (performance.now() > deadline - 1000) {
+          recenter();
+          break;
+        }
+      }
+    }
+    cleanup();
+    recenter();
+  }
+
+  let _jumpHudTimeout = null;
+  let _jumpAbortController = null;
+
+  function showJumpHud(text) {
+    const hud = document.getElementById('chat-jump-hud');
+    const label = document.getElementById('chat-jump-hud-text');
+    if (!hud || !label) return;
+    if (_jumpHudTimeout) {
+      clearTimeout(_jumpHudTimeout);
+      _jumpHudTimeout = null;
+    }
+    hud.classList.remove('error');
+    label.textContent = text;
+    hud.classList.add('visible');
+  }
+
+  function hideJumpHud() {
+    const hud = document.getElementById('chat-jump-hud');
+    if (!hud) return;
+    if (_jumpHudTimeout) {
+      clearTimeout(_jumpHudTimeout);
+      _jumpHudTimeout = null;
+    }
+    hud.classList.remove('visible', 'error');
+  }
+
+  function showJumpHudError(errorText) {
+    const hud = document.getElementById('chat-jump-hud');
+    const label = document.getElementById('chat-jump-hud-text');
+    if (!hud || !label) return;
+    if (_jumpHudTimeout) {
+      clearTimeout(_jumpHudTimeout);
+    }
+    hud.classList.add('error', 'visible');
+    label.textContent = errorText;
+    _jumpHudTimeout = setTimeout(() => {
+      hud.classList.remove('visible', 'error');
+      _jumpHudTimeout = null;
+    }, 3000);
   }
 
   // exactMsgId: when the caller needs a specific message in the DOM (e.g. jumpToMessage,
-  // chat search), pass its msg_id to bypass the nearest-ts early-exit — the caller already
-  // confirmed the message is not in the current window, so a full fetch is always needed.
-  // Pass null for nearest-ts callers (date picker, quoted-message jumps).
-  async function jumpToTimestamp(ts, exactMsgId) {
+  // chat search), pass its msg_id to bypass the nearest-ts early-exit.
+  // isExactTarget: true when jumping to a specific message or quote (tightens threshold to 1500ms
+  // instead of the 24-hour date-picker window).
+  async function jumpToTimestamp(ts, exactMsgId, isExactTarget) {
     if (exactMsgId == null) {
       const near = nearestMsgToTs(ts);
-      const existing = near && Math.abs(near.timestamp_ms - ts) < 86400000 && rowForMsgId(near.msg_id);
+      const threshold = isExactTarget ? 1500 : 86400000;
+      const existing = near && Math.abs(near.timestamp_ms - ts) <= threshold && rowForMsgId(near.msg_id);
       if (existing) {
         suppressScroll = true;
         existing.scrollIntoView({ behavior: 'instant', block: 'center' });
         suppressScroll = false;
+        if (isExactTarget) flashHighlightRow(existing);
         return existing;
       }
     }
 
+    if (_jumpAbortController) {
+      _jumpAbortController.abort();
+    }
+    _jumpAbortController = new AbortController();
+    const abortSignal = _jumpAbortController.signal;
+
     const gen = ++_loadGen;
     loading = true;
     const scroll = document.getElementById('message-scroll');
+    if (scroll) scroll.classList.add('is-navigating');
+
+    const dateLabel = ts ? fmtDateSep(ts) : '';
+    const hudText = dateLabel ? `Jumping to message · ${dateLabel}` : 'Jumping to message…';
+    showJumpHud(hudText);
 
     try {
       const params = new URLSearchParams({
@@ -2669,10 +3840,19 @@
         ts,
         limit: 50
       });
-      const res = await fetch('/api/messages/at?' + params);
+      const res = await fetch('/api/messages/at?' + params, { signal: abortSignal });
+      if (!res.ok) {
+        if (gen === _loadGen) {
+          showJumpHudError(`Failed to load message (${res.status})`);
+        }
+        throw new Error(`Server returned HTTP ${res.status} when loading messages at timestamp ${ts}`);
+      }
       const msgs = await res.json();
       if (gen !== _loadGen) return null;
-      if (!msgs.length) return null;
+      if (!msgs.length) {
+        showJumpHudError('Message not found');
+        return null;
+      }
 
       msgList = [];
       noMoreOlder = false;
@@ -2680,12 +3860,28 @@
       mergePage(msgs);
       renderWindow();
 
-      const target = nearestMsgToTs(ts);
-      const targetEl = target && rowForMsgId(target.msg_id);
-      if (targetEl) await _pinToMsg(targetEl, gen);
+      let targetEl = exactMsgId != null ? rowForMsgId(exactMsgId) : null;
+      if (!targetEl) {
+        const near = nearestMsgToTs(ts);
+        targetEl = near ? rowForMsgId(near.msg_id) : null;
+      }
+      if (targetEl) {
+        await _pinToMsg(targetEl, gen);
+        if (isExactTarget) flashHighlightRow(targetEl);
+      }
       if (gen !== _loadGen) return null;
+      hideJumpHud();
       return targetEl || null;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        return null;
+      }
+      if (gen === _loadGen) {
+        showJumpHudError('Unable to load message');
+      }
+      throw err;
     } finally {
+      if (scroll) scroll.classList.remove('is-navigating');
       if (gen === _loadGen) loading = false;
     }
   }
@@ -2769,14 +3965,14 @@
     const chatAtOpen = currentChat;
 
     // Kick off both requests in parallel
-    let info, sizeData;
+    const sizePromise = fetch('/api/chat-info/media-size?' + params)
+      .then(r => r.ok ? r.json() : { bytes: 0 })
+      .catch(() => ({ bytes: 0 }));
+
+    let info;
     try {
-      const [infoResp, sizeResp] = await Promise.all([
-        fetch('/api/chat-info?' + params),
-        fetch('/api/chat-info/media-size?' + params),
-      ]);
+      const infoResp = await fetch('/api/chat-info?' + params);
       info = await infoResp.json();
-      sizeData = await sizeResp.json();
     } catch (_) {
       if (currentChat === chatAtOpen && panel.classList.contains('open')) {
         body.innerHTML = '<div class="chat-info-row" style="color:var(--text-muted)">Could not load chat info.</div>';
@@ -2833,6 +4029,10 @@
       body.appendChild(_infoRow('Total messages', fmtNum(info.total)).row);
     }
 
+    if (info.calls_count) {
+      body.appendChild(_infoRow('Preserved calls', fmtNum(info.calls_count)).row);
+    }
+
     // Gallery link row
     const galleryLink = document.createElement('button');
     galleryLink.className = 'chat-info-link';
@@ -2840,8 +4040,14 @@
     galleryLink.addEventListener('click', () => { closeChatInfo(); openMediaGallery(); });
     body.appendChild(_infoRow('Media', galleryLink).row);
 
-    // Media size row (already resolved since we awaited both)
-    body.appendChild(_infoRow('Media size', _formatBytes(sizeData.bytes || 0)).row);
+    // Media size row
+    const sizeRowObj = _infoRow('Media size', 'Calculating…');
+    body.appendChild(sizeRowObj.row);
+    sizePromise.then(sizeData => {
+      if (currentChat === chatAtOpen && panel.classList.contains('open')) {
+        sizeRowObj.val.textContent = _formatBytes(sizeData.bytes || 0);
+      }
+    });
 
     // Group members
     if (currentChat.type === 'group' && info.members && info.members.length > 0) {
@@ -2922,8 +4128,30 @@
     return '—';
   }
 
-  async function showMsgDetails(msgId, anchorEl, archivePath) {
+  async function showMsgDetails(msgId, anchorEl, archivePath, presInfo, editInfo) {
     let html = '';
+
+    if (presInfo) {
+      const reasonText = presInfo.reason === 'revoked_by_sender'
+        ? 'Revoked by sender'
+        : (presInfo.reason === 'chat_deleted' ? 'Chat deleted on device' : 'Deleted on device');
+      const presTs = typeof presInfo.at === 'number' ? presInfo.at * 1000 : Date.parse(presInfo.at);
+      const atText = !isNaN(presTs) ? fmtTime(presTs) : (presInfo.at || '');
+      const platformText = presInfo.platform ? (' • ' + esc(presInfo.platform)) : '';
+      const backupPrefix = atText ? `Preserved from backup (${atText})` : 'Preserved from backup';
+      html += `<div class="msg-details-row"><span class="msg-details-label">Preserved</span><span class="msg-details-value">${backupPrefix} • ${reasonText}${platformText}</span></div>`;
+    }
+
+    if (editInfo && (editInfo.original_text || editInfo.edited_ts)) {
+      html += '<div class="msg-details-section msg-edit-history">';
+      if (editInfo.original_text) {
+        html += `<div class="msg-details-row"><span class="msg-details-label">Original (Pre-edit)</span><span class="msg-details-value msg-pre-edit-text">${esc(editInfo.original_text)}</span></div>`;
+      }
+      if (editInfo.edited_ts) {
+        html += `<div class="msg-details-row"><span class="msg-details-label">Edited On</span><span class="msg-details-value">${fmtTime(editInfo.edited_ts)}</span></div>`;
+      }
+      html += '</div>';
+    }
 
     if (msgId !== null) {
       msgDetailsPopup.innerHTML = '<span style="color:var(--text-muted)">Loading…</span>';
@@ -2939,9 +4167,11 @@
       }
 
       if (!data.available || !(data.members || []).length) {
-        html = '<span class="msg-details-na">No receipt data available.</span>';
+        if (!html) {
+          html = '<span class="msg-details-na">No receipt data available.</span>';
+        }
       } else if (data.members.length === 1) {
-        html =
+        html +=
           `<div class="msg-details-row"><span class="msg-details-label">Delivered</span><span class="msg-details-value">${fmtReceipt(data.delivered_ts)}</span></div>` +
           `<div class="msg-details-row"><span class="msg-details-label">Read</span><span class="msg-details-value">${fmtRead(data)}</span></div>`;
       } else {
@@ -2949,7 +4179,7 @@
         for (const m of data.members) {
           rows += `<tr><td>${esc(m.name || m.jid || '?')}</td><td>${fmtReceipt(m.delivered_ts)}</td><td>${fmtRead(m)}</td></tr>`;
         }
-        html = `<table class="msg-details-table"><thead><tr><th>Member</th><th>Delivered</th><th>Read</th></tr></thead><tbody>${rows}</tbody></table>`;
+        html += `<table class="msg-details-table"><thead><tr><th>Member</th><th>Delivered</th><th>Read</th></tr></thead><tbody>${rows}</tbody></table>`;
       }
     }
 
@@ -3018,6 +4248,66 @@
     msgDetailsPopup.classList.add('visible');
   }
 
+  async function showPollDetails(msgId, anchorEl) {
+    msgDetailsPopup.innerHTML = '<span style="color:var(--text-muted)">Loading…</span>';
+    positionPopup(anchorEl);
+    msgDetailsPopup.classList.add('visible');
+
+    let data;
+    try {
+      const res = await fetch('/api/poll_details/' + msgId);
+      data = await res.json();
+    } catch (_) {
+      data = { available: false };
+    }
+
+    let html;
+    if (!data.available || !data.options) {
+      html = '<span class="msg-details-na">No poll vote data available.</span>';
+    } else {
+      const totalVoters = data.total_voters || 0;
+      const label = totalVoters === 1 ? '1 voter' : `${totalVoters} voters`;
+      html = `<div class="rx-details-total" style="margin-bottom:8px;font-weight:600">Poll votes · ${label}</div>`;
+
+      const getVoteCount = opt =>
+        opt.vote_count !== undefined ? opt.vote_count : (opt.voters ? opt.voters.length : 0);
+
+      let maxVotes = 0;
+      for (const opt of data.options) {
+        const count = getVoteCount(opt);
+        if (count > maxVotes) maxVotes = count;
+      }
+
+      const sortedOptions = [...data.options].sort((a, b) => getVoteCount(b) - getVoteCount(a));
+
+      let hasAnyVotes = false;
+      for (const opt of sortedOptions) {
+        const count = getVoteCount(opt);
+        if (!count && (!opt.voters || !opt.voters.length)) continue;
+        hasAnyVotes = true;
+        const isWinner = maxVotes > 0 && count === maxVotes;
+        const star = isWinner
+          ? '<span class="msg-poll-winner-star" title="Winning option" aria-label="Winner">★</span>'
+          : '';
+        html += `<div class="msg-poll-details-option-hdr"><span>${esc(opt.name)}${star ? ' ' + star : ''}</span><span class="msg-poll-details-option-count">(${count})</span></div>`;
+        if (opt.voters && opt.voters.length) {
+          for (const v of opt.voters) {
+            const name = esc(v.name || '?');
+            const timeStr = v.timestamp_ms ? fmtTime(v.timestamp_ms) : '';
+            html += `<div class="msg-details-row"><span class="msg-details-label">${name}</span><span class="msg-details-value">${timeStr}</span></div>`;
+          }
+        }
+      }
+      if (!hasAnyVotes) {
+        html += '<span class="msg-details-na">No votes recorded yet.</span>';
+      }
+    }
+
+    msgDetailsPopup.innerHTML = html;
+    positionPopup(anchorEl);
+    msgDetailsPopup.classList.add('visible');
+  }
+
   // ---- init ----------------------------------------------------------------
 
   let _bulkIndexPollGen = 0;
@@ -3052,6 +4342,8 @@
   }
 
   document.getElementById('settings-btn').addEventListener('click', async () => {
+    const sBody = document.getElementById('settings-body');
+    if (sBody) sBody.scrollTop = 0;
     document.getElementById('settings-modal').classList.add('open');
     try {
       const r = await fetch('/api/index/progress');
@@ -3159,6 +4451,106 @@
       }
     });
   }
+
+  // ---- map provider chooser modal ------------------------------------------
+  let activeMapTrigger = null;
+
+  function openMapChooser(locData, triggerEl) {
+    activeMapTrigger = triggerEl;
+    const modal = document.getElementById('map-chooser-modal');
+    if (!modal) return;
+
+    const lat = Number(locData.latitude);
+    const lng = Number(locData.longitude);
+    if (isNaN(lat) || isNaN(lng)) return;
+
+    const titleEl = document.getElementById('map-chooser-title');
+    const subtitleEl = document.getElementById('map-chooser-subtitle');
+    const copyTextEl = document.getElementById('map-copy-coords-text');
+    const copyBtn = document.getElementById('map-copy-coords-btn');
+
+    const formattedCoords = formatCoordinates(lat, lng);
+    const placeName = locData.name ? locData.name.trim() : '';
+    const address = locData.address ? locData.address.trim() : '';
+
+    if (titleEl) {
+      titleEl.textContent = placeName || (locData.isLive ? 'Live Location' : 'Shared Location');
+    }
+    if (subtitleEl) {
+      subtitleEl.textContent = address ? (address + ' · ' + formattedCoords) : formattedCoords;
+    }
+
+    // 1. Google Maps: embedded exact coordinates
+    const gmapsBtn = document.getElementById('map-provider-google');
+    if (gmapsBtn) {
+      gmapsBtn.href = 'https://www.google.com/maps/search/?api=1&query=' + lat + ',' + lng;
+    }
+
+    // 2. Bing Maps: centers view (cp), sets street zoom (lvl=16), drops named pushpin (sp=point.lat_lng_Name)
+    const bingBtn = document.getElementById('map-provider-bing');
+    if (bingBtn) {
+      const pinLabel = placeName || address || 'Location';
+      bingBtn.href = 'https://www.bing.com/maps?cp=' + lat + '~' + lng + '&lvl=16&sp=point.' + lat + '_' + lng + '_' + encodeURIComponent(pinLabel);
+    }
+
+    // 3. OpenStreetMap: sets marker pin (mlat/mlon) and centers map (#map=16/lat/lng)
+    const osmBtn = document.getElementById('map-provider-osm');
+    if (osmBtn) {
+      osmBtn.href = 'https://www.openstreetmap.org/?mlat=' + lat + '&mlon=' + lng + '#map=16/' + lat + '/' + lng;
+    }
+
+    // Copy Coordinates button
+    if (copyBtn && copyTextEl) {
+      copyBtn.classList.remove('copied');
+      copyTextEl.textContent = 'Copy Coordinates (' + lat.toFixed(4) + ', ' + lng.toFixed(4) + ')';
+      copyBtn.onclick = (e) => {
+        e.preventDefault();
+        const rawCoords = lat + ', ' + lng;
+        navigator.clipboard.writeText(rawCoords).then(() => {
+          copyBtn.classList.add('copied');
+          copyTextEl.textContent = 'Copied to clipboard! ✓';
+          setTimeout(() => {
+            copyBtn.classList.remove('copied');
+            copyTextEl.textContent = 'Copy Coordinates (' + lat.toFixed(4) + ', ' + lng.toFixed(4) + ')';
+          }, 2000);
+        }).catch(() => {});
+      };
+    }
+
+    modal.classList.add('open');
+    setTimeout(() => {
+      gmapsBtn?.focus();
+    }, 50);
+  }
+
+  function closeMapChooser() {
+    const modal = document.getElementById('map-chooser-modal');
+    if (!modal || !modal.classList.contains('open')) return;
+    modal.classList.remove('open');
+    if (activeMapTrigger && typeof activeMapTrigger.focus === 'function') {
+      activeMapTrigger.focus();
+    }
+    activeMapTrigger = null;
+  }
+
+  const mapModal = document.getElementById('map-chooser-modal');
+  if (mapModal) {
+    document.getElementById('map-chooser-close')?.addEventListener('click', closeMapChooser);
+    mapModal.addEventListener('click', (e) => {
+      if (e.target === mapModal) closeMapChooser();
+    });
+    mapModal.querySelectorAll('.map-provider-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setTimeout(closeMapChooser, 150);
+      });
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeMapChooser();
+    }
+  });
 
   loadPrefs().then(() => loadChats());
 })();

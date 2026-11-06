@@ -36,6 +36,9 @@ _MEDIA_SUBFOLDERS = {
     "WhatsApp Stickers",
 }
 
+ASSOCIATION_TYPE_HD_PHOTO = 12
+ASSOCIATION_TYPE_HD_VIDEO = 7
+
 
 def _check_hd_association(cursor: sqlite3.Cursor, logger: logging.Logger) -> bool:
     """Return True if message_association exists and supports HD dedup (types 12 and 7)."""
@@ -183,12 +186,12 @@ def build_query(limit: int | None, since_ms: int | None, hd_dedup: bool) -> str:
     block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
     since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
     hd_dedup_clause = (
-        """
+        f"""
         AND NOT EXISTS (
             SELECT 1 FROM message_association ma
             JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
             WHERE ma.parent_message_row_id = message_media.message_row_id
-              AND ma.association_type IN (12, 7)
+              AND ma.association_type IN ({ASSOCIATION_TYPE_HD_PHOTO}, {ASSOCIATION_TYPE_HD_VIDEO})
               AND mm_hd.file_path IS NOT NULL
         )"""
         if hd_dedup
@@ -222,14 +225,8 @@ SELECT * FROM (
         ) jid_map ON jid_map.lid_row_id = message.sender_jid_row_id
         LEFT JOIN jid AS jid2 ON jid2._id = jid_map.jid_row_id
         WHERE (
-            message_media.file_path LIKE 'Media/WhatsApp Images/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Stickers/%'
+            message_media.file_path LIKE 'Media/WhatsApp %'
+            AND message_media.file_path NOT LIKE 'Media/.Statuses/%'
         )
         AND chat.subject IS NOT NULL
         {since_clause}
@@ -258,14 +255,8 @@ SELECT * FROM (
         LEFT JOIN message ON message_media.message_row_id = message._id
         LEFT JOIN jid     ON jid._id = chat.jid_row_id
         WHERE (
-            message_media.file_path LIKE 'Media/WhatsApp Images/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Video/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Audio/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Voice Notes/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Video Notes/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Animated Gifs/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Documents/%'
-            OR message_media.file_path LIKE 'Media/WhatsApp Stickers/%'
+            message_media.file_path LIKE 'Media/WhatsApp %'
+            AND message_media.file_path NOT LIKE 'Media/.Statuses/%'
         )
         AND chat.subject IS NULL
         {since_clause}
@@ -285,7 +276,99 @@ def get_media_file_paths(cursor: sqlite3.Cursor, since_ms: int | None, hd_dedup:
     rows = cursor.execute(
         f"SELECT DISTINCT file_path FROM ({query}) WHERE file_path IS NOT NULL"
     ).fetchall()
-    return {row[0].replace("\\", "/") for row in rows if row[0]}
+    paths = {row[0].replace("\\", "/") for row in rows if row[0]}
+    if has_extended_media_support(cursor):
+        ext_query = build_extended_media_query(None, since_ms)
+        ext_rows = cursor.execute(
+            f"SELECT DISTINCT file_path FROM ({ext_query}) WHERE file_path IS NOT NULL"
+        ).fetchall()
+        paths.update(row[0].replace("\\", "/") for row in ext_rows if row[0])
+    return paths
+
+
+def has_extended_media_support(cursor: sqlite3.Cursor) -> bool:
+    """Return True if message_media_map and extended_media_data exist and contain rows."""
+    tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "message_media_map" not in tables or "extended_media_data" not in tables:
+        return False
+    row = cursor.execute("SELECT 1 FROM message_media_map LIMIT 1").fetchone()
+    return row is not None
+
+
+def build_extended_media_query(limit: int | None, since_ms: int | None) -> str:
+    """
+    Build query to extract extended media items mapped via message_media_map.
+    """
+    block_limit_clause = f"LIMIT {limit // 2}" if limit else ""
+    since_clause = f"AND message.timestamp >= {since_ms}" if since_ms else ""
+
+    return f"""
+SELECT * FROM (
+    SELECT * FROM (
+        -- Group chats
+        SELECT
+            message._id                         AS message_id,
+            message.timestamp                   AS timestamp,
+            emd.file_path                       AS file_path,
+            emd.mime_type                       AS mime_type,
+            mmm.chat_row_id                     AS chat_row_id,
+            chat.subject                        AS chat_subject,
+            ifnull(jid2.user, jid.user)         AS sender,
+            message.from_me                     AS key_from_me,
+            emd.external_url                    AS message_url,
+            CASE WHEN emd.file_path LIKE 'Media/WhatsApp Documents/%'
+                 THEN NULL END                  AS media_name
+        FROM message_media_map mmm
+        JOIN extended_media_data emd ON emd.row_id = mmm.media_row_id
+        LEFT JOIN chat    ON mmm.chat_row_id    = chat._id
+        LEFT JOIN message ON mmm.message_row_id = message._id
+        LEFT JOIN jid     ON jid._id = message.sender_jid_row_id
+        LEFT JOIN (
+            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
+            FROM jid_map
+            GROUP BY lid_row_id
+        ) jid_map ON jid_map.lid_row_id = message.sender_jid_row_id
+        LEFT JOIN jid AS jid2 ON jid2._id = jid_map.jid_row_id
+        WHERE (
+            emd.file_path LIKE 'Media/WhatsApp %'
+            AND emd.file_path NOT LIKE 'Media/.Statuses/%'
+        )
+        AND chat.subject IS NOT NULL
+        {since_clause}
+        {block_limit_clause}
+    )
+
+    UNION ALL
+
+    SELECT * FROM (
+        -- 1-to-1 chats
+        SELECT
+            message._id                         AS message_id,
+            message.timestamp                   AS timestamp,
+            emd.file_path                       AS file_path,
+            emd.mime_type                       AS mime_type,
+            mmm.chat_row_id                     AS chat_row_id,
+            NULL                                AS chat_subject,
+            jid.user                            AS sender,
+            message.from_me                     AS key_from_me,
+            emd.external_url                    AS message_url,
+            CASE WHEN emd.file_path LIKE 'Media/WhatsApp Documents/%'
+                 THEN NULL END                  AS media_name
+        FROM message_media_map mmm
+        JOIN extended_media_data emd ON emd.row_id = mmm.media_row_id
+        LEFT JOIN chat    ON mmm.chat_row_id    = chat._id
+        LEFT JOIN message ON mmm.message_row_id = message._id
+        LEFT JOIN jid     ON jid._id = chat.jid_row_id
+        WHERE (
+            emd.file_path LIKE 'Media/WhatsApp %'
+            AND emd.file_path NOT LIKE 'Media/.Statuses/%'
+        )
+        AND chat.subject IS NULL
+        {since_clause}
+        {block_limit_clause}
+    )
+)
+"""
 
 
 def has_vcard_support(cursor: sqlite3.Cursor) -> bool:

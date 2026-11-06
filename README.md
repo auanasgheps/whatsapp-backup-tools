@@ -1,8 +1,35 @@
-# WhatsApp Backup Tools
+<p align="center">
+  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="130"/>
+</p>
+
+<h1 align="center">WhatsApp Backup Tools</h1>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/icon.svg" alt="WhatsApp Backup Tools" width="120"/>
+  <strong>Your WhatsApp history, truly yours.</strong><br>
+  The complete local-first suite to automatically organize your media and explore your chats offline, just like WhatsApp Web.
 </p>
+
+<p align="center">
+  <a href="#features">Features</a> •
+  <a href="#installation--quick-start">Quick Start</a> •
+  <a href="#archive-structure">How It Works</a> •
+  <a href="#known-limitations">Limitations</a>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/whatsapp-backup-tools/"><img src="https://img.shields.io/pypi/v/whatsapp-backup-tools" alt="PyPI Version"></a>
+  <a href="https://github.com/auanasgheps/whatsapp-backup-tools/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/auanasgheps/whatsapp-backup-tools/tests.yml?branch=master&label=tests" alt="Tests Status"></a>
+  <a href="https://github.com/auanasgheps/whatsapp-backup-tools/tree/master/tests"><img src="https://img.shields.io/badge/tests-1000%2B%20passed-brightgreen" alt="Tests Count"></a>
+  <a href="https://pypi.org/project/whatsapp-backup-tools/"><img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python Version"></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Code style: ruff"></a>
+  <a href="https://github.com/auanasgheps/whatsapp-backup-tools/blob/master/LICENSE"><img src="https://img.shields.io/github/license/auanasgheps/whatsapp-backup-tools" alt="License"></a>
+</p>
+
+<p align="center">
+  <img src="docs/images/viewer_dark_1_shots_so.jpeg" alt="WhatsApp Backup Tools Viewer Hero" width="100%"/>
+</p>
+
+> **⚡️ 100% Local & Private** — No cloud accounts, no telemetry, no data leaves your machine. Full native support for **Android & iOS** backups on Windows, macOS, and Linux.
 
 ## Overview
 
@@ -17,10 +44,8 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 > ⚠️ **These tools are designed to run on a backup copy of your WhatsApp data — never on live device files.** The archiver always makes a copy of your data.
 
 
-**Whatsapp Backup Viewer screenshots**
-<p float="left">
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_dark.png" width="700" />
-  <img src="https://raw.githubusercontent.com/auanasgheps/whatsapp-backup-tools/master/docs/images/viewer_clean.png" width="700" /> 
+<p align="center">
+  <img src="docs/images/group-demo-1.gif" alt="WhatsApp Backup Viewer Demo" width="100%" />
 </p>
 
 ---
@@ -53,8 +78,10 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 Organise and preserve your WhatsApp media in a clean, human-readable structure.
 
 - **Structured & Human-Readable**: Organises media into `Contacts/` and `Groups/` sorted by year and `Sent/Received`, with original WhatsApp message timestamps preserved.
+- **Android Incremental Backup Merging**: Discovers, decrypts, and sequentially merges Android incremental backups (`msgstore-increment*.db.crypt14/15`) with full entity resolution for reactions, polls, pins, locations, and edits.
 - **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
+- **Deleted Message & Chat Preservation**: Seamlessly retains messages and chats deleted from your phone or revoked by senders across backup cycles (`-P`/`--preserve-deleted`), including call logs, interactive polls, shared locations, and progressive edit history.
 - **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
 - **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents, Stickers, and Contact cards (.vcf).
 
@@ -62,7 +89,8 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 Explore and search your archived chats through a local web UI replicating WhatsApp Web.
 
 - **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, customizable font size, and regional date formats.
-- **Rich Chat Timeline**: Chronological chat history with reactions, quoted replies, delivery/read receipts, and smooth scrolling even in massive conversations.
+- **Rich Chat Timeline**: Chronological chat history with interactive polls, reactions, quoted replies, progressive edit history disclosure, revoked message tombstones, view-once badges, and delivery/read receipts.
+- **Interactive WhatsApp Polls**: Native poll cards with option percentages, checkmarks, and an interactive "View votes" popup detailing voter identities.
 - **In-Browser Media Player & Gallery**: Stream video and voice notes with seeking, open photos in a lightbox, and explore chat media via thumbnail grid or folder tree.
 - **Full-Text Search & Navigation**: Search across all chats or within a single conversation, jump directly to matches, or jump to specific dates with the date picker.
 
@@ -70,37 +98,39 @@ Explore and search your archived chats through a local web UI replicating WhatsA
 
 ## Archive Structure
 
-After a successful run, the archive is organised as follows:
+After a successful run, the archive is organised into a clean, human-readable hierarchy:
 
-```
-<output>/
-├── Contacts/
+```text
+📁 <output>/
+├── 👤 Contacts/
 │   ├── John Doe (0039123456789)/
 │   │   ├── 2023/
-│   │   │   ├── Received/
-│   │   │   └── Sent/
+│   │   │   ├── 📥 Received/
+│   │   │   └── 📤 Sent/
 │   │   └── 2024/
-│   │       ├── Received/
-│   │       └── Sent/
+│   │       ├── 📥 Received/
+│   │       └── 📤 Sent/
 │   └── Unknown (0044987654321)/
 │       └── 2022/
-│           └── Received/
-├── Groups/
+│           └── 📥 Received/
+├── 👥 Groups/
 │   ├── Family Chat/
 │   │   ├── 2023/
+│   │   │   └── 🖼️ IMG-20230115-WA0001_JohnDoe.jpg
 │   │   └── 2024/
+│   │       └── 🎥 VID-20240115-WA0002_Me.mp4
 │   └── Work Team/
 │       └── 2024/
-├── Whatsapp Databases/       ← Extracted/decrypted WhatsApp databases (iOS & Android)
-│   ├── ChatStorage.sqlite
-│   ├── ContactsV2.sqlite
-│   └── ...
-├── .wa_media_archiver.db
-├── wab-archiver.log
-├── missing_media_report.csv
-├── duplicate_media_report.csv
-└── source_conflicts_report.csv  ← only when multiple --wa-root roots produce conflicting copies
+├── 🗄️ WhatsApp Databases/          # Decrypted ChatStorage.sqlite, msgstore.db, etc.
+├── 🛡️ preserved_messages.db        # Deleted messages, polls & edits (when using -P)
+├── ⚙️ .wa_media_archiver.db        # Archive cache & state tracking
+├── 📝 wab-archiver.log             # Execution audit log
+├── 📊 missing_media_report.csv     # Missing media report
+├── 📊 duplicate_media_report.csv   # Deduplicated media audit
+└── 📊 source_conflicts_report.csv  # Conflicting copies across backup roots (--wa-root)
 ```
+*Please note: the actual output does not contain these emojis, they have been added here only for readability purposes.*
+
 
 - Files in **Contacts** folders retain their original filename
 - Files in **Groups** folders have the sender name appended: `IMG-20230115-WA0001_JohnDoe.jpg`
@@ -220,6 +250,7 @@ The archiver is **safe to re-run** on an existing archive:
 ## Prerequisites
 
 - **Python 3.11** or later is required
+- **Core Dependencies**: Required Python packages (`flask`, `wa-crypt-tools`, `iphone-backup-decrypt`, `cryptography`) are installed automatically by `pip`. See [docs/prerequisites.md](docs/prerequisites.md) for complete technical details.
 - **Android**: 
   - End-to-end encrypted backup must be **enabled** in WhatsApp before pulling the database. Root is not required
   - ADB is installed
@@ -238,9 +269,10 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 - **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
 - **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
 - **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
+- **Recent Android link previews and media thumbnails may be missing until the next full backup.** To save space and mobile data, WhatsApp's daily incremental backups only save message text and details, leaving out image previews. Once WhatsApp completes its next full base backup on your phone (typically created every 5 to 7 days, or when manually triggering a backup in WhatsApp settings), those missing previews will appear in your archive after running the archiver again. Because this tool runs 100% locally and offline, it never connects to WhatsApp servers to download missing previews.
 ### Viewer
 
-- **Timeline scope**: Call history and poll interactions are not yet rendered in the chat timeline.
+- **Timeline scope**: Call history logs are not rendered in the chat timeline.
 - See [viewer known limitations](docs/viewer/index.md#known-limitations) for full details on profile push names, receipts, and platform variations.
 
 ---
@@ -257,10 +289,13 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ---
 
-## Credits
+## Credits and Thanks
 
 - Inspired by [Wa_Immich_Tagger](https://github.com/mac12m99/Wa_Immich_Tagger) by mac12m99 — provided the initial Android DB query pattern
 - iOS backup reading approach inspired by [whatsapp-chat-exporter](https://github.com/KnugiHK/whatsapp-chat-exporter) by KnugiHK
+- Decryption powered by [wa-crypt-tools](https://github.com/eladnava/wa-crypt-tools) (Android) and [iphone-backup-decrypt](https://github.com/johanley/iphone-backup-decrypt) (iOS)
+- WebUI styled with [Pico CSS](https://picocss.com/)
+- Protobuf schema and wire tag definitions cross-referenced with [wa-proto](https://github.com/wppconnect-team/wa-proto) by WPPConnect and [Baileys](https://github.com/WhiskeySockets/Baileys) by WhiskeySockets
 
 ---
 
@@ -268,8 +303,8 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 Handling personal communication archives requires high standards for data integrity and privacy. This project is built on three core engineering pillars:
 
-- **Strict Verification**: Over **570 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
-- **Domain Rigor**: Deep reverse-engineering of proprietary WhatsApp artifacts across both mobile operating systems (cryptographic pipelines, protobuf varints, and auxiliary databases).
+- **Strict Verification**: Over **990 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
+- **Domain Rigor**: Deep reverse-engineering of proprietary WhatsApp artifacts across both mobile operating systems (cryptographic pipelines, protobuf varints, and auxiliary databases), cross-checked against established open-source implementations to ensure structural accuracy.
 - **Developed with AI**: Modern AI coding tools were leveraged as pair programmers to accelerate implementation and broaden test coverage, strictly guided by human architectural design and verified against automated CI suites.
 
 ---

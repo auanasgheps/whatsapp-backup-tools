@@ -14,6 +14,7 @@ import atexit
 import contextlib
 import csv
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -22,11 +23,19 @@ import subprocess
 import tempfile
 import tomllib
 import zlib
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from shared import db, hashing
 
-from . import adb_extractor, android_handler, archive_db, backup_reader, ios_handler
+from . import (
+    adb_extractor,
+    android_handler,
+    archive_db,
+    backup_reader,
+    increment_merger,
+    ios_handler,
+    preservation,
+)
 from .progress import ProgressReporter
 
 # ==============================================================================
@@ -162,16 +171,17 @@ def probe_hardlink_support(target_dir: str, logger: logging.Logger) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def setup_logging(log_path: str) -> logging.Logger:
-    """Configure logging to both file (DEBUG) and console (INFO)."""
+def setup_logging(log_path: str, debug: bool) -> logging.Logger:
+    """Configure logging to both file (DEBUG if debug is True else INFO) and console (INFO)."""
     logger = logging.getLogger("wab_archiver")
-    logger.setLevel(logging.DEBUG)
+    target_level = logging.DEBUG if debug else logging.INFO
+    logger.setLevel(target_level)
 
     if not logger.handlers:
         fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
         fh = logging.FileHandler(log_path, encoding="utf-8")
-        fh.setLevel(logging.DEBUG)
+        fh.setLevel(target_level)
         fh.setFormatter(fmt)
 
         ch = logging.StreamHandler()
@@ -180,6 +190,13 @@ def setup_logging(log_path: str) -> logging.Logger:
 
         logger.addHandler(fh)
         logger.addHandler(ch)
+    else:
+        logger.setLevel(target_level)
+        for h in logger.handlers:
+            if isinstance(h, logging.FileHandler):
+                h.setLevel(target_level)
+            elif isinstance(h, logging.StreamHandler):
+                h.setLevel(logging.INFO)
     return logger
 
 
@@ -193,9 +210,16 @@ def detect_db_platform(path: str) -> str:
     Inspect a WhatsApp database and return 'ios' or 'android'.
     iOS databases contain ZWAMESSAGE; Android databases do not.
     """
-    with contextlib.closing(sqlite3.connect(path)) as conn:
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    return "ios" if "ZWAMESSAGE" in tables else "android"
+    try:
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            tables = {
+                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        return "ios" if "ZWAMESSAGE" in tables else "android"
+    except sqlite3.DatabaseError as e:
+        logger = logging.getLogger("wab_archiver")
+        logger.error(f"Database file '{path}' is not a valid SQLite database: {e}")
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +230,7 @@ def detect_db_platform(path: str) -> str:
 def write_conflict_report(report_path: str, rows: list, logger: logging.Logger):
     """Write a CSV report of files that resolved differently across multiple wa_roots."""
     if not rows:
-        logger.info("No source conflicts found.")
+        logger.debug("No source conflicts found.")
         return
     fieldnames = [
         "file_path",
@@ -220,13 +244,13 @@ def write_conflict_report(report_path: str, rows: list, logger: logging.Logger):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    logger.info(f"Source conflicts report written to: {report_path} ({len(rows)} conflict(s))")
+    logger.debug(f"Source conflicts report written to: {report_path} ({len(rows)} conflict(s))")
 
 
 def write_missing_report(report_path: str, rows: list, logger: logging.Logger):
     """Write the collected missing media rows to a CSV file."""
     if not rows:
-        logger.info("No missing media entries to report.")
+        logger.debug("No missing media entries to report.")
         return
     fieldnames = [
         "message_id",
@@ -244,12 +268,48 @@ def write_missing_report(report_path: str, rows: list, logger: logging.Logger):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    logger.info(f"Missing media report written to: {report_path} ({len(rows)} entries)")
+    logger.debug(f"Missing media report written to: {report_path} ({len(rows)} entries)")
 
 
 # ---------------------------------------------------------------------------
 # Duplicate media CSV report
 # ---------------------------------------------------------------------------
+
+_DUPLICATE_SECTIONS = [
+    ("image", "PHOTOS & IMAGES"),
+    ("video", "VIDEOS"),
+    ("document", "DOCUMENTS"),
+    ("audio", "AUDIO & VOICE NOTES"),
+    ("gif", "ANIMATED GIFS"),
+    ("vcard", "CONTACTS"),
+    ("sticker", "STICKERS"),
+    ("other", "OTHER FILES"),
+]
+
+
+def _determine_duplicate_group_media_type(grp_rows: list) -> str:
+    """Determine canonical media type for a duplicate group from candidate paths."""
+    for _, _, _, orig_p in grp_rows:
+        if orig_p:
+            mt = db.classify_media_type(orig_p, None)
+            if mt in ("sticker", "gif", "vcard"):
+                return mt
+    for arch_p, _, _, _ in grp_rows:
+        mt = db.classify_media_type(arch_p, None)
+        if mt in ("sticker", "gif", "vcard"):
+            return mt
+
+    first_arch_p, _, _, first_orig_p = grp_rows[0]
+    return db.classify_media_type(first_arch_p, first_orig_p)
+
+
+class DuplicateReportSummary(tuple):
+    """2-tuple (group_count, file_count) with section breakdown metadata."""
+
+    def __new__(cls, group_count: int, file_count: int, sections: list):
+        obj = super().__new__(cls, (group_count, file_count))
+        obj.sections = sections
+        return obj
 
 
 def write_duplicate_report(
@@ -258,7 +318,7 @@ def write_duplicate_report(
     logger: logging.Logger,
     tz,
 ):
-    """Write a CSV report of media files with identical content at multiple paths."""
+    """Write a CSV report of media files with identical content at multiple paths, grouped into sections."""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_copies)")}
     ts_expr = "MIN(ac.timestamp_ms)" if "timestamp_ms" in cols else "NULL"
     rows = conn.execute(f"""
@@ -266,22 +326,50 @@ def write_duplicate_report(
             SELECT f.md5, COUNT(DISTINCT ac.archive_path) AS total
             FROM files f
             JOIN archive_copies ac ON ac.original_path = f.original_path
+            WHERE f.md5 IS NOT NULL
+              AND length(f.md5) > 0
+              AND ac.archive_path NOT LIKE '%.thumbnails/%'
             GROUP BY f.md5
             HAVING total >= 2
         )
-        SELECT dh.md5, dh.total, ac.archive_path, MAX(ac.is_hardlink) AS is_hardlink, {ts_expr} AS timestamp_ms
+        SELECT dh.md5, dh.total, ac.archive_path, MAX(ac.is_hardlink) AS is_hardlink, {ts_expr} AS timestamp_ms, MIN(f.original_path) AS orig_path
         FROM dup_hashes dh
         JOIN files f ON f.md5 = dh.md5
         JOIN archive_copies ac ON ac.original_path = f.original_path
+        WHERE ac.archive_path NOT LIKE '%.thumbnails/%'
         GROUP BY dh.md5, dh.total, ac.archive_path
         ORDER BY dh.total DESC, dh.md5, ac.archive_path ASC
     """).fetchall()
 
     if not rows:
-        logger.info("No duplicate media found.")
-        return 0, 0
+        logger.debug("No duplicate media found.")
+        return DuplicateReportSummary(0, 0, [])
+
+    groups_by_md5: dict[bytes, dict] = {}
+    for md5_bytes, file_count, archived_path, is_hardlink, timestamp_ms, orig_path in rows:
+        if md5_bytes not in groups_by_md5:
+            groups_by_md5[md5_bytes] = {
+                "file_count": file_count,
+                "md5_bytes": md5_bytes,
+                "rows": [],
+            }
+        groups_by_md5[md5_bytes]["rows"].append(
+            (archived_path, is_hardlink, timestamp_ms, orig_path)
+        )
+
+    known_section_keys = {sec[0] for sec in _DUPLICATE_SECTIONS}
+    sections: dict[str, list[dict]] = {sec[0]: [] for sec in _DUPLICATE_SECTIONS}
+    for grp in groups_by_md5.values():
+        m_type = _determine_duplicate_group_media_type(grp["rows"])
+        grp["media_type"] = m_type
+        sec_key = m_type if m_type in known_section_keys else "other"
+        sections[sec_key].append(grp)
+
+    for sec_key in sections:
+        sections[sec_key].sort(key=lambda g: (-g["file_count"], g["md5_bytes"]))
 
     fieldnames = [
+        "media_type",
         "group_id",
         "file_count",
         "archived_path",
@@ -289,46 +377,108 @@ def write_duplicate_report(
         "link_status",
         "original_timestamp",
     ]
-    current_md5 = None
-    group_id = 0
+    current_group_id = 0
+    total_files = 0
     output_root = os.path.dirname(os.path.abspath(report_path))
+    first_section = True
 
     with open(report_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for md5_bytes, file_count, archived_path, is_hardlink, timestamp_ms in rows:
-            if md5_bytes != current_md5:
-                current_md5 = md5_bytes
-                group_id += 1
-            abs_file = os.path.join(output_root, *archived_path.split("/"))
-            is_hl = 1 if is_hardlink else 0
-            if os.path.isfile(abs_file):
-                try:
-                    if os.stat(abs_file).st_nlink > 1:
-                        is_hl = 1
-                except OSError:
-                    pass
-            link_status = "hardlink" if is_hl else "duplicate_copy"
-            writer.writerow(
-                {
-                    "group_id": group_id,
-                    "file_count": file_count,
-                    "archived_path": archived_path,
-                    "md5_hex": md5_bytes.hex(),
-                    "link_status": link_status,
-                    "original_timestamp": human_datetime(timestamp_ms, tz) if timestamp_ms else "",
-                }
-            )
-    logger.info(
+        raw_writer = csv.writer(f)
+        dict_writer = csv.DictWriter(f, fieldnames=fieldnames)
+        dict_writer.writeheader()
+
+        for sec_key, sec_title in _DUPLICATE_SECTIONS:
+            sec_groups = sections.get(sec_key, [])
+            if not sec_groups:
+                continue
+
+            sec_file_count = sum(len(g["rows"]) for g in sec_groups)
+            group_label = "duplicate group" if len(sec_groups) == 1 else "duplicate groups"
+            file_label = "file" if sec_file_count == 1 else "files"
+
+            if not first_section:
+                raw_writer.writerow([])
+            first_section = False
+
+            divider_text = f"# --- {sec_title} ({len(sec_groups)} {group_label}, {sec_file_count} {file_label}) ---"
+            raw_writer.writerow([divider_text, "", "", "", "", "", ""])
+
+            for grp in sec_groups:
+                current_group_id += 1
+                md5_hex = grp["md5_bytes"].hex()
+                file_count = grp["file_count"]
+                m_type = grp["media_type"]
+
+                for archived_path, is_hardlink, timestamp_ms, _ in grp["rows"]:
+                    total_files += 1
+                    abs_file = os.path.join(output_root, *archived_path.split("/"))
+                    is_hl = 1 if is_hardlink else 0
+                    if os.path.isfile(abs_file):
+                        try:
+                            if os.stat(abs_file).st_nlink > 1:
+                                is_hl = 1
+                        except OSError:
+                            pass
+                    link_status = "hardlink" if is_hl else "duplicate_copy"
+                    dict_writer.writerow(
+                        {
+                            "media_type": m_type,
+                            "group_id": current_group_id,
+                            "file_count": file_count,
+                            "archived_path": archived_path,
+                            "md5_hex": md5_hex,
+                            "link_status": link_status,
+                            "original_timestamp": human_datetime(timestamp_ms, tz)
+                            if timestamp_ms
+                            else "",
+                        }
+                    )
+
+    logger.debug(
         f"Duplicate media report written to: {report_path} "
-        f"({group_id} group(s), {len(rows)} file(s))"
+        f"({current_group_id} group(s), {total_files} file(s))"
     )
-    return group_id, len(rows)
+    section_breakdown = []
+    for sec_key, sec_title in _DUPLICATE_SECTIONS:
+        sec_groups = sections.get(sec_key, [])
+        if sec_groups:
+            sec_file_count = sum(len(g["rows"]) for g in sec_groups)
+            section_breakdown.append((sec_title, len(sec_groups), sec_file_count))
+            logger.debug(
+                f"  - {sec_title:<22}: {len(sec_groups)} group(s), {sec_file_count} file(s)"
+            )
+    return DuplicateReportSummary(current_group_id, total_files, section_breakdown)
 
 
 # ---------------------------------------------------------------------------
 # Core processing
 # ---------------------------------------------------------------------------
+
+
+def _infer_media_extension(mime_type: str | None) -> str:
+    """Infer file extension from mime type string with standard fallbacks."""
+    if not mime_type:
+        return ""
+    mt = mime_type.lower()
+    if "jpeg" in mt or "jpg" in mt:
+        return ".jpg"
+    if "png" in mt:
+        return ".png"
+    if "webp" in mt:
+        return ".webp"
+    if "gif" in mt:
+        return ".gif"
+    if "mp4" in mt:
+        return ".mp4"
+    if "opus" in mt or "ogg" in mt:
+        return ".opus"
+    if "aac" in mt:
+        return ".aac"
+    if "pdf" in mt:
+        return ".pdf"
+
+    guessed = mimetypes.guess_extension(mime_type.split(";")[0].strip())
+    return guessed or ""
 
 
 def _build_missing_row(
@@ -480,8 +630,11 @@ def _copy_or_skip(
         src_hash = None
         resolved = dest_path
 
-    os.makedirs(dest_dir, exist_ok=True)
+    os.makedirs(db.ensure_long_path(dest_dir), exist_ok=True)
     is_hardlink = 0
+
+    lp_resolved = db.ensure_long_path(resolved)
+    lp_src = db.ensure_long_path(src)
 
     if link_duplicates:
         if src_hash is None:
@@ -489,7 +642,7 @@ def _copy_or_skip(
         canonical = hash_to_canonical.get(src_hash)
         if canonical and canonical != resolved and os.path.isfile(canonical):
             try:
-                os.link(canonical, resolved)
+                os.link(db.ensure_long_path(canonical), lp_resolved)
                 is_hardlink = 1
                 logger.debug(f"LINKED: {canonical} -> {resolved}")
             except OSError as e:
@@ -497,14 +650,14 @@ def _copy_or_skip(
                     f"Could not hard link {canonical} -> {resolved} ({e}). Falling back to copy."
                 )
                 try:
-                    shutil.copy(src, resolved)
+                    shutil.copy(lp_src, lp_resolved)
                     logger.debug(f"COPIED (fallback): {src} -> {resolved}")
                 except Exception as copy_err:
                     logger.error(f"ERROR copying {src} -> {resolved}: {copy_err}")
                     return CopyResult(0, 0, 1, 0)
         else:
             try:
-                shutil.copy(src, resolved)
+                shutil.copy(lp_src, lp_resolved)
                 logger.debug(f"COPIED: {src} -> {resolved}")
             except Exception as e:
                 logger.error(f"ERROR copying {src} -> {resolved}: {e}")
@@ -512,7 +665,7 @@ def _copy_or_skip(
             hash_to_canonical[src_hash] = resolved
     else:
         try:
-            shutil.copy(src, resolved)
+            shutil.copy(lp_src, lp_resolved)
             logger.debug(f"COPIED: {src} -> {resolved}")
         except Exception as e:
             logger.error(f"ERROR copying {src} -> {resolved}: {e}")
@@ -570,29 +723,114 @@ def process_rows(
     cursor = conn.cursor() if conn is not None else None
 
     progress = ProgressReporter("Progress", total, logger, sys.stderr, 0.2)
+    thumb_dir_ensured = False
 
-    for i, (
-        msg_id,
-        timestamp,
-        file_path,
-        mime_type,
-        chat_row_id,
-        chat_subject,
-        sender,
-        key_from_me,
-        message_url,
-        media_name,
-    ) in enumerate(rows, 1):
+    for i, row in enumerate(rows, 1):
+        (
+            msg_id,
+            timestamp,
+            file_path,
+            mime_type,
+            chat_row_id,
+            chat_subject,
+            sender,
+            key_from_me,
+            message_url,
+            media_name,
+        ) = row[:10]
+        thumb_path = row[10] if len(row) > 10 else None
         is_group = chat_subject is not None
         filename = media_name if media_name else (os.path.basename(file_path) if file_path else "")
 
+        if not filename and thumb_path:
+            base_thumb = os.path.splitext(os.path.basename(thumb_path))[0]
+            ext = _infer_media_extension(mime_type)
+            filename = f"{base_thumb}{ext}"
+        elif not filename:
+            ext = _infer_media_extension(mime_type)
+            ts_label = (
+                datetime.fromtimestamp(timestamp / 1000.0, tz=UTC).strftime("%Y%m%d")
+                if timestamp
+                else "unknown"
+            )
+            filename = f"MEDIA-{ts_label}-{msg_id}{ext}"
+
+        year = get_year(timestamp, tz) if timestamp else "Unknown"
+
+        if is_group:
+            dest_dir, dest_filename = _route_group(
+                chat_row_id,
+                chat_subject,
+                sender,
+                key_from_me,
+                contacts,
+                number_map,
+                filename,
+                year,
+                output_root,
+                updated_group_index,
+            )
+        else:
+            dest_dir, dest_filename = _route_contact(
+                sender,
+                key_from_me,
+                contacts,
+                number_map,
+                filename,
+                year,
+                output_root,
+                updated_index,
+            )
+
+        expected_dest_path = os.path.relpath(
+            os.path.join(dest_dir, dest_filename), output_root
+        ).replace(os.sep, "/")
+
+        report_file_path = (
+            expected_dest_path
+            if (file_path is None or file_path.startswith("Message/"))
+            else file_path
+        )
+
+        def _extract_thumb_if_missing() -> bool:
+            nonlocal thumb_dir_ensured
+            if thumb_path:
+                src_thumb = media_resolver(thumb_path)
+                if src_thumb and os.path.isfile(src_thumb):
+                    thumb_dest_dir = os.path.join(output_root, "Whatsapp Databases", ".thumbnails")
+                    thumb_filename = os.path.basename(thumb_path)
+                    dest_thumb = os.path.join(thumb_dest_dir, thumb_filename)
+                    if not dry_run:
+                        if not thumb_dir_ensured:
+                            os.makedirs(thumb_dest_dir, exist_ok=True)
+                            thumb_dir_ensured = True
+                        try:
+                            if not os.path.exists(dest_thumb):
+                                shutil.copy2(src_thumb, dest_thumb)
+                            if cursor is not None:
+                                rel = os.path.relpath(dest_thumb, output_root).replace(os.sep, "/")
+                                archive_db.record_file_archived(
+                                    cursor,
+                                    thumb_path,
+                                    b"",
+                                    rel,
+                                    os.path.getsize(dest_thumb),
+                                    0,
+                                    timestamp,
+                                )
+                        except OSError:
+                            pass
+                    return True
+            return False
+
         if not file_path:
             logger.debug(f"SKIP (no file_path): message_id={msg_id}")
+            _extract_thumb_if_missing()
             missing_rows.append(
                 _build_missing_row(
                     msg_id,
                     timestamp,
-                    None,
+                    report_file_path,
                     mime_type,
                     chat_subject,
                     sender,
@@ -619,12 +857,24 @@ def process_rows(
         src = media_resolver(file_path)
 
         if src is None or not os.path.isfile(src):
-            logger.warning(f"MISSING source file (message_id={msg_id}): {file_path}")
+            thumb_found = _extract_thumb_if_missing()
+            short_name = (
+                os.path.basename(file_path)
+                if (file_path and os.path.basename(file_path))
+                else (filename or f"msg_{msg_id}")
+            )
+            if thumb_found:
+                logger.warning(
+                    f"MISSING source file '{short_name}' (message_id={msg_id}) — "
+                    "A thumbnail has been found and will be used as backup in the Viewer"
+                )
+            else:
+                logger.warning(f"MISSING source file '{short_name}' (message_id={msg_id})")
             missing_rows.append(
                 _build_missing_row(
                     msg_id,
                     timestamp,
-                    file_path,
+                    report_file_path,
                     mime_type,
                     chat_subject,
                     sender,
@@ -654,7 +904,7 @@ def process_rows(
                 _build_missing_row(
                     msg_id,
                     timestamp,
-                    file_path,
+                    report_file_path,
                     mime_type,
                     chat_subject,
                     sender,
@@ -677,33 +927,6 @@ def process_rows(
                 },
             )
             continue
-
-        year = get_year(timestamp, tz)
-
-        if is_group:
-            dest_dir, dest_filename = _route_group(
-                chat_row_id,
-                chat_subject,
-                sender,
-                key_from_me,
-                contacts,
-                number_map,
-                filename,
-                year,
-                output_root,
-                updated_group_index,
-            )
-        else:
-            dest_dir, dest_filename = _route_contact(
-                sender,
-                key_from_me,
-                contacts,
-                number_map,
-                filename,
-                year,
-                output_root,
-                updated_index,
-            )
 
         dest_path = os.path.join(dest_dir, dest_filename)
         dest_existed_before = dest_path not in written_dest_paths and os.path.exists(dest_path)
@@ -931,6 +1154,106 @@ def process_vcard_rows(
     return stats, updated_index, updated_group_index
 
 
+def process_ios_link_thumbnails(
+    cursor: sqlite3.Cursor,
+    media_resolver,
+    output_root: str,
+    archive_conn: sqlite3.Connection | None,
+    since_ms: int | None,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> dict[str, int]:
+    """
+    Extract link preview thumbnails from iOS ChatStorage.sqlite into Whatsapp Databases/.thumbnails/
+    and record them in .wa_media_archiver.db (archive_copies).
+    """
+    query = ios_handler.build_ios_link_thumbnails_query(cursor, since_ms)
+    rows = cursor.execute(query).fetchall()
+    if not rows:
+        return {"copied": 0, "skipped": 0, "missing": 0}
+
+    copied = 0
+    skipped = 0
+    missing = 0
+    thumb_dir_ensured = False
+    thumb_dest_dir = os.path.join(output_root, "Whatsapp Databases", ".thumbnails")
+
+    progress = ProgressReporter("Thumbnails", len(rows), logger, sys.stderr, 0.2)
+    arch_cursor = archive_conn.cursor() if archive_conn is not None else None
+
+    for i, row in enumerate(rows, 1):
+        _msg_id, timestamp_ms, thumb_path = row[0], row[1], row[2]
+        if not thumb_path:
+            missing += 1
+            progress.update(i, {"Copied": copied, "Skipped": skipped, "Missing": missing})
+            continue
+
+        norm_path = thumb_path.replace("\\", "/")
+        cands = [norm_path]
+        if norm_path.startswith("Message/"):
+            cands.append(norm_path[8:])
+        else:
+            cands.append(f"Message/{norm_path}")
+
+        src_thumb = None
+        for cand in cands:
+            resolved = media_resolver(cand)
+            if resolved and os.path.isfile(resolved):
+                src_thumb = resolved
+                break
+
+        if not src_thumb:
+            missing += 1
+            progress.update(i, {"Copied": copied, "Skipped": skipped, "Missing": missing})
+            continue
+
+        thumb_filename = os.path.basename(norm_path)
+        dest_thumb = os.path.join(thumb_dest_dir, thumb_filename)
+
+        if not dry_run:
+            if not thumb_dir_ensured:
+                os.makedirs(thumb_dest_dir, exist_ok=True)
+                thumb_dir_ensured = True
+
+            try:
+                if not os.path.exists(dest_thumb):
+                    shutil.copy2(src_thumb, dest_thumb)
+                    copied += 1
+                else:
+                    skipped += 1
+
+                if archive_conn is not None:
+                    rel_path = os.path.relpath(dest_thumb, output_root).replace(os.sep, "/")
+                    file_size = os.path.getsize(dest_thumb)
+                    keys = {
+                        norm_path,
+                        norm_path[8:] if norm_path.startswith("Message/") else norm_path,
+                    }
+                    for key_path in keys:
+                        archive_db.record_file_archived(
+                            arch_cursor,
+                            key_path,
+                            b"",
+                            rel_path,
+                            file_size,
+                            0,
+                            timestamp_ms or 0,
+                        )
+            except OSError as e:
+                logger.warning(f"Failed to copy link thumbnail {src_thumb} -> {dest_thumb}: {e}")
+        else:
+            copied += 1
+
+        progress.update(i, {"Copied": copied, "Skipped": skipped, "Missing": missing})
+
+    progress.finish({"Copied": copied, "Skipped": skipped, "Missing": missing})
+
+    if archive_conn is not None and not dry_run:
+        archive_conn.commit()
+
+    return {"copied": copied, "skipped": skipped, "missing": missing}
+
+
 # ---------------------------------------------------------------------------
 # Restore mode
 # ---------------------------------------------------------------------------
@@ -1104,6 +1427,32 @@ def run_restore_mode(args, logger):
             }
         )
 
+        arch_db_source = os.path.join(args.output, "Whatsapp Databases", "msgstore.db")
+        if os.path.isfile(arch_db_source):
+            db_dest = os.path.join(args.output, "Databases", "msgstore.db")
+            if os.path.exists(db_dest) and file_md5(arch_db_source) == file_md5(db_dest):
+                logger.debug("SKIP database (identical already restored): Databases/msgstore.db")
+                stats["skipped"] += 1
+            elif args.dry_run:
+                logger.info("[DRY RUN] Would restore database: Databases/msgstore.db")
+                stats["restored"] += 1
+            else:
+                os.makedirs(os.path.dirname(db_dest), exist_ok=True)
+                try:
+                    shutil.copy2(arch_db_source, db_dest)
+                    logger.info("RESTORED database: Databases/msgstore.db")
+                    stats["restored"] += 1
+                except Exception as e:
+                    logger.error(f"ERROR restoring database Databases/msgstore.db: {e}")
+                    stats["warnings"] += 1
+                    report_rows.append(
+                        {
+                            "original_path": "Databases/msgstore.db",
+                            "source_archive_path": "Whatsapp Databases/msgstore.db",
+                            "status": f"error: {e}",
+                        }
+                    )
+
         if not args.dry_run:
             if report_rows:
                 fieldnames = ["original_path", "source_archive_path", "status"]
@@ -1143,6 +1492,7 @@ _VALID_CONFIG_KEYS = {
     "wa_root",
     "contacts",
     "log",
+    "debug",
     "business",
     "timezone",
     "since",
@@ -1153,50 +1503,84 @@ _VALID_CONFIG_KEYS = {
     "pull_media",
     "staging",
     "link_duplicates",
+    "preserve_deleted",
 }
 
 _EXAMPLE_CONFIG = """\
-# This is an example config file. Rename it to config.toml to activate it.
+# =============================================================================
 # wab-archiver config
-# All paths can be absolute or relative to where you run the script.
-# Remove the leading # to activate a setting.
 #
-# Windows tip: you can paste Windows paths as-is; backslashes are auto-corrected.
+# Rename this file to config.toml to activate it.
+# All paths can be absolute or relative to where you run the command.
+# Remove the leading '#' to uncomment and activate any setting.
+#
+# Windows tip: You can paste Windows paths as-is (e.g. C:\\Users\\...);
+# backslashes are automatically converted to forward slashes.
+# =============================================================================
 
-output     = "/path/to/archive"         # required
-# msgstore = "msgstore.db"
-# e2e_key  = ""
+# -----------------------------------------------------------------------------
+# Archive Destination & General Settings
+# -----------------------------------------------------------------------------
+output     = "/path/to/archive"         # Destination folder for the archive (required)
+# log      = ""                         # Custom log file path (default: <output>/wab-archiver.log)
+# debug    = false                      # Enable debug logging in the log file (default: false, INFO level)
+# timezone = ""                         # IANA timezone (e.g. Europe/Rome, UTC) for year folders & reports
+# business = false                      # Target WhatsApp Business instead of regular WhatsApp
 
-# Single WhatsApp source folder (Android: folder containing Media/)
+# -----------------------------------------------------------------------------
+# Archiving Features & Filtering
+# -----------------------------------------------------------------------------
+# preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
+# link_duplicates  = true               # Save disk space by hardlinking duplicate media across chats
+# since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
+
+# -----------------------------------------------------------------------------
+# Source: Android (Local Files & Folders)
+# -----------------------------------------------------------------------------
+# msgstore = "msgstore.db"              # Path to msgstore.db or msgstore.db.crypt15
+# e2e_key  = ""                         # 64-char hex key for encrypted .crypt15 backups
+# contacts = ""                         # Path to contacts CSV or exported wa_contacts
+
+# Single WhatsApp source folder (folder containing Media/)
 # wa_root  = "/path/to/WhatsApp"
 
-# Multiple source folders — tried in order, best copy wins (Android only)
+# Multiple source folders — searched in order, best copy wins
 # wa_root  = ["/path/to/old-archive", "/path/to/current-phone/WhatsApp"]
 
-# contacts = ""
-# log      = ""
-# business = false
-# timezone = ""                         # e.g. Europe/Rome
-# since    = ""                         # e.g. 2024-01-01
-# link_duplicates = false              # hardlink duplicate media files across chats
+# -----------------------------------------------------------------------------
+# Source: Android (ADB Mode — Automatic USB Pull)
+# See docs/archiver/setup-android.md
+# -----------------------------------------------------------------------------
+# from_adb   = false                    # Pull msgstore and contacts automatically via ADB
+# pull_media = false                    # Also pull media files from phone storage via ADB
+# staging    = ""                       # Permanent local phone backup folder (copied to output)
 
-# Android — pull via ADB  (wab-archiver archive --from-adb; see setup-android.md)
-# from_adb   = false
-# pull_media = false                    # also pull media files (--pull-media)
-# staging    = ""                       # permanent copy of phone storage (treated as wa_root, copied to output)
-
-# iOS
-# ios_backup   = ""
-# ios_password = ""
-# ios_contacts = ""
+# -----------------------------------------------------------------------------
+# Source: iOS (iPhone Backup)
+# See docs/archiver/setup-ios.md
+# -----------------------------------------------------------------------------
+# ios_backup   = ""                     # Path to iPhone backup folder (containing Manifest.db)
+# ios_password = ""                     # Password for encrypted iPhone backup
+# ios_contacts = ""                     # Path to ContactsV2.sqlite (auto-extracted from backup if omitted)
 """
+
+
+def _flatten_config(data: dict) -> dict:
+    """Recursively flatten TOML sections into a flat configuration dict."""
+    flat = {}
+    for k, v in data.items():
+        if isinstance(v, dict):
+            flat.update(_flatten_config(v))
+        else:
+            flat[k] = v
+    return flat
 
 
 def _load_toml(path: str) -> dict:
     try:
         with open(path, "rb") as f:
             raw = f.read()
-        return tomllib.loads(raw.decode("utf-8"))
+        return _flatten_config(tomllib.loads(raw.decode("utf-8")))
     except tomllib.TOMLDecodeError:
         fixed = re.sub(
             r'"([^"]*)"', lambda m: '"' + m.group(1).replace("\\", "/") + '"', raw.decode("utf-8")
@@ -1210,7 +1594,7 @@ def _load_toml(path: str) -> dict:
                 "to forward slashes and the file was updated.",
                 file=sys.stderr,
             )
-            return result
+            return _flatten_config(result)
         except tomllib.TOMLDecodeError as e:
             print(f"ERROR: Could not parse config file {path}:\n  {e}", file=sys.stderr)
             sys.exit(1)
@@ -1340,7 +1724,7 @@ def parse_args() -> argparse.Namespace:
         description="Archive WhatsApp media into a structured folder hierarchy.",
     )
     parser.add_argument(
-        "--version", action="version", version=f"WhatsApp Backup Tools — Archiver v{_get_version()}"
+        "--version", action="version", version=f"WhatsApp Backup Tools - Archiver v{_get_version()}"
     )
 
     subs = parser.add_subparsers(dest="command", metavar="command")
@@ -1490,6 +1874,23 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Hardlink duplicate media files across chats instead of copying bytes.",
     )
+    archive_p.add_argument(
+        "-P",
+        "--preserve-deleted",
+        action="store_true",
+        dest="preserve_deleted",
+        default=False,
+        help="Preserve messages deleted or revoked on device into preserved_messages.db.",
+    )
+    archive_p.add_argument(
+        "-v",
+        "--debug",
+        "--verbose",
+        action="store_true",
+        dest="debug",
+        default=False,
+        help="Enable debug logging in the log file (default: false, INFO level).",
+    )
     # Apply config defaults to the archive subparser.
     archive_p.set_defaults(**_config)
 
@@ -1513,6 +1914,15 @@ def parse_args() -> argparse.Namespace:
         help="Log file path.",
     )
     restore_p.add_argument(
+        "-v",
+        "--debug",
+        "--verbose",
+        action="store_true",
+        dest="debug",
+        default=False,
+        help="Enable debug logging in the log file (default: false, INFO level).",
+    )
+    restore_p.add_argument(
         "--dry-run",
         action="store_true",
         help="Simulate the restore without copying any files.",
@@ -1523,7 +1933,7 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Path to a TOML config file.",
     )
-    _restore_config = {k: v for k, v in _config.items() if k in ("output", "log")}
+    _restore_config = {k: v for k, v in _config.items() if k in ("output", "log", "debug")}
     restore_p.set_defaults(**_restore_config)
 
     # --- config ---
@@ -1580,8 +1990,9 @@ def parse_args() -> argparse.Namespace:
 
 def _warn_network_paths(args: argparse.Namespace, logger: logging.Logger):
     """Warn if output or any wa_root appear to be UNC network share paths."""
-    roots = args.wa_roots or []
-    for label, path in [("--output", args.output)] + [("--wa-root", r) for r in roots]:
+    roots = getattr(args, "wa_roots", None) or []
+    output = getattr(args, "output", None)
+    for label, path in [("--output", output)] + [("--wa-root", r) for r in roots]:
         if path and (path.startswith("\\\\") or path.startswith("//")):
             logger.warning(
                 f"{label} appears to be a network share ({path}). "
@@ -1679,22 +2090,143 @@ def decrypt_msgstore(
         os.makedirs(output_dir, exist_ok=True)
     if os.path.exists(output_path):
         logger.warning(f"Overwriting existing {output_path} with decrypted database.")
+    _clean_sqlite_files(output_path)
     with open(output_path, "wb") as out:
         out.write(output_file)
     logger.info("Decryption complete.")
     return output_path
 
 
-def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger):
-    """Decrypt encrypted msgstore if necessary."""
-    if hasattr(args, "msgstore") and args.msgstore and args.msgstore.endswith(".crypt15"):
+_clean_sqlite_files = db.clean_sqlite_files
+_safe_replace_sqlite_db = db.safe_replace_sqlite_db
+
+
+def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger) -> None:
+    """Decrypt encrypted msgstore and merge incremental diffs if present."""
+    if hasattr(args, "msgstore") and args.msgstore:
+        is_encrypted = args.msgstore.endswith((".crypt15", ".crypt14"))
+        staged_incs = getattr(args, "_staged_increments", None) or []
+        local_incs = []
+        if os.path.isfile(args.msgstore):
+            msgstore_dir = os.path.dirname(os.path.abspath(args.msgstore))
+            local_incs = increment_merger.find_increment_files(msgstore_dir, args.msgstore)
+            local_incs = [
+                f for f in local_incs if os.path.abspath(f) != os.path.abspath(args.msgstore)
+            ]
+
+        all_increments = staged_incs if staged_incs else local_incs
+        if all_increments:
+            all_increments = increment_merger.filter_active_increments(
+                all_increments, getattr(args, "msgstore", None)
+            )
+            all_increments = increment_merger.validate_increment_sequence(all_increments, logger)
+
+        if not is_encrypted and not all_increments:
+            return
+
         if not getattr(args, "e2e_key", None):
-            logger.error("Encrypted msgstore detected but no --e2e-key provided. Exiting.")
+            logger.error("Encrypted backup/increments detected but no --e2e-key provided. Exiting.")
             raise SystemExit(1)
+
         db_dir = os.path.join(args.output, "Whatsapp Databases")
         os.makedirs(db_dir, exist_ok=True)
         decrypted_db = os.path.join(db_dir, "msgstore.db")
-        args.msgstore = decrypt_msgstore(args.msgstore, args.e2e_key, decrypted_db, logger)
+        old_db = os.path.join(db_dir, "msgstore.db.old")
+        incoming_db = os.path.join(db_dir, "msgstore.db.incoming")
+        merge_staging_dir = os.path.join(db_dir, ".staging_merge")
+
+        _clean_sqlite_files(incoming_db)
+
+        try:
+            if all_increments:
+                logger.info(f"Detected {len(all_increments)} incremental backup(s) to merge.")
+                base_decrypted = os.path.join(db_dir, "msgstore.db.base_decrypted")
+                _clean_sqlite_files(base_decrypted)
+
+                try:
+                    if is_encrypted:
+                        decrypt_msgstore(args.msgstore, args.e2e_key, base_decrypted, logger)
+                    else:
+                        shutil.copy2(args.msgstore, base_decrypted)
+
+                    increment_merger.merge_increments(
+                        base_decrypted,
+                        all_increments,
+                        args.e2e_key,
+                        incoming_db,
+                        merge_staging_dir,
+                        logger,
+                        args.output if getattr(args, "preserve_deleted", False) else None,
+                    )
+                finally:
+                    _clean_sqlite_files(base_decrypted)
+            else:
+                decrypt_msgstore(args.msgstore, args.e2e_key, incoming_db, logger)
+        except BaseException:
+            _clean_sqlite_files(incoming_db)
+            raise
+
+        has_previous_db = os.path.isfile(decrypted_db)
+
+        if getattr(args, "preserve_deleted", False):
+            if has_previous_db:
+                _clean_sqlite_files(old_db)
+                _safe_replace_sqlite_db(decrypted_db, old_db)
+                _safe_replace_sqlite_db(incoming_db, decrypted_db)
+                args.msgstore = decrypted_db
+
+                try:
+                    archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+                    args._preservation_stats = preservation.preserve_deleted_messages(
+                        old_db,
+                        decrypted_db,
+                        args.output,
+                        archive_db_path,
+                        "android",
+                        logger,
+                    )
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.error(
+                        f"Preservation failed ({e}). Restoring previous database from {old_db}."
+                    )
+                    _clean_sqlite_files(decrypted_db)
+                    with contextlib.suppress(OSError):
+                        _safe_replace_sqlite_db(old_db, decrypted_db)
+                    raise
+                finally:
+                    _clean_sqlite_files(old_db)
+            else:
+                logger.info(
+                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
+                )
+                args._preservation_stats = preservation.PreservationResult(messages=0, chats=0)
+                _safe_replace_sqlite_db(incoming_db, decrypted_db)
+                args.msgstore = decrypted_db
+        else:
+            if has_previous_db:
+                logger.warning(f"Overwriting existing {decrypted_db} with decrypted database.")
+            _safe_replace_sqlite_db(incoming_db, decrypted_db)
+            args.msgstore = decrypted_db
+
+        # Clear stale viewer caches in archive db if present
+        archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+        if os.path.exists(archive_db_path):
+            with contextlib.closing(sqlite3.connect(archive_db_path)) as arc_c:
+                try:
+                    arc_c.execute("DELETE FROM recent_messages")
+                    arc_c.execute("DELETE FROM reactions_cache")
+                    arc_c.commit()
+                except sqlite3.OperationalError:
+                    pass
+
+        # Only after successful merge and rotation, clean up temporary staging diff files
+        if os.path.exists(merge_staging_dir):
+            shutil.rmtree(merge_staging_dir, ignore_errors=True)
+        if staged_incs:
+            for sf in staged_incs:
+                with contextlib.suppress(OSError):
+                    os.remove(sf)
+            args._staged_increments = []
 
 
 def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: logging.Logger):
@@ -1709,29 +2241,111 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
     # iOS backup mode
     # -------------------------------------------------------------------------
     if args.ios_backup:
+        existing_chat_storage = os.path.join(
+            args.output, "Whatsapp Databases", "ChatStorage.sqlite"
+        )
+        old_ios_db = os.path.join(args.output, "Whatsapp Databases", "ChatStorage.sqlite.old")
+        has_previous_ios_db = os.path.isfile(existing_chat_storage)
+
         is_encrypted = backup_reader.detect_encrypted(args.ios_backup, logger)
         if is_encrypted and not args.ios_password:
             logger.error("Your iPhone backup is encrypted. Re-run with --ios-password <password>.")
             raise SystemExit(1)
 
-        if is_encrypted:
-            msgstore_path, ios_contacts_path, media_resolver = backup_reader.extract_encrypted(
-                args.ios_backup,
-                args.ios_password,
-                args.output,
-                args.ios_contacts,
-                args.business,
-                logger,
-            )
+        if getattr(args, "preserve_deleted", False):
+            if has_previous_ios_db:
+                _clean_sqlite_files(old_ios_db)
+                _safe_replace_sqlite_db(existing_chat_storage, old_ios_db)
+
+                try:
+                    if is_encrypted:
+                        msgstore_path, ios_contacts_path, media_resolver = (
+                            backup_reader.extract_encrypted(
+                                args.ios_backup,
+                                args.ios_password,
+                                args.output,
+                                args.ios_contacts,
+                                args.business,
+                                logger,
+                            )
+                        )
+                    else:
+                        manifest_map, msgstore_path, ios_contacts_path = (
+                            backup_reader.extract_plaintext(
+                                args.ios_backup,
+                                args.output,
+                                args.ios_contacts,
+                                args.business,
+                                logger,
+                            )
+                        )
+                        media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
+
+                    archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+                    args._preservation_stats = preservation.preserve_deleted_messages(
+                        old_ios_db,
+                        msgstore_path,
+                        args.output,
+                        archive_db_path,
+                        "ios",
+                        logger,
+                    )
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.error(
+                        f"Preservation failed ({e}). Restoring previous database from {old_ios_db}."
+                    )
+                    _clean_sqlite_files(existing_chat_storage)
+                    with contextlib.suppress(OSError):
+                        _safe_replace_sqlite_db(old_ios_db, existing_chat_storage)
+                    raise
+                finally:
+                    _clean_sqlite_files(old_ios_db)
+            else:
+                logger.info(
+                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
+                )
+                args._preservation_stats = preservation.PreservationResult(messages=0, chats=0)
+                if is_encrypted:
+                    msgstore_path, ios_contacts_path, media_resolver = (
+                        backup_reader.extract_encrypted(
+                            args.ios_backup,
+                            args.ios_password,
+                            args.output,
+                            args.ios_contacts,
+                            args.business,
+                            logger,
+                        )
+                    )
+                else:
+                    manifest_map, msgstore_path, ios_contacts_path = (
+                        backup_reader.extract_plaintext(
+                            args.ios_backup,
+                            args.output,
+                            args.ios_contacts,
+                            args.business,
+                            logger,
+                        )
+                    )
+                    media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
         else:
-            manifest_map, msgstore_path, ios_contacts_path = backup_reader.extract_plaintext(
-                args.ios_backup,
-                args.output,
-                args.ios_contacts,
-                args.business,
-                logger,
-            )
-            media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
+            if is_encrypted:
+                msgstore_path, ios_contacts_path, media_resolver = backup_reader.extract_encrypted(
+                    args.ios_backup,
+                    args.ios_password,
+                    args.output,
+                    args.ios_contacts,
+                    args.business,
+                    logger,
+                )
+            else:
+                manifest_map, msgstore_path, ios_contacts_path = backup_reader.extract_plaintext(
+                    args.ios_backup,
+                    args.output,
+                    args.ios_contacts,
+                    args.business,
+                    logger,
+                )
+                media_resolver = lambda fp: manifest_map.get(fp)  # noqa: E731
 
         args.msgstore = msgstore_path
         platform = "ios"
@@ -1817,7 +2431,10 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
         tmp_dir = tempfile.mkdtemp(prefix="wab_adb_")
         atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
         try:
-            args.msgstore = adb_extractor.pull_msgstore(tmp_dir, args.business, logger)
+            args.msgstore, args._staged_increments = adb_extractor.pull_msgstore_and_increments(
+                tmp_dir, args.business, logger
+            )
+            args._staging_dir = tmp_dir
             args.contacts = adb_extractor.pull_contacts(tmp_dir, logger)
         except subprocess.CalledProcessError:
             raise SystemExit(1)
@@ -1867,7 +2484,8 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
         contacts = android_handler.load_contacts(args.contacts, logger)
 
     # --- Decrypt if needed ---
-    _decrypt_msgstore_if_needed(args, logger)
+    if not getattr(args, "from_adb", False):
+        _decrypt_msgstore_if_needed(args, logger)
 
     return platform, media_resolver, ios_contacts_path, contacts
 
@@ -1957,62 +2575,150 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
         platform = detect_db_platform(args.msgstore)
         logger.info(f"Detected platform: {platform}")
 
+    pres_stats = getattr(
+        args, "_preservation_stats", preservation.PreservationResult(messages=0, chats=0)
+    )
+
+    if getattr(args, "preserve_deleted", False) and not args.ios_backup:
+        target_name = "msgstore.db" if platform == "android" else "ChatStorage.sqlite"
+        dest_db = os.path.join(args.output, "Whatsapp Databases", target_name)
+        if not getattr(args, "dry_run", False):
+            os.makedirs(os.path.dirname(dest_db), exist_ok=True)
+            if os.path.isfile(dest_db):
+                if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
+                    archive_db_path = os.path.join(args.output, ".wa_media_archiver.db")
+                    old_db = dest_db + ".old"
+                    _clean_sqlite_files(old_db)
+                    _safe_replace_sqlite_db(dest_db, old_db)
+                    _clean_sqlite_files(dest_db)
+                    shutil.copy2(args.msgstore, dest_db)
+                    try:
+                        pres_stats = preservation.preserve_deleted_messages(
+                            old_db,
+                            dest_db,
+                            args.output,
+                            archive_db_path,
+                            platform or "android",
+                            logger,
+                        )
+                    except (Exception, KeyboardInterrupt) as e:
+                        logger.error(
+                            f"Preservation failed ({e}). Restoring previous database from {old_db}."
+                        )
+                        _clean_sqlite_files(dest_db)
+                        with contextlib.suppress(OSError):
+                            _safe_replace_sqlite_db(old_db, dest_db)
+                        raise
+                    finally:
+                        _clean_sqlite_files(old_db)
+                    args.msgstore = dest_db
+            else:
+                logger.info(
+                    "Preserve-deleted: First run detected in output directory; establishing baseline database snapshot (0 messages preserved across 0 chats)."
+                )
+                pres_stats = preservation.PreservationResult(messages=0, chats=0)
+                if os.path.abspath(args.msgstore) != os.path.abspath(dest_db):
+                    _clean_sqlite_files(dest_db)
+                    shutil.copy2(args.msgstore, dest_db)
+                    args.msgstore = dest_db
+        else:
+            logger.info(
+                "Preserve-deleted: [DRY RUN] Skipping database preservation (0 messages preserved across 0 chats)."
+            )
+
     with contextlib.closing(sqlite3.connect(args.msgstore)) as msgstore_conn:
         cursor = msgstore_conn.cursor()
 
-        if platform == "ios":
-            ios_handler.validate_ios_schema(cursor, logger)
+        try:
+            if platform == "ios":
+                ios_handler.validate_ios_schema(cursor, logger)
 
-            if args.wa_roots:
-                ios_handler.validate_ios_wa_root(args.wa_roots[0], logger)
+                if args.wa_roots:
+                    ios_handler.validate_ios_wa_root(args.wa_roots[0], logger)
 
-            number_map = ios_handler.build_ios_number_map(cursor, logger)
+                number_map = ios_handler.build_ios_number_map(cursor, logger)
 
-            if not contacts and ios_contacts_path:
-                contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
+                if not contacts and ios_contacts_path:
+                    contacts = ios_handler.load_ios_contacts(ios_contacts_path, logger)
 
-            pushname_map = ios_handler.build_ios_pushname_map(cursor, logger)
-            for key, name in pushname_map.items():
-                contacts.setdefault(key, name)
+                if ios_contacts_path:
+                    lid_map = ios_handler.load_ios_lid_map(ios_contacts_path, logger)
+                    for lid_key, phone_val in lid_map.items():
+                        number_map.setdefault(lid_key, phone_val)
 
-            candidate_dirs = [
-                os.path.join(args.output, "Whatsapp Databases"),
-                args.output,
-                os.path.dirname(os.path.abspath(args.msgstore)),
-            ]
-            if args.wa_roots:
-                candidate_dirs.extend(args.wa_roots)
-            ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
-            hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
+                pushname_map = ios_handler.build_ios_pushname_map(cursor, logger)
+                for key, name in pushname_map.items():
+                    contacts.setdefault(key, name)
 
-            query = ios_handler.build_ios_query(args.limit, since_ms, hd_dedup)
-            vcard_query = (
-                ios_handler.build_ios_vcard_query(args.limit, since_ms)
-                if ios_handler.has_ios_vcard_support(cursor)
-                else None
-            )
-            group_subjects = dict(
-                cursor.execute(ios_handler.build_ios_group_subjects_query()).fetchall()
-            )
+                candidate_dirs = [
+                    os.path.join(args.output, "Whatsapp Databases"),
+                    args.output,
+                    os.path.dirname(os.path.abspath(args.msgstore)),
+                ]
+                if args.wa_roots:
+                    candidate_dirs.extend(args.wa_roots)
+                ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
+                hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
 
-        else:
-            android_handler.validate_schema(cursor, logger)
-            android_handler.validate_wa_root(args.wa_roots, logger)
-            number_map = android_handler.build_number_map(cursor, logger)
+                has_thumb, has_msg_type, has_vcard, has_text = ios_handler.get_ios_schema_features(
+                    cursor
+                )
+                query = ios_handler.build_ios_query(
+                    args.limit,
+                    since_ms,
+                    hd_dedup,
+                    has_thumb,
+                    has_msg_type,
+                    has_vcard,
+                    has_text,
+                )
+                vcard_query = (
+                    ios_handler.build_ios_vcard_query(args.limit, since_ms)
+                    if ios_handler.has_ios_vcard_support(cursor)
+                    else None
+                )
+                group_subjects = dict(
+                    cursor.execute(ios_handler.build_ios_group_subjects_query()).fetchall()
+                )
 
-            hd_dedup = android_handler._check_hd_association(cursor, logger)
-            query = android_handler.build_query(args.limit, since_ms, hd_dedup)
-            vcard_query = (
-                android_handler.build_vcard_query(args.limit, since_ms)
-                if android_handler.has_vcard_support(cursor)
-                else None
-            )
-            group_subjects = dict(
-                cursor.execute(android_handler.build_group_subjects_query()).fetchall()
-            )
+            else:
+                android_handler.validate_schema(cursor, logger)
+                android_handler.validate_wa_root(args.wa_roots, logger)
+                number_map = android_handler.build_number_map(cursor, logger)
 
-        total_rows = cursor.execute(f"SELECT COUNT(*) FROM ({query})").fetchone()[0]
-        logger.info(f"Query returned {total_rows} rows.")
+                hd_dedup = android_handler._check_hd_association(cursor, logger)
+                query = android_handler.build_query(args.limit, since_ms, hd_dedup)
+                vcard_query = (
+                    android_handler.build_vcard_query(args.limit, since_ms)
+                    if android_handler.has_vcard_support(cursor)
+                    else None
+                )
+                if android_handler.has_extended_media_support(cursor):
+                    ext_query = android_handler.build_extended_media_query(args.limit, since_ms)
+                    query = f"SELECT * FROM ({query}) UNION ALL SELECT * FROM ({ext_query})"
+                group_subjects = dict(
+                    cursor.execute(android_handler.build_group_subjects_query()).fetchall()
+                )
+
+            total_rows = cursor.execute(f"SELECT COUNT(*) FROM ({query})").fetchone()[0]
+            logger.info(f"Query returned {total_rows} rows.")
+        except sqlite3.OperationalError as e:
+            err_msg = str(e).lower()
+            if "no such column" in err_msg or "no such table" in err_msg:
+                from shared.schema_validator import (
+                    build_github_issue_url,
+                    extract_database_fingerprint,
+                    format_schema_banner,
+                )
+
+                fingerprint = extract_database_fingerprint(cursor, platform)
+                issue_url = build_github_issue_url(
+                    platform, [], {}, f"{fingerprint}; query error={e}", _get_version()
+                )
+                banner = format_schema_banner(platform, [], {}, issue_url)
+                logger.error(banner)
+                raise SystemExit(1)
+            raise
 
         archive_conn = archive_db.open_archive_db(args.output)
         try:
@@ -2103,6 +2809,24 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                         "skipped_empty_vcard", 0
                     ) + v_stats.get("skipped_empty_vcard", 0)
 
+            if platform == "ios" and ios_handler.has_ios_link_thumbnails_support(cursor):
+                logger.info("Extracting iOS link preview thumbnails...")
+                link_thumb_stats = process_ios_link_thumbnails(
+                    cursor,
+                    media_resolver,
+                    args.output,
+                    archive_conn if not args.dry_run else None,
+                    since_ms,
+                    args.dry_run,
+                    logger,
+                )
+                if link_thumb_stats["copied"] > 0 or link_thumb_stats["skipped"] > 0:
+                    logger.info(
+                        f"Link preview thumbnails: {link_thumb_stats['copied']} extracted, "
+                        f"{link_thumb_stats['skipped']} already present, "
+                        f"{link_thumb_stats['missing']} missing in backup source."
+                    )
+
             if not args.dry_run:
                 archive_conn.commit()
                 archive_db.save_contacts_to_db(archive_conn, updated_index)
@@ -2117,14 +2841,14 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             if not args.dry_run:
                 write_missing_report(report_path, missing_rows, logger)
             else:
-                logger.info(
+                logger.debug(
                     f"[DRY RUN] Would write missing media report with "
                     f"{len(missing_rows)} entries to: {report_path}"
                 )
 
             dup_report_path = os.path.join(args.output, "duplicate_media_report.csv")
             conflict_report_path = os.path.join(args.output, "source_conflicts_report.csv")
-            dup_summary = (0, 0)
+            dup_summary = DuplicateReportSummary(0, 0, [])
             if not args.dry_run:
                 dup_summary = write_duplicate_report(dup_report_path, archive_conn, logger, tz)
                 if hasattr(media_resolver, "conflict_rows"):
@@ -2161,16 +2885,15 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             parts.append(f"{n_dup} same-chat duplicates")
         if n_empty > 0:
             parts.append(f"{n_empty} empty vCards")
-        logger.info(f"  Skipped             : {n_skipped} ({', '.join(parts)})")
+        logger.info(f"  {'Skipped':<20}: {n_skipped} ({', '.join(parts)})")
     else:
-        logger.info(f"  Skipped             : {n_skipped}")
+        logger.info(f"  {'Skipped':<20}: {n_skipped}")
 
-    logger.info(f"  Missing source files: {stats['missing']}")
-    logger.info(f"  Errors / Warnings   : {stats['warnings']}")
-    if dup_summary[1] > 0:
+    logger.info(f"  {'Errors / Warnings':<20}: {stats['warnings']}")
+    if getattr(args, "preserve_deleted", False):
+        pres_label = "Would preserve" if args.dry_run else "Preserved"
         logger.info(
-            f"  Duplicate media     : {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
-            "→ see duplicate_media_report.csv"
+            f"  {pres_label:<20}: {pres_stats.messages} message(s) across {pres_stats.chats} chat(s)"
         )
     if hasattr(media_resolver, "root_hits"):
         for root, count in media_resolver.root_hits.items():
@@ -2183,25 +2906,55 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             )
         if n_zero:
             logger.info(f"  0-byte skipped      : {n_zero}")
-    logger.info(f"  Log file            : {log_path}")
+
+    logger.info("")
+    logger.info(f"  {'Missing source files':<20}: {stats['missing']}")
+
+    if dup_summary[1] > 0:
+        logger.info(
+            f"  {'Duplicate media':<20}: {dup_summary[1]} file(s) across {dup_summary[0]} group(s) "
+            "→ see duplicate_media_report.csv"
+        )
+        for sec_title, sec_groups, sec_files in getattr(dup_summary, "sections", []):
+            logger.info(f"    - {sec_title:<18}: {sec_groups} group(s), {sec_files} file(s)")
+
+    logger.info("")
     if not args.dry_run:
-        logger.info(f"  {'Missing media report':<20}: {report_path}")
-        logger.info(f"  {'Duplicate media report':<20}: {dup_report_path}")
-        if hasattr(media_resolver, "conflict_rows") and media_resolver.conflict_rows:
-            logger.info(f"  {'Conflicts report':<20}: {conflict_report_path}")
         logger.info(f"  {'Archive DB':<20}: {db_path}")
+        if getattr(args, "preserve_deleted", False):
+            pres_db_path = preservation.get_preserved_db_path(args.output)
+            if os.path.isfile(pres_db_path):
+                logger.info(f"  {'Preserved DB':<20}: {pres_db_path}")
+    logger.info(f"  {'Log file':<20}: {log_path}")
+    if not args.dry_run:
+        if stats["missing"] > 0 and os.path.isfile(report_path):
+            logger.info(f"  {'Missing report':<20}: {report_path}")
+        if dup_summary[1] > 0 and os.path.isfile(dup_report_path):
+            logger.info(f"  {'Duplicate report':<20}: {dup_report_path}")
+        if (
+            hasattr(media_resolver, "conflict_rows")
+            and media_resolver.conflict_rows
+            and os.path.isfile(conflict_report_path)
+        ):
+            logger.info(f"  {'Conflicts report':<20}: {conflict_report_path}")
 
 
 def main():
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                with contextlib.suppress(Exception):
+                    stream.reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()
     os.makedirs(args.output, exist_ok=True)
     log_path = args.log or os.path.join(args.output, "wab-archiver.log")
-    logger = setup_logging(log_path)
+    debug_enabled = getattr(args, "debug", False)
+    logger = setup_logging(log_path, debug_enabled)
     _warn_network_paths(args, logger)
 
     if args.command == "restore":
         logger.info(
-            f"=== WhatsApp Backup Tools — Archiver v{_get_version()} started (restore mode) ==="
+            f"=== WhatsApp Backup Tools - Archiver v{_get_version()} started (restore mode) ==="
         )
         if args.dry_run:
             logger.info("*** DRY RUN MODE — no files will be copied ***")
@@ -2210,7 +2963,7 @@ def main():
 
     if args.dry_run:
         logger.info("*** DRY RUN MODE — no files will be copied ***")
-    logger.info(f"=== WhatsApp Backup Tools — Archiver v{_get_version()} started ===")
+    logger.info(f"=== WhatsApp Backup Tools - Archiver v{_get_version()} started ===")
     run_forward_mode(args, logger)
 
 

@@ -23,6 +23,28 @@ HTML_TEMPLATE = (
 </head>
 <body>
 <div id="app">
+  {% if schema_alert %}
+  <div id="schema-alert-banner" class="schema-alert-banner">
+    <div class="schema-alert-content">
+      <span class="schema-alert-icon">⚠️</span>
+      <div class="schema-alert-text">
+        {% if schema_alert.is_legacy %}
+        <strong>Legacy WhatsApp Database Detected:</strong>
+        {{ schema_alert.summary }}. Only modern WhatsApp database backups (Android 2019+ and iOS CoreData) are supported.
+        {% else %}
+        <strong>WhatsApp Database Schema Incompatibility Detected:</strong>
+        {{ schema_alert.summary }}. Chats could not be read.
+        Please check for updates: <code>pip install --upgrade whatsapp-backup-tools</code>
+        {% endif %}
+      </div>
+      {% if schema_alert.issue_url %}
+      <a href="{{ schema_alert.issue_url }}" target="_blank" rel="noopener noreferrer" class="schema-alert-btn">
+        {% if schema_alert.is_legacy %}Request Support on GitHub{% else %}Report Issue on GitHub{% endif %}
+      </a>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
   <div id="header">
     <h1>WhatsApp Backup Viewer</h1>
     <span class="subtitle">{{ output_root }}</span>
@@ -70,6 +92,10 @@ HTML_TEMPLATE = (
       </div>
       <div id="message-scroll"></div>
       <button id="scroll-to-bottom" title="Jump to latest">&#8627;</button>
+      <div id="chat-jump-hud" class="chat-jump-hud" role="status" aria-live="polite">
+        <span class="jump-hud-spinner"></span>
+        <span id="chat-jump-hud-text" class="jump-hud-text">Jumping to message…</span>
+      </div>
       <div id="empty-pane">Select a chat to browse messages</div>
       <div id="chat-loading">
         <div class="loading-spinner"></div>
@@ -112,53 +138,55 @@ HTML_TEMPLATE = (
       <span>Settings</span>
       <button id="settings-close">&#10005;</button>
     </div>
-    <div id="settings-app-info">
-      <img id="settings-app-logo" src="/static/favicon.svg" alt="" width="52" height="52">
-      <div id="settings-app-details">
-        <h2 id="settings-app-name">WhatsApp Backup Viewer</h2>
-        <p id="settings-app-subtitle">from WhatsApp Backup Tools</p>
-        <div id="settings-app-links">
-          <a id="settings-repo-link" href="https://github.com/auanasgheps/whatsapp-backup-tools" target="_blank" rel="noopener noreferrer">Repository</a>
-          <span id="settings-version">v{{ version }}</span>
-        </div>
-      </div>
-    </div>
-    <div class="settings-section">
-      <div class="settings-label">Theme</div>
-      <div class="settings-row">
-        <button class="pref-btn" data-pref="theme" data-value="dark">Dark</button>
-        <button class="pref-btn" data-pref="theme" data-value="light">Light</button>
-      </div>
-    </div>
-    <div class="settings-section">
-      <div class="settings-label">Date format</div>
-      <div class="settings-row">
-        <button class="pref-btn" data-pref="date_format" data-value="DD/MM/YYYY">DD/MM/YYYY &nbsp;<em>25/07/2026</em></button>
-        <button class="pref-btn" data-pref="date_format" data-value="MM/DD/YYYY">MM/DD/YYYY &nbsp;<em>07/25/2026</em></button>
-        <button class="pref-btn" data-pref="date_format" data-value="YYYY/MM/DD">YYYY/MM/DD &nbsp;<em>2026/07/25</em></button>
-      </div>
-    </div>
-    <div class="settings-section">
-      <div class="settings-label">Font size</div>
-      <div class="settings-row">
-        <button class="pref-btn" data-pref="font_size" data-value="small">Small</button>
-        <button class="pref-btn" data-pref="font_size" data-value="medium">Medium</button>
-        <button class="pref-btn" data-pref="font_size" data-value="large">Large</button>
-      </div>
-    </div>
-    <div class="settings-section">
-      <div class="settings-label">Database</div>
-      <div class="settings-row" style="flex-direction:column;gap:8px;align-items:flex-start">
-        <button id="optimize-db-btn" class="pref-btn">Compact & optimize database</button>
-        <div id="optimize-db-status" class="index-progress-label" style="display:none"></div>
-        <button id="index-all-btn" class="pref-btn">Index all chats for search</button>
-        <div id="index-all-progress" style="display:none;width:100%">
-          <div class="index-progress-bar-wrap">
-            <div id="index-progress-bar" class="index-progress-bar"></div>
+    <div id="settings-body">
+      <div id="settings-app-info">
+        <img id="settings-app-logo" src="/static/favicon.svg" alt="" width="52" height="52">
+        <div id="settings-app-details">
+          <h2 id="settings-app-name">WhatsApp Backup Viewer</h2>
+          <p id="settings-app-subtitle">from WhatsApp Backup Tools</p>
+          <div id="settings-app-links">
+            <a id="settings-repo-link" href="https://github.com/auanasgheps/whatsapp-backup-tools" target="_blank" rel="noopener noreferrer">Repository</a>
+            <span id="settings-version">v{{ version }}</span>
           </div>
-          <div id="index-progress-label" class="index-progress-label"></div>
         </div>
-        <button id="clear-index-btn" class="pref-btn">Clear search index</button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Theme</div>
+        <div class="settings-row">
+          <button class="pref-btn" data-pref="theme" data-value="dark">Dark</button>
+          <button class="pref-btn" data-pref="theme" data-value="light">Light</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Date format</div>
+        <div class="settings-row">
+          <button class="pref-btn" data-pref="date_format" data-value="DD/MM/YYYY">DD/MM/YYYY &nbsp;<em>25/07/2026</em></button>
+          <button class="pref-btn" data-pref="date_format" data-value="MM/DD/YYYY">MM/DD/YYYY &nbsp;<em>07/25/2026</em></button>
+          <button class="pref-btn" data-pref="date_format" data-value="YYYY/MM/DD">YYYY/MM/DD &nbsp;<em>2026/07/25</em></button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Font size</div>
+        <div class="settings-row">
+          <button class="pref-btn" data-pref="font_size" data-value="small">Small</button>
+          <button class="pref-btn" data-pref="font_size" data-value="medium">Medium</button>
+          <button class="pref-btn" data-pref="font_size" data-value="large">Large</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Database</div>
+        <div class="settings-row" style="flex-direction:column;gap:8px;align-items:flex-start">
+          <button id="optimize-db-btn" class="pref-btn">Compact & optimize database</button>
+          <div id="optimize-db-status" class="index-progress-label" style="display:none"></div>
+          <button id="index-all-btn" class="pref-btn">Index all chats for search</button>
+          <div id="index-all-progress" style="display:none;width:100%">
+            <div class="index-progress-bar-wrap">
+              <div id="index-progress-bar" class="index-progress-bar"></div>
+            </div>
+            <div id="index-progress-label" class="index-progress-label"></div>
+          </div>
+          <button id="clear-index-btn" class="pref-btn">Clear search index</button>
+        </div>
       </div>
     </div>
   </div>
@@ -178,6 +206,52 @@ HTML_TEMPLATE = (
 </div>
 
 <div id="msg-details-popup"></div>
+
+<div id="map-chooser-modal" role="dialog" aria-modal="true" aria-labelledby="map-chooser-title" aria-describedby="map-chooser-subtitle">
+  <div id="map-chooser-panel">
+    <div id="map-chooser-header">
+      <div class="map-chooser-header-text">
+        <h3 id="map-chooser-title">Open in Maps</h3>
+        <div id="map-chooser-subtitle" class="map-chooser-subtitle"></div>
+      </div>
+      <button id="map-chooser-close" aria-label="Close dialog">&#10005;</button>
+    </div>
+    <div id="map-chooser-body">
+      <div class="map-provider-list">
+        <a id="map-provider-google" class="map-provider-btn" target="_blank" rel="noopener noreferrer">
+          <span class="map-provider-icon">🌐</span>
+          <div class="map-provider-info">
+            <span class="map-provider-name">Google Maps</span>
+            <span class="map-provider-desc">Open exact coordinates on Google Maps</span>
+          </div>
+          <span class="map-provider-arrow" aria-hidden="true">↗</span>
+        </a>
+        <a id="map-provider-bing" class="map-provider-btn" target="_blank" rel="noopener noreferrer">
+          <span class="map-provider-icon">🧭</span>
+          <div class="map-provider-info">
+            <span class="map-provider-name">Bing Maps</span>
+            <span class="map-provider-desc">Open exact coordinates on Microsoft Bing Maps</span>
+          </div>
+          <span class="map-provider-arrow" aria-hidden="true">↗</span>
+        </a>
+        <a id="map-provider-osm" class="map-provider-btn" target="_blank" rel="noopener noreferrer">
+          <span class="map-provider-icon">🗺️</span>
+          <div class="map-provider-info">
+            <span class="map-provider-name">OpenStreetMap</span>
+            <span class="map-provider-desc">Open exact coordinates on open community map</span>
+          </div>
+          <span class="map-provider-arrow" aria-hidden="true">↗</span>
+        </a>
+      </div>
+      <div class="map-chooser-footer">
+        <button id="map-copy-coords-btn" class="map-copy-btn" type="button">
+          <span class="map-copy-icon">📋</span>
+          <span id="map-copy-coords-text">Copy Coordinates</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>window.OUTPUT_ROOT = {{ output_root | tojson }};</script>
 <script src="/static/app.js?v={{ version }}"></script>
