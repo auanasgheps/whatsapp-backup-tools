@@ -4705,7 +4705,13 @@ def _query_ios_calls(
             has_duration = "ZDURATION" in cl_cols
             has_outcome = "ZOUTCOME" in cl_cols
             has_date = "ZDATE" in cl_cols
-            has_aggregate = "ZAGGREGATECALLEVENT" in cl_cols and "ZWAAGGREGATECALLEVENT" in tables
+            has_creator = "ZGROUPCALLCREATORUSERJIDSTRING" in cl_cols
+            agg_fk_col = (
+                "Z1CALLEVENTS"
+                if "Z1CALLEVENTS" in cl_cols
+                else ("ZAGGREGATECALLEVENT" if "ZAGGREGATECALLEVENT" in cl_cols else None)
+            )
+            has_aggregate = agg_fk_col is not None and "ZWAAGGREGATECALLEVENT" in tables
             has_participants = "ZWACDCALLEVENTPARTICIPANT" in tables
 
             call_id_expr = (
@@ -4714,14 +4720,16 @@ def _query_ios_calls(
                 else "'call_' || cl.Z_PK"
             )
             group_jid_expr = "cl.ZGROUPJIDSTRING" if has_group_jid else "NULL"
+            creator_expr = "cl.ZGROUPCALLCREATORUSERJIDSTRING" if has_creator else "NULL"
             dur_expr = "COALESCE(cl.ZDURATION, 0)" if has_duration else "0"
             outcome_expr = "COALESCE(cl.ZOUTCOME, 0)" if has_outcome else "0"
             ts_expr = "CAST((cl.ZDATE + 978307200) AS INTEGER)" if has_date else "0"
             agg_join = (
-                "LEFT JOIN ZWAAGGREGATECALLEVENT agg ON agg.Z_PK = cl.ZAGGREGATECALLEVENT"
+                f"LEFT JOIN ZWAAGGREGATECALLEVENT agg ON agg.Z_PK = cl.{agg_fk_col}"
                 if has_aggregate
                 else ""
             )
+            agg_pk_expr = f"cl.{agg_fk_col}" if has_aggregate else "NULL"
             video_expr = "COALESCE(agg.ZVIDEO, 0)" if has_aggregate else "0"
             from_me_expr = "CASE WHEN agg.ZINCOMING = 0 THEN 1 ELSE 0 END" if has_aggregate else "0"
 
@@ -4743,8 +4751,10 @@ def _query_ios_calls(
             sql = f"""
                 SELECT
                     cl.Z_PK AS call_pk,
+                    {agg_pk_expr} AS agg_pk,
                     {call_id_expr} AS id,
                     {group_jid_expr} AS group_jid,
+                    {creator_expr} AS creator_jid,
                     {ts_expr} AS timestamp,
                     {dur_expr} AS duration,
                     {video_expr} AS is_video,
@@ -4760,7 +4770,7 @@ def _query_ios_calls(
             if not call_rows:
                 return []
 
-            participants_by_call: dict[int, list[dict]] = {}
+            participants_by_key: dict[int, list[dict]] = {}
             if has_participants:
                 part_cols = {
                     r[1]
@@ -4780,9 +4790,15 @@ def _query_ios_calls(
                 )
                 out_col = "COALESCE(p.ZOUTCOME, 0)" if "ZOUTCOME" in part_cols else "0"
                 if fk_col and jid_col:
-                    call_pks = [r["call_pk"] for r in call_rows]
-                    for i in range(0, len(call_pks), 900):
-                        chunk = call_pks[i : i + 900]
+                    all_keys = set()
+                    for r in call_rows:
+                        if r.get("call_pk") is not None:
+                            all_keys.add(r["call_pk"])
+                        if r.get("agg_pk") is not None:
+                            all_keys.add(r["agg_pk"])
+                    key_list = list(all_keys)
+                    for i in range(0, len(key_list), 900):
+                        chunk = key_list[i : i + 900]
                         ph = ",".join("?" * len(chunk))
                         p_sql = f"""
                             SELECT p.{fk_col}, p.{jid_col}, {out_col}
@@ -4791,9 +4807,9 @@ def _query_ios_calls(
                         """
                         with contextlib.suppress(sqlite3.OperationalError):
                             for pr in call_conn.execute(p_sql, chunk).fetchall():
-                                cid = pr[0]
+                                kid = pr[0]
                                 p_jid = pr[1] or ""
-                                participants_by_call.setdefault(cid, []).append(
+                                participants_by_key.setdefault(kid, []).append(
                                     {
                                         "jid": p_jid,
                                         "outcome": int(pr[2] or 0),
@@ -4805,21 +4821,42 @@ def _query_ios_calls(
     # Map chat sessions from ChatStorage.sqlite to resolve chat_id and contact names
     chat_session_map: dict[str, dict] = {}
     with contextlib.suppress(sqlite3.OperationalError):
+        cs_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        ident_col = "ZCONTACTIDENTIFIER" if "ZCONTACTIDENTIFIER" in cs_cols else "NULL"
         cs_rows = wa_conn.execute(
-            "SELECT Z_PK, ZCONTACTJID, ZPARTNERNAME FROM ZWACHATSESSION"
+            f"SELECT Z_PK, ZCONTACTJID, {ident_col}, ZPARTNERNAME FROM ZWACHATSESSION"
         ).fetchall()
         for csr in cs_rows:
+            c_pk = str(csr[0])
+            p_name = csr[3] or ""
             jid = csr[1]
+            ident = csr[2]
             if jid:
                 chat_session_map[jid] = {
-                    "chat_id": str(csr[0]),
-                    "partner_name": csr[2] or "",
+                    "chat_id": c_pk,
+                    "partner_name": p_name,
+                    "companion_jid": ident,
                 }
+            if ident and ident != jid:
+                chat_session_map[ident] = {
+                    "chat_id": c_pk,
+                    "partner_name": p_name,
+                    "companion_jid": jid,
+                }
+
+    has_ios_contacts = False
+    with contextlib.suppress(sqlite3.OperationalError):
+        has_ios_contacts = bool(
+            wa_conn.execute(
+                "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_ios_contacts'"
+            ).fetchone()
+        )
 
     contacts_map = _get_contacts_lookup(arch_conn)
     results = []
     for r in call_rows:
         call_pk = r["call_pk"]
+        agg_pk = r.get("agg_pk")
         from_me = int(r["from_me"])
         outcome = int(r["outcome"])
         is_video = bool(r["is_video"] == 1)
@@ -4836,7 +4873,13 @@ def _query_ios_calls(
         if filter_type == "video" and not is_video:
             continue
 
-        parts = participants_by_call.get(call_pk, [])
+        # Look up participants by aggregate PK first (CoreData canonical), fallback to call_pk
+        parts = []
+        if agg_pk is not None and agg_pk in participants_by_key:
+            parts = participants_by_key[agg_pk]
+        elif call_pk in participants_by_key:
+            parts = participants_by_key[call_pk]
+
         group_jid = r["group_jid"]
         is_group = bool(group_jid and group_jid != "")
 
@@ -4845,17 +4888,66 @@ def _query_ios_calls(
             chat_id_val = cs_info.get("chat_id") or (
                 group_jid.split("@")[0] if "@" in group_jid else group_jid
             )
-            caller_jid = parts[0]["jid"] if parts else ""
-            caller_phone = f"+{caller_jid.split('@')[0]}" if "@" in caller_jid else caller_jid
+            caller_jid = parts[0]["jid"] if parts else (r.get("creator_jid") or "")
+            resolved_phone = ""
+            resolved_name = ""
+            if has_ios_contacts and caller_jid:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    ic_row = wa_conn.execute(
+                        "SELECT full_name, phone_number FROM _ios_contacts WHERE jid = ?",
+                        (caller_jid,),
+                    ).fetchone()
+                    if ic_row:
+                        resolved_name = ic_row[0] or ""
+                        resolved_phone = ic_row[1] or ""
+            if resolved_phone:
+                caller_phone = f"+{resolved_phone.lstrip('+')}"
+            elif caller_jid.endswith("@s.whatsapp.net"):
+                caller_phone = f"+{caller_jid.split('@')[0]}"
+            else:
+                caller_phone = f"+{caller_jid.split('@')[0]}" if "@" in caller_jid else caller_jid
             caller_name = cs_info.get("partner_name") or caller_phone or "Unknown Group"
         else:
-            caller_jid = parts[0]["jid"] if parts else ""
+            caller_jid = parts[0]["jid"] if parts else (r.get("creator_jid") or "")
             cs_info = chat_session_map.get(caller_jid, {})
-            chat_id_val = cs_info.get("chat_id") or (
-                caller_jid.split("@")[0] if "@" in caller_jid else (caller_jid or "call")
-            )
-            caller_phone = f"+{caller_jid.split('@')[0]}" if "@" in caller_jid else caller_jid
-            caller_name = cs_info.get("partner_name")
+            resolved_phone = ""
+            resolved_name = ""
+            if has_ios_contacts and caller_jid:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    ic_row = wa_conn.execute(
+                        "SELECT full_name, phone_number FROM _ios_contacts WHERE jid = ?",
+                        (caller_jid,),
+                    ).fetchone()
+                    if ic_row:
+                        resolved_name = ic_row[0] or ""
+                        resolved_phone = ic_row[1] or ""
+            if resolved_phone:
+                caller_phone = f"+{resolved_phone.lstrip('+')}"
+            elif caller_jid.endswith("@s.whatsapp.net"):
+                caller_phone = f"+{caller_jid.split('@')[0]}"
+            elif cs_info.get("companion_jid", "").endswith("@s.whatsapp.net"):
+                caller_phone = f"+{cs_info['companion_jid'].split('@')[0]}"
+            else:
+                caller_phone = f"+{caller_jid.split('@')[0]}" if "@" in caller_jid else caller_jid
+
+            chat_id_val = cs_info.get("chat_id")
+            if not chat_id_val:
+                clean_p = caller_phone.lstrip("+")
+                chat_id_val = (
+                    clean_p
+                    if clean_p
+                    else (caller_jid.split("@")[0] if "@" in caller_jid else "call")
+                )
+
+            caller_name = None
+            if (
+                resolved_name
+                and not resolved_name.startswith("+")
+                and not resolved_name.startswith("Unknown")
+            ):
+                caller_name = resolved_name
+            if not caller_name:
+                caller_name = cs_info.get("partner_name")
             if not caller_name and caller_phone:
                 clean_num = caller_phone.lstrip("+")
                 caller_name = contacts_map.get(clean_num, "")
@@ -6540,7 +6632,12 @@ def create_app(output_root: Path, rescan: bool = False):
             if "ZWACHATSESSION" in _wa_tables
             else set()
         )
-        has_cs_archived = "ZARCHIVED" in _cs_cols
+        has_cs_archived = "ZARCHIVED" in _cs_cols or "ZISARCHIVED" in _cs_cols
+        cs_archived_col_name = (
+            "ZARCHIVED"
+            if "ZARCHIVED" in _cs_cols
+            else ("ZISARCHIVED" if "ZISARCHIVED" in _cs_cols else "ZARCHIVED")
+        )
         has_cs_ident = "ZCONTACTIDENTIFIER" in _cs_cols
         _tmp_wa.close()
 
@@ -7642,7 +7739,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 else ""
             )
             cs_ident_col = "cs.ZCONTACTIDENTIFIER" if has_cs_ident else "NULL"
-            ios_archived_col = "COALESCE(cs.ZARCHIVED, 0)" if has_cs_archived else "0"
+            ios_archived_col = f"COALESCE(cs.{cs_archived_col_name}, 0)" if has_cs_archived else "0"
             mi_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
             vcard_name_ios = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
             if "ZMOVIEDURATION" in mi_cols and "ZVCARDSTRING" in mi_cols:
@@ -7692,7 +7789,7 @@ def create_app(output_root: Path, rescan: bool = False):
                         CASE WHEN ({ios_phone_expr}) IS NOT NULL AND ({ios_phone_expr}) != '' THEN '+' || ({ios_phone_expr}) END,
                         'Unknown Contact (' || cs.Z_PK || ')'
                     )                                                   AS display_name,
-                    CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER) AS newest_ts,
+                    CAST((COALESCE(m.ZMESSAGEDATE, cs.ZLASTMESSAGEDATE, 0) + 978307200) * 1000 AS INTEGER) AS newest_ts,
                     COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({vcard_name_ios}, ''), '') AS last_msg_preview,
                     COALESCE(m.ZMESSAGETYPE, 0)                        AS last_msg_type,
                     {ios_dur_col}                                      AS last_msg_duration,
@@ -7709,7 +7806,7 @@ def create_app(output_root: Path, rescan: bool = False):
                       ON con_lid.number = SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
                                                  INSTR(COALESCE(cs.ZCONTACTJID,'') || '@', '@') - 1)
                 LEFT JOIN arch.groups grp ON grp.chat_row_id = CAST(cs.Z_PK AS TEXT)
-                JOIN (
+                LEFT JOIN (
                     SELECT msg.ZCHATSESSION, MAX(msg.Z_PK) AS last_pk
                     FROM ZWAMESSAGE msg
                     LEFT JOIN ZWAMEDIAITEM mi2 ON mi2.Z_PK = msg.ZMEDIAITEM
@@ -7720,19 +7817,20 @@ def create_app(output_root: Path, rescan: bool = False):
                        {ios_service_filter_last_real}
                     GROUP BY msg.ZCHATSESSION
                 ) last_real ON last_real.ZCHATSESSION = cs.Z_PK
-                JOIN ZWAMESSAGE m ON m.Z_PK = last_real.last_pk
+                LEFT JOIN ZWAMESSAGE m ON m.Z_PK = last_real.last_pk
                 LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
                 LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
                 WHERE cs.ZHIDDEN = 0
                   AND (
-                      cs.ZGROUPINFO IS NOT NULL
+                      ({ios_archived_col}) = 1
+                      OR cs.ZGROUPINFO IS NOT NULL
                       OR EXISTS (
                           SELECT 1 FROM ZWAMESSAGE msg_real
                           WHERE msg_real.ZCHATSESSION = cs.Z_PK
                             AND (msg_real.ZMESSAGETYPE NOT IN (6, 10) OR msg_real.ZMESSAGETYPE IS NULL)
                       )
                   )
-                ORDER BY m.ZMESSAGEDATE DESC
+                ORDER BY COALESCE(m.ZMESSAGEDATE, cs.ZLASTMESSAGEDATE, 0) DESC
             """).fetchall()
 
         result = []
@@ -10843,23 +10941,102 @@ def create_app(output_root: Path, rescan: bool = False):
                             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACDCALLEVENT'"
                         ).fetchone():
                             target_jid = None
+                            ident_jid = None
                             if conn_wa is not None and str(chat_id).isdigit():
+                                cs_cols = {
+                                    r[1]
+                                    for r in conn_wa.execute(
+                                        "PRAGMA table_info(ZWACHATSESSION)"
+                                    ).fetchall()
+                                }
+                                ident_col = (
+                                    ", ZCONTACTIDENTIFIER"
+                                    if "ZCONTACTIDENTIFIER" in cs_cols
+                                    else ""
+                                )
                                 csr = conn_wa.execute(
-                                    "SELECT ZCONTACTJID FROM ZWACHATSESSION WHERE Z_PK = ?",
+                                    f"SELECT ZCONTACTJID{ident_col} FROM ZWACHATSESSION WHERE Z_PK = ?",
                                     (int(chat_id),),
                                 ).fetchone()
                                 if csr:
                                     target_jid = csr[0]
+                                    if len(csr) > 1 and csr[1]:
+                                        ident_jid = csr[1]
+
+                            candidates = set()
                             if target_jid:
-                                ios_cnt = call_conn.execute(
-                                    """
+                                candidates.add(target_jid)
+                            if ident_jid:
+                                candidates.add(ident_jid)
+                            if conn_wa is not None:
+                                for c_jid in list(candidates):
+                                    with contextlib.suppress(sqlite3.OperationalError):
+                                        clean_p = c_jid.split("@")[0]
+                                        c_rows = conn_wa.execute(
+                                            "SELECT jid, phone_number FROM _ios_contacts WHERE jid = ? OR phone_number = ?",
+                                            (c_jid, clean_p),
+                                        ).fetchall()
+                                        for cr in c_rows:
+                                            if cr[0]:
+                                                candidates.add(cr[0])
+                                            if cr[1]:
+                                                candidates.add(f"{cr[1]}@s.whatsapp.net")
+
+                            if candidates:
+                                cl_cols = {
+                                    r[1]
+                                    for r in call_conn.execute(
+                                        "PRAGMA table_info(ZWACDCALLEVENT)"
+                                    ).fetchall()
+                                }
+                                agg_fk = (
+                                    "Z1CALLEVENTS"
+                                    if "Z1CALLEVENTS" in cl_cols
+                                    else (
+                                        "ZAGGREGATECALLEVENT"
+                                        if "ZAGGREGATECALLEVENT" in cl_cols
+                                        else "Z_PK"
+                                    )
+                                )
+                                has_parts = bool(
+                                    call_conn.execute(
+                                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACDCALLEVENTPARTICIPANT'"
+                                    ).fetchone()
+                                )
+                                part_cols = (
+                                    {
+                                        r[1]
+                                        for r in call_conn.execute(
+                                            "PRAGMA table_info(ZWACDCALLEVENTPARTICIPANT)"
+                                        ).fetchall()
+                                    }
+                                    if has_parts
+                                    else set()
+                                )
+                                part_fk = (
+                                    "Z1PARTICIPANTS"
+                                    if "Z1PARTICIPANTS" in part_cols
+                                    else ("ZCALLEVENT" if "ZCALLEVENT" in part_cols else "Z_PK")
+                                )
+                                has_creator = "ZGROUPCALLCREATORUSERJIDSTRING" in cl_cols
+
+                                cand_list = list(candidates)
+                                ph = ",".join("?" * len(cand_list))
+                                creator_clause = (
+                                    f"OR cl.ZGROUPCALLCREATORUSERJIDSTRING IN ({ph})"
+                                    if has_creator
+                                    else ""
+                                )
+                                sql = f"""
                                     SELECT COUNT(DISTINCT cl.Z_PK)
                                     FROM ZWACDCALLEVENT cl
-                                    LEFT JOIN ZWACDCALLEVENTPARTICIPANT p ON p.Z1PARTICIPANTS = cl.Z_PK
-                                    WHERE cl.ZGROUPJIDSTRING = ? OR p.ZJIDSTRING = ?
-                                    """,
-                                    (target_jid, target_jid),
-                                ).fetchone()
+                                    LEFT JOIN ZWACDCALLEVENTPARTICIPANT p ON (p.{part_fk} = cl.{agg_fk} OR p.{part_fk} = cl.Z_PK)
+                                    WHERE cl.ZGROUPJIDSTRING IN ({ph})
+                                       OR p.ZJIDSTRING IN ({ph})
+                                       {creator_clause}
+                                """
+                                params = cand_list * (3 if has_creator else 2)
+                                ios_cnt = call_conn.execute(sql, params).fetchone()
                                 if ios_cnt and ios_cnt[0]:
                                     calls_count += int(ios_cnt[0])
 
