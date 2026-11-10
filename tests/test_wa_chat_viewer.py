@@ -12583,6 +12583,8 @@ class TestPhase1CallsFeature:
         assert "function loadCallsList(reset)" in js
         assert "function renderCallItem(call)" in js
         assert "function selectCallItem(call, el)" in js
+        assert "function fmtTimeGap(diffMs, isPrior)" in js
+        assert "Nearest message:" in js
         assert "function jumpFromCallToChat(call, matchedChat)" in js
         assert "async function openChatAtTimestamp(chatId, timestampMs)" in js
 
