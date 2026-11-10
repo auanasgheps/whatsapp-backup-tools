@@ -12583,6 +12583,131 @@ class TestPhase1CallsFeature:
         call = calls[0]
         assert call["chat_id"] == "123456789"
 
+    def test_calls_android_privacy_lid_resolved(self, tmp_path):
+        """Android call records logged with privacy LID must resolve caller phone, name, and chat_id."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+        if "server" not in jid_cols:
+            wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '187000000000001', 'lid', '187000000000001@lid')"
+        )
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (2, '15551234567', 's.whatsapp.net', '15551234567@s.whatsapp.net')"
+        )
+        wa_conn.execute("INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (1, 2)")
+
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (10, 2, 'Alice')")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data) VALUES (1, 10, 0, 1700000000000, 'Hey')"
+        )
+
+        wa_conn.execute("""
+            CREATE TABLE IF NOT EXISTS call_log (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id TEXT,
+                jid_row_id INTEGER,
+                group_jid_row_id INTEGER,
+                from_me INTEGER DEFAULT 0,
+                timestamp INTEGER NOT NULL,
+                video_call INTEGER DEFAULT 0,
+                duration INTEGER DEFAULT 0,
+                call_result INTEGER DEFAULT 1,
+                bytes_transferred INTEGER DEFAULT 0
+            );
+        """)
+        wa_conn.execute("""
+            INSERT INTO call_log (_id, call_id, jid_row_id, from_me, timestamp, video_call, duration, call_result)
+            VALUES (1, 'call_lid_test', 1, 0, 1700000050000, 1, 300, 1)
+        """)
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15551234567', '15551234567', 'Alice Whitman')"
+        )
+        archive_conn.commit()
+
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/calls?limit=10")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert "calls" in data
+            calls = data["calls"]
+            assert len(calls) == 1
+            call = calls[0]
+            assert call["id"] == "call_lid_test"
+            assert call["caller_phone"] == "+15551234567"
+            assert call["caller_name"] == "Alice Whitman"
+            assert call["chat_id"] == "15551234567"
+
+    def test_api_chat_info_calls_count_includes_lid_calls(self, tmp_path):
+        """Chat info calls_count must count calls logged under companion privacy LID."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+        if "server" not in jid_cols:
+            wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '187000000000001', 'lid', '187000000000001@lid')"
+        )
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (2, '15559876543', 's.whatsapp.net', '15559876543@s.whatsapp.net')"
+        )
+        wa_conn.execute("INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (1, 2)")
+
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (20, 2, 'Bob')")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data) VALUES (1, 20, 0, 1700000000000, 'Hello')"
+        )
+
+        wa_conn.execute("""
+            CREATE TABLE IF NOT EXISTS call_log (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id TEXT,
+                jid_row_id INTEGER,
+                group_jid_row_id INTEGER,
+                from_me INTEGER DEFAULT 0,
+                timestamp INTEGER NOT NULL,
+                video_call INTEGER DEFAULT 0,
+                duration INTEGER DEFAULT 0,
+                call_result INTEGER DEFAULT 1,
+                bytes_transferred INTEGER DEFAULT 0
+            );
+        """)
+        wa_conn.execute("""
+            INSERT INTO call_log (_id, call_id, jid_row_id, from_me, timestamp, video_call, duration, call_result)
+            VALUES (1, 'call_lid_info', 1, 0, 1700000060000, 0, 120, 1)
+        """)
+        wa_conn.commit()
+        archive_conn.commit()
+
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/15559876543/info")
+            assert resp.status_code == 200
+            info = resp.get_json()
+            assert info["calls_count"] == 1
+
     def test_ios_calls_api_endpoint(self, tmp_path):
         """GET /api/calls on iOS parses CallHistory.sqlite with metrics and participants."""
         cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
@@ -12729,6 +12854,102 @@ class TestPhase2ArchivedAndSearch:
             archived = next((c for c in chats if c["id"] == "1"), None)
             assert archived is not None
             assert archived["is_archived"] == 1
+
+    def test_android_archived_chats_companion_consolidation(self, tmp_path):
+        """Companion phone and LID chats consolidate without losing archived status."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+        if "server" not in jid_cols:
+            wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+
+        chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+        if "archived" not in chat_cols:
+            wa_conn.execute("ALTER TABLE chat ADD COLUMN archived INTEGER DEFAULT 0")
+
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15550001111', 's.whatsapp.net', '15550001111@s.whatsapp.net')"
+        )
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (2, '187000000000002', 'lid', '187000000000002@lid')"
+        )
+        wa_conn.execute("INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (2, 1)")
+
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (10, 1, 'Alice Dual', 1, 1000)"
+        )
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (20, 2, 'Alice Dual', 0, 2000)"
+        )
+
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data) VALUES (1, 20, 0, 1700000000000, 'Hey there')"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550001111', '15550001111', 'Alice Dual')"
+        )
+        archive_conn.commit()
+
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            matching = [c for c in chats if c["id"] == "15550001111"]
+            assert len(matching) == 1
+            assert matching[0]["is_archived"] == 1
+
+    def test_android_archived_chat_without_messages_not_pruned(self, tmp_path):
+        """Archived Android chat with zero messages must not be pruned from /api/chats."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+        if "server" not in jid_cols:
+            wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+
+        chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+        if "archived" not in chat_cols:
+            wa_conn.execute("ALTER TABLE chat ADD COLUMN archived INTEGER DEFAULT 0")
+
+        wa_conn.execute(
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15550002222', 's.whatsapp.net', '15550002222@s.whatsapp.net')"
+        )
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (30, 1, 'Empty Archived', 1, 1000)"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550002222', '15550002222', 'Empty Archived')"
+        )
+        archive_conn.commit()
+
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            matching = [c for c in chats if c["id"] == "15550002222"]
+            assert len(matching) == 1
+            assert matching[0]["is_archived"] == 1
 
     def test_archived_and_search_js_functions_present(self, app_and_tmp):
         """Helper functions for archived rendering, client-side filters, and keyboard shortcuts must exist in app.js."""
