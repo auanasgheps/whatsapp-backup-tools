@@ -95,6 +95,36 @@
     return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
+  function fmtDuration(seconds) {
+    const s = Math.max(0, Math.floor(Number(seconds) || 0));
+    const m = Math.floor(s / 60);
+    const remSec = s % 60;
+    if (m === 0) {
+      return `${remSec}s`;
+    }
+    const h = Math.floor(m / 60);
+    const remMin = m % 60;
+    if (h === 0) {
+      return `${remMin}m ${remSec}s`;
+    }
+    return `${h}h ${remMin}m ${remSec}s`;
+  }
+
+  function fmtDurationLong(seconds) {
+    const s = Math.max(0, Math.floor(Number(seconds) || 0));
+    const m = Math.floor(s / 60);
+    const remSec = s % 60;
+    if (m === 0) {
+      return `${remSec} ${remSec === 1 ? 'second' : 'seconds'}`;
+    }
+    const h = Math.floor(m / 60);
+    const remMin = m % 60;
+    if (h === 0) {
+      return `${remMin} ${remMin === 1 ? 'minute' : 'minutes'}, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}`;
+    }
+    return `${h} ${h === 1 ? 'hour' : 'hours'}, ${remMin} ${remMin === 1 ? 'minute' : 'minutes'}, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}`;
+  }
+
   function fmtDateSep(ts) {
     const d = new Date(ts);
     const dd = String(d.getDate()).padStart(2, '0');
@@ -400,6 +430,31 @@
     return el;
   }
 
+  async function checkCallsAvailability() {
+    const callsBtn = document.getElementById('tab-btn-calls');
+    if (!callsBtn) return;
+    try {
+      const res = await fetch('/api/calls?limit=1');
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status} when checking calls availability`);
+      }
+      const data = await res.json();
+      const calls = data.calls || [];
+      if (calls.length === 0) {
+        callsBtn.classList.add('disabled', 'opacity-30', 'pointer-events-none');
+        callsBtn.setAttribute('aria-disabled', 'true');
+        callsBtn.setAttribute('tabindex', '-1');
+        callsBtn.title = 'No call history in this backup';
+      } else {
+        callsBtn.classList.remove('disabled', 'opacity-30', 'pointer-events-none');
+        callsBtn.removeAttribute('aria-disabled');
+        callsBtn.title = 'Calls';
+      }
+    } catch (err) {
+      console.warn('Failed to check calls availability:', err);
+    }
+  }
+
   // ---- load chats ----------------------------------------------------------
 
   async function loadChats() {
@@ -417,6 +472,7 @@
         archivedBtn.title = 'Archived';
       }
     }
+    await checkCallsAvailability();
     renderChatList();
   }
 
@@ -512,6 +568,41 @@
     });
   }
 
+  function renderArchivedList(searchQuery) {
+    const list = document.getElementById('chat-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    const archivedChats = allChats.filter(c => Boolean(c.is_archived));
+    if (archivedChats.length === 0) {
+      list.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📦</span><strong>Archived Chats</strong><span>Chats tucked away will appear here</span></div>';
+      return;
+    }
+
+    const q = (searchQuery || '').trim().toLowerCase();
+    const matches = q
+      ? archivedChats.filter(c => (c.display_name || '').toLowerCase().includes(q) || (c.last_msg_preview || '').toLowerCase().includes(q) || String(c.id || '').toLowerCase().includes(q))
+      : archivedChats;
+
+    if (matches.length === 0) {
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No archived chats matching "${esc(searchQuery)}"</span></div>`;
+      return;
+    }
+
+    matches.forEach(chat => {
+      const el = document.createElement('div');
+      el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
+      el.dataset.id = chat.id;
+      el.dataset.type = chat.type;
+      const tagHtml = chat.is_preserved_only
+        ? '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
+        : '';
+      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
+      el.addEventListener('click', () => selectChat(chat, el));
+      list.appendChild(el);
+    });
+  }
+
   // ---- bottom navigation bar -----------------------------------------------
 
   let currentNavTab = 'chats';
@@ -539,58 +630,101 @@
       searchResults.classList.remove('has-results');
       searchResults.innerHTML = '';
     }
+    if (searchInput) {
+      searchInput.value = '';
+    }
 
     if (tabName === 'chats') {
-      if (searchInput) searchInput.placeholder = 'Search messages…';
+      if (searchInput) searchInput.placeholder = 'Search messages & chats…';
       if (filtersEl) filtersEl.style.display = 'flex';
+      const callInspector = document.getElementById('pane-call-inspector');
+      if (callInspector) callInspector.style.display = 'none';
+      if (currentChat) {
+        const chatHeader = document.getElementById('chat-header');
+        const msgScroll = document.getElementById('message-scroll');
+        const emptyPane = document.getElementById('empty-pane');
+        if (chatHeader) chatHeader.style.display = 'flex';
+        if (msgScroll) msgScroll.style.display = 'block';
+        if (emptyPane) emptyPane.style.display = 'none';
+      } else {
+        const emptyPane = document.getElementById('empty-pane');
+        if (emptyPane) {
+          emptyPane.textContent = 'Select a chat to browse messages';
+          emptyPane.style.display = 'flex';
+        }
+      }
       renderChatList();
     } else {
       if (filtersEl) filtersEl.style.display = 'none';
+      const callInspector = document.getElementById('pane-call-inspector');
+      if (callInspector) callInspector.style.display = 'none';
+
       if (tabName === 'calls') {
         if (searchInput) searchInput.placeholder = 'Search call history…';
-        if (chatListEl) {
-          chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>Call History</strong><span>Voice and video call log</span></div>';
+        const emptyPane = document.getElementById('empty-pane');
+        const chatHeader = document.getElementById('chat-header');
+        const msgScroll = document.getElementById('message-scroll');
+        const pinnedBanner = document.getElementById('pinned-banner');
+        const contextBanner = document.getElementById('context-jump-banner');
+
+        if (chatHeader) chatHeader.style.display = 'none';
+        if (msgScroll) msgScroll.style.display = 'none';
+        if (pinnedBanner) pinnedBanner.style.display = 'none';
+        if (contextBanner) contextBanner.style.display = 'none';
+        closeChatInfo();
+        closeChatStarred();
+        closeMediaGallery();
+
+        if (emptyPane) {
+          emptyPane.textContent = 'Select a call from the history to view connection metrics and duration.';
+          emptyPane.style.display = 'flex';
         }
+
+        loadCallsList(true);
       } else if (tabName === 'starred') {
         if (searchInput) searchInput.placeholder = 'Search starred bookmarks…';
-        if (chatListEl) {
-          chatListEl.innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading starred messages…</div>';
-          fetch('/api/starred?limit=50')
-            .then(res => res.json())
-            .then(data => {
-              if (currentNavTab !== 'starred') return;
-              const msgs = data.messages || [];
-              if (msgs.length === 0) {
-                chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>No starred bookmarks found</span></div>';
-                return;
-              }
-              chatListEl.innerHTML = '';
-              msgs.forEach(m => {
-                const el = document.createElement('div');
-                el.className = 'chat-item';
-                let preview = m.text || m.text_body || '';
-                if (m.media_type) {
-                  const label = MEDIA_LABELS[m.media_type] || '📎 Media';
-                  preview = preview ? `${label} • ${preview}` : label;
-                }
-                const authorPrefix = m.sender_name ? `${m.sender_name}: ` : '';
-                el.innerHTML = `<div class="chat-name">${esc(m.chat_name || 'Chat')}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
-                el.addEventListener('click', () => {
-                  openChatAtMessage(m.chat_id, m.id);
-                });
-                chatListEl.appendChild(el);
-              });
-            })
-            .catch(() => {
-              if (currentNavTab !== 'starred') return;
-              chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>Failed to load bookmarks</span></div>';
-            });
+        const emptyPane = document.getElementById('empty-pane');
+        const chatHeader = document.getElementById('chat-header');
+        const msgScroll = document.getElementById('message-scroll');
+        const pinnedBanner = document.getElementById('pinned-banner');
+        const contextBanner = document.getElementById('context-jump-banner');
+
+        if (chatHeader) chatHeader.style.display = 'none';
+        if (msgScroll) msgScroll.style.display = 'none';
+        if (pinnedBanner) pinnedBanner.style.display = 'none';
+        if (contextBanner) contextBanner.style.display = 'none';
+        closeChatInfo();
+        closeChatStarred();
+        closeMediaGallery();
+
+        if (emptyPane) {
+          emptyPane.textContent = 'Select a starred message to jump to its conversational context.';
+          emptyPane.style.display = 'flex';
         }
+
+        loadStarredList(true);
       } else if (tabName === 'archived') {
         if (searchInput) searchInput.placeholder = 'Search archived chats…';
-        if (chatListEl) {
-          chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📦</span><strong>Archived Chats</strong><span>Archived conversations</span></div>';
+        const emptyPane = document.getElementById('empty-pane');
+        const chatHeader = document.getElementById('chat-header');
+        const msgScroll = document.getElementById('message-scroll');
+        const pinnedBanner = document.getElementById('pinned-banner');
+        const contextBanner = document.getElementById('context-jump-banner');
+
+        if (chatHeader) chatHeader.style.display = 'none';
+        if (msgScroll) msgScroll.style.display = 'none';
+        if (pinnedBanner) pinnedBanner.style.display = 'none';
+        if (contextBanner) contextBanner.style.display = 'none';
+        closeChatInfo();
+        closeChatStarred();
+        closeMediaGallery();
+
+        if (emptyPane) {
+          emptyPane.textContent = 'Select an archived chat to browse messages.';
+          emptyPane.style.display = 'flex';
         }
+
+        renderArchivedList('');
       }
     }
   }
@@ -649,6 +783,9 @@
 
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
+    scroll.style.display = 'block';
+    const callInspector = document.getElementById('pane-call-inspector');
+    if (callInspector) callInspector.style.display = 'none';
     document.getElementById('scroll-to-bottom').classList.remove('visible');
 
     document.getElementById('chat-header').style.display = 'flex';
@@ -1167,6 +1304,24 @@
   }
   setupScrollTrigger();
 
+  function createMetaPinIcon() {
+    const pinIcon = document.createElement('span');
+    pinIcon.className = 'msg-meta-icon msg-pinned-icon';
+    pinIcon.title = 'Pinned message';
+    pinIcon.setAttribute('aria-label', 'Pinned message');
+    pinIcon.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"></line><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path></svg>';
+    return pinIcon;
+  }
+
+  function createMetaStarIcon() {
+    const starIcon = document.createElement('span');
+    starIcon.className = 'msg-meta-icon msg-starred-icon';
+    starIcon.title = 'Starred message';
+    starIcon.setAttribute('aria-label', 'Starred message');
+    starIcon.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>';
+    return starIcon;
+  }
+
   function renderBubble(unit) {
     if (unit.type === 'group') {
       const group = unit.members;
@@ -1224,6 +1379,16 @@
           );
         });
         meta.appendChild(editedSpan);
+      }
+      const isGroupPinned = unit.members.some(m => m.is_pinned) || Boolean(
+        msg.is_pinned || (_chatPins && _chatPins.some(p => String(p.id) === String(msg.msg_id)))
+      );
+      if (isGroupPinned) {
+        meta.appendChild(createMetaPinIcon());
+      }
+      const isGroupStarred = unit.members.some(m => m.is_starred) || Boolean(msg.is_starred);
+      if (isGroupStarred) {
+        meta.appendChild(createMetaStarIcon());
       }
       meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
       bubble.appendChild(meta);
@@ -1388,6 +1553,15 @@
         );
       });
       meta.appendChild(editedSpan);
+    }
+    const isPinned = Boolean(
+      msg.is_pinned || (_chatPins && _chatPins.some(p => String(p.id) === String(msg.msg_id)))
+    );
+    if (isPinned) {
+      meta.appendChild(createMetaPinIcon());
+    }
+    if (msg.is_starred) {
+      meta.appendChild(createMetaStarIcon());
     }
     meta.appendChild(document.createTextNode(fmtTime(msg.timestamp_ms)));
     if (msg.media_type === 'deleted') {
@@ -3585,11 +3759,34 @@
   document.getElementById('search-input').addEventListener('input', function () {
     clearTimeout(searchTimer);
     const q = this.value.trim();
-    if (!q) {
-      clearSearchResults();
-      return;
+
+    if (currentNavTab === 'chats') {
+      if (!q) {
+        clearSearchResults();
+        return;
+      }
+      searchTimer = setTimeout(() => doSearch(q), 300);
+    } else if (currentNavTab === 'calls') {
+      filterCallsList(q);
+    } else if (currentNavTab === 'starred') {
+      filterStarredList(q);
+    } else if (currentNavTab === 'archived') {
+      renderArchivedList(q);
     }
-    searchTimer = setTimeout(() => doSearch(q), 300);
+  });
+
+  document.getElementById('search-input').addEventListener('search', function () {
+    if (!this.value.trim()) {
+      if (currentNavTab === 'chats') {
+        clearSearchResults();
+      } else if (currentNavTab === 'calls') {
+        filterCallsList('');
+      } else if (currentNavTab === 'starred') {
+        filterStarredList('');
+      } else if (currentNavTab === 'archived') {
+        renderArchivedList('');
+      }
+    }
   });
 
   async function doSearch(q) {
@@ -4681,6 +4878,391 @@
     }
   }
 
+  // ---- starred messages sidebar list ---------------------------------------
+
+  let _starredList = [];
+  let _starredLoading = false;
+
+  async function loadStarredList(reset) {
+    if (_starredLoading) return;
+    _starredLoading = true;
+    const chatListEl = document.getElementById('chat-list');
+    if (!chatListEl) {
+      _starredLoading = false;
+      return;
+    }
+
+    if (reset) {
+      _starredList = [];
+      chatListEl.innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading starred messages…</div>';
+    }
+
+    try {
+      const res = await fetch('/api/starred?limit=100');
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status} when fetching starred messages`);
+      }
+      const data = await res.json();
+      if (currentNavTab !== 'starred') return;
+
+      const msgs = data.messages || [];
+      _starredList = msgs;
+      filterStarredList('');
+    } catch (err) {
+      if (currentNavTab !== 'starred') return;
+      chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>Failed to load bookmarks</span></div>';
+      console.error('Failed to load starred bookmarks:', err);
+    } finally {
+      _starredLoading = false;
+    }
+  }
+
+  function renderStarredItem(m) {
+    const el = document.createElement('div');
+    el.className = 'chat-item';
+    let preview = m.text || m.text_body || '';
+    if (m.media_type) {
+      const label = MEDIA_LABELS[m.media_type] || '📎 Media';
+      preview = preview ? `${label} • ${preview}` : label;
+    }
+    const authorPrefix = m.sender_name ? `${m.sender_name}: ` : '';
+    el.innerHTML = `<div class="chat-name">${esc(m.chat_name || 'Chat')}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
+    el.addEventListener('click', () => {
+      openChatAtMessage(m.chat_id, m.id);
+    });
+    return el;
+  }
+
+  function filterStarredList(searchQuery) {
+    const list = document.getElementById('chat-list');
+    if (!list) return;
+
+    if (_starredList.length === 0) {
+      list.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>No starred bookmarks found</span></div>';
+      return;
+    }
+
+    const q = (searchQuery || '').trim().toLowerCase();
+    const matches = q
+      ? _starredList.filter(m => (m.chat_name || '').toLowerCase().includes(q) || (m.sender_name || '').toLowerCase().includes(q) || (m.text || m.text_body || '').toLowerCase().includes(q))
+      : _starredList;
+
+    list.innerHTML = '';
+    if (matches.length === 0) {
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No starred bookmarks matching "${esc(searchQuery)}"</span></div>`;
+      return;
+    }
+
+    matches.forEach(m => {
+      list.appendChild(renderStarredItem(m));
+    });
+  }
+
+  // ---- calls history & inspector -------------------------------------------
+
+  let _callsList = [];
+  let _callsOffset = 0;
+  let _callsHasMore = false;
+  let _callsLoading = false;
+
+  function filterCallsList(searchQuery) {
+    const list = document.getElementById('chat-list');
+    if (!list) return;
+
+    if (_callsList.length === 0) {
+      list.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>No Call History</strong><span>No calls found in this backup</span></div>';
+      return;
+    }
+
+    const q = (searchQuery || '').trim().toLowerCase();
+    const matches = q
+      ? _callsList.filter(c => (c.caller_name || '').toLowerCase().includes(q) || (c.caller_phone || '').toLowerCase().includes(q))
+      : _callsList;
+
+    list.innerHTML = '';
+    if (matches.length === 0) {
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No calls matching "${esc(searchQuery)}"</span></div>`;
+      return;
+    }
+
+    matches.forEach(c => {
+      list.appendChild(renderCallItem(c));
+    });
+  }
+
+  async function loadCallsList(reset) {
+    if (_callsLoading) return;
+    _callsLoading = true;
+    const chatListEl = document.getElementById('chat-list');
+    if (!chatListEl) {
+      _callsLoading = false;
+      return;
+    }
+
+    if (reset) {
+      _callsOffset = 0;
+      _callsList = [];
+      chatListEl.innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading Call History…</div>';
+    }
+
+    try {
+      const res = await fetch(`/api/calls?offset=${_callsOffset}&limit=50`);
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status} when fetching calls`);
+      }
+      const data = await res.json();
+      if (currentNavTab !== 'calls') return;
+
+      const calls = data.calls || [];
+      _callsHasMore = Boolean(data.has_more);
+      _callsOffset += calls.length;
+
+      if (reset) {
+        chatListEl.innerHTML = '';
+        if (calls.length === 0) {
+          chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>No Call History</strong><span>No calls found in this backup</span></div>';
+          return;
+        }
+      }
+
+      _callsList.push(...calls);
+      calls.forEach(c => {
+        chatListEl.appendChild(renderCallItem(c));
+      });
+    } catch (err) {
+      if (currentNavTab !== 'calls') return;
+      if (reset) {
+        chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⚠️</span><strong>Call History Error</strong><span>Unable to load call records</span></div>';
+      }
+      console.error('Failed to load call history:', err);
+    } finally {
+      _callsLoading = false;
+    }
+  }
+
+  function renderCallItem(call) {
+    const el = document.createElement('div');
+    el.className = 'call-item';
+    el.dataset.callId = call.id;
+
+    const left = document.createElement('div');
+    left.className = 'call-item-left';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'call-item-avatar';
+    const avatarKey = call.caller_phone || call.caller_name || 'Call';
+    avatar.style.backgroundColor = getAvatarColor(avatarKey);
+    avatar.textContent = getInitials(call.caller_name || 'Call');
+    left.appendChild(avatar);
+
+    const body = document.createElement('div');
+    body.className = 'call-item-body';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'call-item-name';
+    nameEl.textContent = call.caller_name || 'Unknown';
+    body.appendChild(nameEl);
+
+    const sub = document.createElement('div');
+    sub.className = 'call-item-sub';
+
+    let arrowSvg = '';
+    let statusText = '';
+    if (call.call_type === 'missed') {
+      arrowSvg = '<svg class="call-item-arrow call-icon-missed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/></svg>';
+      statusText = '<span class="call-icon-missed font-semibold">Missed</span>';
+    } else if (call.call_type === 'incoming') {
+      arrowSvg = '<svg class="call-item-arrow call-icon-incoming" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg>';
+      statusText = `<span>Incoming (${fmtDuration(call.duration)})</span>`;
+    } else {
+      arrowSvg = '<svg class="call-item-arrow call-icon-outgoing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg>';
+      const durText = call.duration > 0 ? `(${fmtDuration(call.duration)})` : '(No answer)';
+      statusText = `<span>Outgoing ${durText}</span>`;
+    }
+    sub.innerHTML = arrowSvg + ' ' + statusText;
+    body.appendChild(sub);
+    left.appendChild(body);
+    el.appendChild(left);
+
+    const right = document.createElement('div');
+    right.className = 'call-item-right';
+
+    const timeEl = document.createElement('span');
+    timeEl.className = 'call-item-time';
+    timeEl.textContent = fmtTime(call.timestamp * 1000);
+    right.appendChild(timeEl);
+
+    const mediaIcon = document.createElement('span');
+    mediaIcon.className = 'call-item-media-icon';
+    if (call.is_video) {
+      mediaIcon.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
+      mediaIcon.title = 'Video call';
+    } else {
+      mediaIcon.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>';
+      mediaIcon.title = 'Voice call';
+    }
+    right.appendChild(mediaIcon);
+    el.appendChild(right);
+
+    el.addEventListener('click', () => {
+      selectCallItem(call, el);
+    });
+
+    return el;
+  }
+
+  function selectCallItem(call, el) {
+    document.querySelectorAll('.call-item').forEach(item => {
+      item.classList.remove('active');
+    });
+    if (el) el.classList.add('active');
+
+    const emptyPane = document.getElementById('empty-pane');
+    if (emptyPane) emptyPane.style.display = 'none';
+
+    const chatHeader = document.getElementById('chat-header');
+    if (chatHeader) chatHeader.style.display = 'none';
+
+    const pinnedBanner = document.getElementById('pinned-banner');
+    if (pinnedBanner) pinnedBanner.style.display = 'none';
+
+    const contextBanner = document.getElementById('context-jump-banner');
+    if (contextBanner) contextBanner.style.display = 'none';
+
+    const msgScroll = document.getElementById('message-scroll');
+    if (msgScroll) msgScroll.style.display = 'none';
+
+    const scrollBottom = document.getElementById('scroll-to-bottom');
+    if (scrollBottom) scrollBottom.classList.remove('visible');
+
+    closeChatInfo();
+    closeChatStarred();
+    closeMediaGallery();
+
+    const callInspector = document.getElementById('pane-call-inspector');
+    if (!callInspector) return;
+    callInspector.style.display = 'flex';
+
+    const avatarEl = document.getElementById('call-inspect-avatar');
+    if (avatarEl) {
+      avatarEl.textContent = getInitials(call.caller_name || 'Call');
+      avatarEl.style.backgroundColor = getAvatarColor(call.caller_phone || call.caller_name || 'Call');
+    }
+
+    const nameEl = document.getElementById('call-inspect-name');
+    if (nameEl) nameEl.textContent = call.caller_name || 'Unknown';
+
+    const phoneEl = document.getElementById('call-inspect-phone');
+    if (phoneEl) {
+      const formatted = formatPhoneNumber(call.caller_phone || '');
+      phoneEl.textContent = formatted ? formatted : (call.caller_phone || '');
+    }
+
+    const badgeIcon = document.getElementById('call-inspect-badge-icon');
+    const badgeLabel = document.getElementById('call-inspect-badge-label');
+    if (badgeIcon && badgeLabel) {
+      if (call.is_video) {
+        badgeIcon.textContent = '📹';
+        badgeLabel.textContent = 'Video Call';
+      } else {
+        badgeIcon.textContent = '📞';
+        badgeLabel.textContent = 'Voice Call';
+      }
+    }
+
+    const dirEl = document.getElementById('call-inspect-dir');
+    if (dirEl) {
+      if (call.call_type === 'missed') {
+        dirEl.innerHTML = '<span class="call-icon-missed font-semibold">Missed</span>';
+      } else if (call.call_type === 'incoming') {
+        dirEl.innerHTML = '<svg class="call-item-arrow call-icon-incoming" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg> <span class="call-icon-incoming font-semibold">Incoming</span>';
+      } else {
+        dirEl.innerHTML = '<svg class="call-item-arrow call-icon-outgoing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg> <span class="call-icon-outgoing font-semibold">Outgoing</span>';
+      }
+    }
+
+    const timeEl = document.getElementById('call-inspect-time');
+    if (timeEl) {
+      const d = new Date(call.timestamp * 1000);
+      timeEl.textContent = d.toLocaleString(undefined, {
+        weekday: 'short',
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+    }
+
+    const durEl = document.getElementById('call-inspect-duration');
+    if (durEl) {
+      if (call.call_type === 'missed') {
+        durEl.textContent = '0s (Missed)';
+      } else {
+        durEl.textContent = fmtDurationLong(call.duration);
+      }
+    }
+
+    const dataRow = document.getElementById('call-inspect-data-row');
+    const dataVal = document.getElementById('call-inspect-data');
+    if (dataRow && dataVal) {
+      if (call.data_transferred && call.data_transferred > 0) {
+        dataRow.style.display = 'flex';
+        dataVal.textContent = _formatBytes(call.data_transferred);
+      } else {
+        dataRow.style.display = 'none';
+      }
+    }
+
+    const jumpBtn = document.getElementById('call-inspect-jump-btn');
+    if (jumpBtn) {
+      let matchedChat = null;
+      if (call.chat_id) {
+        matchedChat = allChats.find(c => String(c.id) === String(call.chat_id) || c.jid === call.chat_id);
+      }
+      if (!matchedChat && call.caller_phone) {
+        const cleanPhone = call.caller_phone.replace(/[^0-9]/g, '');
+        if (cleanPhone) {
+          matchedChat = allChats.find(c => {
+            const cp = (c.phone_number || '').replace(/[^0-9]/g, '');
+            return cp && (cp.includes(cleanPhone) || cleanPhone.includes(cp));
+          });
+        }
+      }
+
+      if (matchedChat) {
+        jumpBtn.disabled = false;
+        jumpBtn.title = 'Jump to this moment in conversation';
+        jumpBtn.onclick = () => {
+          jumpFromCallToChat(call, matchedChat);
+        };
+      } else {
+        jumpBtn.disabled = true;
+        jumpBtn.title = 'No archived conversation found for this caller';
+        jumpBtn.onclick = null;
+      }
+    }
+  }
+
+  function jumpFromCallToChat(call, matchedChat) {
+    if (!matchedChat) return;
+    const callInspector = document.getElementById('pane-call-inspector');
+    if (callInspector) callInspector.style.display = 'none';
+    openChatAtTimestamp(matchedChat.id, call.timestamp * 1000);
+  }
+
+  const chatListScroll = document.getElementById('chat-list');
+  if (chatListScroll) {
+    chatListScroll.addEventListener('scroll', () => {
+      if (currentNavTab === 'calls' && _callsHasMore && !_callsLoading) {
+        if (chatListScroll.scrollTop + chatListScroll.clientHeight >= chatListScroll.scrollHeight - 80) {
+          loadCallsList(false);
+        }
+      }
+    });
+  }
+
   // ---- cross-chat jump engine ----------------------------------------------
 
   async function openChatAtMessage(chatId, messageId) {
@@ -4720,8 +5302,12 @@
       if (match) e.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
 
+    const callInspector = document.getElementById('pane-call-inspector');
+    if (callInspector) callInspector.style.display = 'none';
+
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
+    scroll.style.display = 'block';
     scroll.classList.add('is-navigating');
     document.getElementById('scroll-to-bottom').classList.remove('visible');
 
@@ -4817,6 +5403,170 @@
     } catch (err) {
       if (err.name === 'AbortError') return null;
       showJumpHudError('Unable to load message');
+      throw err;
+    } finally {
+      if (scroll) scroll.classList.remove('is-navigating');
+      if (gen === _loadGen) {
+        loadingEl.style.display = 'none';
+        loading = false;
+      }
+    }
+  }
+
+  async function openChatAtTimestamp(chatId, timestampMs) {
+    if (_jumpAbortController) {
+      _jumpAbortController.abort();
+    }
+    _jumpAbortController = new AbortController();
+    const abortSignal = _jumpAbortController.signal;
+    const gen = ++_loadGen;
+    loading = true;
+
+    let chat = allChats.find(c => String(c.id) === String(chatId) || c.jid === chatId);
+    if (!chat) {
+      await loadChats();
+      chat = allChats.find(c => String(c.id) === String(chatId) || c.jid === chatId);
+    }
+    if (!chat) {
+      loading = false;
+      throw new Error(`Chat with ID ${chatId} not found`);
+    }
+
+    currentChat = chat;
+    msgList = [];
+    noMoreOlder = false;
+    noMoreNewer = false;
+    isUserAtBottom = false;
+
+    const callInspector = document.getElementById('pane-call-inspector');
+    if (callInspector) callInspector.style.display = 'none';
+
+    closeChatInfo();
+    closeChatStarred();
+    closeMediaGallery();
+
+    resetFilterTo('all');
+
+    document.querySelectorAll('.chat-item').forEach(e => {
+      const match = e.dataset.id === String(chat.id) && e.dataset.type === chat.type;
+      e.classList.toggle('active', match);
+      if (match) e.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+
+    const scroll = document.getElementById('message-scroll');
+    scroll.innerHTML = '';
+    scroll.style.display = 'block';
+    scroll.classList.add('is-navigating');
+    document.getElementById('scroll-to-bottom').classList.remove('visible');
+
+    document.getElementById('chat-header').style.display = 'flex';
+    document.getElementById('chat-title').textContent = chat.display_name;
+
+    const avatarEl = document.getElementById('chat-header-avatar');
+    if (avatarEl) {
+      const avatarKey = chat.phone_number || chat.id || chat.display_name;
+      avatarEl.style.backgroundColor = getAvatarColor(avatarKey);
+      avatarEl.textContent = getInitials(chat.display_name);
+    }
+
+    const subtitleEl = document.getElementById('chat-subtitle');
+    if (subtitleEl) {
+      if (chat.type === 'group') {
+        let subHtml = 'Group chat';
+        if (chat.is_preserved_only) {
+          subHtml += ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+        }
+        subtitleEl.innerHTML = subHtml;
+      } else {
+        const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
+        let subHtml = formattedPhone ? esc(formattedPhone) : '';
+        if (chat.is_preserved_only) {
+          subHtml += (subHtml ? ' ' : '') + '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+        }
+        subtitleEl.innerHTML = subHtml;
+      }
+    }
+
+    document.getElementById('empty-pane').style.display = 'none';
+    const sr = document.getElementById('search-results');
+    if (sr) {
+      sr.classList.remove('has-results');
+      sr.innerHTML = '';
+    }
+
+    document.getElementById('chat-search-input').value = '';
+    document.getElementById('chat-search-clear').style.display = 'none';
+    clearChatSearch();
+    document.getElementById('date-picker-input').value = '';
+    document.getElementById('date-go-btn').style.display = 'none';
+    document.getElementById('date-clear-btn').style.display = 'none';
+
+    updateChatStarredBadge(chat.id);
+    loadChatPinnedBanner(chat.id, chat.type);
+
+    const loadingEl = document.getElementById('chat-loading');
+    loadingEl.style.display = 'flex';
+    showJumpHud('Jumping to conversation moment…');
+
+    try {
+      const params = new URLSearchParams({
+        chat_id: chat.id,
+        chat_type: chat.type,
+        ts: timestampMs,
+        limit: 50
+      });
+      const res = await fetch('/api/messages/at?' + params, { signal: abortSignal });
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status} when loading messages at timestamp ${timestampMs}`);
+      }
+      const msgs = await res.json();
+      if (gen !== _loadGen) return null;
+
+      mergePage(msgs);
+      renderWindow();
+
+      let targetEl = null;
+      let minDiff = Infinity;
+      document.querySelectorAll('.msg-row').forEach(row => {
+        const rowTs = Number(row.dataset.ts);
+        if (rowTs) {
+          const diff = Math.abs(rowTs - timestampMs);
+          if (diff < minDiff) {
+            minDiff = diff;
+            targetEl = row;
+          }
+        }
+      });
+
+      if (targetEl) {
+        await _pinToMsg(targetEl, gen);
+        flashHighlightRow(targetEl, 'emerald');
+      }
+
+      const contextBanner = document.getElementById('context-jump-banner');
+      if (contextBanner) {
+        contextBanner.style.display = 'flex';
+        const bannerIcon = contextBanner.querySelector('.context-jump-icon');
+        if (bannerIcon) bannerIcon.textContent = '📞';
+        const bannerText = document.getElementById('context-jump-text');
+        if (bannerText) bannerText.textContent = 'Viewing Call Moment in context';
+        const switchBtn = document.getElementById('context-jump-switch-btn');
+        if (switchBtn) {
+          switchBtn.onclick = () => {
+            contextBanner.style.display = 'none';
+            switchNavTab('chats');
+            resetFilterTo('all');
+            const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+            if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          };
+        }
+      }
+
+      hideJumpHud();
+      return targetEl || null;
+    } catch (err) {
+      if (err.name === 'AbortError') return null;
+      showJumpHudError('Unable to load moment');
       throw err;
     } finally {
       if (scroll) scroll.classList.remove('is-navigating');
@@ -5283,6 +6033,46 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       closeMapChooser();
+      const searchInput = document.getElementById('search-input');
+      if (document.activeElement === searchInput) {
+        if (searchInput.value) {
+          searchInput.value = '';
+          if (currentNavTab === 'chats') {
+            clearSearchResults();
+          } else if (currentNavTab === 'calls') {
+            filterCallsList('');
+          } else if (currentNavTab === 'starred') {
+            filterStarredList('');
+          } else if (currentNavTab === 'archived') {
+            renderArchivedList('');
+          }
+        }
+        searchInput.blur();
+      }
+      return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      const searchInput = document.getElementById('search-input');
+      if (searchInput) {
+        searchInput.focus();
+        searchInput.select();
+      }
+      return;
+    }
+
+    if (e.key === '/') {
+      const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+      const isEditable = document.activeElement && (document.activeElement.isContentEditable || tag === 'input' || tag === 'textarea');
+      if (!isEditable) {
+        e.preventDefault();
+        const searchInput = document.getElementById('search-input');
+        if (searchInput) {
+          searchInput.focus();
+          searchInput.select();
+        }
+      }
     }
   });
 

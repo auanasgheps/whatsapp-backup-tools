@@ -163,6 +163,47 @@ HTML_TEMPLATE = (
         <span id="chat-loading-count"></span>
       </div>
 
+      <!-- Call Inspector Detail Card -->
+      <div id="pane-call-inspector" class="call-inspector-pane" style="display:none;" role="region" aria-label="Call details">
+        <div class="call-inspector-card">
+          <div class="call-inspect-header">
+            <div id="call-inspect-avatar" class="call-inspect-avatar">AW</div>
+            <div class="call-inspect-caller-info">
+              <h3 id="call-inspect-name" class="call-inspect-name">Alice Whitman</h3>
+              <p id="call-inspect-phone" class="call-inspect-phone">+1 (555) 234-5678</p>
+            </div>
+            <div id="call-inspect-badge" class="call-inspect-type-badge">
+              <span id="call-inspect-badge-icon">📹</span>
+              <span id="call-inspect-badge-label">Video Call</span>
+            </div>
+          </div>
+          <div class="call-inspect-details">
+            <div class="call-inspect-row">
+              <span class="call-inspect-label">Call Direction</span>
+              <span id="call-inspect-dir" class="call-inspect-val">Incoming</span>
+            </div>
+            <div class="call-inspect-row">
+              <span class="call-inspect-label">Timestamp</span>
+              <span id="call-inspect-time" class="call-inspect-val">Today at 14:20:18</span>
+            </div>
+            <div class="call-inspect-row">
+              <span class="call-inspect-label">Duration</span>
+              <span id="call-inspect-duration" class="call-inspect-val font-mono">12 minutes, 45 seconds</span>
+            </div>
+            <div id="call-inspect-data-row" class="call-inspect-row" style="display:none;">
+              <span class="call-inspect-label">Data Transferred</span>
+              <span id="call-inspect-data" class="call-inspect-val font-mono">84.2 MB</span>
+            </div>
+          </div>
+          <div class="call-inspect-actions">
+            <button id="call-inspect-jump-btn" class="call-inspect-jump-btn">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              <span>Jump to this Moment in Chat &#8599;</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- In-Chat Starred Messages Flyout Drawer -->
       <aside id="chat-starred-drawer" class="chat-drawer" role="region" aria-label="Starred messages" style="display:none;">
         <div class="chat-drawer-header">

@@ -2971,6 +2971,8 @@ class TestRecentMessagesRouting:
             "location_address",
             "location_url",
             "live_location_share_duration",
+            "is_starred",
+            "is_pinned",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -12466,3 +12468,333 @@ class TestTrack3FeaturePanes:
         msgs = resp.get_json()
         assert len(msgs) > 0
         assert any(m["msg_id"] == -50 for m in msgs)
+
+
+class TestPhase1CallsFeature:
+    """Tests for Phase 1: Calls Feature Completion & Inspector View."""
+
+    @pytest.fixture
+    def app_and_tmp(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Seed call_log table in Android DB
+        wa_conn.execute("""
+            CREATE TABLE IF NOT EXISTS call_log (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id TEXT,
+                jid_row_id INTEGER,
+                group_jid_row_id INTEGER,
+                from_me INTEGER DEFAULT 0,
+                timestamp INTEGER NOT NULL,
+                video_call INTEGER DEFAULT 0,
+                duration INTEGER DEFAULT 0,
+                call_result INTEGER DEFAULT 1,
+                bytes_transferred INTEGER DEFAULT 0
+            );
+        """)
+        wa_conn.execute("""
+            INSERT INTO call_log (_id, call_id, jid_row_id, from_me, timestamp, video_call, duration, call_result)
+            VALUES (1, 'call_abc_1', 1, 0, 1700000000000, 1, 765, 1);
+        """)
+        wa_conn.execute("""
+            INSERT INTO call_log (_id, call_id, jid_row_id, from_me, timestamp, video_call, duration, call_result)
+            VALUES (2, 'call_abc_2', 1, 0, 1700000010000, 0, 0, 2);
+        """)
+        wa_conn.commit()
+
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client, tmp_path
+
+    def test_call_inspector_elements_rendered_in_template(self, app_and_tmp):
+        """Call inspector pane and elements must exist in index HTML."""
+        client, _ = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert 'id="pane-call-inspector"' in html
+        assert 'id="call-inspect-avatar"' in html
+        assert 'id="call-inspect-name"' in html
+        assert 'id="call-inspect-phone"' in html
+        assert 'id="call-inspect-badge"' in html
+        assert 'id="call-inspect-dir"' in html
+        assert 'id="call-inspect-time"' in html
+        assert 'id="call-inspect-duration"' in html
+        assert 'id="call-inspect-data-row"' in html
+        assert 'id="call-inspect-jump-btn"' in html
+
+    def test_call_inspector_and_sidebar_css_classes(self, app_and_tmp):
+        """CSS rules for call inspector card and call items must exist in app.css."""
+        client, _ = app_and_tmp
+        resp = client.get("/static/app.css")
+        assert resp.status_code == 200
+        css = resp.get_data(as_text=True)
+        assert ".call-inspector-pane" in css
+        assert ".call-inspector-card" in css
+        assert ".call-inspect-avatar" in css
+        assert ".call-inspect-type-badge" in css
+        assert ".call-inspect-jump-btn" in css
+        assert ".call-item" in css
+        assert ".call-item-avatar" in css
+        assert ".call-icon-missed" in css
+        assert ".call-icon-incoming" in css
+        assert ".call-icon-outgoing" in css
+
+    def test_calls_api_endpoint(self, app_and_tmp):
+        """GET /api/calls returns calls with proper formatting and pagination."""
+        client, _ = app_and_tmp
+        resp = client.get("/api/calls?limit=10")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "calls" in data
+        assert "has_more" in data
+        calls = data["calls"]
+        assert len(calls) == 2
+        # Check call properties
+        video_call = next((c for c in calls if c["id"] == "call_abc_1"), None)
+        assert video_call is not None
+        assert video_call["is_video"] is True
+        assert video_call["duration"] == 765
+        assert video_call["call_type"] == "incoming"
+
+        missed_call = next((c for c in calls if c["id"] == "call_abc_2"), None)
+        assert missed_call is not None
+        assert missed_call["is_video"] is False
+        assert missed_call["call_type"] == "missed"
+
+    def test_calls_js_functions_present(self, app_and_tmp):
+        """Helper functions for calls and duration must exist in app.js."""
+        client, _ = app_and_tmp
+        resp = client.get("/static/app.js")
+        assert resp.status_code == 200
+        js = resp.get_data(as_text=True)
+        assert "function fmtDuration(seconds)" in js
+        assert "function fmtDurationLong(seconds)" in js
+        assert "function checkCallsAvailability()" in js
+        assert "function loadCallsList(reset)" in js
+        assert "function renderCallItem(call)" in js
+        assert "function selectCallItem(call, el)" in js
+        assert "function jumpFromCallToChat(call, matchedChat)" in js
+        assert "async function openChatAtTimestamp(chatId, timestampMs)" in js
+
+
+class TestPhase2ArchivedAndSearch:
+    """Tests for Phase 2: Archived Tab Live State & Tab-Aware Search."""
+
+    @pytest.fixture
+    def app_and_tmp(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Ensure chat table has archived column and set one chat as archived
+        chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+        if "archived" not in chat_cols:
+            wa_conn.execute("ALTER TABLE chat ADD COLUMN archived INTEGER DEFAULT 0")
+        wa_conn.execute("UPDATE chat SET archived = 1 WHERE _id = 10")
+        wa_conn.commit()
+
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client, tmp_path
+
+    def test_api_chats_projection_includes_is_archived(self, app_and_tmp):
+        """GET /api/chats returns is_archived integer flag for each chat."""
+        client, _ = app_and_tmp
+        resp = client.get("/api/chats")
+        assert resp.status_code == 200
+        chats = resp.get_json()
+        assert len(chats) > 0
+        # Check that is_archived exists on every chat
+        for c in chats:
+            assert "is_archived" in c
+        # At least one chat is archived
+        archived_chats = [c for c in chats if c["is_archived"] == 1]
+        assert len(archived_chats) >= 1
+
+    def test_archived_and_search_js_functions_present(self, app_and_tmp):
+        """Helper functions for archived rendering, client-side filters, and keyboard shortcuts must exist in app.js."""
+        client, _ = app_and_tmp
+        resp = client.get("/static/app.js")
+        assert resp.status_code == 200
+        js = resp.get_data(as_text=True)
+        assert "function renderArchivedList(searchQuery)" in js
+        assert "function filterCallsList(searchQuery)" in js
+        assert "function filterStarredList(searchQuery)" in js
+        assert "function loadStarredList(reset)" in js
+        assert "function renderStarredItem(m)" in js
+        assert "Search messages & chats…" in js
+        assert "Search archived chats…" in js
+        assert "Search starred bookmarks…" in js
+        assert "Search call history…" in js
+        # Verify keyboard shortcuts
+        assert "e.key === '/'" in js
+        assert "e.key.toLowerCase() === 'k'" in js
+
+
+class TestPhase3InBubbleIndicators:
+    """Tests for Phase 3: In-Bubble Pinned & Starred Indicators."""
+
+    @pytest.fixture
+    def app_and_tmp(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Ensure message table has starred column
+        msg_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(message)").fetchall()}
+        if "starred" not in msg_cols:
+            wa_conn.execute("ALTER TABLE message ADD COLUMN starred INTEGER DEFAULT 0")
+
+        # Insert message 2; message 1 will be starred, message 2 will be pinned
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type, starred) "
+            "VALUES (2, 10, 0, 1700000001000, 'Second message pinned', 0, 0)"
+        )
+        wa_conn.execute("UPDATE message SET starred = 1 WHERE _id = 1")
+
+        # Create message_add_on and insert pin for message 2
+        wa_conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_add_on (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_message_row_id INTEGER NOT NULL,
+                message_add_on_type INTEGER NOT NULL,
+                expiry_timestamp INTEGER,
+                timestamp INTEGER
+            )
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_add_on (parent_message_row_id, message_add_on_type, expiry_timestamp, timestamp)
+            VALUES (2, 79, 9999999999999, 1700000001000)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client, tmp_path
+
+    def test_android_messages_projection_includes_starred_and_pinned(self, app_and_tmp):
+        """GET /api/messages returns is_starred and is_pinned integer flags."""
+        client, _ = app_and_tmp
+        resp = client.get("/api/messages?chat_id=10&chat_type=contact")
+        assert resp.status_code == 200
+        msgs = resp.get_json()
+        assert len(msgs) >= 2
+        for m in msgs:
+            assert "is_starred" in m
+            assert "is_pinned" in m
+        msg1 = next((m for m in msgs if m["msg_id"] == 1), None)
+        assert msg1 is not None
+        assert msg1["is_starred"] == 1
+        assert msg1["is_pinned"] == 0
+        msg2 = next((m for m in msgs if m["msg_id"] == 2), None)
+        assert msg2 is not None
+        assert msg2["is_pinned"] == 1
+        assert msg2["is_starred"] == 0
+
+    def test_messages_at_projection_includes_starred_and_pinned(self, app_and_tmp):
+        """GET /api/messages/at returns is_starred and is_pinned."""
+        client, _ = app_and_tmp
+        resp = client.get("/api/messages/at?chat_id=10&chat_type=contact&ts=1700000000000")
+        assert resp.status_code == 200
+        msgs = resp.get_json()
+        assert len(msgs) >= 1
+        for m in msgs:
+            assert "is_starred" in m
+            assert "is_pinned" in m
+
+    def test_preserved_messages_projection_includes_starred_and_pinned(self, tmp_path):
+        """GET /api/messages correctly passes is_starred and is_pinned from preserved_messages.db."""
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.close()
+
+        pres_db = tmp_path / "preserved_messages.db"
+        pres_conn = sqlite3.connect(str(pres_db))
+        pres_conn.execute("""
+            CREATE TABLE preserved_messages (
+                rowid INTEGER PRIMARY KEY,
+                msg_id INTEGER,
+                chat_id TEXT NOT NULL,
+                chat_type TEXT NOT NULL,
+                from_me INTEGER NOT NULL,
+                key_id TEXT NOT NULL,
+                sender_jid TEXT,
+                sender_name TEXT,
+                timestamp_ms INTEGER NOT NULL,
+                text_body TEXT,
+                media_type TEXT,
+                archive_path TEXT,
+                file_size INTEGER,
+                is_starred INTEGER DEFAULT 0,
+                is_pinned INTEGER DEFAULT 0
+            );
+        """)
+        pres_conn.execute(
+            """INSERT INTO preserved_messages (
+                rowid, msg_id, chat_id, chat_type, from_me, key_id,
+                sender_name, timestamp_ms, text_body, media_type, is_starred, is_pinned
+            ) VALUES (
+                1, 101, 'test_chat', 'contact', 0, 'st_pres_1',
+                'Alice', 1700000005000, 'Preserved starred pin', 'text', 1, 1
+            )"""
+        )
+        pres_conn.commit()
+        pres_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=test_chat&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["is_starred"] == 1
+            assert msgs[0]["is_pinned"] == 1
+            assert msgs[0]["is_preserved"] == 1
+
+    def test_js_in_bubble_indicator_markup(self, app_and_tmp):
+        """Verify helper functions and classes for in-bubble indicators in app.js."""
+        client, _ = app_and_tmp
+        resp = client.get("/static/app.js")
+        assert resp.status_code == 200
+        js = resp.get_data(as_text=True)
+        assert "function createMetaPinIcon()" in js
+        assert "function createMetaStarIcon()" in js
+        assert "msg-pinned-icon" in js
+        assert "msg-starred-icon" in js
+        assert "msg-meta-icon" in js
+        assert "Pinned message" in js
+        assert "Starred message" in js
+
+    def test_css_indicator_styles(self, app_and_tmp):
+        """Verify CSS classes for meta indicator icons in app.css."""
+        client, _ = app_and_tmp
+        resp = client.get("/static/app.css")
+        assert resp.status_code == 200
+        css = resp.get_data(as_text=True)
+        assert ".msg-meta-icon" in css
+        assert ".msg-pinned-icon" in css
+        assert ".msg-starred-icon" in css
+        assert "var(--star-color" in css
