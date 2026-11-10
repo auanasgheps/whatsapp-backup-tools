@@ -5231,6 +5231,54 @@ class TestIosHdDeduplication:
         run_forward_mode(args, logger)
 
 
+class TestIosCallHistoryExtraction:
+    def test_find_ios_call_history_db(self, tmp_path):
+        from wab_archiver import ios_handler as ios
+
+        d1 = tmp_path / "d1"
+        d1.mkdir()
+        assert ios.find_ios_call_history_db([str(d1)]) is None
+
+        # Test nested Library/CallHistory/CallHistory.storedata
+        ch_dir = d1 / "Library" / "CallHistory"
+        ch_dir.mkdir(parents=True)
+        storedata = ch_dir / "CallHistory.storedata"
+        storedata.touch()
+        assert ios.find_ios_call_history_db([str(d1)]) == str(storedata)
+
+        # Test flat folder CallHistory.sqlite
+        d2 = tmp_path / "d2"
+        d2.mkdir()
+        flat_file = d2 / "CallHistory.sqlite"
+        flat_file.touch()
+        assert ios.find_ios_call_history_db([str(d2)]) == str(flat_file)
+
+    def test_verify_ios_call_history_db(self, tmp_path, logger):
+        from wab_archiver import ios_handler as ios
+
+        # Non-existent file
+        assert ios.verify_ios_call_history_db(str(tmp_path / "nonexistent.sqlite"), logger) is False
+
+        # Invalid/empty file
+        empty_file = tmp_path / "empty.sqlite"
+        empty_file.touch()
+        assert ios.verify_ios_call_history_db(str(empty_file), logger) is False
+
+        # Missing ZWACDCALLEVENT table
+        no_table = tmp_path / "no_table.sqlite"
+        with sqlite3.connect(str(no_table)) as conn:
+            conn.execute("CREATE TABLE other_table (id INTEGER PRIMARY KEY)")
+        assert ios.verify_ios_call_history_db(str(no_table), logger) is False
+
+        # Valid CallHistory database
+        valid_db = tmp_path / "valid.sqlite"
+        with sqlite3.connect(str(valid_db)) as conn:
+            conn.execute(
+                "CREATE TABLE ZWACDCALLEVENT (Z_PK INTEGER PRIMARY KEY, ZDATE REAL, ZDURATION INTEGER)"
+            )
+        assert ios.verify_ios_call_history_db(str(valid_db), logger) is True
+
+
 class TestIosThumbnailExtraction:
     def test_has_ios_thumb_support(self):
         from wab_archiver import ios_handler as ios

@@ -11839,3 +11839,355 @@ class TestExtendedMediaMap:
         assert rows[2]["quoted_msg_id"] == 101
         assert rows[2]["quoted_text"] == "I am message 101"
         assert rows[2]["quoted_sender"] == "You"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Track 1 Navigation Redesign (Calls, Starred, Pinned)
+# ---------------------------------------------------------------------------
+
+
+class TestTrack1Endpoints:
+    def test_api_calls_android(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        arch_path = tmp_path / ".wa_media_archiver.db"
+
+        with sqlite3.connect(str(arch_path)) as arch_conn:
+            arch_conn.execute(
+                "CREATE TABLE contacts (number TEXT PRIMARY KEY, display_name TEXT, folder TEXT)"
+            )
+            arch_conn.execute(
+                "INSERT INTO contacts VALUES ('15551234', 'Alice Whitman', 'Alice (15551234)')"
+            )
+            arch_conn.commit()
+
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE call_log (
+                    _id INTEGER PRIMARY KEY,
+                    call_id TEXT,
+                    jid_row_id INTEGER,
+                    from_me INTEGER,
+                    timestamp INTEGER,
+                    video_call INTEGER,
+                    duration INTEGER,
+                    call_result INTEGER,
+                    group_jid_row_id INTEGER
+                );
+                INSERT INTO jid VALUES (1, '15551234', '15551234@s.whatsapp.net');
+                INSERT INTO jid VALUES (2, '15559999', '15559999@s.whatsapp.net');
+                INSERT INTO chat VALUES (10, 1, NULL);
+                INSERT INTO chat VALUES (20, 2, NULL);
+
+                INSERT INTO call_log VALUES (1, 'call-101', 1, 0, 1793972400000, 1, 765, 1, NULL);
+                INSERT INTO call_log VALUES (2, 'call-102', 1, 0, 1793973000000, 0, 0, 2, NULL);
+                INSERT INTO call_log VALUES (3, 'call-103', 2, 1, 1793974000000, 0, 120, 1, NULL);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # 1. All calls
+            resp = client.get("/api/calls")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 3
+            c1 = next(c for c in data if c["id"] == "call-101")
+            assert c1["caller_name"] == "Alice Whitman"
+            assert c1["caller_phone"] == "+15551234"
+            assert c1["is_video"] is True
+            assert c1["is_missed"] is False
+            assert c1["duration"] == 765
+
+            # 2. Missed calls filter
+            resp_missed = client.get("/api/calls?filter=missed")
+            assert resp_missed.status_code == 200
+            data_missed = resp_missed.get_json()
+            assert len(data_missed) == 1
+            assert data_missed[0]["id"] == "call-102"
+            assert data_missed[0]["is_missed"] is True
+
+            # 3. Video calls filter
+            resp_video = client.get("/api/calls?filter=video")
+            assert resp_video.status_code == 200
+            data_video = resp_video.get_json()
+            assert len(data_video) == 1
+            assert data_video[0]["id"] == "call-101"
+            assert data_video[0]["is_video"] is True
+
+    def test_api_calls_ios(self, tmp_path):
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        call_path = tmp_path / "CallHistory.sqlite"
+
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+                CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+                INSERT INTO ZWACHATSESSION VALUES (1, '15553333@s.whatsapp.net', 'Bob iOS');
+            """)
+            conn.commit()
+
+        with sqlite3.connect(str(call_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE ZWACDCALLEVENT (
+                    Z_PK INTEGER PRIMARY KEY,
+                    ZDATE REAL,
+                    ZDURATION INTEGER,
+                    ZBYTESENT INTEGER,
+                    ZBYTESRECEIVED INTEGER,
+                    ZAGGREGATECALLEVENT INTEGER,
+                    Z12_AGGREGATECALLEVENT INTEGER
+                );
+                CREATE TABLE ZWAAGGREGATECALLEVENT (
+                    Z_PK INTEGER PRIMARY KEY,
+                    ZVIDEO INTEGER,
+                    ZINCOMING INTEGER,
+                    ZCALLRESULT INTEGER
+                );
+                CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
+                    Z_PK INTEGER PRIMARY KEY,
+                    ZCALLEVENT INTEGER,
+                    ZJIDSTRING TEXT,
+                    ZOUTCOME INTEGER
+                );
+
+                -- Call 1: Incoming connected video call (ZDATE=700000000 -> 2023)
+                INSERT INTO ZWACDCALLEVENT VALUES (1, 700000000.0, 300, 1000, 2000, 1, 1);
+                INSERT INTO ZWAAGGREGATECALLEVENT VALUES (1, 1, 1, 1);
+                INSERT INTO ZWACDCALLEVENTPARTICIPANT VALUES (1, 1, '15553333@s.whatsapp.net', 1);
+
+                -- Call 2: Outgoing missed audio call
+                INSERT INTO ZWACDCALLEVENT VALUES (2, 700001000.0, 0, 0, 0, 2, 2);
+                INSERT INTO ZWAAGGREGATECALLEVENT VALUES (2, 0, 0, 2);
+                INSERT INTO ZWACDCALLEVENTPARTICIPANT VALUES (2, 2, '15554444@s.whatsapp.net', 2);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/calls")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 2
+
+            c1 = next(c for c in data if c["id"] == "ios-call-1")
+            assert c1["caller_name"] == "Bob iOS"
+            assert c1["caller_phone"] == "+15553333"
+            assert c1["is_video"] is True
+            assert c1["is_missed"] is False
+            assert c1["duration"] == 300
+            assert c1["from_me"] is False
+
+            # Filter missed
+            resp_missed = client.get("/api/calls?filter=missed")
+            assert resp_missed.status_code == 200
+            data_missed = resp_missed.get_json()
+            assert len(data_missed) == 1
+            assert data_missed[0]["id"] == "ios-call-2"
+
+    def test_api_calls_with_preserved(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        pres_path = tmp_path / "preserved_messages.db"
+
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE call_log (
+                    _id INTEGER PRIMARY KEY, call_id TEXT, jid_row_id INTEGER,
+                    from_me INTEGER, timestamp INTEGER, video_call INTEGER,
+                    duration INTEGER, call_result INTEGER, group_jid_row_id INTEGER
+                );
+            """)
+            conn.commit()
+
+        with sqlite3.connect(str(pres_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE preserved_calls (
+                    call_id TEXT PRIMARY KEY,
+                    chat_id TEXT,
+                    caller_jid TEXT,
+                    caller_name TEXT,
+                    timestamp_ms INTEGER,
+                    duration_sec INTEGER,
+                    video_call INTEGER,
+                    from_me INTEGER,
+                    call_result INTEGER
+                );
+                INSERT INTO preserved_calls VALUES (
+                    'pres-call-1', '99', '15557777@s.whatsapp.net', 'Ghost Caller',
+                    1793979999000, 45, 0, 0, 2
+                );
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/calls")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            assert data[0]["id"] == "pres-call-1"
+            assert data[0]["caller_name"] == "Ghost Caller"
+            assert data[0]["is_missed"] is True
+
+    def test_api_starred_android(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT,
+                    starred INTEGER
+                );
+                INSERT INTO jid VALUES (1, '15551111', '15551111@s.whatsapp.net');
+                INSERT INTO chat VALUES (10, 1, 'Project Alpha');
+                INSERT INTO message VALUES (
+                    100, 10, 0, 1, 1793970000000, 'Starred Important Note', 0, 'STANZA_STAR_1', 1
+                );
+                INSERT INTO message VALUES (
+                    101, 10, 0, 1, 1793971000000, 'Regular Note', 0, 'STANZA_REG_1', 0
+                );
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # Global starred
+            resp = client.get("/api/starred")
+            assert resp.status_code == 200
+            items = resp.get_json()
+            assert len(items) == 1
+            assert items[0]["msg_id"] == 100
+            assert items[0]["text_body"] == "Starred Important Note"
+            assert items[0]["chat_name"] == "Project Alpha"
+
+            # Scoped chat starred
+            resp_chat = client.get("/api/chat/10/starred")
+            assert resp_chat.status_code == 200
+            chat_items = resp_chat.get_json()
+            assert len(chat_items) == 1
+            assert chat_items[0]["msg_id"] == 100
+
+            resp_empty = client.get("/api/chat/999/starred")
+            assert resp_empty.status_code == 200
+            assert len(resp_empty.get_json()) == 0
+
+    def test_api_pinned_android(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT
+                );
+                CREATE TABLE message_add_on (
+                    _id INTEGER PRIMARY KEY,
+                    parent_message_row_id INTEGER,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    key_id TEXT,
+                    timestamp INTEGER,
+                    message_add_on_type INTEGER,
+                    status INTEGER,
+                    expiry_timestamp INTEGER
+                );
+                CREATE TABLE message_add_on_pin_in_chat (
+                    message_add_on_row_id INTEGER PRIMARY KEY,
+                    pin_in_chat_state INTEGER,
+                    sender_timestamp INTEGER
+                );
+
+                INSERT INTO jid VALUES (1, '15551111', '15551111@s.whatsapp.net');
+                INSERT INTO chat VALUES (10, 1, 'Pinned Chat');
+                INSERT INTO message VALUES (
+                    50, 10, 0, 1, 1793970000000, 'Pinned announcement message', 0, 'PIN_PARENT_1'
+                );
+                -- Add-on type 79 = Pin in Chat (Wire Tag 63)
+                INSERT INTO message_add_on VALUES (
+                    1, 50, 10, 0, 1, 'PIN_ADDON_1', 1793970500000, 79, 0, 9999999999000
+                );
+                INSERT INTO message_add_on_pin_in_chat VALUES (1, 1, 1793970500000);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/10/pinned")
+            assert resp.status_code == 200
+            items = resp.get_json()
+            assert len(items) == 1
+            assert items[0]["msg_id"] == 50
+            assert items[0]["text_body"] == "Pinned announcement message"
+            assert items[0]["is_pinned"] is True
+
+    def test_api_chat_info_aggregates_calls(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT
+                );
+                CREATE TABLE call_log (
+                    _id INTEGER PRIMARY KEY,
+                    call_id TEXT,
+                    jid_row_id INTEGER,
+                    from_me INTEGER,
+                    timestamp INTEGER,
+                    video_call INTEGER,
+                    duration INTEGER,
+                    call_result INTEGER,
+                    group_jid_row_id INTEGER
+                );
+                CREATE TABLE jid_map (
+                    lid_row_id INTEGER,
+                    jid_row_id INTEGER
+                );
+
+                INSERT INTO jid VALUES (1, '15551234', '15551234@s.whatsapp.net');
+                INSERT INTO chat VALUES (10, 1, NULL);
+                INSERT INTO message VALUES (1, 10, 0, 1, 1793970000000, 'Test msg', 0, 'M1');
+                INSERT INTO call_log VALUES (1, 'call-1', 1, 0, 1793971000000, 0, 60, 1, NULL);
+                INSERT INTO call_log VALUES (2, 'call-2', 1, 1, 1793972000000, 1, 120, 1, NULL);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat-info?chat_id=15551234&chat_type=contact")
+            assert resp.status_code == 200
+            info = resp.get_json()
+            assert info["calls"] == 2
