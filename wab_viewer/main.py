@@ -4484,6 +4484,23 @@ def _query_android_calls(
     has_group = "group_jid_row_id" in cl_cols
     has_jid_row = "jid_row_id" in cl_cols
 
+    _ensure_jid_map_resolved(conn, arch_conn)
+
+    has_chat_table = bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat'").fetchone()
+    )
+    chat_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
+        if has_chat_table
+        else set()
+    )
+    has_account_jid = "account_jid_row_id" in chat_cols
+    has_ldn = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'"
+        ).fetchone()
+    )
+
     video_expr = "COALESCE(cl.video_call, 0)" if has_video else "0"
     dur_expr = "COALESCE(cl.duration, 0)" if has_duration else "0"
     result_expr = "COALESCE(cl.call_result, 0)" if has_result else "0"
@@ -4494,17 +4511,64 @@ def _query_android_calls(
         if has_group
         else "0"
     )
-    caller_join = "LEFT JOIN jid j_caller ON j_caller._id = cl.jid_row_id" if has_jid_row else ""
-    chat_join = (
+    caller_join = (
         """
-        LEFT JOIN chat c ON c.jid_row_id = (
-            CASE WHEN cl.group_jid_row_id IS NOT NULL AND cl.group_jid_row_id > 0
-                 THEN cl.group_jid_row_id
-                 ELSE cl.jid_row_id END
+        LEFT JOIN jid j_caller ON j_caller._id = cl.jid_row_id
+        LEFT JOIN _jid_map_resolved jm_caller ON jm_caller.lid_row_id = cl.jid_row_id
+        LEFT JOIN jid j_caller_real ON j_caller_real._id = jm_caller.jid_row_id
+        """
+        if has_jid_row
+        else ""
+    )
+    if has_account_jid and has_jid_row:
+        chat_join = """
+        LEFT JOIN chat c ON (
+            (cl.group_jid_row_id IS NOT NULL AND cl.group_jid_row_id > 0 AND c.jid_row_id = cl.group_jid_row_id)
+            OR
+            ((cl.group_jid_row_id IS NULL OR cl.group_jid_row_id = 0) AND (
+                c.jid_row_id = cl.jid_row_id
+                OR c.account_jid_row_id = cl.jid_row_id
+                OR (jm_caller.jid_row_id IS NOT NULL AND (
+                    c.jid_row_id = jm_caller.jid_row_id
+                    OR c.account_jid_row_id = jm_caller.jid_row_id
+                ))
+            ))
         )
-    """
-        if (has_group and has_jid_row)
-        else ("LEFT JOIN chat c ON c.jid_row_id = cl.jid_row_id" if has_jid_row else "")
+        """
+    elif has_jid_row:
+        chat_join = """
+        LEFT JOIN chat c ON (
+            (cl.group_jid_row_id IS NOT NULL AND cl.group_jid_row_id > 0 AND c.jid_row_id = cl.group_jid_row_id)
+            OR
+            ((cl.group_jid_row_id IS NULL OR cl.group_jid_row_id = 0) AND (
+                c.jid_row_id = cl.jid_row_id
+                OR (jm_caller.jid_row_id IS NOT NULL AND c.jid_row_id = jm_caller.jid_row_id)
+            ))
+        )
+        """
+    else:
+        chat_join = ""
+
+    con_caller_join = (
+        """
+        LEFT JOIN _contacts_resolved con_caller ON con_caller.clean_number = COALESCE(
+            j_caller_real.user,
+            CASE WHEN j_caller.server != 'lid' THEN j_caller.user END,
+            j_caller.user
+        )
+        """
+        if has_jid_row
+        else ""
+    )
+    ldn_caller_join = (
+        "LEFT JOIN lid_display_name ldn_caller ON ldn_caller.lid_row_id = cl.jid_row_id"
+        if (has_ldn and has_jid_row)
+        else ""
+    )
+    ldn_col = (
+        "ldn_caller.display_name AS ldn_display_name,"
+        if (has_ldn and has_jid_row)
+        else "NULL AS ldn_display_name,"
     )
 
     where_parts: list[str] = []
@@ -4526,13 +4590,22 @@ def _query_android_calls(
             {video_expr} AS is_video,
             {result_expr} AS call_result,
             {is_group_expr} AS is_group_call,
-            j_caller.user AS caller_number,
-            j_caller.raw_string AS caller_raw,
+            COALESCE(
+                j_caller_real.user,
+                CASE WHEN j_caller.server != 'lid' THEN j_caller.user END,
+                j_caller.user
+            ) AS caller_number,
+            COALESCE(j_caller_real.raw_string, j_caller.raw_string) AS caller_raw,
+            con_caller.display_name AS con_display_name,
+            con_caller.folder AS con_folder,
+            {ldn_col}
             c._id AS chat_row_id,
             c.subject AS chat_subject
         FROM call_log cl
         {caller_join}
         {chat_join}
+        {con_caller_join}
+        {ldn_caller_join}
         {where_sql}
         ORDER BY {ts_expr} DESC
         {limit_sql}
@@ -4561,6 +4634,14 @@ def _query_android_calls(
         raw_num = row_dict["caller_number"] or ""
         caller_phone = f"+{raw_num}" if (raw_num and raw_num.isdigit()) else raw_num
         caller_name = contacts_map.get(raw_num, "")
+        if not caller_name and row_dict.get("con_display_name"):
+            caller_name = row_dict["con_display_name"]
+        if not caller_name and row_dict.get("con_folder"):
+            caller_name = re.sub(r"\s*\(\+?\d+\)$", "", row_dict["con_folder"]).strip()
+        if not caller_name and row_dict.get("ldn_display_name"):
+            ldn_n = str(row_dict["ldn_display_name"]).strip()
+            if "∙" not in ldn_n and "\u2219" not in ldn_n:
+                caller_name = ldn_n
         if not caller_name:
             caller_name = row_dict["chat_subject"] or caller_phone or "Unknown"
 
@@ -7523,6 +7604,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 LEFT JOIN _contacts_resolved con_s ON con_s.clean_number = {_clean_user_sql("COALESCE(j_s_real.user, j_s.user)")}
                 {ms_chat_join}
                 WHERE (
+                    ({chat_archived_col} = 1)
+                    OR
                     ({is_group_chat} AND (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))))
                     OR
                     (NOT ({is_group_chat}) AND (
@@ -7539,15 +7622,16 @@ def create_app(output_root: Path, rescan: bool = False):
                 )
                 ORDER BY newest_ts DESC
             """).fetchall()
-            seen_ids = set()
-            deduped_rows = []
+            deduped_chats: dict[str, dict] = {}
             for r in rows:
                 cid = r["id"]
-                if cid in seen_ids:
+                r_dict = dict(r)
+                if cid in deduped_chats:
+                    if r_dict.get("is_archived"):
+                        deduped_chats[cid]["is_archived"] = 1
                     continue
-                seen_ids.add(cid)
-                deduped_rows.append(r)
-            rows = deduped_rows
+                deduped_chats[cid] = r_dict
+            rows = list(deduped_chats.values())
         else:
             group_ev_col = "m.ZGROUPEVENTTYPE" if has_ios_group_event else "0"
             # Exclude internal system events (2: E2E encryption notice, 56: security code notice)
@@ -10735,11 +10819,18 @@ def create_app(output_root: Path, rescan: bool = False):
                         """
                         SELECT COUNT(*)
                         FROM call_log cl
-                        LEFT JOIN chat c ON c.jid_row_id = cl.jid_row_id
+                        LEFT JOIN chat c ON (
+                            c.jid_row_id = cl.jid_row_id
+                            OR (c.account_jid_row_id IS NOT NULL AND c.account_jid_row_id = cl.jid_row_id)
+                        )
                         LEFT JOIN jid j ON j._id = cl.jid_row_id
-                        WHERE CAST(c._id AS TEXT) = ? OR j.user = ?
+                        LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = cl.jid_row_id
+                        LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+                        WHERE CAST(c._id AS TEXT) = ?
+                           OR j.user = ?
+                           OR (j_real.user IS NOT NULL AND j_real.user = ?)
                         """,
-                        (str(chat_id), str(chat_id)),
+                        (str(chat_id), str(chat_id), str(chat_id)),
                     ).fetchone()
                     if c_cnt_row and c_cnt_row[0]:
                         calls_count += int(c_cnt_row[0])
