@@ -2942,6 +2942,7 @@ def _merge_preserved_chats(
             {
                 "id": cid,
                 "type": ctype,
+                "phone_number": "" if ctype == "group" else cid,
                 "display_name": display_name,
                 "newest_ts": pc["newest_ts"],
                 "last_msg_preview": last_preview,
@@ -4555,6 +4556,8 @@ def _query_android_calls(
                 "caller_phone": caller_phone,
                 "chat_id": chat_id_val,
                 "call_type": call_type,
+                "is_missed": bool(call_type == "missed"),
+                "from_me": bool(from_me == 1),
                 "is_video": is_video,
                 "duration": int(row_dict["duration"]),
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
@@ -4740,6 +4743,8 @@ def _query_ios_calls(
                 "caller_phone": caller_phone,
                 "chat_id": chat_id_val,
                 "call_type": call_type,
+                "is_missed": bool(call_type == "missed"),
+                "from_me": bool(call_type == "outgoing"),
                 "is_video": is_video,
                 "duration": int(r["duration"]),
                 "timestamp": int(r["timestamp"]),
@@ -4765,9 +4770,20 @@ def _query_preserved_calls(
         if not has_table:
             return []
 
+        cols = {r[1] for r in pres_conn.execute("PRAGMA table_info(preserved_calls)").fetchall()}
+        dur_expr = (
+            "duration_seconds"
+            if "duration_seconds" in cols
+            else ("duration_sec" if "duration_sec" in cols else "0")
+        )
+        video_expr = (
+            "is_video" if "is_video" in cols else ("video_call" if "video_call" in cols else "0")
+        )
+        chat_jid_expr = "chat_jid" if "chat_jid" in cols else "NULL"
+
         where_parts: list[str] = []
         if filter_type == "video":
-            where_parts.append("is_video = 1")
+            where_parts.append(f"{video_expr} = 1")
         elif filter_type == "missed":
             where_parts.append("from_me = 0 AND call_result IN (2, 3, 5)")
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
@@ -4777,13 +4793,13 @@ def _query_preserved_calls(
             SELECT
                 call_id,
                 chat_id,
-                chat_jid,
+                {chat_jid_expr} AS chat_jid,
                 caller_jid,
                 caller_name,
                 from_me,
                 timestamp_ms,
-                duration_seconds,
-                is_video,
+                {dur_expr} AS duration_seconds,
+                {video_expr} AS is_video,
                 call_result
             FROM preserved_calls
             {where_sql}
@@ -4824,6 +4840,8 @@ def _query_preserved_calls(
                 "caller_phone": caller_phone,
                 "chat_id": chat_id_val,
                 "call_type": call_type,
+                "is_missed": bool(call_type == "missed"),
+                "from_me": bool(call_type == "outgoing"),
                 "is_video": is_video,
                 "duration": int(row_dict["duration_seconds"] or 0),
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
@@ -4979,6 +4997,7 @@ def _query_android_starred(
                 "sender_name": sender_name,
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
                 "text": row_dict["text"],
+                "text_body": row_dict["text"],
                 "media_type": media_type,
             }
         )
@@ -5111,6 +5130,7 @@ def _query_ios_starred(
                 "sender_name": sender_name,
                 "timestamp": int(round(float(row_dict["msg_date"]) + 978307200)),
                 "text": row_dict["text"],
+                "text_body": row_dict["text"],
                 "media_type": media_type,
             }
         )
@@ -5185,6 +5205,7 @@ def _query_preserved_starred(
                 "sender_name": sender_name,
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
                 "text": row_dict["text_body"] or "",
+                "text_body": row_dict["text_body"] or "",
                 "media_type": media_type,
             }
         )
@@ -5292,6 +5313,8 @@ def _query_android_pinned(
                 "id": mid,
                 "sender_name": sender_name,
                 "text": text,
+                "text_body": text,
+                "is_pinned": True,
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
             }
         )
@@ -5377,6 +5400,8 @@ def _query_ios_pinned(
                                             "id": int(r_dict["id"]),
                                             "sender_name": sender_name,
                                             "text": r_dict["text"] or "Pinned message",
+                                            "text_body": r_dict["text"] or "Pinned message",
+                                            "is_pinned": True,
                                             "timestamp": int(
                                                 round(float(r_dict["msg_date"]) + 978307200)
                                             ),
@@ -5448,6 +5473,8 @@ def _query_ios_pinned(
                 "id": int(target["id"]),
                 "sender_name": sender_name,
                 "text": target["text"] or "Pinned message",
+                "text_body": target["text"] or "Pinned message",
+                "is_pinned": True,
                 "timestamp": int(round(float(target["msg_date"]) + 978307200)),
             }
         )
@@ -5505,6 +5532,8 @@ def _query_preserved_pinned(
                 "id": int(row_dict["msg_id"]),
                 "sender_name": sender_name,
                 "text": row_dict["text_body"] or "Pinned message",
+                "text_body": row_dict["text_body"] or "Pinned message",
+                "is_pinned": True,
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
             }
         )
@@ -7276,6 +7305,13 @@ def create_app(output_root: Path, rescan: bool = False):
                     END                                                 AS id,
                     CASE WHEN {is_group_chat} THEN 'group'
                          ELSE 'contact' END                            AS type,
+                    CASE WHEN {is_group_chat} THEN ''
+                         ELSE COALESCE(
+                             {_clean_user_sql("j_chat_real.user")},
+                             {_clean_user_sql("j_chat.user")},
+                             ''
+                         )
+                    END                                                 AS phone_number,
                     COALESCE(
                         NULLIF(c.subject, ''),
                         NULLIF(grp.subject, ''),
@@ -7411,6 +7447,9 @@ def create_app(output_root: Path, rescan: bool = False):
                     CAST(cs.Z_PK AS TEXT)                               AS id,
                     CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
                          ELSE 'contact' END                            AS type,
+                    CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN ''
+                         ELSE COALESCE(({ios_phone_expr}), '')
+                    END                                                 AS phone_number,
                     COALESCE(
                         NULLIF(con.display_name, ''),
                         NULLIF(con_lid.display_name, ''),
@@ -10512,6 +10551,7 @@ def create_app(output_root: Path, rescan: bool = False):
             "received": received,
             "total": total,
             "calls_count": calls_count,
+            "calls": calls_count,
         }
         if chat_type == "group":
             result["description"] = description
@@ -11491,10 +11531,12 @@ def create_app(output_root: Path, rescan: bool = False):
 
     @app.route("/")
     def index():
+        p_name = "iOS" if source_type == "ios" else ("Android" if source_type == "android" else "")
         return render_template_string(
             HTML_TEMPLATE,
             output_root=str(output_root),
             version=_get_version(),
+            platform_name=p_name,
             schema_alert=app.config.get("SCHEMA_ALERT"),
         )
 

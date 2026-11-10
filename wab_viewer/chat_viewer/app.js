@@ -33,6 +33,62 @@
 
   // ---- util ----------------------------------------------------------------
 
+  const AVATAR_PALETTE = [
+    '#00a884',
+    '#0284c7',
+    '#2563eb',
+    '#7c3aed',
+    '#c026d3',
+    '#db2777',
+    '#ea580c',
+    '#16a34a',
+    '#0d9488',
+    '#4f46e5',
+  ];
+
+  function getAvatarColor(key) {
+    if (!key) return AVATAR_PALETTE[0];
+    const str = String(key);
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+    }
+    return AVATAR_PALETTE[hash % AVATAR_PALETTE.length];
+  }
+
+  function getInitials(name) {
+    if (!name) return '?';
+    const cleaned = String(name).trim();
+    if (!cleaned) return '?';
+    const digitsOnly = cleaned.replace(/[\s\-\(\)\+]/g, '');
+    if (/^\d+$/.test(digitsOnly)) {
+      return '👤';
+    }
+    const parts = cleaned.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      const first = Array.from(parts[0])[0] || '';
+      const last = Array.from(parts[parts.length - 1])[0] || '';
+      return (first + last).toUpperCase();
+    }
+    return Array.from(cleaned).slice(0, 2).join('').toUpperCase();
+  }
+
+  function formatPhoneNumber(num) {
+    if (!num) return '';
+    const clean = String(num).trim();
+    if (!clean) return '';
+    if (clean === '0') return 'WhatsApp';
+    const digits = clean.replace(/\D/g, '');
+    if (!digits) return clean;
+    if (digits.length === 11 && digits.startsWith('1')) {
+      return `+1 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+    }
+    if (digits.length === 10) {
+      return `+1 (${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+    }
+    return clean.startsWith('+') ? clean : `+${clean}`;
+  }
+
   function fmtTime(ts) {
     if (!ts) return '';
     const d = new Date(ts);
@@ -350,6 +406,17 @@
     document.getElementById('chat-list').innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading Chats…</div>';
     const res = await fetch('/api/chats');
     allChats = await res.json();
+    const archivedBtn = document.getElementById('tab-btn-archived');
+    if (archivedBtn) {
+      const hasArchived = allChats.some(c => c.is_archived);
+      if (!hasArchived) {
+        archivedBtn.classList.add('disabled');
+        archivedBtn.title = 'No archived chats in this backup';
+      } else {
+        archivedBtn.classList.remove('disabled');
+        archivedBtn.title = 'Archived';
+      }
+    }
     renderChatList();
   }
 
@@ -445,6 +512,93 @@
     });
   }
 
+  // ---- bottom navigation bar -----------------------------------------------
+
+  let currentNavTab = 'chats';
+
+  function switchNavTab(tabName) {
+    if (currentNavTab === tabName) return;
+    currentNavTab = tabName;
+
+    const tabs = ['chats', 'calls', 'starred', 'archived'];
+    tabs.forEach(t => {
+      const btn = document.getElementById('tab-btn-' + t);
+      if (btn) {
+        const isActive = t === tabName;
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        btn.setAttribute('tabindex', isActive ? '0' : '-1');
+      }
+    });
+
+    const filtersEl = document.getElementById('sidebar-filters');
+    const searchInput = document.getElementById('search-input');
+    const chatListEl = document.getElementById('chat-list');
+    const searchResults = document.getElementById('search-results');
+    if (searchResults) {
+      searchResults.classList.remove('has-results');
+      searchResults.innerHTML = '';
+    }
+
+    if (tabName === 'chats') {
+      if (searchInput) searchInput.placeholder = 'Search messages…';
+      if (filtersEl) filtersEl.style.display = 'flex';
+      renderChatList();
+    } else {
+      if (filtersEl) filtersEl.style.display = 'none';
+      if (tabName === 'calls') {
+        if (searchInput) searchInput.placeholder = 'Search call history…';
+        if (chatListEl) {
+          chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>Call History</strong><span>Voice and video call log</span></div>';
+        }
+      } else if (tabName === 'starred') {
+        if (searchInput) searchInput.placeholder = 'Search starred bookmarks…';
+        if (chatListEl) {
+          chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>Global bookmarked messages</span></div>';
+        }
+      } else if (tabName === 'archived') {
+        if (searchInput) searchInput.placeholder = 'Search archived chats…';
+        if (chatListEl) {
+          chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📦</span><strong>Archived Chats</strong><span>Archived conversations</span></div>';
+        }
+      }
+    }
+  }
+
+  const bottomBar = document.getElementById('sidebar-bottom-bar');
+  if (bottomBar) {
+    const tabBtns = Array.from(bottomBar.querySelectorAll('.tab-btn'));
+    tabBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.classList.contains('disabled') || btn.disabled) return;
+        const tab = btn.dataset.tab;
+        if (tab) switchNavTab(tab);
+      });
+      btn.addEventListener('keydown', e => {
+        const enabledBtns = tabBtns.filter(b => !b.classList.contains('disabled') && !b.disabled);
+        const currentIdx = enabledBtns.indexOf(btn);
+        if (currentIdx === -1) return;
+        let targetIdx = -1;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+          targetIdx = (currentIdx + 1) % enabledBtns.length;
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+          targetIdx = (currentIdx - 1 + enabledBtns.length) % enabledBtns.length;
+        } else if (e.key === 'Home') {
+          targetIdx = 0;
+        } else if (e.key === 'End') {
+          targetIdx = enabledBtns.length - 1;
+        }
+        if (targetIdx !== -1) {
+          e.preventDefault();
+          const targetBtn = enabledBtns[targetIdx];
+          targetBtn.focus();
+          const tab = targetBtn.dataset.tab;
+          if (tab) switchNavTab(tab);
+        }
+      });
+    });
+  }
+
   // ---- select chat ---------------------------------------------------------
 
   async function selectChat(chat, el) {
@@ -467,6 +621,31 @@
 
     document.getElementById('chat-header').style.display = 'flex';
     document.getElementById('chat-title').textContent = chat.display_name;
+
+    const avatarEl = document.getElementById('chat-header-avatar');
+    if (avatarEl) {
+      const avatarKey = chat.phone_number || chat.id || chat.display_name;
+      avatarEl.style.backgroundColor = getAvatarColor(avatarKey);
+      avatarEl.textContent = getInitials(chat.display_name);
+    }
+
+    const subtitleEl = document.getElementById('chat-subtitle');
+    if (subtitleEl) {
+      if (chat.type === 'group') {
+        let subHtml = 'Group chat';
+        if (chat.is_preserved_only) {
+          subHtml += ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+        }
+        subtitleEl.innerHTML = subHtml;
+      } else {
+        const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
+        let subHtml = formattedPhone ? esc(formattedPhone) : '';
+        if (chat.is_preserved_only) {
+          subHtml += (subHtml ? ' ' : '') + '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+        }
+        subtitleEl.innerHTML = subHtml;
+      }
+    }
     document.getElementById('empty-pane').style.display = 'none';
     document.getElementById('search-results').classList.remove('has-results');
     document.getElementById('search-results').innerHTML = '';
@@ -3985,6 +4164,17 @@
 
     body.innerHTML = '';
 
+    if (currentChat.type === 'group' && info.members && info.members.length) {
+      const subEl = document.getElementById('chat-subtitle');
+      if (subEl) {
+        let subHtml = `${info.members.length} participants`;
+        if (currentChat.is_preserved_only) {
+          subHtml += ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+        }
+        subEl.innerHTML = subHtml;
+      }
+    }
+
     if (currentChat.type === 'group' && info.description && desc) {
       desc.textContent = info.description;
       desc.style.display = 'block';
@@ -4091,7 +4281,26 @@
     }
   }
 
-  document.getElementById('chat-info-btn').addEventListener('click', openChatInfo);
+  function toggleChatInfo() {
+    const panel = document.getElementById('chat-info-panel');
+    if (panel && panel.classList.contains('open')) {
+      closeChatInfo();
+    } else {
+      openChatInfo();
+    }
+  }
+
+  document.getElementById('chat-info-btn').addEventListener('click', toggleChatInfo);
+  const headerInfo = document.getElementById('chat-header-info');
+  if (headerInfo) {
+    headerInfo.addEventListener('click', toggleChatInfo);
+    headerInfo.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleChatInfo();
+      }
+    });
+  }
   document.getElementById('chat-info-close').addEventListener('click', closeChatInfo);
   document.getElementById('chat-info-panel').addEventListener('click', e => {
     if (e.target === document.getElementById('chat-info-panel')) closeChatInfo();

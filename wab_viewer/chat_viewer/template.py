@@ -46,15 +46,20 @@ HTML_TEMPLATE = (
   </div>
   {% endif %}
   <div id="header">
-    <h1>WhatsApp Backup Viewer</h1>
-    <span class="subtitle">{{ output_root }}</span>
+    <div id="header-brand">
+      <h1>WhatsApp Backup Viewer</h1>
+      <span class="subtitle">{{ output_root }}{% if platform_name %} • <span class="platform-badge">{{ platform_name }}</span>{% endif %}</span>
+    </div>
+    <button id="settings-btn" title="Settings" aria-label="Settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span class="settings-btn-label">Settings</span>
+    </button>
   </div>
 
   <div id="body">
     <div id="sidebar">
       <div id="search-box">
         <input id="search-input" type="search" placeholder="Search messages…" autocomplete="off">
-        <button id="settings-btn" title="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
       </div>
       <div id="sidebar-filters">
         <button class="filter-btn active" data-filter="all">All</button>
@@ -63,11 +68,38 @@ HTML_TEMPLATE = (
       </div>
       <div id="search-results"></div>
       <div id="chat-list"></div>
+      <nav id="sidebar-bottom-bar" role="tablist" aria-label="Main Navigation">
+        <button id="tab-btn-chats" class="tab-btn active" role="tab" aria-selected="true" tabindex="0" data-tab="chats" title="Chats">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>Chats</span>
+        </button>
+        <button id="tab-btn-calls" class="tab-btn" role="tab" aria-selected="false" tabindex="-1" data-tab="calls" title="Calls">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+          <span>Calls</span>
+        </button>
+        <button id="tab-btn-starred" class="tab-btn" role="tab" aria-selected="false" tabindex="-1" data-tab="starred" title="Starred">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+          <span>Starred</span>
+        </button>
+        <button id="tab-btn-archived" class="tab-btn" role="tab" aria-selected="false" tabindex="-1" data-tab="archived" title="Archived">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+          <span>Archived</span>
+        </button>
+      </nav>
     </div>
 
     <div id="chat-pane">
       <div id="chat-header" style="display:none;">
-        <h2 id="chat-title"></h2>
+        <div id="chat-header-info" role="button" tabindex="0" title="Click to view chat info" aria-label="Chat details">
+          <div id="chat-header-avatar" class="chat-header-avatar" aria-hidden="true"></div>
+          <div class="chat-header-meta">
+            <div class="chat-header-title-wrap">
+              <h2 id="chat-title"></h2>
+              <span class="chat-header-arrow" aria-hidden="true">›</span>
+            </div>
+            <div id="chat-subtitle" class="chat-header-subtitle"></div>
+          </div>
+        </div>
         <div id="chat-toolbar">
           <button id="chat-info-btn" title="Chat info">&#8505;</button>
           <button id="media-btn" title="Media">&#128247;</button>
