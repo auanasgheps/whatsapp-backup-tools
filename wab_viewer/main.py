@@ -3504,6 +3504,20 @@ def _find_ios_db(wa_db_path: str, rel_path: str, output_root: Path | None) -> Pa
     return None
 
 
+def _find_ios_call_history_db(wa_db_path: str, output_root: Path | None) -> Path | None:
+    for name in (
+        "CallHistory.sqlite",
+        "CallHistory.storedata",
+        "Library/CallHistory/CallHistory.storedata",
+        "Library/CallHistory/CallHistory.sqlite",
+        "CallHistory/CallHistory.sqlite",
+    ):
+        found = _find_ios_db(wa_db_path, name, output_root)
+        if found is not None:
+            return found
+    return None
+
+
 def _check_ios_hd_association(wa_db_path: str, ext_db_path: Path | None) -> bool:
     if ext_db_path is None or not ext_db_path.is_file():
         return False
@@ -4402,6 +4416,1099 @@ def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> li
             }
         )
     return members
+
+
+# ---------------------------------------------------------------------------
+# Calls, Starred Messages & Pinned Messages Query Helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_contacts_lookup(arch_conn: sqlite3.Connection | None) -> dict[str, str]:
+    """Load contacts mapping once into an in-memory dictionary to eliminate N+1 queries."""
+    if arch_conn is None:
+        return {}
+    try:
+        rows = arch_conn.execute("SELECT number, display_name, folder FROM contacts").fetchall()
+        lookup: dict[str, str] = {}
+        for r in rows:
+            num = r[0]
+            if num:
+                name = r[1] or (r[2].split(" (")[0] if r[2] else "")
+                lookup[str(num)] = name
+        return lookup
+    except (sqlite3.OperationalError, Exception):
+        return {}
+
+
+def _query_android_calls(
+    conn: sqlite3.Connection,
+    filter_type: str,
+    arch_conn: sqlite3.Connection | None,
+    fetch_limit: int | None,
+) -> list[dict]:
+    """Query voice and video call history from Android msgstore.db."""
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_log'"
+    ).fetchone()
+    if not has_table:
+        return []
+
+    cl_cols = {r[1] for r in conn.execute("PRAGMA table_info(call_log)").fetchall()}
+    has_video = "video_call" in cl_cols
+    has_duration = "duration" in cl_cols
+    has_result = "call_result" in cl_cols
+    has_from_me = "from_me" in cl_cols
+    has_timestamp = "timestamp" in cl_cols
+    has_group = "group_jid_row_id" in cl_cols
+    has_jid_row = "jid_row_id" in cl_cols
+
+    video_expr = "COALESCE(cl.video_call, 0)" if has_video else "0"
+    dur_expr = "COALESCE(cl.duration, 0)" if has_duration else "0"
+    result_expr = "COALESCE(cl.call_result, 0)" if has_result else "0"
+    from_me_expr = "COALESCE(cl.from_me, 0)" if has_from_me else "0"
+    ts_expr = "COALESCE(cl.timestamp, 0)" if has_timestamp else "0"
+    is_group_expr = (
+        "CASE WHEN cl.group_jid_row_id IS NOT NULL AND cl.group_jid_row_id > 0 THEN 1 ELSE 0 END"
+        if has_group
+        else "0"
+    )
+    caller_join = "LEFT JOIN jid j_caller ON j_caller._id = cl.jid_row_id" if has_jid_row else ""
+    chat_join = (
+        """
+        LEFT JOIN chat c ON c.jid_row_id = (
+            CASE WHEN cl.group_jid_row_id IS NOT NULL AND cl.group_jid_row_id > 0
+                 THEN cl.group_jid_row_id
+                 ELSE cl.jid_row_id END
+        )
+    """
+        if (has_group and has_jid_row)
+        else ("LEFT JOIN chat c ON c.jid_row_id = cl.jid_row_id" if has_jid_row else "")
+    )
+
+    where_parts: list[str] = []
+    if filter_type == "video" and has_video:
+        where_parts.append(f"{video_expr} = 1")
+    elif filter_type == "missed" and (has_from_me or has_result):
+        where_parts.append(f"{from_me_expr} = 0 AND {result_expr} IN (2, 3, 5)")
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
+
+    sql = f"""
+        SELECT
+            cl._id AS call_log_id,
+            COALESCE(NULLIF(cl.call_id, ''), 'call_' || cl._id) AS id,
+            {from_me_expr} AS from_me,
+            {ts_expr} AS timestamp_ms,
+            {dur_expr} AS duration,
+            {video_expr} AS is_video,
+            {result_expr} AS call_result,
+            {is_group_expr} AS is_group_call,
+            j_caller.user AS caller_number,
+            j_caller.raw_string AS caller_raw,
+            c._id AS chat_row_id,
+            c.subject AS chat_subject
+        FROM call_log cl
+        {caller_join}
+        {chat_join}
+        {where_sql}
+        ORDER BY {ts_expr} DESC
+        {limit_sql}
+    """
+    rows = conn.execute(sql).fetchall()
+    contacts_map = _get_contacts_lookup(arch_conn)
+    results = []
+    for r in rows:
+        row_dict = dict(r)
+        from_me = int(row_dict["from_me"])
+        result_code = int(row_dict["call_result"])
+        is_video = bool(row_dict["is_video"] == 1)
+
+        if from_me == 1:
+            call_type = "outgoing"
+        elif result_code in (2, 3, 5):
+            call_type = "missed"
+        else:
+            call_type = "incoming"
+
+        if filter_type == "missed" and call_type != "missed":
+            continue
+        if filter_type == "video" and not is_video:
+            continue
+
+        raw_num = row_dict["caller_number"] or ""
+        caller_phone = f"+{raw_num}" if (raw_num and raw_num.isdigit()) else raw_num
+        caller_name = contacts_map.get(raw_num, "")
+        if not caller_name:
+            caller_name = row_dict["chat_subject"] or caller_phone or "Unknown"
+
+        chat_id_val = (
+            str(row_dict["chat_row_id"])
+            if row_dict["chat_row_id"] is not None
+            else (raw_num or "call")
+        )
+
+        results.append(
+            {
+                "id": str(row_dict["id"]),
+                "caller_name": caller_name,
+                "caller_phone": caller_phone,
+                "chat_id": chat_id_val,
+                "call_type": call_type,
+                "is_video": is_video,
+                "duration": int(row_dict["duration"]),
+                "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
+            }
+        )
+    return results
+
+
+def _query_ios_calls(
+    call_db_path: Path,
+    wa_conn: sqlite3.Connection,
+    filter_type: str,
+    arch_conn: sqlite3.Connection | None,
+    fetch_limit: int | None,
+) -> list[dict]:
+    """Query voice and video call history from iOS CallHistory.sqlite."""
+    if not call_db_path.is_file():
+        return []
+
+    try:
+        with contextlib.closing(sqlite3.connect(str(call_db_path))) as call_conn:
+            call_conn.row_factory = sqlite3.Row
+            tables = {
+                r[0]
+                for r in call_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "ZWACDCALLEVENT" not in tables:
+                return []
+
+            cl_cols = {
+                r[1] for r in call_conn.execute("PRAGMA table_info(ZWACDCALLEVENT)").fetchall()
+            }
+            has_call_id = "ZCALLIDSTRING" in cl_cols
+            has_group_jid = "ZGROUPJIDSTRING" in cl_cols
+            has_duration = "ZDURATION" in cl_cols
+            has_outcome = "ZOUTCOME" in cl_cols
+            has_date = "ZDATE" in cl_cols
+            has_aggregate = "ZAGGREGATECALLEVENT" in cl_cols and "ZWAAGGREGATECALLEVENT" in tables
+            has_participants = "ZWACDCALLEVENTPARTICIPANT" in tables
+
+            call_id_expr = (
+                "COALESCE(NULLIF(cl.ZCALLIDSTRING, ''), 'call_' || cl.Z_PK)"
+                if has_call_id
+                else "'call_' || cl.Z_PK"
+            )
+            group_jid_expr = "cl.ZGROUPJIDSTRING" if has_group_jid else "NULL"
+            dur_expr = "COALESCE(cl.ZDURATION, 0)" if has_duration else "0"
+            outcome_expr = "COALESCE(cl.ZOUTCOME, 0)" if has_outcome else "0"
+            ts_expr = "CAST((cl.ZDATE + 978307200) AS INTEGER)" if has_date else "0"
+            agg_join = (
+                "LEFT JOIN ZWAAGGREGATECALLEVENT agg ON agg.Z_PK = cl.ZAGGREGATECALLEVENT"
+                if has_aggregate
+                else ""
+            )
+            video_expr = "COALESCE(agg.ZVIDEO, 0)" if has_aggregate else "0"
+            from_me_expr = "CASE WHEN agg.ZINCOMING = 0 THEN 1 ELSE 0 END" if has_aggregate else "0"
+
+            where_parts: list[str] = []
+            if filter_type == "video" and has_aggregate:
+                where_parts.append("agg.ZVIDEO = 1")
+            elif filter_type == "missed":
+                missed_conds: list[str] = []
+                if has_aggregate:
+                    missed_conds.append("agg.ZINCOMING = 1")
+                if has_outcome:
+                    missed_conds.append("cl.ZOUTCOME IN (2, 3)")
+                if missed_conds:
+                    where_parts.append(" AND ".join(missed_conds))
+
+            where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+            limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
+
+            sql = f"""
+                SELECT
+                    cl.Z_PK AS call_pk,
+                    {call_id_expr} AS id,
+                    {group_jid_expr} AS group_jid,
+                    {ts_expr} AS timestamp,
+                    {dur_expr} AS duration,
+                    {video_expr} AS is_video,
+                    {outcome_expr} AS outcome,
+                    {from_me_expr} AS from_me
+                FROM ZWACDCALLEVENT cl
+                {agg_join}
+                {where_sql}
+                ORDER BY {ts_expr} DESC
+                {limit_sql}
+            """
+            call_rows = [dict(r) for r in call_conn.execute(sql).fetchall()]
+            if not call_rows:
+                return []
+
+            participants_by_call: dict[int, list[dict]] = {}
+            if has_participants:
+                call_pks = [r["call_pk"] for r in call_rows]
+                for i in range(0, len(call_pks), 900):
+                    chunk = call_pks[i : i + 900]
+                    ph = ",".join("?" * len(chunk))
+                    p_sql = f"""
+                        SELECT p.Z1PARTICIPANTS, p.ZJIDSTRING, COALESCE(p.ZOUTCOME, 0)
+                        FROM ZWACDCALLEVENTPARTICIPANT p
+                        WHERE p.Z1PARTICIPANTS IN ({ph})
+                    """
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        for pr in call_conn.execute(p_sql, chunk).fetchall():
+                            cid = pr[0]
+                            p_jid = pr[1] or ""
+                            participants_by_call.setdefault(cid, []).append(
+                                {
+                                    "jid": p_jid,
+                                    "outcome": int(pr[2] or 0),
+                                }
+                            )
+    except sqlite3.OperationalError:
+        return []
+
+    # Map chat sessions from ChatStorage.sqlite to resolve chat_id and contact names
+    chat_session_map: dict[str, dict] = {}
+    with contextlib.suppress(sqlite3.OperationalError):
+        cs_rows = wa_conn.execute(
+            "SELECT Z_PK, ZCONTACTJID, ZPARTNERNAME FROM ZWACHATSESSION"
+        ).fetchall()
+        for csr in cs_rows:
+            jid = csr[1]
+            if jid:
+                chat_session_map[jid] = {
+                    "chat_id": str(csr[0]),
+                    "partner_name": csr[2] or "",
+                }
+
+    contacts_map = _get_contacts_lookup(arch_conn)
+    results = []
+    for r in call_rows:
+        call_pk = r["call_pk"]
+        from_me = int(r["from_me"])
+        outcome = int(r["outcome"])
+        is_video = bool(r["is_video"] == 1)
+
+        if from_me == 1:
+            call_type = "outgoing"
+        elif outcome in (2, 3):
+            call_type = "missed"
+        else:
+            call_type = "incoming"
+
+        if filter_type == "missed" and call_type != "missed":
+            continue
+        if filter_type == "video" and not is_video:
+            continue
+
+        parts = participants_by_call.get(call_pk, [])
+        group_jid = r["group_jid"]
+        is_group = bool(group_jid and group_jid != "")
+
+        if is_group:
+            cs_info = chat_session_map.get(group_jid, {})
+            chat_id_val = cs_info.get("chat_id") or (
+                group_jid.split("@")[0] if "@" in group_jid else group_jid
+            )
+            caller_jid = parts[0]["jid"] if parts else ""
+            caller_phone = f"+{caller_jid.split('@')[0]}" if "@" in caller_jid else caller_jid
+            caller_name = cs_info.get("partner_name") or caller_phone or "Unknown Group"
+        else:
+            caller_jid = parts[0]["jid"] if parts else ""
+            cs_info = chat_session_map.get(caller_jid, {})
+            chat_id_val = cs_info.get("chat_id") or (
+                caller_jid.split("@")[0] if "@" in caller_jid else (caller_jid or "call")
+            )
+            caller_phone = f"+{caller_jid.split('@')[0]}" if "@" in caller_jid else caller_jid
+            caller_name = cs_info.get("partner_name")
+            if not caller_name and caller_phone:
+                clean_num = caller_phone.lstrip("+")
+                caller_name = contacts_map.get(clean_num, "")
+            if not caller_name:
+                caller_name = caller_phone or "Unknown"
+
+        results.append(
+            {
+                "id": str(r["id"]),
+                "caller_name": caller_name,
+                "caller_phone": caller_phone,
+                "chat_id": chat_id_val,
+                "call_type": call_type,
+                "is_video": is_video,
+                "duration": int(r["duration"]),
+                "timestamp": int(r["timestamp"]),
+            }
+        )
+
+    return results
+
+
+def _query_preserved_calls(
+    pres_conn: sqlite3.Connection | None,
+    filter_type: str,
+    fetch_limit: int | None,
+) -> list[dict]:
+    """Query preserved calls from preserved_messages.db."""
+    if pres_conn is None:
+        return []
+
+    try:
+        has_table = pres_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='preserved_calls'"
+        ).fetchone()
+        if not has_table:
+            return []
+
+        where_parts: list[str] = []
+        if filter_type == "video":
+            where_parts.append("is_video = 1")
+        elif filter_type == "missed":
+            where_parts.append("from_me = 0 AND call_result IN (2, 3, 5)")
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
+
+        rows = pres_conn.execute(f"""
+            SELECT
+                call_id,
+                chat_id,
+                chat_jid,
+                caller_jid,
+                caller_name,
+                from_me,
+                timestamp_ms,
+                duration_seconds,
+                is_video,
+                call_result
+            FROM preserved_calls
+            {where_sql}
+            ORDER BY timestamp_ms DESC
+            {limit_sql}
+        """).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    results = []
+    for r in rows:
+        row_dict = dict(r)
+        from_me = int(row_dict["from_me"])
+        result_code = int(row_dict["call_result"])
+        is_video = bool(row_dict["is_video"] == 1)
+
+        if from_me == 1:
+            call_type = "outgoing"
+        elif result_code in (2, 3, 5):
+            call_type = "missed"
+        else:
+            call_type = "incoming"
+
+        if filter_type == "missed" and call_type != "missed":
+            continue
+        if filter_type == "video" and not is_video:
+            continue
+
+        c_jid = row_dict["caller_jid"] or ""
+        caller_phone = f"+{c_jid.split('@')[0]}" if "@" in c_jid else c_jid
+        caller_name = row_dict["caller_name"] or caller_phone or "Unknown"
+        chat_id_val = str(row_dict["chat_id"]) if row_dict["chat_id"] else "call"
+
+        results.append(
+            {
+                "id": str(row_dict["call_id"]),
+                "caller_name": caller_name,
+                "caller_phone": caller_phone,
+                "chat_id": chat_id_val,
+                "call_type": call_type,
+                "is_video": is_video,
+                "duration": int(row_dict["duration_seconds"] or 0),
+                "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
+            }
+        )
+    return results
+
+
+def _query_android_starred(
+    conn: sqlite3.Connection,
+    target_chat_id: str | None,
+    arch_conn: sqlite3.Connection | None,
+    fetch_limit: int | None,
+) -> list[dict]:
+    """Query starred messages from Android msgstore.db."""
+    has_msg = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
+    ).fetchone()
+    if not has_msg:
+        return []
+
+    msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
+    if "starred" not in msg_cols:
+        return []
+
+    has_mm = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_media'"
+        ).fetchone()
+    )
+    mm_join = "LEFT JOIN message_media mm ON mm.message_row_id = m._id" if has_mm else ""
+    mm_file = "mm.file_path" if has_mm else "NULL"
+    mm_mime = "mm.mime_type" if has_mm else "NULL"
+
+    has_chat = bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat'").fetchone()
+    )
+    chat_join = "LEFT JOIN chat c ON c._id = m.chat_row_id" if has_chat else ""
+
+    has_jid = bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid'").fetchone()
+    )
+    jid_c_join = "LEFT JOIN jid j_c ON j_c._id = c.jid_row_id" if (has_chat and has_jid) else ""
+    jid_s_join = "LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id" if has_jid else ""
+
+    where_clauses = ["m.starred = 1"]
+    params: list = []
+    if target_chat_id is not None:
+        if has_chat and target_chat_id.isdigit():
+            where_clauses.append(
+                "(m.chat_row_id = ? OR (c.jid_row_id IN (SELECT _id FROM jid WHERE user = ?)))"
+            )
+            params.extend([int(target_chat_id), target_chat_id])
+        elif has_chat:
+            where_clauses.append("c.jid_row_id IN (SELECT _id FROM jid WHERE user = ?)")
+            params.append(target_chat_id)
+        else:
+            where_clauses.append("m.chat_row_id = ?")
+            params.append(target_chat_id)
+
+    where_sql = " AND ".join(where_clauses)
+    limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
+    sql = f"""
+        SELECT
+            m._id AS id,
+            m.chat_row_id AS chat_row_id,
+            m.from_me AS from_me,
+            COALESCE(m.timestamp, 0) AS timestamp_ms,
+            COALESCE(m.text_data, '') AS text,
+            COALESCE(m.message_type, 0) AS message_type,
+            {mm_file} AS file_path,
+            {mm_mime} AS mime_type,
+            {"c.subject" if has_chat else "NULL"} AS chat_subject,
+            {"j_c.user" if (has_chat and has_jid) else "NULL"} AS chat_user,
+            {"j_s.user" if has_jid else "NULL"} AS sender_user
+        FROM message m
+        {chat_join}
+        {jid_c_join}
+        {jid_s_join}
+        {mm_join}
+        WHERE {where_sql}
+        ORDER BY m.timestamp DESC
+        {limit_sql}
+    """
+    rows = conn.execute(sql, params).fetchall()
+    contacts_map = _get_contacts_lookup(arch_conn)
+    results = []
+    for r in rows:
+        row_dict = dict(r)
+        m_type = int(row_dict["message_type"])
+        fp = (row_dict["file_path"] or "").lower()
+
+        if m_type in (1, 42) or any(
+            fp.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".heic", ".webp")
+        ):
+            media_type = "photo"
+        elif m_type in (2, 43, 28) or any(
+            fp.endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".3gp")
+        ):
+            media_type = "video"
+        elif m_type in (3, 82) or any(
+            fp.endswith(ext) for ext in (".mp3", ".ogg", ".opus", ".m4a", ".aac")
+        ):
+            media_type = "audio"
+        elif m_type in (8, 9) or any(
+            fp.endswith(ext) for ext in (".pdf", ".doc", ".docx", ".zip", ".xlsx")
+        ):
+            media_type = "document"
+        elif (
+            m_type == 7
+            or "http://" in row_dict["text"].lower()
+            or "https://" in row_dict["text"].lower()
+        ):
+            media_type = "link"
+        elif m_type == 5:
+            media_type = "location"
+        elif m_type == 66:
+            media_type = "poll"
+        else:
+            media_type = None
+
+        from_me = int(row_dict["from_me"])
+        s_user = row_dict["sender_user"] or ""
+        if from_me == 1:
+            sender_name = "You"
+        else:
+            sender_name = contacts_map.get(s_user, "")
+            if not sender_name:
+                sender_name = (
+                    f"+{s_user}" if (s_user and s_user.isdigit()) else (s_user or "Unknown")
+                )
+
+        c_user = row_dict["chat_user"] or ""
+        chat_name = row_dict["chat_subject"] or ""
+        if not chat_name and c_user:
+            chat_name = contacts_map.get(c_user, "")
+        if not chat_name:
+            chat_name = (
+                f"+{c_user}"
+                if (c_user and c_user.isdigit())
+                else (c_user or f"Chat {row_dict['chat_row_id']}")
+            )
+
+        chat_id_val = (
+            str(row_dict["chat_row_id"]) if row_dict["chat_row_id"] is not None else (c_user or "0")
+        )
+
+        results.append(
+            {
+                "id": int(row_dict["id"]),
+                "chat_id": chat_id_val,
+                "chat_name": chat_name,
+                "sender_name": sender_name,
+                "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
+                "text": row_dict["text"],
+                "media_type": media_type,
+            }
+        )
+    return results
+
+
+def _query_ios_starred(
+    conn: sqlite3.Connection,
+    target_chat_id: str | None,
+    arch_conn: sqlite3.Connection | None,
+    fetch_limit: int | None,
+) -> list[dict]:
+    """Query starred messages from iOS ChatStorage.sqlite."""
+    has_msg = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
+    ).fetchone()
+    if not has_msg:
+        return []
+
+    msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
+    if "ZSTARRED" not in msg_cols:
+        return []
+
+    has_mi = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMEDIAITEM'"
+        ).fetchone()
+    )
+    mi_join = "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM" if has_mi else ""
+    mi_title = "mi.ZTITLE" if has_mi else "NULL"
+    mi_path = "mi.ZMEDIALOCALPATH" if has_mi else "NULL"
+
+    has_cs = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACHATSESSION'"
+        ).fetchone()
+    )
+    cs_join = "LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION" if has_cs else ""
+
+    where_clauses = ["m.ZSTARRED = 1"]
+    params: list = []
+    if target_chat_id is not None:
+        where_clauses.append("m.ZCHATSESSION = ?")
+        params.append(target_chat_id)
+
+    where_sql = " AND ".join(where_clauses)
+    limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
+    sql = f"""
+        SELECT
+            m.Z_PK AS id,
+            m.ZCHATSESSION AS chat_session,
+            COALESCE(m.ZISFROMME, 0) AS is_from_me,
+            COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
+            COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({mi_title}, ''), '') AS text,
+            COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
+            m.ZPUSHNAME AS push_name,
+            m.ZFROMJID AS from_jid,
+            {mi_path} AS media_path,
+            {"cs.ZPARTNERNAME" if has_cs else "NULL"} AS partner_name,
+            {"cs.ZCONTACTJID" if has_cs else "NULL"} AS contact_jid
+        FROM ZWAMESSAGE m
+        {cs_join}
+        {mi_join}
+        WHERE {where_sql}
+        ORDER BY m.ZMESSAGEDATE DESC
+        {limit_sql}
+    """
+    rows = conn.execute(sql, params).fetchall()
+    contacts_map = _get_contacts_lookup(arch_conn)
+    results = []
+    for r in rows:
+        row_dict = dict(r)
+        m_type = int(row_dict["message_type"])
+        fp = (row_dict["media_path"] or "").lower()
+
+        if m_type in (1, 38) or any(fp.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".heic")):
+            media_type = "photo"
+        elif m_type in (2, 39, 54) or any(fp.endswith(ext) for ext in (".mp4", ".mov")):
+            media_type = "video"
+        elif m_type == 3 or any(fp.endswith(ext) for ext in (".mp3", ".opus", ".m4a", ".aac")):
+            media_type = "audio"
+        elif m_type == 8 or any(fp.endswith(ext) for ext in (".pdf", ".doc", ".docx", ".zip")):
+            media_type = "document"
+        elif (
+            m_type == 7
+            or "http://" in row_dict["text"].lower()
+            or "https://" in row_dict["text"].lower()
+        ):
+            media_type = "link"
+        elif m_type == 5:
+            media_type = "location"
+        elif m_type == 46:
+            media_type = "poll"
+        else:
+            media_type = None
+
+        is_from_me = int(row_dict["is_from_me"])
+        from_jid = row_dict["from_jid"] or ""
+        from_phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
+        if is_from_me == 1:
+            sender_name = "You"
+        else:
+            sender_name = row_dict["push_name"] or ""
+            if not sender_name and from_phone:
+                sender_name = contacts_map.get(from_phone, "")
+            if not sender_name:
+                sender_name = (
+                    f"+{from_phone}"
+                    if (from_phone and from_phone.isdigit())
+                    else (from_phone or "Unknown")
+                )
+
+        contact_jid = row_dict["contact_jid"] or ""
+        c_phone = contact_jid.split("@")[0] if "@" in contact_jid else contact_jid
+        chat_name = row_dict["partner_name"] or ""
+        if not chat_name and c_phone:
+            chat_name = contacts_map.get(c_phone, "")
+        if not chat_name:
+            chat_name = (
+                f"+{c_phone}"
+                if (c_phone and c_phone.isdigit())
+                else (c_phone or f"Chat {row_dict['chat_session']}")
+            )
+
+        results.append(
+            {
+                "id": int(row_dict["id"]),
+                "chat_id": str(row_dict["chat_session"]),
+                "chat_name": chat_name,
+                "sender_name": sender_name,
+                "timestamp": int(round(float(row_dict["msg_date"]) + 978307200)),
+                "text": row_dict["text"],
+                "media_type": media_type,
+            }
+        )
+    return results
+
+
+def _query_preserved_starred(
+    pres_conn: sqlite3.Connection | None,
+    target_chat_id: str | None,
+    fetch_limit: int | None,
+) -> list[dict]:
+    """Query starred messages from preserved_messages.db."""
+    if pres_conn is None:
+        return []
+
+    try:
+        has_table = pres_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='preserved_messages'"
+        ).fetchone()
+        if not has_table:
+            return []
+
+        cols = {r[1] for r in pres_conn.execute("PRAGMA table_info(preserved_messages)").fetchall()}
+        if "is_starred" not in cols:
+            return []
+
+        where_clauses = ["is_starred = 1"]
+        params: list = []
+        if target_chat_id is not None:
+            where_clauses.append("chat_id = ?")
+            params.append(target_chat_id)
+
+        where_sql = " AND ".join(where_clauses)
+        limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
+        sql = f"""
+            SELECT
+                msg_id,
+                chat_id,
+                timestamp_ms,
+                text_body,
+                media_type,
+                from_me,
+                participant_name
+            FROM preserved_messages
+            WHERE {where_sql}
+            ORDER BY timestamp_ms DESC
+            {limit_sql}
+        """
+        rows = pres_conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    results = []
+    for r in rows:
+        row_dict = dict(r)
+        mt = row_dict["media_type"]
+        if mt in ("image", "photo"):
+            media_type = "photo"
+        elif mt in ("video", "audio", "document", "link", "location", "poll"):
+            media_type = mt
+        else:
+            media_type = None
+
+        from_me = int(row_dict["from_me"])
+        sender_name = "You" if from_me == 1 else (row_dict["participant_name"] or "Unknown")
+
+        results.append(
+            {
+                "id": int(row_dict["msg_id"]),
+                "chat_id": str(row_dict["chat_id"]),
+                "chat_name": f"Chat {row_dict['chat_id']}",
+                "sender_name": sender_name,
+                "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
+                "text": row_dict["text_body"] or "",
+                "media_type": media_type,
+            }
+        )
+    return results
+
+
+def _query_android_pinned(
+    conn: sqlite3.Connection,
+    chat_id: str,
+    chat_type: str,
+    arch_conn: sqlite3.Connection | None,
+) -> list[dict]:
+    """Query active pinned messages for a chat from Android msgstore.db."""
+    has_ao = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on'"
+    ).fetchone()
+    if not has_ao:
+        return []
+
+    has_msg = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
+    ).fetchone()
+    if not has_msg:
+        return []
+
+    has_pin_table = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on_pin_in_chat'"
+        ).fetchone()
+    )
+
+    pin_join = (
+        "JOIN message_add_on_pin_in_chat pic ON pic.message_add_on_row_id = ao._id"
+        if has_pin_table
+        else ""
+    )
+    pin_cond = "AND pic.pin_in_chat_state = 1" if has_pin_table else ""
+
+    chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+
+    sql = f"""
+        SELECT
+            m._id AS id,
+            m.from_me AS from_me,
+            COALESCE(m.timestamp, 0) AS timestamp_ms,
+            COALESCE(m.text_data, '') AS text,
+            m.message_type AS message_type,
+            j_s.user AS sender_user,
+            ao.expiry_timestamp AS expiry_ts
+        FROM message_add_on ao
+        {pin_join}
+        JOIN message m ON m._id = ao.parent_message_row_id
+        LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
+        WHERE ao.message_add_on_type = 79
+          {pin_cond}
+          AND (ao.expiry_timestamp IS NULL OR ao.expiry_timestamp = 0 OR ao.expiry_timestamp > (CAST(strftime('%s', 'now') AS INTEGER) * 1000))
+          AND {chat_pred}
+        ORDER BY ao._id DESC
+        LIMIT 3
+    """
+    try:
+        rows = conn.execute(sql, chat_params).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    pins = []
+    seen_ids = set()
+    contacts_map = _get_contacts_lookup(arch_conn)
+    for r in rows:
+        row_dict = dict(r)
+        mid = int(row_dict["id"])
+        if mid in seen_ids:
+            continue
+        seen_ids.add(mid)
+
+        from_me = int(row_dict["from_me"])
+        s_user = row_dict["sender_user"] or ""
+        if from_me == 1:
+            sender_name = "You"
+        else:
+            sender_name = contacts_map.get(s_user, "")
+            if not sender_name:
+                sender_name = (
+                    f"+{s_user}" if (s_user and s_user.isdigit()) else (s_user or "Unknown")
+                )
+
+        text = row_dict["text"]
+        if not text:
+            mt = int(row_dict["message_type"] or 0)
+            if mt in (1, 42):
+                text = "📷 Photo"
+            elif mt in (2, 43, 28):
+                text = "📹 Video"
+            elif mt in (3, 82):
+                text = "🎤 Voice message"
+            elif mt in (8, 9):
+                text = "📄 Document"
+            elif mt == 5:
+                text = "📍 Location"
+            elif mt == 66:
+                text = "📊 Poll"
+
+        pins.append(
+            {
+                "id": mid,
+                "sender_name": sender_name,
+                "text": text,
+                "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
+            }
+        )
+    return pins
+
+
+def _query_ios_pinned(
+    conn: sqlite3.Connection,
+    ext_db_path: Path | None,
+    chat_id: str,
+    arch_conn: sqlite3.Connection | None,
+) -> list[dict]:
+    """Query active pinned messages for a chat from iOS databases."""
+    has_msg = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
+    ).fetchone()
+    if not has_msg:
+        return []
+
+    contacts_map = _get_contacts_lookup(arch_conn)
+
+    # 1. Check ExtChatDatabase if available
+    if ext_db_path is not None and ext_db_path.is_file():
+        try:
+            with contextlib.closing(sqlite3.connect(str(ext_db_path))) as ext_conn:
+                ext_conn.row_factory = sqlite3.Row
+                has_tm = ext_conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_messages'"
+                ).fetchone()
+                if has_tm:
+                    tm_cols = {
+                        r[1]
+                        for r in ext_conn.execute("PRAGMA table_info(thread_messages)").fetchall()
+                    }
+                    key_col = (
+                        "key_id"
+                        if "key_id" in tm_cols
+                        else ("stanza_id" if "stanza_id" in tm_cols else None)
+                    )
+                    if key_col:
+                        tm_rows = ext_conn.execute(
+                            f"SELECT {key_col} FROM thread_messages ORDER BY rowid DESC LIMIT 3"
+                        ).fetchall()
+                        stanzas = [r[0] for r in tm_rows if r[0]]
+                        if stanzas:
+                            ph = ",".join("?" * len(stanzas))
+                            m_rows = conn.execute(
+                                f"""
+                                SELECT
+                                    m.Z_PK AS id,
+                                    COALESCE(m.ZISFROMME, 0) AS is_from_me,
+                                    COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
+                                    COALESCE(NULLIF(m.ZTEXT, ''), '') AS text,
+                                    COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
+                                    m.ZPUSHNAME AS push_name,
+                                    m.ZFROMJID AS from_jid
+                                FROM ZWAMESSAGE m
+                                WHERE m.ZSTANZAID IN ({ph})
+                            """,
+                                stanzas,
+                            ).fetchall()
+                            if m_rows:
+                                pins = []
+                                for mr in m_rows:
+                                    r_dict = dict(mr)
+                                    is_from_me = int(r_dict["is_from_me"])
+                                    from_jid = r_dict["from_jid"] or ""
+                                    from_phone = (
+                                        from_jid.split("@")[0] if "@" in from_jid else from_jid
+                                    )
+                                    sender_name = (
+                                        "You"
+                                        if is_from_me == 1
+                                        else (
+                                            r_dict["push_name"]
+                                            or contacts_map.get(from_phone, "")
+                                            or from_phone
+                                            or "Unknown"
+                                        )
+                                    )
+                                    pins.append(
+                                        {
+                                            "id": int(r_dict["id"]),
+                                            "sender_name": sender_name,
+                                            "text": r_dict["text"] or "Pinned message",
+                                            "timestamp": int(
+                                                round(float(r_dict["msg_date"]) + 978307200)
+                                            ),
+                                        }
+                                    )
+                                return pins
+        except sqlite3.OperationalError:
+            pass
+
+    # 2. Check ZMESSAGETYPE = 66 in ZWAMESSAGE
+    sql = """
+        SELECT
+            m.Z_PK AS id,
+            COALESCE(m.ZISFROMME, 0) AS is_from_me,
+            COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
+            COALESCE(NULLIF(m.ZTEXT, ''), '') AS text,
+            COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
+            m.ZPUSHNAME AS push_name,
+            m.ZFROMJID AS from_jid,
+            m.ZPARENTMESSAGE AS parent_msg_pk
+        FROM ZWAMESSAGE m
+        WHERE m.ZCHATSESSION = ?
+          AND m.ZMESSAGETYPE = 66
+        ORDER BY m.ZMESSAGEDATE DESC
+        LIMIT 3
+    """
+    try:
+        rows = conn.execute(sql, (chat_id,)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    pins = []
+    for r in rows:
+        r_dict = dict(r)
+        parent_pk = r_dict["parent_msg_pk"]
+        target = r_dict
+        if parent_pk:
+            p_row = conn.execute(
+                """
+                SELECT
+                    m.Z_PK AS id,
+                    COALESCE(m.ZISFROMME, 0) AS is_from_me,
+                    COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
+                    COALESCE(NULLIF(m.ZTEXT, ''), '') AS text,
+                    COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
+                    m.ZPUSHNAME AS push_name,
+                    m.ZFROMJID AS from_jid
+                FROM ZWAMESSAGE m
+                WHERE m.Z_PK = ?
+            """,
+                (parent_pk,),
+            ).fetchone()
+            if p_row:
+                target = dict(p_row)
+
+        is_from_me = int(target["is_from_me"])
+        from_jid = target["from_jid"] or ""
+        from_phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
+        sender_name = (
+            "You"
+            if is_from_me == 1
+            else (
+                target["push_name"] or contacts_map.get(from_phone, "") or from_phone or "Unknown"
+            )
+        )
+
+        pins.append(
+            {
+                "id": int(target["id"]),
+                "sender_name": sender_name,
+                "text": target["text"] or "Pinned message",
+                "timestamp": int(round(float(target["msg_date"]) + 978307200)),
+            }
+        )
+    return pins
+
+
+def _query_preserved_pinned(
+    pres_conn: sqlite3.Connection | None,
+    chat_id: str,
+) -> list[dict]:
+    """Query active pinned messages from preserved_messages.db."""
+    if pres_conn is None:
+        return []
+
+    try:
+        has_table = pres_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='preserved_messages'"
+        ).fetchone()
+        if not has_table:
+            return []
+
+        cols = {r[1] for r in pres_conn.execute("PRAGMA table_info(preserved_messages)").fetchall()}
+        if "is_pinned" not in cols:
+            return []
+
+        rows = pres_conn.execute(
+            """
+            SELECT
+                msg_id,
+                chat_id,
+                timestamp_ms,
+                text_body,
+                from_me,
+                participant_name,
+                pin_expiry_ts
+            FROM preserved_messages
+            WHERE chat_id = ?
+              AND is_pinned = 1
+              AND (pin_expiry_ts IS NULL OR pin_expiry_ts = 0 OR pin_expiry_ts > (CAST(strftime('%s', 'now') AS INTEGER) * 1000))
+            ORDER BY timestamp_ms DESC
+            LIMIT 3
+        """,
+            (chat_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    pins = []
+    for r in rows:
+        row_dict = dict(r)
+        from_me = int(row_dict["from_me"])
+        sender_name = "You" if from_me == 1 else (row_dict["participant_name"] or "Unknown")
+        pins.append(
+            {
+                "id": int(row_dict["msg_id"]),
+                "sender_name": sender_name,
+                "text": row_dict["text_body"] or "Pinned message",
+                "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
+            }
+        )
+    return pins
 
 
 # ---------------------------------------------------------------------------
@@ -7425,6 +8532,193 @@ def create_app(output_root: Path, rescan: bool = False):
             by_type[t]["count"] += 1
         return jsonify({"total": total, "archived": archived, "by_type": by_type})
 
+    # ---- API: calls --------------------------------------------------------
+
+    @app.route("/api/calls")
+    def api_calls():
+        raw_filter = request.args.get("filter", "all")
+        filter_type = raw_filter.strip().lower() if raw_filter else "all"
+        if filter_type not in ("all", "missed", "video"):
+            filter_type = "all"
+        raw_offset = request.args.get("offset")
+        raw_limit = request.args.get("limit")
+        offset = int(raw_offset) if raw_offset and raw_offset.isdigit() else 0
+        limit = min(int(raw_limit), 200) if raw_limit and raw_limit.isdigit() else 50
+        offset = max(0, offset)
+        limit = max(1, limit)
+        fetch_limit = offset + limit + 1
+
+        live_calls: list[dict] = []
+        conn = get_wa()
+        if conn is not None and source_type == "android":
+            live_calls = _query_android_calls(conn, filter_type, get_archive(), fetch_limit)
+        elif source_type == "ios" and wa_db_path is not None:
+            call_db_p = _find_ios_call_history_db(wa_db_path, output_root)
+            if call_db_p is not None and conn is not None:
+                live_calls = _query_ios_calls(
+                    call_db_p, conn, filter_type, get_archive(), fetch_limit
+                )
+
+        pres_calls = _query_preserved_calls(get_preserved(), filter_type, fetch_limit)
+
+        merged: list[dict] = []
+        seen_ids: set[str] = set()
+        for c in live_calls:
+            cid = c["id"]
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                merged.append(c)
+
+        for c in pres_calls:
+            cid = c["id"]
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                merged.append(c)
+
+        merged.sort(key=lambda x: x["timestamp"], reverse=True)
+        has_more = len(merged) > offset + limit
+        paged = merged[offset : offset + limit]
+        return jsonify(
+            {
+                "calls": paged,
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more,
+            }
+        )
+
+    # ---- API: starred messages ---------------------------------------------
+
+    @app.route("/api/starred")
+    def api_starred():
+        raw_offset = request.args.get("offset")
+        raw_limit = request.args.get("limit")
+        offset = int(raw_offset) if raw_offset and raw_offset.isdigit() else 0
+        limit = min(int(raw_limit), 200) if raw_limit and raw_limit.isdigit() else 50
+        offset = max(0, offset)
+        limit = max(1, limit)
+        fetch_limit = offset + limit + 1
+
+        live_starred: list[dict] = []
+        conn = get_wa()
+        if conn is not None and source_type == "android":
+            live_starred = _query_android_starred(conn, None, get_archive(), fetch_limit)
+        elif conn is not None and source_type == "ios":
+            live_starred = _query_ios_starred(conn, None, get_archive(), fetch_limit)
+
+        pres_starred = _query_preserved_starred(get_preserved(), None, fetch_limit)
+
+        merged: list[dict] = []
+        seen_ids: set[int] = set()
+        for m in live_starred:
+            mid = m["id"]
+            if mid not in seen_ids:
+                seen_ids.add(mid)
+                merged.append(m)
+
+        for m in pres_starred:
+            mid = m["id"]
+            if mid not in seen_ids:
+                seen_ids.add(mid)
+                merged.append(m)
+
+        merged.sort(key=lambda x: x["timestamp"], reverse=True)
+        has_more = len(merged) > offset + limit
+        paged = merged[offset : offset + limit]
+        return jsonify(
+            {
+                "messages": paged,
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more,
+            }
+        )
+
+    @app.route("/api/chat/<chat_id>/starred")
+    def api_chat_starred(chat_id: str):
+        chat_id_clean = str(chat_id).strip()
+        raw_offset = request.args.get("offset")
+        raw_limit = request.args.get("limit")
+        offset = int(raw_offset) if raw_offset and raw_offset.isdigit() else 0
+        limit = min(int(raw_limit), 200) if raw_limit and raw_limit.isdigit() else 50
+        offset = max(0, offset)
+        limit = max(1, limit)
+
+        live_starred: list[dict] = []
+        conn = get_wa()
+        if conn is not None and source_type == "android":
+            live_starred = _query_android_starred(conn, chat_id_clean, get_archive(), None)
+        elif conn is not None and source_type == "ios":
+            live_starred = _query_ios_starred(conn, chat_id_clean, get_archive(), None)
+
+        pres_starred = _query_preserved_starred(get_preserved(), chat_id_clean, None)
+
+        merged: list[dict] = []
+        seen_ids: set[int] = set()
+        for m in live_starred:
+            mid = m["id"]
+            if mid not in seen_ids:
+                seen_ids.add(mid)
+                merged.append(m)
+
+        for m in pres_starred:
+            mid = m["id"]
+            if mid not in seen_ids:
+                seen_ids.add(mid)
+                merged.append(m)
+
+        merged.sort(key=lambda x: x["timestamp"], reverse=True)
+        total_count = len(merged)
+        has_more = total_count > offset + limit
+        paged = merged[offset : offset + limit]
+        return jsonify(
+            {
+                "count": total_count,
+                "messages": paged,
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more,
+            }
+        )
+
+    # ---- API: pinned messages ----------------------------------------------
+
+    @app.route("/api/chat/<chat_id>/pinned")
+    def api_chat_pinned(chat_id: str):
+        chat_id_clean = str(chat_id).strip()
+        raw_type = request.args.get("chat_type", "contact")
+        chat_type = raw_type.strip().lower() if raw_type else "contact"
+        live_pins: list[dict] = []
+        conn = get_wa()
+        if conn is not None and source_type == "android":
+            live_pins = _query_android_pinned(conn, chat_id_clean, chat_type, get_archive())
+        elif conn is not None and source_type == "ios":
+            ext_db_p = (
+                _find_ios_db(wa_db_path, "ExtChatDatabase.sqlite", output_root)
+                if wa_db_path
+                else None
+            )
+            live_pins = _query_ios_pinned(conn, ext_db_p, chat_id_clean, get_archive())
+
+        pres_pins = _query_preserved_pinned(get_preserved(), chat_id_clean)
+
+        merged: list[dict] = []
+        seen_ids: set[int] = set()
+        for p in live_pins:
+            mid = p["id"]
+            if mid not in seen_ids:
+                seen_ids.add(mid)
+                merged.append(p)
+
+        for p in pres_pins:
+            mid = p["id"]
+            if mid not in seen_ids:
+                seen_ids.add(mid)
+                merged.append(p)
+
+        first_pin = merged[0] if merged else None
+        return jsonify({"pinned_message": first_pin, "pinned_messages": merged})
+
     # ---- API: search -------------------------------------------------------
 
     @app.route("/api/search")
@@ -9160,6 +10454,54 @@ def create_app(output_root: Path, rescan: bool = False):
                     calls_count = int(c_row["cnt"])
             except sqlite3.OperationalError:
                 pass
+
+        # Also count live calls for this chat
+        conn_wa = get_wa()
+        if conn_wa is not None and source_type == "android":
+            with contextlib.suppress(sqlite3.OperationalError):
+                if conn_wa.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_log'"
+                ).fetchone():
+                    c_cnt_row = conn_wa.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM call_log cl
+                        LEFT JOIN chat c ON c.jid_row_id = cl.jid_row_id
+                        LEFT JOIN jid j ON j._id = cl.jid_row_id
+                        WHERE CAST(c._id AS TEXT) = ? OR j.user = ?
+                        """,
+                        (str(chat_id), str(chat_id)),
+                    ).fetchone()
+                    if c_cnt_row and c_cnt_row[0]:
+                        calls_count += int(c_cnt_row[0])
+        elif source_type == "ios" and wa_db_path is not None:
+            call_db_p = _find_ios_call_history_db(wa_db_path, output_root)
+            if call_db_p is not None:
+                with contextlib.suppress(Exception):
+                    with contextlib.closing(sqlite3.connect(str(call_db_p))) as call_conn:
+                        if call_conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACDCALLEVENT'"
+                        ).fetchone():
+                            target_jid = None
+                            if conn_wa is not None and str(chat_id).isdigit():
+                                csr = conn_wa.execute(
+                                    "SELECT ZCONTACTJID FROM ZWACHATSESSION WHERE Z_PK = ?",
+                                    (int(chat_id),),
+                                ).fetchone()
+                                if csr:
+                                    target_jid = csr[0]
+                            if target_jid:
+                                ios_cnt = call_conn.execute(
+                                    """
+                                    SELECT COUNT(DISTINCT cl.Z_PK)
+                                    FROM ZWACDCALLEVENT cl
+                                    LEFT JOIN ZWACDCALLEVENTPARTICIPANT p ON p.Z1PARTICIPANTS = cl.Z_PK
+                                    WHERE cl.ZGROUPJIDSTRING = ? OR p.ZJIDSTRING = ?
+                                    """,
+                                    (target_jid, target_jid),
+                                ).fetchone()
+                                if ios_cnt and ios_cnt[0]:
+                                    calls_count += int(ios_cnt[0])
 
         result = {
             "display_name": display_name,

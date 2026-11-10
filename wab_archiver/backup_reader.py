@@ -30,7 +30,16 @@ _IOS_AUXILIARY_DATABASES: list[tuple[list[str], str]] = [
         "MessagingInfraDatabase.sqlite",
     ),
     (["LID.sqlite"], "LID.sqlite"),
-    (["CallHistory.sqlite"], "CallHistory.sqlite"),
+    (
+        [
+            "Library/CallHistory/CallHistory.storedata",
+            "Library/CallHistory/CallHistory.sqlite",
+            "CallHistory/CallHistory.sqlite",
+            "CallHistory.sqlite",
+            "CallHistory.storedata",
+        ],
+        "CallHistory.sqlite",
+    ),
     (["Labels.sqlite"], "Labels.sqlite"),
 ]
 

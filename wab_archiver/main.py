@@ -2659,6 +2659,9 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                     candidate_dirs.extend(args.wa_roots)
                 ext_db_path = ios_handler.find_ios_ext_db(candidate_dirs)
                 hd_dedup = ios_handler.check_ios_hd_association(cursor, ext_db_path, logger)
+                call_history_path = ios_handler.find_ios_call_history_db(candidate_dirs)
+                if call_history_path:
+                    ios_handler.verify_ios_call_history_db(call_history_path, logger)
 
                 has_thumb, has_msg_type, has_vcard, has_text = ios_handler.get_ios_schema_features(
                     cursor

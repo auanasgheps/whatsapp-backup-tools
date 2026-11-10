@@ -90,6 +90,60 @@ def find_ios_ext_db(candidate_dirs: list[str]) -> str | None:
     return None
 
 
+def find_ios_call_history_db(candidate_dirs: list[str]) -> str | None:
+    """Find CallHistory.sqlite or CallHistory.storedata in candidate directories."""
+    subpaths = (
+        "CallHistory.sqlite",
+        os.path.join("Whatsapp Databases", "CallHistory.sqlite"),
+        os.path.join("Library", "CallHistory", "CallHistory.storedata"),
+        os.path.join("Library", "CallHistory", "CallHistory.sqlite"),
+        os.path.join("CallHistory", "CallHistory.sqlite"),
+        "CallHistory.storedata",
+    )
+    for d in candidate_dirs:
+        if not d:
+            continue
+        for sub in subpaths:
+            candidate = os.path.join(d, sub)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def verify_ios_call_history_db(call_history_path: str, logger: logging.Logger) -> bool:
+    """
+    Verify that an iOS CallHistory SQLite database exists, is readable,
+    passes structural integrity check, and contains the required ZWACDCALLEVENT table.
+    """
+    if not call_history_path or not os.path.isfile(call_history_path):
+        logger.debug(f"CallHistory file does not exist at: {call_history_path}")
+        return False
+
+    try:
+        with contextlib.closing(sqlite3.connect(call_history_path)) as conn:
+            check_row = conn.execute("PRAGMA quick_check").fetchone()
+            if not check_row or check_row[0] != "ok":
+                logger.warning(
+                    f"CallHistory database at '{call_history_path}' failed quick_check: {check_row}"
+                )
+                return False
+
+            table_row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACDCALLEVENT'"
+            ).fetchone()
+            if not table_row:
+                logger.debug(
+                    f"CallHistory database at '{call_history_path}' lacks ZWACDCALLEVENT table."
+                )
+                return False
+
+            logger.info(f"Verified iOS CallHistory database at '{call_history_path}'.")
+            return True
+    except sqlite3.OperationalError as e:
+        logger.warning(f"Could not verify iOS CallHistory database ({e}).")
+        return False
+
+
 def check_ios_hd_association(
     cursor: sqlite3.Cursor, ext_db_path: str | None, logger: logging.Logger
 ) -> bool:
