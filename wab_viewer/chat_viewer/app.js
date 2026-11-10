@@ -125,6 +125,28 @@
     return `${h} ${h === 1 ? 'hour' : 'hours'}, ${remMin} ${remMin === 1 ? 'minute' : 'minutes'}, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}`;
   }
 
+  function fmtTimeGap(diffMs, isPrior) {
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHrs = Math.floor(diffMin / 60);
+    const diffDays = Math.floor(diffHrs / 24);
+
+    let gapStr = '';
+    if (diffDays >= 365) {
+      const years = Math.floor(diffDays / 365);
+      gapStr = `${years} ${years === 1 ? 'year' : 'years'}`;
+    } else if (diffDays >= 30) {
+      const months = Math.floor(diffDays / 30);
+      gapStr = `${months} ${months === 1 ? 'month' : 'months'}`;
+    } else if (diffDays >= 1) {
+      gapStr = `${diffDays} ${diffDays === 1 ? 'day' : 'days'}`;
+    } else if (diffHrs >= 1) {
+      gapStr = `${diffHrs} ${diffHrs === 1 ? 'hour' : 'hours'}`;
+    }
+    if (!gapStr) return '';
+    return ` • Nearest message: ${gapStr} ${isPrior ? 'prior' : 'later'}`;
+  }
+
   function fmtDateSep(ts) {
     const d = new Date(ts);
     const dd = String(d.getDate()).padStart(2, '0');
@@ -1329,6 +1351,7 @@
       const row = document.createElement('div');
       row.className = 'msg-row ' + (msg.from_me ? 'sent' : 'recv');
       row.dataset.msgId = String(msg.msg_id);
+      row.dataset.ts = String(msg.timestamp_ms || 0);
       row.dataset.groupIds = group.map(m => String(m.msg_id)).join(' ');
 
       const bubble = document.createElement('div');
@@ -1417,6 +1440,7 @@
       const row = document.createElement('div');
       row.className = 'msg-row service';
       row.dataset.msgId = String(msg.msg_id);
+      row.dataset.ts = String(msg.timestamp_ms || 0);
 
       const bubble = document.createElement('div');
       bubble.className = 'msg-service-bubble';
@@ -1432,6 +1456,7 @@
     const row = document.createElement('div');
     row.className = 'msg-row ' + (msg.from_me ? 'sent' : 'recv');
     row.dataset.msgId = String(msg.msg_id);
+    row.dataset.ts = String(msg.timestamp_ms || 0);
 
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
@@ -5527,6 +5552,7 @@
 
       let targetEl = null;
       let minDiff = Infinity;
+      let targetTs = 0;
       document.querySelectorAll('.msg-row').forEach(row => {
         const rowTs = Number(row.dataset.ts);
         if (rowTs) {
@@ -5534,6 +5560,7 @@
           if (diff < minDiff) {
             minDiff = diff;
             targetEl = row;
+            targetTs = rowTs;
           }
         }
       });
@@ -5549,7 +5576,10 @@
         const bannerIcon = contextBanner.querySelector('.context-jump-icon');
         if (bannerIcon) bannerIcon.textContent = '📞';
         const bannerText = document.getElementById('context-jump-text');
-        if (bannerText) bannerText.textContent = 'Viewing Call Moment in context';
+        if (bannerText) {
+          const gapSuffix = targetTs ? fmtTimeGap(minDiff, targetTs < timestampMs) : '';
+          bannerText.textContent = `Viewing Call Moment in context${gapSuffix}`;
+        }
         const switchBtn = document.getElementById('context-jump-switch-btn');
         if (switchBtn) {
           switchBtn.onclick = () => {
