@@ -4564,11 +4564,17 @@ def _query_android_calls(
         if not caller_name:
             caller_name = row_dict["chat_subject"] or caller_phone or "Unknown"
 
-        chat_id_val = (
-            str(row_dict["chat_row_id"])
-            if row_dict["chat_row_id"] is not None
-            else (raw_num or "call")
-        )
+        is_group_call = bool(row_dict.get("is_group_call") == 1)
+        if is_group_call:
+            chat_id_val = (
+                str(row_dict["chat_row_id"])
+                if row_dict["chat_row_id"] is not None
+                else (raw_num or "call")
+            )
+        else:
+            chat_id_val = raw_num or (
+                str(row_dict["chat_row_id"]) if row_dict["chat_row_id"] is not None else "call"
+            )
 
         results.append(
             {
@@ -4675,25 +4681,43 @@ def _query_ios_calls(
 
             participants_by_call: dict[int, list[dict]] = {}
             if has_participants:
-                call_pks = [r["call_pk"] for r in call_rows]
-                for i in range(0, len(call_pks), 900):
-                    chunk = call_pks[i : i + 900]
-                    ph = ",".join("?" * len(chunk))
-                    p_sql = f"""
-                        SELECT p.Z1PARTICIPANTS, p.ZJIDSTRING, COALESCE(p.ZOUTCOME, 0)
-                        FROM ZWACDCALLEVENTPARTICIPANT p
-                        WHERE p.Z1PARTICIPANTS IN ({ph})
-                    """
-                    with contextlib.suppress(sqlite3.OperationalError):
-                        for pr in call_conn.execute(p_sql, chunk).fetchall():
-                            cid = pr[0]
-                            p_jid = pr[1] or ""
-                            participants_by_call.setdefault(cid, []).append(
-                                {
-                                    "jid": p_jid,
-                                    "outcome": int(pr[2] or 0),
-                                }
-                            )
+                part_cols = {
+                    r[1]
+                    for r in call_conn.execute(
+                        "PRAGMA table_info(ZWACDCALLEVENTPARTICIPANT)"
+                    ).fetchall()
+                }
+                fk_col = (
+                    "Z1PARTICIPANTS"
+                    if "Z1PARTICIPANTS" in part_cols
+                    else ("ZCALLEVENT" if "ZCALLEVENT" in part_cols else None)
+                )
+                jid_col = (
+                    "ZJIDSTRING"
+                    if "ZJIDSTRING" in part_cols
+                    else ("ZJID" if "ZJID" in part_cols else None)
+                )
+                out_col = "COALESCE(p.ZOUTCOME, 0)" if "ZOUTCOME" in part_cols else "0"
+                if fk_col and jid_col:
+                    call_pks = [r["call_pk"] for r in call_rows]
+                    for i in range(0, len(call_pks), 900):
+                        chunk = call_pks[i : i + 900]
+                        ph = ",".join("?" * len(chunk))
+                        p_sql = f"""
+                            SELECT p.{fk_col}, p.{jid_col}, {out_col}
+                            FROM ZWACDCALLEVENTPARTICIPANT p
+                            WHERE p.{fk_col} IN ({ph})
+                        """
+                        with contextlib.suppress(sqlite3.OperationalError):
+                            for pr in call_conn.execute(p_sql, chunk).fetchall():
+                                cid = pr[0]
+                                p_jid = pr[1] or ""
+                                participants_by_call.setdefault(cid, []).append(
+                                    {
+                                        "jid": p_jid,
+                                        "outcome": int(pr[2] or 0),
+                                    }
+                                )
     except sqlite3.OperationalError:
         return []
 
@@ -5282,7 +5306,6 @@ def _query_android_pinned(
         LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
         WHERE ao.message_add_on_type = 79
           {pin_cond}
-          AND (ao.expiry_timestamp IS NULL OR ao.expiry_timestamp = 0 OR ao.expiry_timestamp > (CAST(strftime('%s', 'now') AS INTEGER) * 1000))
           AND {chat_pred}
         ORDER BY ao._id DESC
         LIMIT 3
@@ -5630,6 +5653,8 @@ def create_app(output_root: Path, rescan: bool = False):
             count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
             print(f"[wab_viewer] {count} chat(s) already indexed")
 
+        has_ios_ext_pinned = False
+        ext_pin_key_col = "key_id"
         if source_type == "android" and wa_db_path is not None:
             try:
                 tmp_chk = sqlite3.connect(wa_db_path)
@@ -5644,6 +5669,29 @@ def create_app(output_root: Path, rescan: bool = False):
                     wa_db_path, "ExtChatDB/ExtChatDatabase.sqlite", output_root
                 )
             has_ios_hd = _check_ios_hd_association(wa_db_path, ext_db_init)
+            if ext_db_init and ext_db_init.is_file():
+                try:
+                    with sqlite3.connect(
+                        f"file:{ext_db_init.resolve().as_posix()}?mode=ro", uri=True
+                    ) as _ec:
+                        has_tm = _ec.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_messages'"
+                        ).fetchone()
+                        if has_tm:
+                            has_ios_ext_pinned = True
+                            tm_cols = {
+                                r[1]
+                                for r in _ec.execute(
+                                    "PRAGMA table_info(thread_messages)"
+                                ).fetchall()
+                            }
+                            ext_pin_key_col = (
+                                "key_id"
+                                if "key_id" in tm_cols
+                                else ("stanza_id" if "stanza_id" in tm_cols else "key_id")
+                            )
+                except Exception:
+                    has_ios_ext_pinned = False
 
         if has_ios_hd:
             globals()["_IOS_FILTER"] = _BASE_IOS_FILTER + _IOS_HD_DEDUP_CLAUSE
@@ -6223,7 +6271,6 @@ def create_app(output_root: Path, rescan: bool = False):
     has_android_add_on = False
     has_mei_ts = False
     has_mao_ts = False
-    has_mao_expiry = False
     has_android_key_id = False
     has_ios_stanza_id = False
     has_message_thumbnail = False
@@ -6261,6 +6308,10 @@ def create_app(output_root: Path, rescan: bool = False):
     has_ios_mdi_matched = False
     has_ios_mdi_title = False
     has_ios_mdi_summary = False
+    has_pin_in_chat_table = False
+    has_chat_archived = False
+    has_cs_archived = False
+    has_cs_ident = False
     if wa_db_path is not None:
         _tmp_wa = sqlite3.connect(str(wa_db_path))
         _wa_tables = {
@@ -6271,6 +6322,7 @@ def create_app(output_root: Path, rescan: bool = False):
         has_message_revoked = "message_revoked" in _wa_tables
         has_reactions = "message_add_on" in _wa_tables and "message_add_on_reaction" in _wa_tables
         has_message_poll = "message_poll" in _wa_tables
+        has_pin_in_chat_table = "message_add_on_pin_in_chat" in _wa_tables
         _mao_cols = (
             {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_add_on)").fetchall()}
             if "message_add_on" in _wa_tables
@@ -6330,7 +6382,6 @@ def create_app(output_root: Path, rescan: bool = False):
             and "parent_message_row_id" in _mao_cols
         )
         has_mao_ts = "timestamp" in _mao_cols
-        has_mao_expiry = "expiry_timestamp" in _mao_cols
         has_message_media_map = (
             "message_media_map" in _wa_tables
             and "extended_media_data" in _wa_tables
@@ -6397,6 +6448,19 @@ def create_app(output_root: Path, rescan: bool = False):
         )
         has_ios_group_event = "ZGROUPEVENTTYPE" in _zwa_cols
         has_ios_stanza_id = "ZSTANZAID" in _zwa_cols
+        _chat_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(chat)").fetchall()}
+            if "chat" in _wa_tables
+            else set()
+        )
+        has_chat_archived = "archived" in _chat_cols
+        _cs_cols = (
+            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+            if "ZWACHATSESSION" in _wa_tables
+            else set()
+        )
+        has_cs_archived = "ZARCHIVED" in _cs_cols
+        has_cs_ident = "ZCONTACTIDENTIFIER" in _cs_cols
         _tmp_wa.close()
 
     if source_type == "ios":
@@ -6563,16 +6627,22 @@ def create_app(output_root: Path, rescan: bool = False):
 
         has_ios_starred = "ZSTARRED" in _zwa_cols
         ios_starred_expr = "COALESCE(m.ZSTARRED, 0)" if has_ios_starred else "0"
-        ios_pinned_expr = (
-            "CASE WHEN EXISTS ("
+        ios_type66_cond = (
+            "EXISTS ("
             "SELECT 1 FROM ZWAMESSAGE pin_m "
             "WHERE pin_m.ZCHATSESSION = m.ZCHATSESSION "
             "AND pin_m.ZMESSAGETYPE = 66 "
             "AND pin_m.ZPARENTMESSAGE = m.Z_PK"
-            ") THEN 1 ELSE 0 END"
+            ")"
             if ("ZWAMESSAGE" in _wa_tables and "ZPARENTMESSAGE" in _zwa_cols)
-            else "0"
+            else "0=1"
         )
+        ext_pin_arm = (
+            f" OR (m.ZSTANZAID IS NOT NULL AND EXISTS (SELECT 1 FROM ext.thread_messages tm WHERE tm.{ext_pin_key_col} = m.ZSTANZAID))"
+            if has_ios_ext_pinned
+            else ""
+        )
+        ios_pinned_expr = f"CASE WHEN ({ios_type66_cond}{ext_pin_arm}) THEN 1 ELSE 0 END"
 
         mdi_join = (
             "    LEFT JOIN ZWAMESSAGEDATAITEM mdi ON mdi.ZMESSAGE = m.Z_PK AND mdi.ZINDEX = 0\n"
@@ -7085,17 +7155,23 @@ def create_app(output_root: Path, rescan: bool = False):
 
     has_starred_col = "starred" in _msg_cols
     android_starred_expr = "COALESCE(m.starred, 0)" if has_starred_col else "0"
-    expiry_cond = (
-        "AND (mao_pin.expiry_timestamp IS NULL OR mao_pin.expiry_timestamp = 0 OR mao_pin.expiry_timestamp > (CAST(strftime('%s', 'now') AS INTEGER) * 1000))"
-        if has_mao_expiry
+    pin_table_join = (
+        "LEFT JOIN message_add_on_pin_in_chat mao_pic ON mao_pic.message_add_on_row_id = mao_pin._id\n        "
+        if has_pin_in_chat_table
+        else ""
+    )
+    pin_table_cond = (
+        "AND (mao_pic.pin_in_chat_state IS NULL OR mao_pic.pin_in_chat_state = 1) "
+        if has_pin_in_chat_table
         else ""
     )
     android_pinned_expr = (
         "CASE WHEN EXISTS ("
         "SELECT 1 FROM message_add_on mao_pin "
+        f"{pin_table_join}"
         "WHERE mao_pin.parent_message_row_id = m._id "
         "AND mao_pin.message_add_on_type = 79 "
-        f"{expiry_cond}"
+        f"{pin_table_cond}"
         ") THEN 1 ELSE 0 END"
         if has_android_add_on
         else "0"
@@ -7361,8 +7437,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 else ""
             )
             ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if has_lid_dn else ""
-            chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
-            chat_archived_col = "COALESCE(c.archived, 0)" if "archived" in chat_cols else "0"
+            chat_archived_col = "COALESCE(c.archived, 0)" if has_chat_archived else "0"
             rows = conn.execute(f"""
                 SELECT
                     c._id                                               AS chat_row_id,
@@ -7482,10 +7557,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 if has_ios_group_event
                 else ""
             )
-            cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
-            has_cs_ident = "ZCONTACTIDENTIFIER" in cs_cols
             cs_ident_col = "cs.ZCONTACTIDENTIFIER" if has_cs_ident else "NULL"
-            has_cs_archived = "ZARCHIVED" in cs_cols
             ios_archived_col = "COALESCE(cs.ZARCHIVED, 0)" if has_cs_archived else "0"
             mi_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
             vcard_name_ios = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"

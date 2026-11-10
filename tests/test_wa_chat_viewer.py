@@ -21,6 +21,7 @@ sys.path.insert(0, _ROOT)
 from tests.conftest import (
     make_android_db,
     make_archive_db,
+    make_ios_db,
     seed_android_db,
 )
 from wab_viewer import main as viewer
@@ -12571,6 +12572,70 @@ class TestPhase1CallsFeature:
         assert missed_call["is_video"] is False
         assert missed_call["call_type"] == "missed"
 
+    def test_calls_contact_chat_id_matches_raw_number(self, app_and_tmp):
+        """Android contact call records must project chat_id matching the contact phone/user string."""
+        client, _ = app_and_tmp
+        resp = client.get("/api/calls?limit=10")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        calls = data["calls"]
+        assert len(calls) >= 1
+        call = calls[0]
+        assert call["chat_id"] == "123456789"
+
+    def test_ios_calls_api_endpoint(self, tmp_path):
+        """GET /api/calls on iOS parses CallHistory.sqlite with metrics and participants."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_conn.close()
+
+        call_db = tmp_path / "CallHistory.sqlite"
+        call_conn = sqlite3.connect(str(call_db))
+        call_conn.executescript("""
+            CREATE TABLE ZWACDCALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCALLIDSTRING TEXT,
+                ZGROUPJIDSTRING TEXT,
+                ZDURATION REAL DEFAULT 0,
+                ZOUTCOME INTEGER DEFAULT 0,
+                ZDATE REAL NOT NULL,
+                ZAGGREGATECALLEVENT INTEGER
+            );
+            CREATE TABLE ZWAAGGREGATECALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZVIDEO INTEGER DEFAULT 0,
+                ZINCOMING INTEGER DEFAULT 1
+            );
+            CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
+                Z_PK INTEGER PRIMARY KEY,
+                Z1PARTICIPANTS INTEGER,
+                ZJIDSTRING TEXT,
+                ZOUTCOME INTEGER DEFAULT 0
+            );
+            INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (1, 1, 1);
+            INSERT INTO ZWACDCALLEVENT (Z_PK, ZCALLIDSTRING, ZDURATION, ZOUTCOME, ZDATE, ZAGGREGATECALLEVENT)
+            VALUES (1, 'ios_call_1', 345, 1, 720000000, 1);
+            INSERT INTO ZWACDCALLEVENTPARTICIPANT (Z_PK, Z1PARTICIPANTS, ZJIDSTRING, ZOUTCOME)
+            VALUES (1, 1, '19876543210@s.whatsapp.net', 1);
+        """)
+        call_conn.commit()
+        call_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/calls?limit=10")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert "calls" in data
+            calls = data["calls"]
+            assert len(calls) == 1
+            c = calls[0]
+            assert c["id"] == "ios_call_1"
+            assert c["is_video"] is True
+            assert c["duration"] == 345
+            assert c["call_type"] == "incoming"
+            assert "19876543210" in c["caller_phone"]
+
     def test_calls_js_functions_present(self, app_and_tmp):
         """Helper functions for calls and duration must exist in app.js."""
         client, _ = app_and_tmp
@@ -12587,6 +12652,7 @@ class TestPhase1CallsFeature:
         assert "Nearest message:" in js
         assert "function jumpFromCallToChat(call, matchedChat)" in js
         assert "async function openChatAtTimestamp(chatId, timestampMs)" in js
+        assert "function showContextJumpBanner(icon, text, onSwitch)" in js
 
 
 class TestPhase2ArchivedAndSearch:
@@ -12629,6 +12695,40 @@ class TestPhase2ArchivedAndSearch:
         # At least one chat is archived
         archived_chats = [c for c in chats if c["is_archived"] == 1]
         assert len(archived_chats) >= 1
+
+    def test_main_chat_list_excludes_archived(self, app_and_tmp):
+        """Archived chats must be filtered out from main renderChatList() logic."""
+        client, _ = app_and_tmp
+        resp = client.get("/static/app.js")
+        assert resp.status_code == 200
+        js = resp.get_data(as_text=True)
+        assert "allChats.filter(c => !c.is_archived)" in js
+
+    def test_ios_archived_chats_api(self, tmp_path):
+        """GET /api/chats returns is_archived = 1 from ZWACHATSESSION.ZARCHIVED on iOS."""
+        conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZARCHIVED INTEGER DEFAULT 0")
+        conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZARCHIVED)
+            VALUES (1, '123456789@s.whatsapp.net', 'Archived User', 0, 1)
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE)
+            VALUES (1, 1, 0, 720000000, 'Archived chat message', 0)
+        """)
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            assert len(chats) >= 1
+            archived = next((c for c in chats if c["id"] == "1"), None)
+            assert archived is not None
+            assert archived["is_archived"] == 1
 
     def test_archived_and_search_js_functions_present(self, app_and_tmp):
         """Helper functions for archived rendering, client-side filters, and keyboard shortcuts must exist in app.js."""
@@ -12789,6 +12889,165 @@ class TestPhase3InBubbleIndicators:
         assert "msg-meta-icon" in js
         assert "Pinned message" in js
         assert "Starred message" in js
+
+    def test_android_pinned_unpinned_state_exclusion(self, tmp_path):
+        """Android message with pin_in_chat_state = 2 (unpinned) must have is_pinned = 0."""
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute("""
+            CREATE TABLE message_add_on (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_message_row_id INTEGER NOT NULL,
+                message_add_on_type INTEGER NOT NULL,
+                expiry_timestamp INTEGER,
+                timestamp INTEGER
+            );
+        """)
+        wa_conn.execute("""
+            CREATE TABLE message_add_on_pin_in_chat (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_add_on_row_id INTEGER NOT NULL,
+                pin_in_chat_state INTEGER NOT NULL
+            );
+        """)
+        wa_conn.execute(
+            "INSERT INTO message_add_on (_id, parent_message_row_id, message_add_on_type) VALUES (1, 1, 79)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_add_on_pin_in_chat (message_add_on_row_id, pin_in_chat_state) VALUES (1, 2)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) >= 1
+            msg1 = next(m for m in msgs if m["msg_id"] == 1)
+            assert msg1["is_pinned"] == 0
+
+    def test_historical_backup_pin_not_expired(self, tmp_path):
+        """Pinned messages in older backups must not be expired by host computer clock."""
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute("""
+            CREATE TABLE message_add_on (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_message_row_id INTEGER NOT NULL,
+                message_add_on_type INTEGER NOT NULL,
+                expiry_timestamp INTEGER,
+                timestamp INTEGER
+            );
+        """)
+        wa_conn.execute("""
+            INSERT INTO message_add_on (_id, parent_message_row_id, message_add_on_type, expiry_timestamp, timestamp)
+            VALUES (1, 1, 79, 1580000000000, 1570000000000)
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=10&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) >= 1
+            msg1 = next(m for m in msgs if m["msg_id"] == 1)
+            assert msg1["is_pinned"] == 1
+
+    def test_ios_messages_starred_and_pinned(self, tmp_path):
+        """GET /api/messages on iOS projects is_starred and is_pinned."""
+        conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        conn.execute("ALTER TABLE ZWAMESSAGE ADD COLUMN ZSTARRED INTEGER DEFAULT 0")
+        conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '123456789@s.whatsapp.net', 'Alice', 0)
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTARRED)
+            VALUES (1, 1, 0, 720000000, 'Starred msg', 0, 1)
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTARRED)
+            VALUES (2, 1, 0, 720000010, 'Pinned target', 0, 0)
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZPARENTMESSAGE)
+            VALUES (3, 1, 0, 720000020, 66, 2)
+        """)
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) >= 2
+            msg1 = next(m for m in msgs if m["msg_id"] == 1)
+            assert msg1["is_starred"] == 1
+            assert msg1["is_pinned"] == 0
+
+            msg2 = next(m for m in msgs if m["msg_id"] == 2)
+            assert msg2["is_starred"] == 0
+            assert msg2["is_pinned"] == 1
+
+    def test_ios_ext_chat_pinned_messages(self, tmp_path):
+        """GET /api/messages on iOS projects is_pinned when pinned in ExtChatDatabase.sqlite."""
+        conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '123456789@s.whatsapp.net', 'Alice', 0)
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID)
+            VALUES (10, 1, 0, 720000000, 'Ext pinned msg', 0, 'ext_stanza_pin_1')
+        """)
+        conn.commit()
+        conn.close()
+
+        ext_db = tmp_path / "ExtChatDatabase.sqlite"
+        ext_conn = sqlite3.connect(str(ext_db))
+        ext_conn.executescript("""
+            CREATE TABLE thread_messages (
+                rowid INTEGER PRIMARY KEY,
+                key_id TEXT
+            );
+            INSERT INTO thread_messages (rowid, key_id) VALUES (1, 'ext_stanza_pin_1');
+        """)
+        ext_conn.commit()
+        ext_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            msgs = resp.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["msg_id"] == 10
+            assert msgs[0]["is_pinned"] == 1
+
+    def test_context_jump_banner_reset_helper(self, app_and_tmp):
+        """Verify showContextJumpBanner helper resets banner icon and text."""
+        client, _ = app_and_tmp
+        resp = client.get("/static/app.js")
+        assert resp.status_code == 200
+        js = resp.get_data(as_text=True)
+        assert "function showContextJumpBanner(icon, text, onSwitch)" in js
+        assert "showContextJumpBanner('⭐', 'Viewing message in context'" in js
+        assert "showContextJumpBanner('📞', `Viewing Call Moment in context" in js
 
     def test_css_indicator_styles(self, app_and_tmp):
         """Verify CSS classes for meta indicator icons in app.css."""
