@@ -12761,6 +12761,170 @@ class TestPhase1CallsFeature:
             assert c["call_type"] == "incoming"
             assert "19876543210" in c["caller_phone"]
 
+    def test_ios_calls_coredata_z1callevents_and_z1participants_join(self, tmp_path):
+        """GET /api/calls on iOS parses authentic CoreData Z1CALLEVENTS and Z1PARTICIPANTS."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_conn.close()
+
+        call_db = tmp_path / "CallHistory.sqlite"
+        call_conn = sqlite3.connect(str(call_db))
+        call_conn.executescript("""
+            CREATE TABLE ZWACDCALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCALLIDSTRING TEXT,
+                ZGROUPJIDSTRING TEXT,
+                ZDURATION REAL DEFAULT 0,
+                ZOUTCOME INTEGER DEFAULT 0,
+                ZDATE REAL NOT NULL,
+                Z1CALLEVENTS INTEGER
+            );
+            CREATE TABLE ZWAAGGREGATECALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZVIDEO INTEGER DEFAULT 0,
+                ZINCOMING INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
+                Z_PK INTEGER PRIMARY KEY,
+                Z1PARTICIPANTS INTEGER,
+                ZJIDSTRING TEXT,
+                ZOUTCOME INTEGER DEFAULT 0
+            );
+            INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (1, 1, 0);
+            INSERT INTO ZWACDCALLEVENT (Z_PK, ZCALLIDSTRING, ZDURATION, ZOUTCOME, ZDATE, Z1CALLEVENTS)
+            VALUES (84, 'ios_coredata_call_1', 120, 0, 720000000, 1);
+            INSERT INTO ZWACDCALLEVENTPARTICIPANT (Z_PK, Z1PARTICIPANTS, ZJIDSTRING, ZOUTCOME)
+            VALUES (1, 1, '15551234567@s.whatsapp.net', 0);
+        """)
+        call_conn.commit()
+        call_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/calls?limit=10")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            calls = data["calls"]
+            assert len(calls) == 1
+            c = calls[0]
+            assert c["id"] == "ios_coredata_call_1"
+            assert c["is_video"] is True
+            assert c["from_me"] is True
+            assert c["call_type"] == "outgoing"
+            assert c["caller_phone"] == "+15551234567"
+
+    def test_ios_calls_privacy_lid_resolution_via_chat_identifier(self, tmp_path):
+        """GET /api/calls on iOS resolves Privacy LID participant via ZCONTACTIDENTIFIER."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_cols = {r[1] for r in cs_conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if "ZCONTACTIDENTIFIER" not in cs_cols:
+            cs_conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZCONTACTIDENTIFIER TEXT")
+        cs_conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZHIDDEN)
+            VALUES (50, '15559876543@s.whatsapp.net', '145500000000001@lid', 'Salvatore Test', 0)
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        call_db = tmp_path / "CallHistory.sqlite"
+        call_conn = sqlite3.connect(str(call_db))
+        call_conn.executescript("""
+            CREATE TABLE ZWACDCALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCALLIDSTRING TEXT,
+                ZGROUPJIDSTRING TEXT,
+                ZDURATION REAL DEFAULT 0,
+                ZOUTCOME INTEGER DEFAULT 0,
+                ZDATE REAL NOT NULL,
+                Z1CALLEVENTS INTEGER
+            );
+            CREATE TABLE ZWAAGGREGATECALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZVIDEO INTEGER DEFAULT 0,
+                ZINCOMING INTEGER DEFAULT 1
+            );
+            CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
+                Z_PK INTEGER PRIMARY KEY,
+                Z1PARTICIPANTS INTEGER,
+                ZJIDSTRING TEXT,
+                ZOUTCOME INTEGER DEFAULT 0
+            );
+            INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (1, 0, 1);
+            INSERT INTO ZWACDCALLEVENT (Z_PK, ZCALLIDSTRING, ZDURATION, ZOUTCOME, ZDATE, Z1CALLEVENTS)
+            VALUES (1, 'ios_lid_call', 60, 0, 720000000, 1);
+            INSERT INTO ZWACDCALLEVENTPARTICIPANT (Z_PK, Z1PARTICIPANTS, ZJIDSTRING, ZOUTCOME)
+            VALUES (1, 1, '145500000000001@lid', 0);
+        """)
+        call_conn.commit()
+        call_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/calls?limit=10")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            calls = data["calls"]
+            assert len(calls) == 1
+            c = calls[0]
+            assert c["id"] == "ios_lid_call"
+            assert c["caller_phone"] == "+15559876543"
+            assert c["caller_name"] == "Salvatore Test"
+            assert c["chat_id"] == "50"
+
+    def test_api_chat_info_ios_calls_count_with_companion_lid(self, tmp_path):
+        """GET /api/chat/<id>/info on iOS accurately counts calls logged under companion Privacy LID."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_cols = {r[1] for r in cs_conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if "ZCONTACTIDENTIFIER" not in cs_cols:
+            cs_conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZCONTACTIDENTIFIER TEXT")
+        cs_conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZHIDDEN)
+            VALUES (50, '15559876543@s.whatsapp.net', '145500000000001@lid', 'Salvatore Test', 0)
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        call_db = tmp_path / "CallHistory.sqlite"
+        call_conn = sqlite3.connect(str(call_db))
+        call_conn.executescript("""
+            CREATE TABLE ZWACDCALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCALLIDSTRING TEXT,
+                ZGROUPJIDSTRING TEXT,
+                ZDURATION REAL DEFAULT 0,
+                ZOUTCOME INTEGER DEFAULT 0,
+                ZDATE REAL NOT NULL,
+                Z1CALLEVENTS INTEGER
+            );
+            CREATE TABLE ZWAAGGREGATECALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZVIDEO INTEGER DEFAULT 0,
+                ZINCOMING INTEGER DEFAULT 1
+            );
+            CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
+                Z_PK INTEGER PRIMARY KEY,
+                Z1PARTICIPANTS INTEGER,
+                ZJIDSTRING TEXT,
+                ZOUTCOME INTEGER DEFAULT 0
+            );
+            INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (1, 0, 1);
+            INSERT INTO ZWACDCALLEVENT (Z_PK, ZCALLIDSTRING, ZDURATION, ZOUTCOME, ZDATE, Z1CALLEVENTS)
+            VALUES (1, 'ios_lid_call_1', 60, 0, 720000000, 1);
+            INSERT INTO ZWACDCALLEVENTPARTICIPANT (Z_PK, Z1PARTICIPANTS, ZJIDSTRING, ZOUTCOME)
+            VALUES (1, 1, '145500000000001@lid', 0);
+        """)
+        call_conn.commit()
+        call_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/50/info")
+            assert resp.status_code == 200
+            info = resp.get_json()
+            assert info["calls_count"] == 1
+
     def test_calls_js_functions_present(self, app_and_tmp):
         """Helper functions for calls and duration must exist in app.js."""
         client, _ = app_and_tmp
@@ -12948,6 +13112,29 @@ class TestPhase2ArchivedAndSearch:
             assert resp.status_code == 200
             chats = resp.get_json()
             matching = [c for c in chats if c["id"] == "15550002222"]
+            assert len(matching) == 1
+            assert matching[0]["is_archived"] == 1
+
+    def test_ios_archived_chat_without_messages_not_pruned(self, tmp_path):
+        """Archived iOS chat with zero messages must not be pruned from /api/chats."""
+        conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if "ZARCHIVED" not in cs_cols:
+            conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZARCHIVED INTEGER DEFAULT 0")
+        conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZARCHIVED)
+            VALUES (10, '15553334444@s.whatsapp.net', 'Empty Archived iOS', 0, 1)
+        """)
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            matching = [c for c in chats if c["id"] == "10"]
             assert len(matching) == 1
             assert matching[0]["is_archived"] == 1
 
