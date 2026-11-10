@@ -12299,3 +12299,170 @@ class TestTrack2UIShell:
         assert "border: none;" in css
         assert "#chat-header-info" in css
         assert "#sidebar-bottom-bar" in css
+
+
+class TestTrack3FeaturePanes:
+    """Tests for Track 3: Interactive feature panes and mockup fidelity."""
+
+    @pytest.fixture
+    def app_and_tmp(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute("ALTER TABLE message ADD COLUMN starred INTEGER DEFAULT 0")
+        wa_conn.execute("UPDATE message SET starred = 1 WHERE _id = 1")
+        wa_conn.commit()
+
+        # Create preserved_messages.db in tmp_path
+        pres_db = tmp_path / "preserved_messages.db"
+        pres_conn = sqlite3.connect(str(pres_db))
+        pres_conn.execute("""
+            CREATE TABLE preserved_messages (
+                rowid INTEGER PRIMARY KEY,
+                msg_id INTEGER,
+                chat_id TEXT NOT NULL,
+                chat_type TEXT NOT NULL,
+                from_me INTEGER NOT NULL,
+                key_id TEXT NOT NULL,
+                sender_jid TEXT,
+                sender_name TEXT,
+                timestamp_ms INTEGER NOT NULL,
+                text_body TEXT,
+                media_type TEXT,
+                archive_path TEXT,
+                file_size INTEGER,
+                is_starred INTEGER DEFAULT 0,
+                is_pinned INTEGER DEFAULT 0
+            );
+        """)
+        pres_conn.execute("""
+            INSERT INTO preserved_messages (rowid, msg_id, chat_id, chat_type, from_me, key_id, sender_jid, sender_name, timestamp_ms, text_body, media_type, archive_path, file_size, is_starred, is_pinned)
+            VALUES (
+                50, 50, '10', 'contact', 0, 'PRES1', '15551234567@s.whatsapp.net', 'Alice',
+                1700000050000, 'Preserved secret', NULL, NULL, 0, 1, 0
+            );
+        """)
+        pres_conn.commit()
+
+        wa_conn.close()
+        archive_conn.close()
+        pres_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client, tmp_path
+
+    def test_contact_header_no_role_button_and_css_reset(self, app_and_tmp):
+        """Contact header must not have role='button' (which triggers Pico blue button styling) and has transparent background."""
+        client, _ = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        # Verify #chat-header-info is clean without role="button"
+        assert '<div id="chat-header-info" tabindex="0"' in html
+        assert 'id="chat-header-info" role="button"' not in html
+
+        css_resp = client.get("/static/app.css")
+        assert css_resp.status_code == 200
+        css = css_resp.get_data(as_text=True)
+        assert "#chat-header-info" in css
+        assert "background: transparent !important;" in css
+
+    def test_right_slide_over_drawers_inside_chat_pane(self, app_and_tmp):
+        """Drawers must be docked inside #chat-pane with right-slide-over layout matching prototype mockup."""
+        client, _ = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert '<aside id="chat-starred-drawer" class="chat-drawer"' in html
+        assert '<aside id="chat-info-panel" class="chat-drawer"' in html
+        # Both drawers must be within #chat-pane (preceding </div> of #chat-pane)
+        pane_idx = html.find('id="chat-pane"')
+        starred_idx = html.find('id="chat-starred-drawer"')
+        info_idx = html.find('id="chat-info-panel"')
+        assert pane_idx != -1 and starred_idx > pane_idx and info_idx > pane_idx
+
+        css_resp = client.get("/static/app.css")
+        assert css_resp.status_code == 200
+        css = css_resp.get_data(as_text=True)
+        assert ".chat-drawer" in css
+        assert "position: absolute;" in css
+        assert "right: 0;" in css
+        assert "width: 340px;" in css
+
+    def test_starred_messages_flyout_card_bubbles_and_tokens(self, app_and_tmp):
+        """Starred flyout elements, cards, and design tokens must match prototype."""
+        client, _ = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert 'id="chat-starred-btn"' in html
+        assert 'id="chat-starred-badge"' in html
+        assert 'id="chat-starred-header-count"' in html
+        assert 'id="chat-starred-close"' in html
+
+        css_resp = client.get("/static/app.css")
+        assert css_resp.status_code == 200
+        css = css_resp.get_data(as_text=True)
+        assert ".starred-card" in css
+        assert ".starred-card-top" in css
+        assert ".starred-card-meta" in css
+        assert ".starred-card-chevron" in css
+        assert ".starred-card-snippet" in css
+        assert ".chat-starred-subheader" in css
+
+    def test_chat_info_hero_elements(self, app_and_tmp):
+        """Chat info drawer hero elements must match mockup."""
+        client, _ = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert 'id="chat-info-hero"' in html
+        assert 'id="chat-info-avatar"' in html
+        assert 'id="chat-info-title"' in html
+        assert 'id="chat-info-phone"' in html
+        assert 'id="chat-info-details"' in html
+        assert 'id="chat-info-header-heading"' in html
+
+        css_resp = client.get("/static/app.css")
+        assert css_resp.status_code == 200
+        css = css_resp.get_data(as_text=True)
+        assert ".chat-info-hero" in css
+        assert ".chat-info-avatar" in css
+        assert ".chat-info-name" in css
+        assert ".chat-info-phone" in css
+
+    def test_pulsing_glow_animations(self, app_and_tmp):
+        """Pulsing gold and emerald glow keyframes must be present in app.css."""
+        client, _ = app_and_tmp
+        resp = client.get("/static/app.css")
+        assert resp.status_code == 200
+        css = resp.get_data(as_text=True)
+        assert "@keyframes pulseGlowGold" in css
+        assert "@keyframes pulseGlowEmerald" in css
+        assert ".jump-highlight-gold" in css
+        assert ".jump-highlight-emerald" in css
+
+    def test_api_messages_at_resolution_by_msg_id(self, app_and_tmp):
+        """api_messages_at resolves target message by msg_id directly without requiring ts."""
+        client, _ = app_and_tmp
+        # Query msg_id=1 (Android live message) with resolved chat_id=10
+        resp = client.get("/api/messages/at?chat_id=10&chat_type=contact&msg_id=1")
+        assert resp.status_code == 200
+        msgs = resp.get_json()
+        assert len(msgs) > 0
+        assert any(m["msg_id"] == 1 for m in msgs)
+
+    def test_api_messages_at_preserved_by_negative_msg_id(self, app_and_tmp):
+        """api_messages_at resolves preserved message by negative msg_id."""
+        client, _ = app_and_tmp
+        resp = client.get("/api/messages/at?msg_id=-50")
+        assert resp.status_code == 200
+        msgs = resp.get_json()
+        assert len(msgs) > 0
+        assert any(m["msg_id"] == -50 for m in msgs)

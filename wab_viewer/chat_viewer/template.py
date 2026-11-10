@@ -90,7 +90,7 @@ HTML_TEMPLATE = (
 
     <div id="chat-pane">
       <div id="chat-header" style="display:none;">
-        <div id="chat-header-info" role="button" tabindex="0" title="Click to view chat info" aria-label="Chat details">
+        <div id="chat-header-info" tabindex="0" title="Click to view chat info" aria-label="Chat details">
           <div id="chat-header-avatar" class="chat-header-avatar" aria-hidden="true"></div>
           <div class="chat-header-meta">
             <div class="chat-header-title-wrap">
@@ -101,9 +101,13 @@ HTML_TEMPLATE = (
           </div>
         </div>
         <div id="chat-toolbar">
-          <button id="chat-info-btn" title="Chat info">&#8505;</button>
-          <button id="media-btn" title="Media">&#128247;</button>
           <button id="toolbar-toggle" title="Search &amp; date">&#128269;</button>
+          <button id="chat-starred-btn" class="chat-toolbar-btn" title="Starred messages" aria-label="Starred messages">
+            <span class="chat-toolbar-icon" aria-hidden="true">&#9733;</span>
+            <span id="chat-starred-badge" class="chat-toolbar-badge" style="display:none;">0</span>
+          </button>
+          <button id="media-btn" title="Media">&#128247;</button>
+          <button id="chat-info-btn" title="Chat info">&#8505;</button>
         </div>
         <div id="toolbar-expanded">
           <div id="chat-search-wrap">
@@ -122,6 +126,30 @@ HTML_TEMPLATE = (
           </div>
         </div>
       </div>
+      <div id="pinned-banner" class="pinned-banner-strip" role="region" aria-label="Pinned message" style="display:none;">
+        <div class="pinned-banner-content" tabindex="0" title="Jump to pinned message">
+          <span class="pinned-banner-icon" aria-hidden="true">📌</span>
+          <div class="pinned-banner-text-wrap">
+            <span id="pinned-banner-author" class="pinned-banner-author">Pinned</span>
+            <span id="pinned-banner-snippet" class="pinned-banner-snippet"></span>
+          </div>
+        </div>
+        <div class="pinned-banner-actions">
+          <div id="pinned-banner-nav" class="pinned-banner-nav" style="display:none;">
+            <button id="pinned-banner-prev" class="pinned-nav-btn" title="Previous pinned message" aria-label="Previous pinned message">&#8249;</button>
+            <span id="pinned-banner-count" class="pinned-banner-count">1 of 1</span>
+            <button id="pinned-banner-next" class="pinned-nav-btn" title="Next pinned message" aria-label="Next pinned message">&#8250;</button>
+          </div>
+          <button id="pinned-banner-dismiss" class="pinned-banner-dismiss" title="Dismiss pinned message" aria-label="Dismiss pinned message">&#10005;</button>
+        </div>
+      </div>
+      <div id="context-jump-banner" class="context-jump-banner" role="status" style="display:none;">
+        <div class="context-jump-content">
+          <span class="context-jump-icon" aria-hidden="true">⭐</span>
+          <span id="context-jump-text" class="context-jump-text">Viewing message in context</span>
+        </div>
+        <button id="context-jump-switch-btn" class="context-jump-action-btn">Switch to Chat View &#8599;</button>
+      </div>
       <div id="message-scroll"></div>
       <button id="scroll-to-bottom" title="Jump to latest">&#8627;</button>
       <div id="chat-jump-hud" class="chat-jump-hud" role="status" aria-live="polite">
@@ -134,6 +162,38 @@ HTML_TEMPLATE = (
         <span>Loading chat…</span>
         <span id="chat-loading-count"></span>
       </div>
+
+      <!-- In-Chat Starred Messages Flyout Drawer -->
+      <aside id="chat-starred-drawer" class="chat-drawer" role="region" aria-label="Starred messages" style="display:none;">
+        <div class="chat-drawer-header">
+          <div class="chat-drawer-header-left">
+            <svg class="chat-drawer-star-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            <span class="chat-drawer-title">Starred Messages</span>
+            <span id="chat-starred-header-count" class="chat-drawer-count-badge">0</span>
+          </div>
+          <button id="chat-starred-close" class="chat-drawer-close-btn" title="Close flyout" aria-label="Close flyout">&#10005;</button>
+        </div>
+        <div id="chat-starred-body" class="chat-drawer-body"></div>
+      </aside>
+
+      <!-- Contact / Chat Info Drawer -->
+      <aside id="chat-info-panel" class="chat-drawer" role="region" aria-label="Chat info" style="display:none;">
+        <div class="chat-drawer-header">
+          <div class="chat-drawer-header-left">
+            <span id="chat-info-header-heading" class="chat-drawer-title">Contact Info</span>
+          </div>
+          <button id="chat-info-close" class="chat-drawer-close-btn" title="Close chat info" aria-label="Close chat info">&#10005;</button>
+        </div>
+        <div id="chat-info-body" class="chat-drawer-body">
+          <div id="chat-info-hero" class="chat-info-hero">
+            <div id="chat-info-avatar" class="chat-info-avatar"></div>
+            <h3 id="chat-info-title" class="chat-info-name"></h3>
+            <p id="chat-info-phone" class="chat-info-phone"></p>
+            <div id="chat-info-desc" class="chat-info-desc" style="display:none"></div>
+          </div>
+          <div id="chat-info-details" class="chat-info-details"></div>
+        </div>
+      </aside>
     </div>
   </div>
 </div>
@@ -224,18 +284,7 @@ HTML_TEMPLATE = (
   </div>
 </div>
 
-<div id="chat-info-panel">
-  <div id="chat-info-inner">
-    <div id="chat-info-header">
-      <div class="chat-info-header-text">
-        <span id="chat-info-title"></span>
-        <div id="chat-info-desc" class="chat-info-desc" style="display:none"></div>
-      </div>
-      <button id="chat-info-close">&#10005;</button>
-    </div>
-    <div id="chat-info-body"></div>
-  </div>
-</div>
+
 
 <div id="msg-details-popup"></div>
 
