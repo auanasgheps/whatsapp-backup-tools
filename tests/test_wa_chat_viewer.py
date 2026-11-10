@@ -11864,6 +11864,7 @@ class TestTrack1Endpoints:
             conn.executescript("""
                 CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
                 CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, from_me INTEGER, timestamp INTEGER);
                 CREATE TABLE call_log (
                     _id INTEGER PRIMARY KEY,
                     call_id TEXT,
@@ -11893,8 +11894,9 @@ class TestTrack1Endpoints:
             resp = client.get("/api/calls")
             assert resp.status_code == 200
             data = resp.get_json()
-            assert len(data) == 3
-            c1 = next(c for c in data if c["id"] == "call-101")
+            calls = data["calls"] if isinstance(data, dict) and "calls" in data else data
+            assert len(calls) == 3
+            c1 = next(c for c in calls if c["id"] == "call-101")
             assert c1["caller_name"] == "Alice Whitman"
             assert c1["caller_phone"] == "+15551234"
             assert c1["is_video"] is True
@@ -11905,17 +11907,27 @@ class TestTrack1Endpoints:
             resp_missed = client.get("/api/calls?filter=missed")
             assert resp_missed.status_code == 200
             data_missed = resp_missed.get_json()
-            assert len(data_missed) == 1
-            assert data_missed[0]["id"] == "call-102"
-            assert data_missed[0]["is_missed"] is True
+            calls_missed = (
+                data_missed["calls"]
+                if isinstance(data_missed, dict) and "calls" in data_missed
+                else data_missed
+            )
+            assert len(calls_missed) == 1
+            assert calls_missed[0]["id"] == "call-102"
+            assert calls_missed[0]["is_missed"] is True
 
             # 3. Video calls filter
             resp_video = client.get("/api/calls?filter=video")
             assert resp_video.status_code == 200
             data_video = resp_video.get_json()
-            assert len(data_video) == 1
-            assert data_video[0]["id"] == "call-101"
-            assert data_video[0]["is_video"] is True
+            calls_video = (
+                data_video["calls"]
+                if isinstance(data_video, dict) and "calls" in data_video
+                else data_video
+            )
+            assert len(calls_video) == 1
+            assert calls_video[0]["id"] == "call-101"
+            assert calls_video[0]["is_video"] is True
 
     def test_api_calls_ios(self, tmp_path):
         wa_path = tmp_path / "ChatStorage.sqlite"
@@ -11925,6 +11937,7 @@ class TestTrack1Endpoints:
             conn.executescript("""
                 CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
                 CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+                CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER, ZMESSAGEDATE REAL);
                 INSERT INTO ZWACHATSESSION VALUES (1, '15553333@s.whatsapp.net', 'Bob iOS');
             """)
             conn.commit()
@@ -11933,10 +11946,12 @@ class TestTrack1Endpoints:
             conn.executescript("""
                 CREATE TABLE ZWACDCALLEVENT (
                     Z_PK INTEGER PRIMARY KEY,
+                    ZCALLIDSTRING TEXT,
                     ZDATE REAL,
                     ZDURATION INTEGER,
                     ZBYTESENT INTEGER,
                     ZBYTESRECEIVED INTEGER,
+                    ZOUTCOME INTEGER,
                     ZAGGREGATECALLEVENT INTEGER,
                     Z12_AGGREGATECALLEVENT INTEGER
                 );
@@ -11948,19 +11963,19 @@ class TestTrack1Endpoints:
                 );
                 CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
                     Z_PK INTEGER PRIMARY KEY,
-                    ZCALLEVENT INTEGER,
+                    Z1PARTICIPANTS INTEGER,
                     ZJIDSTRING TEXT,
                     ZOUTCOME INTEGER
                 );
 
                 -- Call 1: Incoming connected video call (ZDATE=700000000 -> 2023)
-                INSERT INTO ZWACDCALLEVENT VALUES (1, 700000000.0, 300, 1000, 2000, 1, 1);
+                INSERT INTO ZWACDCALLEVENT VALUES (1, 'ios-call-1', 700000000.0, 300, 1000, 2000, 1, 1, 1);
                 INSERT INTO ZWAAGGREGATECALLEVENT VALUES (1, 1, 1, 1);
                 INSERT INTO ZWACDCALLEVENTPARTICIPANT VALUES (1, 1, '15553333@s.whatsapp.net', 1);
 
-                -- Call 2: Outgoing missed audio call
-                INSERT INTO ZWACDCALLEVENT VALUES (2, 700001000.0, 0, 0, 0, 2, 2);
-                INSERT INTO ZWAAGGREGATECALLEVENT VALUES (2, 0, 0, 2);
+                -- Call 2: Incoming missed audio call
+                INSERT INTO ZWACDCALLEVENT VALUES (2, 'ios-call-2', 700001000.0, 0, 0, 0, 2, 2, 2);
+                INSERT INTO ZWAAGGREGATECALLEVENT VALUES (2, 0, 1, 2);
                 INSERT INTO ZWACDCALLEVENTPARTICIPANT VALUES (2, 2, '15554444@s.whatsapp.net', 2);
             """)
             conn.commit()
@@ -11971,9 +11986,10 @@ class TestTrack1Endpoints:
             resp = client.get("/api/calls")
             assert resp.status_code == 200
             data = resp.get_json()
-            assert len(data) == 2
+            calls = data["calls"] if isinstance(data, dict) and "calls" in data else data
+            assert len(calls) == 2
 
-            c1 = next(c for c in data if c["id"] == "ios-call-1")
+            c1 = next(c for c in calls if c["id"] == "ios-call-1")
             assert c1["caller_name"] == "Bob iOS"
             assert c1["caller_phone"] == "+15553333"
             assert c1["is_video"] is True
@@ -11985,8 +12001,13 @@ class TestTrack1Endpoints:
             resp_missed = client.get("/api/calls?filter=missed")
             assert resp_missed.status_code == 200
             data_missed = resp_missed.get_json()
-            assert len(data_missed) == 1
-            assert data_missed[0]["id"] == "ios-call-2"
+            calls_missed = (
+                data_missed["calls"]
+                if isinstance(data_missed, dict) and "calls" in data_missed
+                else data_missed
+            )
+            assert len(calls_missed) == 1
+            assert calls_missed[0]["id"] == "ios-call-2"
 
     def test_api_calls_with_preserved(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
@@ -11996,6 +12017,7 @@ class TestTrack1Endpoints:
             conn.executescript("""
                 CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
                 CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, from_me INTEGER, timestamp INTEGER);
                 CREATE TABLE call_log (
                     _id INTEGER PRIMARY KEY, call_id TEXT, jid_row_id INTEGER,
                     from_me INTEGER, timestamp INTEGER, video_call INTEGER,
@@ -12030,10 +12052,11 @@ class TestTrack1Endpoints:
             resp = client.get("/api/calls")
             assert resp.status_code == 200
             data = resp.get_json()
-            assert len(data) == 1
-            assert data[0]["id"] == "pres-call-1"
-            assert data[0]["caller_name"] == "Ghost Caller"
-            assert data[0]["is_missed"] is True
+            calls = data["calls"] if isinstance(data, dict) and "calls" in data else data
+            assert len(calls) == 1
+            assert calls[0]["id"] == "pres-call-1"
+            assert calls[0]["caller_name"] == "Ghost Caller"
+            assert calls[0]["is_missed"] is True
 
     def test_api_starred_android(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
@@ -12069,22 +12092,34 @@ class TestTrack1Endpoints:
             # Global starred
             resp = client.get("/api/starred")
             assert resp.status_code == 200
-            items = resp.get_json()
+            data = resp.get_json()
+            items = data["messages"] if isinstance(data, dict) and "messages" in data else data
             assert len(items) == 1
-            assert items[0]["msg_id"] == 100
+            assert items[0]["id"] == 100
             assert items[0]["text_body"] == "Starred Important Note"
             assert items[0]["chat_name"] == "Project Alpha"
 
             # Scoped chat starred
             resp_chat = client.get("/api/chat/10/starred")
             assert resp_chat.status_code == 200
-            chat_items = resp_chat.get_json()
+            data_chat = resp_chat.get_json()
+            chat_items = (
+                data_chat["messages"]
+                if isinstance(data_chat, dict) and "messages" in data_chat
+                else data_chat
+            )
             assert len(chat_items) == 1
-            assert chat_items[0]["msg_id"] == 100
+            assert chat_items[0]["id"] == 100
 
             resp_empty = client.get("/api/chat/999/starred")
             assert resp_empty.status_code == 200
-            assert len(resp_empty.get_json()) == 0
+            data_empty = resp_empty.get_json()
+            empty_items = (
+                data_empty["messages"]
+                if isinstance(data_empty, dict) and "messages" in data_empty
+                else data_empty
+            )
+            assert len(empty_items) == 0
 
     def test_api_pinned_android(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
@@ -12138,9 +12173,14 @@ class TestTrack1Endpoints:
         with app.test_client() as client:
             resp = client.get("/api/chat/10/pinned")
             assert resp.status_code == 200
-            items = resp.get_json()
+            data = resp.get_json()
+            items = (
+                data["pinned_messages"]
+                if isinstance(data, dict) and "pinned_messages" in data
+                else data
+            )
             assert len(items) == 1
-            assert items[0]["msg_id"] == 50
+            assert items[0]["id"] == 50
             assert items[0]["text_body"] == "Pinned announcement message"
             assert items[0]["is_pinned"] is True
 
@@ -12159,6 +12199,11 @@ class TestTrack1Endpoints:
                     text_data TEXT,
                     message_type INTEGER,
                     key_id TEXT
+                );
+                CREATE TABLE message_media (
+                    message_row_id INTEGER PRIMARY KEY,
+                    file_path TEXT,
+                    mime_type TEXT
                 );
                 CREATE TABLE call_log (
                     _id INTEGER PRIMARY KEY,
@@ -12191,3 +12236,66 @@ class TestTrack1Endpoints:
             assert resp.status_code == 200
             info = resp.get_json()
             assert info["calls"] == 2
+
+
+class TestTrack2UIShell:
+    @pytest.fixture
+    def app_and_tmp(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client, tmp_path
+
+    def test_header_top_right_settings_and_platform_badge(self, app_and_tmp):
+        client, tmp_path = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert 'id="header"' in html
+        assert 'id="header-brand"' in html
+        assert 'id="settings-btn"' in html
+        assert "platform-badge" in html
+        assert "Android" in html
+
+    def test_sidebar_search_and_bottom_navbar(self, app_and_tmp):
+        client, tmp_path = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert 'id="sidebar-bottom-bar"' in html
+        assert 'id="tab-btn-chats"' in html
+        assert 'id="tab-btn-calls"' in html
+        assert 'id="tab-btn-starred"' in html
+        assert 'id="tab-btn-archived"' in html
+        assert 'data-tab="chats"' in html
+        assert 'aria-selected="true"' in html
+
+    def test_contact_header_avatar_and_subtitles(self, app_and_tmp):
+        client, tmp_path = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert 'id="chat-header-info"' in html
+        assert 'id="chat-header-avatar"' in html
+        assert 'id="chat-title"' in html
+        assert 'id="chat-subtitle"' in html
+
+    def test_msg_bubble_elevation_and_tokens(self, app_and_tmp):
+        client, tmp_path = app_and_tmp
+        resp = client.get("/static/app.css")
+        assert resp.status_code == 200
+        css = resp.get_data(as_text=True)
+        assert "--bubble-shadow" in css
+        assert "box-shadow: var(--bubble-shadow);" in css
+        assert "border: none;" in css
+        assert "#chat-header-info" in css
+        assert "#sidebar-bottom-bar" in css
