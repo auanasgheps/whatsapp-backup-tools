@@ -2208,9 +2208,12 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
         has_qmid = "quoted_msg_id" in cur_cols
         has_lp = "link_title" in cur_cols and "has_thumbnail" in cur_cols
         has_qthumb = "quoted_has_thumb" in cur_cols
+        has_star_pin = "is_starred" in cur_cols and "is_pinned" in cur_cols
 
         stanza_col = ", stanza_id" if has_stanza else ""
         stanza_val = ", ?" if has_stanza else ""
+        star_pin_cols = ", is_starred, is_pinned" if has_star_pin else ""
+        star_pin_vals = ", ?, ?" if has_star_pin else ""
         if has_lp:
             qthumb_col = ", quoted_has_thumb" if has_qthumb else ""
             qthumb_val = ", ?" if has_qthumb else ""
@@ -2220,8 +2223,8 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
                      archive_path, media_type, media_name, text_body,
                      quoted_text, quoted_sender, quoted_ts, quoted_msg_id{qthumb_col}, reactions,
                      is_edited, edited_ts, is_view_once, link_title, link_desc, link_url,
-                     link_preview_type, has_thumbnail)
-                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     link_preview_type, has_thumbnail{star_pin_cols})
+                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?{star_pin_vals})
             """
         elif has_qmid:
             qthumb_col = ", quoted_has_thumb" if has_qthumb else ""
@@ -2231,8 +2234,8 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
                     (chat_id, chat_type, msg_id{stanza_col}, timestamp_ms, sender, from_me,
                      archive_path, media_type, media_name, text_body,
                      quoted_text, quoted_sender, quoted_ts, quoted_msg_id{qthumb_col}, reactions,
-                     is_edited, edited_ts, is_view_once)
-                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?)
+                     is_edited, edited_ts, is_view_once{star_pin_cols})
+                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{qthumb_val}, ?, ?, ?, ?{star_pin_vals})
             """
         else:
             sql = f"""
@@ -2240,8 +2243,8 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
                     (chat_id, chat_type, msg_id{stanza_col}, timestamp_ms, sender, from_me,
                      archive_path, media_type, media_name, text_body,
                      quoted_text, quoted_sender, quoted_ts, reactions,
-                     is_edited, edited_ts, is_view_once)
-                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_edited, edited_ts, is_view_once{star_pin_cols})
+                VALUES (?, ?, ?{stanza_val}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{star_pin_vals})
             """
         keys = rows[0].keys()
         params = []
@@ -2287,6 +2290,13 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
                         r["link_url"] if "link_url" in keys else None,
                         r["link_preview_type"] if "link_preview_type" in keys else 0,
                         r["has_thumbnail"] if "has_thumbnail" in keys else 0,
+                    ]
+                )
+            if has_star_pin:
+                row_vals.extend(
+                    [
+                        r["is_starred"] if "is_starred" in keys else 0,
+                        r["is_pinned"] if "is_pinned" in keys else 0,
                     ]
                 )
             params.append(tuple(row_vals))
@@ -2504,6 +2514,8 @@ def _query_preserved_messages(
         d["is_preserved"] = 1
         d["is_view_once"] = int(d.get("is_view_once") or 0)
         d["is_edited"] = int(d.get("is_edited") or 0)
+        d["is_starred"] = int(d.get("is_starred") or 0)
+        d["is_pinned"] = int(d.get("is_pinned") or 0)
         d["quoted_msg_id"] = None
         if d.get("live_location_share_duration") and d.get("media_type") == "location":
             d["media_type"] = "live_location"
@@ -2866,6 +2878,7 @@ def _merge_preserved_chats(
     existing_chats = {(c["id"], c["type"]) for c in result}
     for c in result:
         c.setdefault("is_preserved_only", False)
+        c.setdefault("is_archived", 0)
 
     try:
         pres_chats = pres_conn.execute(
@@ -2953,6 +2966,7 @@ def _merge_preserved_chats(
                 "last_msg_from_me": last_from_me,
                 "is_view_once": is_vo,
                 "is_preserved_only": True,
+                "is_archived": 0,
             }
         )
         existing_chats.add((cid, ctype))
@@ -3759,6 +3773,8 @@ _IOS_SENDER_JID = f"""NULLIF(SUBSTR({_IOS_SENDER_RAW}, 1,
                     INSTR({_IOS_SENDER_RAW} || '@', '@') - 1), '')"""
 
 quoted_stanza_id_ios = "NULL"
+ios_starred_expr = "COALESCE(m.ZSTARRED, 0)"
+ios_pinned_expr = "0"
 
 _IOS_SELECT = f"""
     SELECT
@@ -3859,6 +3875,8 @@ _IOS_SELECT = f"""
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
         CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
+        {ios_starred_expr}                                           AS is_starred,
+        {ios_pinned_expr}                                            AS is_pinned,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         0                                                            AS group_event_type,
         gm.ZMEMBERJID                                                AS member_jid,
@@ -6074,6 +6092,8 @@ def create_app(output_root: Path, rescan: bool = False):
             link_preview_type INTEGER NOT NULL DEFAULT 0,
             has_thumbnail  INTEGER NOT NULL DEFAULT 0,
             quoted_has_thumb INTEGER NOT NULL DEFAULT 0,
+            is_starred     INTEGER NOT NULL DEFAULT 0,
+            is_pinned      INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -6132,6 +6152,14 @@ def create_app(output_root: Path, rescan: bool = False):
     if "quoted_has_thumb" not in cols:
         _archive_conn.execute(
             "ALTER TABLE recent_messages ADD COLUMN quoted_has_thumb INTEGER NOT NULL DEFAULT 0"
+        )
+    if "is_starred" not in cols:
+        _archive_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0"
+        )
+    if "is_pinned" not in cols:
+        _archive_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0"
         )
     if rescan or (source_is_changed and has_prior_stamp):
         _archive_conn.execute("DELETE FROM recent_messages")
@@ -6195,6 +6223,7 @@ def create_app(output_root: Path, rescan: bool = False):
     has_android_add_on = False
     has_mei_ts = False
     has_mao_ts = False
+    has_mao_expiry = False
     has_android_key_id = False
     has_ios_stanza_id = False
     has_message_thumbnail = False
@@ -6301,6 +6330,7 @@ def create_app(output_root: Path, rescan: bool = False):
             and "parent_message_row_id" in _mao_cols
         )
         has_mao_ts = "timestamp" in _mao_cols
+        has_mao_expiry = "expiry_timestamp" in _mao_cols
         has_message_media_map = (
             "message_media_map" in _wa_tables
             and "extended_media_data" in _wa_tables
@@ -6531,6 +6561,19 @@ def create_app(output_root: Path, rescan: bool = False):
             globals()["_IOS_FILTER"] = globals()["_BASE_IOS_FILTER"]
             globals()["_IOS_FILTER_TS"] = globals()["_BASE_IOS_FILTER_TS"]
 
+        has_ios_starred = "ZSTARRED" in _zwa_cols
+        ios_starred_expr = "COALESCE(m.ZSTARRED, 0)" if has_ios_starred else "0"
+        ios_pinned_expr = (
+            "CASE WHEN EXISTS ("
+            "SELECT 1 FROM ZWAMESSAGE pin_m "
+            "WHERE pin_m.ZCHATSESSION = m.ZCHATSESSION "
+            "AND pin_m.ZMESSAGETYPE = 66 "
+            "AND pin_m.ZPARENTMESSAGE = m.Z_PK"
+            ") THEN 1 ELSE 0 END"
+            if ("ZWAMESSAGE" in _wa_tables and "ZPARENTMESSAGE" in _zwa_cols)
+            else "0"
+        )
+
         mdi_join = (
             "    LEFT JOIN ZWAMESSAGEDATAITEM mdi ON mdi.ZMESSAGE = m.Z_PK AND mdi.ZINDEX = 0\n"
             if has_ios_mdi
@@ -6637,6 +6680,8 @@ def create_app(output_root: Path, rescan: bool = False):
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
         CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
+        {ios_starred_expr}                                           AS is_starred,
+        {ios_pinned_expr}                                            AS is_pinned,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
         {group_ev_col}                                               AS group_event_type,
         gm.ZMEMBERJID                                                AS member_jid,
@@ -7038,6 +7083,24 @@ def create_app(output_root: Path, rescan: bool = False):
         OR ac.archive_path LIKE '%.gif'
     )"""
 
+    has_starred_col = "starred" in _msg_cols
+    android_starred_expr = "COALESCE(m.starred, 0)" if has_starred_col else "0"
+    expiry_cond = (
+        "AND (mao_pin.expiry_timestamp IS NULL OR mao_pin.expiry_timestamp = 0 OR mao_pin.expiry_timestamp > (CAST(strftime('%s', 'now') AS INTEGER) * 1000))"
+        if has_mao_expiry
+        else ""
+    )
+    android_pinned_expr = (
+        "CASE WHEN EXISTS ("
+        "SELECT 1 FROM message_add_on mao_pin "
+        "WHERE mao_pin.parent_message_row_id = m._id "
+        "AND mao_pin.message_add_on_type = 79 "
+        f"{expiry_cond}"
+        ") THEN 1 ELSE 0 END"
+        if has_android_add_on
+        else "0"
+    )
+
     globals()["_ANDROID_SELECT"] = f"""
     SELECT
         m._id                                                        AS msg_id,
@@ -7115,6 +7178,8 @@ def create_app(output_root: Path, rescan: bool = False):
         {edit_is_edited_col}                                         AS is_edited,
         {edit_ts_col}                                                AS edited_ts,
         CASE WHEN m.message_type IN (42, 43, 82){mvom_or} THEN 1 ELSE 0 END   AS is_view_once,
+        {android_starred_expr}                                       AS is_starred,
+        {android_pinned_expr}                                        AS is_pinned,
         {ms_col}                                                     AS action_type,
         ''                                                           AS participant_name,
         {mm_width_col}                                               AS media_width,
@@ -7296,9 +7361,12 @@ def create_app(output_root: Path, rescan: bool = False):
                 else ""
             )
             ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if has_lid_dn else ""
+            chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
+            chat_archived_col = "COALESCE(c.archived, 0)" if "archived" in chat_cols else "0"
             rows = conn.execute(f"""
                 SELECT
                     c._id                                               AS chat_row_id,
+                    {chat_archived_col}                                 AS is_archived,
                     CASE WHEN {is_group_chat} THEN CAST(c._id AS TEXT)
                          ELSE COALESCE(
                              {_clean_user_sql("j_chat_real.user")},
@@ -7417,6 +7485,8 @@ def create_app(output_root: Path, rescan: bool = False):
             cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
             has_cs_ident = "ZCONTACTIDENTIFIER" in cs_cols
             cs_ident_col = "cs.ZCONTACTIDENTIFIER" if has_cs_ident else "NULL"
+            has_cs_archived = "ZARCHIVED" in cs_cols
+            ios_archived_col = "COALESCE(cs.ZARCHIVED, 0)" if has_cs_archived else "0"
             mi_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
             vcard_name_ios = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
             if "ZMOVIEDURATION" in mi_cols and "ZVCARDSTRING" in mi_cols:
@@ -7448,6 +7518,7 @@ def create_app(output_root: Path, rescan: bool = False):
             rows = conn.execute(f"""
                 SELECT
                     CAST(cs.Z_PK AS TEXT)                               AS id,
+                    {ios_archived_col}                                  AS is_archived,
                     CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
                          ELSE 'contact' END                            AS type,
                     CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN ''
@@ -7932,6 +8003,8 @@ def create_app(output_root: Path, rescan: bool = False):
                 if source_type == "android" and rows:
                     rows = [dict(r) for r in rows]
                     for r in rows:
+                        r.setdefault("is_starred", 0)
+                        r.setdefault("is_pinned", 0)
                         if r.get("chat_type") == "contact" and r.get("media_type") == "service":
                             r["media_type"] = "deleted"
                             r["text_body"] = (
@@ -8205,6 +8278,8 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("group_event_type", None)
             row.pop("raw_msg_type", None)
             row.pop("member_jid", None)
+            row.setdefault("is_starred", 0)
+            row.setdefault("is_pinned", 0)
 
         _hydrate_poll_rows(rows, source_type, conn)
         _hydrate_quoted_rows(rows, source_type, conn)
@@ -8377,6 +8452,8 @@ def create_app(output_root: Path, rescan: bool = False):
             row.pop("group_event_type", None)
             row.pop("raw_msg_type", None)
             row.pop("member_jid", None)
+            row.setdefault("is_starred", 0)
+            row.setdefault("is_pinned", 0)
         _hydrate_poll_rows(combined, source_type, conn)
         _hydrate_quoted_rows(combined, source_type, conn)
         _hydrate_link_preview_rows(combined, source_type)
