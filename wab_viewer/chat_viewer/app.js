@@ -120,9 +120,12 @@
     const h = Math.floor(m / 60);
     const remMin = m % 60;
     if (h === 0) {
-      return `${remMin} ${remMin === 1 ? 'minute' : 'minutes'}, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}`;
+      const secPart = remSec > 0 ? `, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}` : '';
+      return `${remMin} ${remMin === 1 ? 'minute' : 'minutes'}${secPart}`;
     }
-    return `${h} ${h === 1 ? 'hour' : 'hours'}, ${remMin} ${remMin === 1 ? 'minute' : 'minutes'}, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}`;
+    const minPart = remMin > 0 ? `, ${remMin} ${remMin === 1 ? 'minute' : 'minutes'}` : '';
+    const secPart = remSec > 0 ? `, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}` : '';
+    return `${h} ${h === 1 ? 'hour' : 'hours'}${minPart}${secPart}`;
   }
 
   function fmtTimeGap(diffMs, isPrior) {
@@ -452,6 +455,22 @@
     return el;
   }
 
+  function setTabEnabled(btnId, enabled, titleEnabled, titleDisabled) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    if (!enabled) {
+      btn.classList.add('disabled', 'opacity-30', 'pointer-events-none');
+      btn.setAttribute('aria-disabled', 'true');
+      btn.setAttribute('tabindex', '-1');
+      btn.title = titleDisabled;
+    } else {
+      btn.classList.remove('disabled', 'opacity-30', 'pointer-events-none');
+      btn.removeAttribute('aria-disabled');
+      btn.setAttribute('tabindex', '0');
+      btn.title = titleEnabled;
+    }
+  }
+
   async function checkCallsAvailability() {
     const callsBtn = document.getElementById('tab-btn-calls');
     if (!callsBtn) return;
@@ -462,16 +481,7 @@
       }
       const data = await res.json();
       const calls = data.calls || [];
-      if (calls.length === 0) {
-        callsBtn.classList.add('disabled', 'opacity-30', 'pointer-events-none');
-        callsBtn.setAttribute('aria-disabled', 'true');
-        callsBtn.setAttribute('tabindex', '-1');
-        callsBtn.title = 'No call history in this backup';
-      } else {
-        callsBtn.classList.remove('disabled', 'opacity-30', 'pointer-events-none');
-        callsBtn.removeAttribute('aria-disabled');
-        callsBtn.title = 'Calls';
-      }
+      setTabEnabled('tab-btn-calls', calls.length > 0, 'Calls', 'No call history in this backup');
     } catch (err) {
       console.warn('Failed to check calls availability:', err);
     }
@@ -483,17 +493,8 @@
     document.getElementById('chat-list').innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading Chats…</div>';
     const res = await fetch('/api/chats');
     allChats = await res.json();
-    const archivedBtn = document.getElementById('tab-btn-archived');
-    if (archivedBtn) {
-      const hasArchived = allChats.some(c => c.is_archived);
-      if (!hasArchived) {
-        archivedBtn.classList.add('disabled');
-        archivedBtn.title = 'No archived chats in this backup';
-      } else {
-        archivedBtn.classList.remove('disabled');
-        archivedBtn.title = 'Archived';
-      }
-    }
+    const hasArchived = allChats.some(c => c.is_archived);
+    setTabEnabled('tab-btn-archived', hasArchived, 'Archived', 'No archived chats in this backup');
     await checkCallsAvailability();
     renderChatList();
   }
@@ -575,7 +576,8 @@
   function renderChatList() {
     const list = document.getElementById('chat-list');
     list.innerHTML = '';
-    const visible = currentFilter === 'all' ? allChats : allChats.filter(c => c.type === currentFilter);
+    const activeChats = allChats.filter(c => !c.is_archived);
+    const visible = currentFilter === 'all' ? activeChats : activeChats.filter(c => c.type === currentFilter);
     visible.forEach(chat => {
       const el = document.createElement('div');
       el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
@@ -5051,9 +5053,15 @@
       }
 
       _callsList.push(...calls);
-      calls.forEach(c => {
-        chatListEl.appendChild(renderCallItem(c));
-      });
+      const searchInput = document.getElementById('search-input');
+      const activeQ = (currentNavTab === 'calls' && searchInput) ? searchInput.value.trim() : '';
+      if (activeQ) {
+        filterCallsList(activeQ);
+      } else {
+        calls.forEach(c => {
+          chatListEl.appendChild(renderCallItem(c));
+        });
+      }
     } catch (err) {
       if (currentNavTab !== 'calls') return;
       if (reset) {
@@ -5224,6 +5232,8 @@
     if (durEl) {
       if (call.call_type === 'missed') {
         durEl.textContent = '0s (Missed)';
+      } else if (call.call_type === 'outgoing' && call.duration === 0) {
+        durEl.textContent = '0s (No answer)';
       } else {
         durEl.textContent = fmtDurationLong(call.duration);
       }
@@ -5251,7 +5261,12 @@
         if (cleanPhone) {
           matchedChat = allChats.find(c => {
             const cp = (c.phone_number || '').replace(/[^0-9]/g, '');
-            return cp && (cp.includes(cleanPhone) || cleanPhone.includes(cp));
+            if (!cp) return false;
+            if (cp === cleanPhone) return true;
+            if (cleanPhone.length >= 7 && cp.length >= 7) {
+              return cp.endsWith(cleanPhone) || cleanPhone.endsWith(cp);
+            }
+            return false;
           });
         }
       }
@@ -5289,6 +5304,20 @@
   }
 
   // ---- cross-chat jump engine ----------------------------------------------
+
+  function showContextJumpBanner(icon, text, onSwitch) {
+    const contextBanner = document.getElementById('context-jump-banner');
+    if (!contextBanner) return;
+    contextBanner.style.display = 'flex';
+    const bannerIcon = contextBanner.querySelector('.context-jump-icon');
+    if (bannerIcon) bannerIcon.textContent = icon;
+    const bannerText = document.getElementById('context-jump-text');
+    if (bannerText) bannerText.textContent = text;
+    const switchBtn = document.getElementById('context-jump-switch-btn');
+    if (switchBtn) {
+      switchBtn.onclick = onSwitch;
+    }
+  }
 
   async function openChatAtMessage(chatId, messageId) {
     if (_jumpAbortController) {
@@ -5408,20 +5437,14 @@
         flashHighlightRow(targetEl, 'gold');
       }
 
-      const contextBanner = document.getElementById('context-jump-banner');
-      if (contextBanner) {
-        contextBanner.style.display = 'flex';
-        const switchBtn = document.getElementById('context-jump-switch-btn');
-        if (switchBtn) {
-          switchBtn.onclick = () => {
-            contextBanner.style.display = 'none';
-            switchNavTab('chats');
-            resetFilterTo('all');
-            const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
-            if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          };
-        }
-      }
+      showContextJumpBanner('⭐', 'Viewing message in context', () => {
+        const contextBanner = document.getElementById('context-jump-banner');
+        if (contextBanner) contextBanner.style.display = 'none';
+        switchNavTab('chats');
+        resetFilterTo('all');
+        const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+        if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
 
       hideJumpHud();
       return targetEl || null;
@@ -5570,27 +5593,15 @@
         flashHighlightRow(targetEl, 'emerald');
       }
 
-      const contextBanner = document.getElementById('context-jump-banner');
-      if (contextBanner) {
-        contextBanner.style.display = 'flex';
-        const bannerIcon = contextBanner.querySelector('.context-jump-icon');
-        if (bannerIcon) bannerIcon.textContent = '📞';
-        const bannerText = document.getElementById('context-jump-text');
-        if (bannerText) {
-          const gapSuffix = targetTs ? fmtTimeGap(minDiff, targetTs < timestampMs) : '';
-          bannerText.textContent = `Viewing Call Moment in context${gapSuffix}`;
-        }
-        const switchBtn = document.getElementById('context-jump-switch-btn');
-        if (switchBtn) {
-          switchBtn.onclick = () => {
-            contextBanner.style.display = 'none';
-            switchNavTab('chats');
-            resetFilterTo('all');
-            const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
-            if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          };
-        }
-      }
+      const gapSuffix = targetTs ? fmtTimeGap(minDiff, targetTs < timestampMs) : '';
+      showContextJumpBanner('📞', `Viewing Call Moment in context${gapSuffix}`, () => {
+        const contextBanner = document.getElementById('context-jump-banner');
+        if (contextBanner) contextBanner.style.display = 'none';
+        switchNavTab('chats');
+        resetFilterTo('all');
+        const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+        if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
 
       hideJumpHud();
       return targetEl || null;
@@ -5619,13 +5630,6 @@
     if (!msgDetailsPopup.contains(e.target)) hideMsgDetails();
   });
 
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') {
-      hideMsgDetails();
-      closeChatInfo();
-      closeChatStarred();
-    }
-  });
 
   function fmtReceipt(ts) {
     if (!ts) return '—';
@@ -6062,9 +6066,12 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      hideMsgDetails();
+      closeChatInfo();
+      closeChatStarred();
       closeMapChooser();
       const searchInput = document.getElementById('search-input');
-      if (document.activeElement === searchInput) {
+      if (searchInput && (document.activeElement === searchInput || searchInput.value)) {
         if (searchInput.value) {
           searchInput.value = '';
           if (currentNavTab === 'chats') {
@@ -6077,7 +6084,9 @@
             renderArchivedList('');
           }
         }
-        searchInput.blur();
+        if (document.activeElement === searchInput) {
+          searchInput.blur();
+        }
       }
       return;
     }
