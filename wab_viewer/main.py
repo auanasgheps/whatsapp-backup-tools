@@ -2466,32 +2466,35 @@ def _fts_preserved_chat(
 def _query_preserved_messages(
     pres_conn: sqlite3.Connection,
     chat_id: str,
-    chat_type: str,
+    chat_type: str | None,
     before: int | None,
     after: int | None,
     limit: int,
 ) -> list[dict]:
+    type_clause = " AND chat_type = ?" if chat_type else ""
+    type_params = [chat_type] if chat_type else []
+
     if before is not None:
-        sql = """
+        sql = f"""
             SELECT rowid, * FROM preserved_messages
-            WHERE chat_id = ? AND chat_type = ? AND timestamp_ms < ?
+            WHERE chat_id = ?{type_clause} AND timestamp_ms < ?
             ORDER BY timestamp_ms DESC LIMIT ?
         """
-        rows = pres_conn.execute(sql, (chat_id, chat_type, before, limit)).fetchall()
+        rows = pres_conn.execute(sql, [chat_id] + type_params + [before, limit]).fetchall()
     elif after is not None:
-        sql = """
+        sql = f"""
             SELECT rowid, * FROM preserved_messages
-            WHERE chat_id = ? AND chat_type = ? AND timestamp_ms > ?
+            WHERE chat_id = ?{type_clause} AND timestamp_ms > ?
             ORDER BY timestamp_ms ASC LIMIT ?
         """
-        rows = pres_conn.execute(sql, (chat_id, chat_type, after, limit)).fetchall()
+        rows = pres_conn.execute(sql, [chat_id] + type_params + [after, limit]).fetchall()
     else:
-        sql = """
+        sql = f"""
             SELECT rowid, * FROM preserved_messages
-            WHERE chat_id = ? AND chat_type = ?
+            WHERE chat_id = ?{type_clause}
             ORDER BY timestamp_ms DESC LIMIT ?
         """
-        rows = pres_conn.execute(sql, (chat_id, chat_type, limit)).fetchall()
+        rows = pres_conn.execute(sql, [chat_id] + type_params + [limit]).fetchall()
 
     result = []
     for r in rows:
@@ -8231,13 +8234,91 @@ def create_app(output_root: Path, rescan: bool = False):
         chat_id = request.args.get("chat_id", "")
         chat_type = request.args.get("chat_type", "")
         ts_raw = request.args.get("ts")
+        msg_id_raw = request.args.get("msg_id")
         limit = min(int(request.args.get("limit", 50)), 200)
-        if not ts_raw:
-            return jsonify({"error": "ts is required"}), 400
-        try:
-            ts = int(ts_raw)
-        except ValueError:
-            return jsonify({"error": "ts must be an integer"}), 400
+
+        target_msg_id: int | None = None
+        if msg_id_raw:
+            try:
+                target_msg_id = int(msg_id_raw)
+            except ValueError:
+                return jsonify({"error": "msg_id must be an integer"}), 400
+
+        ts: int | None = None
+        if ts_raw:
+            try:
+                ts = int(ts_raw)
+            except ValueError:
+                return jsonify({"error": "ts must be an integer"}), 400
+
+        conn = get_wa()
+        pres = get_preserved()
+
+        if target_msg_id is not None and ts is None:
+            if target_msg_id < 0 and pres is not None:
+                has_pres_tbl = bool(
+                    pres.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='preserved_messages'"
+                    ).fetchone()
+                )
+                if has_pres_tbl:
+                    pres_lookup_id = abs(target_msg_id)
+                    row = pres.execute(
+                        "SELECT timestamp_ms, chat_id, chat_type FROM preserved_messages WHERE rowid = ? OR msg_id = ?",
+                        (pres_lookup_id, pres_lookup_id),
+                    ).fetchone()
+                    if row:
+                        ts = int(row[0])
+                        if not chat_id and row[1]:
+                            chat_id = str(row[1])
+                        if not chat_type and row[2]:
+                            chat_type = str(row[2])
+            elif conn is not None and source_type == "android":
+                has_msg_tbl = bool(
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
+                    ).fetchone()
+                )
+                if has_msg_tbl:
+                    row = conn.execute(
+                        """SELECT m.timestamp, m.chat_row_id,
+                                  CASE WHEN j.raw_string LIKE '%@g.us' OR c.subject IS NOT NULL THEN 'group' ELSE 'contact' END
+                           FROM message m
+                           LEFT JOIN chat c ON c._id = m.chat_row_id
+                           LEFT JOIN jid j ON j._id = c.jid_row_id
+                           WHERE m._id = ?""",
+                        (target_msg_id,),
+                    ).fetchone()
+                    if row:
+                        ts = int(row[0])
+                        if not chat_id and row[1] is not None:
+                            chat_id = str(row[1])
+                        if not chat_type and row[2]:
+                            chat_type = str(row[2])
+            elif conn is not None and source_type == "ios":
+                has_zwamsg = bool(
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
+                    ).fetchone()
+                )
+                if has_zwamsg:
+                    row = conn.execute(
+                        """SELECT m.ZMESSAGEDATE, m.ZCHATSESSION,
+                                  CASE WHEN s.ZCONTACTJID LIKE '%@g.us' THEN 'group' ELSE 'contact' END
+                           FROM ZWAMESSAGE m
+                           LEFT JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION
+                           WHERE m.Z_PK = ?""",
+                        (target_msg_id,),
+                    ).fetchone()
+                    if row and row[0] is not None:
+                        ts = int(round((float(row[0]) + 978307200.0) * 1000.0))
+                        if not chat_id and row[1] is not None:
+                            chat_id = str(row[1])
+                        if not chat_type and row[2]:
+                            chat_type = str(row[2])
+
+        if ts is None:
+            return jsonify({"error": "ts or valid msg_id is required"}), 400
 
         half = limit // 2
         conn = get_wa()

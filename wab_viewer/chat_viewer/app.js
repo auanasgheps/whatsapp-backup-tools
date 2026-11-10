@@ -554,7 +554,37 @@
       } else if (tabName === 'starred') {
         if (searchInput) searchInput.placeholder = 'Search starred bookmarks…';
         if (chatListEl) {
-          chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>Global bookmarked messages</span></div>';
+          chatListEl.innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading starred messages…</div>';
+          fetch('/api/starred?limit=50')
+            .then(res => res.json())
+            .then(data => {
+              if (currentNavTab !== 'starred') return;
+              const msgs = data.messages || [];
+              if (msgs.length === 0) {
+                chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>No starred bookmarks found</span></div>';
+                return;
+              }
+              chatListEl.innerHTML = '';
+              msgs.forEach(m => {
+                const el = document.createElement('div');
+                el.className = 'chat-item';
+                let preview = m.text || m.text_body || '';
+                if (m.media_type) {
+                  const label = MEDIA_LABELS[m.media_type] || '📎 Media';
+                  preview = preview ? `${label} • ${preview}` : label;
+                }
+                const authorPrefix = m.sender_name ? `${m.sender_name}: ` : '';
+                el.innerHTML = `<div class="chat-name">${esc(m.chat_name || 'Chat')}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
+                el.addEventListener('click', () => {
+                  openChatAtMessage(m.chat_id, m.id);
+                });
+                chatListEl.appendChild(el);
+              });
+            })
+            .catch(() => {
+              if (currentNavTab !== 'starred') return;
+              chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>Failed to load bookmarks</span></div>';
+            });
         }
       } else if (tabName === 'archived') {
         if (searchInput) searchInput.placeholder = 'Search archived chats…';
@@ -609,6 +639,8 @@
     el.classList.add('active');
     el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     closeChatInfo();
+    closeChatStarred();
+    closeMediaGallery();
     currentChat = chat;
     msgList = [];
     noMoreOlder = false;
@@ -662,6 +694,12 @@
     document.getElementById('date-picker-input').value = '';
     document.getElementById('date-go-btn').style.display = 'none';
     document.getElementById('date-clear-btn').style.display = 'none';
+
+    const contextBanner = document.getElementById('context-jump-banner');
+    if (contextBanner) contextBanner.style.display = 'none';
+
+    updateChatStarredBadge(chat.id);
+    loadChatPinnedBanner(chat.id, chat.type);
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
@@ -937,31 +975,35 @@
     }
   }
 
-  function flashHighlightRow(row) {
+  function flashHighlightRow(row, highlightType) {
     if (!row) return;
     const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
     if (bubble) {
-      bubble.classList.remove('search-jump-highlight');
+      const animClass = highlightType === 'gold'
+        ? 'jump-highlight-gold'
+        : (highlightType === 'emerald' ? 'jump-highlight-emerald' : 'search-jump-highlight');
+      const duration = (highlightType === 'gold' || highlightType === 'emerald') ? 2200 : 1200;
+      bubble.classList.remove('search-jump-highlight', 'jump-highlight-gold', 'jump-highlight-emerald');
       void bubble.offsetWidth;
-      bubble.classList.add('search-jump-highlight');
-      const timer = setTimeout(() => bubble.classList.remove('search-jump-highlight'), 1200);
+      bubble.classList.add(animClass);
+      const timer = setTimeout(() => bubble.classList.remove(animClass), duration);
       bubble.addEventListener('animationend', () => {
         clearTimeout(timer);
-        bubble.classList.remove('search-jump-highlight');
+        bubble.classList.remove(animClass);
       }, { once: true });
     }
   }
 
-  async function jumpToMessage(msg) {
+  async function jumpToMessage(msg, highlightType) {
     const inWin = rowForMsgId(msg.msg_id);
     if (inWin) {
       suppressScroll = true;
       inWin.scrollIntoView({ behavior: 'instant', block: 'center' });
       suppressScroll = false;
-      flashHighlightRow(inWin);
+      flashHighlightRow(inWin, highlightType);
       return inWin;
     }
-    const row = await jumpToTimestamp(msg.timestamp_ms, msg.msg_id, true);
+    const row = await jumpToTimestamp(msg.timestamp_ms, msg.msg_id, true, highlightType);
     return row;
   }
 
@@ -1275,9 +1317,9 @@
         quote.addEventListener('click', (e) => {
           e.stopPropagation();
           if (msg.quoted_msg_id) {
-            jumpToMessage({ msg_id: msg.quoted_msg_id, timestamp_ms: msg.quoted_ts });
+            jumpToMessage({ msg_id: msg.quoted_msg_id, timestamp_ms: msg.quoted_ts }, 'default');
           } else {
-            jumpToTimestamp(msg.quoted_ts, null, true);
+            jumpToTimestamp(msg.quoted_ts, null, true, 'default');
           }
         });
       }
@@ -3082,7 +3124,7 @@
       btn.disabled = true;
       btn.textContent = '⏳ in chat';
       closeMediaGallery();
-      jumpToMessage(msg);
+      jumpToMessage(msg, 'default');
     });
     cell.appendChild(btn);
     return cell;
@@ -3129,6 +3171,8 @@
 
   async function openMediaGallery() {
     if (!currentChat) return;
+    closeChatInfo();
+    closeChatStarred();
     const grid = document.getElementById('media-gallery-grid');
     const stats = document.getElementById('media-gallery-stats');
     const switcher = document.getElementById('media-view-switcher');
@@ -3303,6 +3347,10 @@
       }
     }
     if (e.key === 'Escape') {
+      const starredDrawer = document.getElementById('chat-starred-drawer');
+      if (starredDrawer && starredDrawer.classList.contains('open')) {
+        closeChatStarred(); return;
+      }
       if (document.getElementById('chat-info-panel').classList.contains('open')) {
         closeChatInfo(); return;
       }
@@ -3608,7 +3656,7 @@
         const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
         if (el2) {
           await selectChat(chat, el2);
-          const row = await jumpToTimestamp(r.timestamp_ms, null, true);
+          const row = await jumpToTimestamp(r.timestamp_ms, null, true, 'default');
           if (row) {
             const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
             if (bubble) {
@@ -3754,7 +3802,7 @@
       highlightMessageRow(existing);
       return;
     }
-    await jumpToTimestamp(result.timestamp_ms, result.msg_id, true);
+    await jumpToTimestamp(result.timestamp_ms, result.msg_id, true, 'default');
     const loaded = rowForMsgId(result.msg_id);
     if (loaded) highlightMessageRow(loaded);
   }
@@ -3782,7 +3830,7 @@
     btn.disabled = true;
     btn.setAttribute('aria-busy', 'true');
     try {
-      await jumpToTimestamp(new Date(val).getTime(), null, false);
+      await jumpToTimestamp(new Date(val).getTime(), null, false, 'default');
     } finally {
       btn.disabled = false;
       btn.removeAttribute('aria-busy');
@@ -3983,7 +4031,7 @@
   // chat search), pass its msg_id to bypass the nearest-ts early-exit.
   // isExactTarget: true when jumping to a specific message or quote (tightens threshold to 1500ms
   // instead of the 24-hour date-picker window).
-  async function jumpToTimestamp(ts, exactMsgId, isExactTarget) {
+  async function jumpToTimestamp(ts, exactMsgId, isExactTarget, highlightType) {
     if (exactMsgId == null) {
       const near = nearestMsgToTs(ts);
       const threshold = isExactTarget ? 1500 : 86400000;
@@ -3992,7 +4040,7 @@
         suppressScroll = true;
         existing.scrollIntoView({ behavior: 'instant', block: 'center' });
         suppressScroll = false;
-        if (isExactTarget) flashHighlightRow(existing);
+        if (isExactTarget) flashHighlightRow(existing, highlightType);
         return existing;
       }
     }
@@ -4016,9 +4064,10 @@
       const params = new URLSearchParams({
         chat_id: currentChat.id,
         chat_type: currentChat.type,
-        ts,
         limit: 50
       });
+      if (ts != null) params.set('ts', ts);
+      if (exactMsgId != null) params.set('msg_id', exactMsgId);
       const res = await fetch('/api/messages/at?' + params, { signal: abortSignal });
       if (!res.ok) {
         if (gen === _loadGen) {
@@ -4046,7 +4095,7 @@
       }
       if (targetEl) {
         await _pinToMsg(targetEl, gen);
-        if (isExactTarget) flashHighlightRow(targetEl);
+        if (isExactTarget) flashHighlightRow(targetEl, highlightType);
       }
       if (gen !== _loadGen) return null;
       hideJumpHud();
@@ -4111,7 +4160,11 @@
   }
 
   function closeChatInfo() {
-    document.getElementById('chat-info-panel').classList.remove('open');
+    const panel = document.getElementById('chat-info-panel');
+    if (panel) {
+      panel.classList.remove('open');
+      panel.style.display = 'none';
+    }
     const desc = document.getElementById('chat-info-desc');
     if (desc) {
       desc.textContent = '';
@@ -4121,24 +4174,52 @@
 
   async function openChatInfo() {
     if (!currentChat) return;
+    closeMediaGallery();
+    closeChatStarred();
     const panel = document.getElementById('chat-info-panel');
+    const heading = document.getElementById('chat-info-header-heading');
+    const avatar = document.getElementById('chat-info-avatar');
     const title = document.getElementById('chat-info-title');
+    const phone = document.getElementById('chat-info-phone');
     const desc  = document.getElementById('chat-info-desc');
-    const body  = document.getElementById('chat-info-body');
+    const details = document.getElementById('chat-info-details');
+    const closeBtn = document.getElementById('chat-info-close');
+    if (!panel || !details) return;
 
-    title.textContent = currentChat.display_name || '';
+    if (heading) {
+      heading.textContent = currentChat.type === 'group' ? 'Group Info' : 'Contact Info';
+    }
+    if (avatar) {
+      const avatarKey = currentChat.phone_number || currentChat.id || currentChat.display_name;
+      avatar.style.backgroundColor = getAvatarColor(avatarKey);
+      avatar.textContent = getInitials(currentChat.display_name);
+    }
+    if (title) {
+      title.textContent = currentChat.display_name || '';
+    }
+    if (phone) {
+      if (currentChat.type === 'contact') {
+        const fmtPhone = formatPhoneNumber(currentChat.phone_number || currentChat.id);
+        phone.textContent = fmtPhone ? fmtPhone : '';
+      } else {
+        phone.textContent = 'Group conversation';
+      }
+    }
     if (desc) {
       desc.textContent = '';
       desc.style.display = 'none';
     }
-    body.innerHTML = '';
+    details.innerHTML = '';
 
     // Show loading skeleton
     const loadingRow = document.createElement('div');
     loadingRow.className = 'chat-info-row';
     loadingRow.appendChild(_spinner());
-    body.appendChild(loadingRow);
+    details.appendChild(loadingRow);
+
+    panel.style.display = 'flex';
     panel.classList.add('open');
+    if (closeBtn) closeBtn.focus();
 
     const params = new URLSearchParams({ chat_id: currentChat.id, chat_type: currentChat.type });
     const chatAtOpen = currentChat;
@@ -4154,7 +4235,7 @@
       info = await infoResp.json();
     } catch (_) {
       if (currentChat === chatAtOpen && panel.classList.contains('open')) {
-        body.innerHTML = '<div class="chat-info-row" style="color:var(--text-muted)">Could not load chat info.</div>';
+        details.innerHTML = '<div class="chat-info-row" style="color:var(--text-muted)">Could not load chat info.</div>';
       }
       return;
     }
@@ -4162,9 +4243,12 @@
     // Panel may have been closed or chat switched while awaiting
     if (currentChat !== chatAtOpen || !panel.classList.contains('open')) return;
 
-    body.innerHTML = '';
+    details.innerHTML = '';
 
     if (currentChat.type === 'group' && info.members && info.members.length) {
+      if (phone) {
+        phone.textContent = `${info.members.length} participants`;
+      }
       const subEl = document.getElementById('chat-subtitle');
       if (subEl) {
         let subHtml = `${info.members.length} participants`;
@@ -4184,21 +4268,21 @@
     const fmtNum = n => (n === null || n === undefined || n < 0) ? '—' : n.toLocaleString();
 
     if (currentChat.type === 'contact' && info.number) {
-      body.appendChild(_infoRow('Phone', '+' + info.number).row);
+      details.appendChild(_infoRow('Phone', '+' + info.number).row);
     }
 
     if (currentChat.type === 'group' && info.created_ts) {
-      body.appendChild(_infoRow('Group created', fmtTs(info.created_ts)).row);
+      details.appendChild(_infoRow('Group created', fmtTs(info.created_ts)).row);
       if (info.creator_number || info.creator_name) {
         const match = info.creator_number ? (info.members || []).find(m => m.number && m.number === info.creator_number) : null;
         const creatorName = (match && match.name) ? match.name : (info.creator_name || (info.creator_number ? '+' + info.creator_number : ''));
         if (creatorName) {
-          body.appendChild(_infoRow('Created by', creatorName).row);
+          details.appendChild(_infoRow('Created by', creatorName).row);
         }
       }
     }
 
-    body.appendChild(_infoRow('Conversation since', fmtTs(info.first_ts)).row);
+    details.appendChild(_infoRow('Conversation since', fmtTs(info.first_ts)).row);
 
     if (info.first_ts && info.last_ts && info.last_ts !== info.first_ts) {
       const days = Math.round((info.last_ts - info.first_ts) / 86400000);
@@ -4208,19 +4292,19 @@
       if (years > 0) span += years + (years === 1 ? ' year' : ' years');
       if (months > 0) span += (span ? ', ' : '') + months + (months === 1 ? ' month' : ' months');
       if (!span) span = days + (days === 1 ? ' day' : ' days');
-      body.appendChild(_infoRow('Duration', span).row);
+      details.appendChild(_infoRow('Duration', span).row);
     }
 
     if (currentChat.type === 'contact') {
       const sentReceived = document.createElement('span');
       sentReceived.textContent = fmtNum(info.sent) + ' sent · ' + fmtNum(info.received) + ' received';
-      body.appendChild(_infoRow('Messages', sentReceived).row);
+      details.appendChild(_infoRow('Messages', sentReceived).row);
     } else {
-      body.appendChild(_infoRow('Total messages', fmtNum(info.total)).row);
+      details.appendChild(_infoRow('Total messages', fmtNum(info.total)).row);
     }
 
     if (info.calls_count) {
-      body.appendChild(_infoRow('Preserved calls', fmtNum(info.calls_count)).row);
+      details.appendChild(_infoRow('Preserved calls', fmtNum(info.calls_count)).row);
     }
 
     // Gallery link row
@@ -4228,11 +4312,11 @@
     galleryLink.className = 'chat-info-link';
     galleryLink.textContent = 'Open Media Gallery →';
     galleryLink.addEventListener('click', () => { closeChatInfo(); openMediaGallery(); });
-    body.appendChild(_infoRow('Media', galleryLink).row);
+    details.appendChild(_infoRow('Media', galleryLink).row);
 
     // Media size row
     const sizeRowObj = _infoRow('Media size', 'Calculating…');
-    body.appendChild(sizeRowObj.row);
+    details.appendChild(sizeRowObj.row);
     sizePromise.then(sizeData => {
       if (currentChat === chatAtOpen && panel.classList.contains('open')) {
         sizeRowObj.val.textContent = _formatBytes(sizeData.bytes || 0);
@@ -4265,7 +4349,7 @@
         });
         membersWrap.appendChild(more);
       }
-      body.appendChild(_infoRow('Members (' + info.members.length + ')', membersWrap).row);
+      details.appendChild(_infoRow('Members (' + info.members.length + ')', membersWrap).row);
     }
 
     // Top senders
@@ -4277,7 +4361,7 @@
         el.textContent = (s.name || '?') + ': ' + s.count.toLocaleString();
         sendersWrap.appendChild(el);
       });
-      body.appendChild(_infoRow('Top senders', sendersWrap).row);
+      details.appendChild(_infoRow('Top senders', sendersWrap).row);
     }
   }
 
@@ -4306,6 +4390,443 @@
     if (e.target === document.getElementById('chat-info-panel')) closeChatInfo();
   });
 
+  // ---- chat starred flyout & count badge -----------------------------------
+
+  let _starredBadgePollGen = 0;
+
+  async function updateChatStarredBadge(chatId) {
+    const badge = document.getElementById('chat-starred-badge');
+    if (!badge) return;
+    const gen = ++_starredBadgePollGen;
+    try {
+      const res = await fetch(`/api/chat/${encodeURIComponent(chatId)}/starred?limit=1`);
+      if (gen !== _starredBadgePollGen || !currentChat || String(currentChat.id) !== String(chatId)) return;
+      if (!res.ok) {
+        badge.style.display = 'none';
+        return;
+      }
+      const data = await res.json();
+      const count = data.count || 0;
+      if (count > 0) {
+        badge.textContent = count > 99 ? '99+' : String(count);
+        badge.style.display = 'inline-flex';
+      } else {
+        badge.style.display = 'none';
+      }
+    } catch {
+      if (gen === _starredBadgePollGen) badge.style.display = 'none';
+    }
+  }
+
+  function closeChatStarred() {
+    const drawer = document.getElementById('chat-starred-drawer');
+    if (drawer) {
+      drawer.classList.remove('open');
+      drawer.style.display = 'none';
+      const triggerBtn = document.getElementById('chat-starred-btn');
+      if (triggerBtn && document.activeElement && drawer.contains(document.activeElement)) {
+        triggerBtn.focus();
+      }
+    }
+  }
+
+  async function openChatStarred() {
+    if (!currentChat) return;
+    closeChatInfo();
+    closeMediaGallery();
+
+    const drawer = document.getElementById('chat-starred-drawer');
+    const headerCount = document.getElementById('chat-starred-header-count');
+    const body = document.getElementById('chat-starred-body');
+    const closeBtn = document.getElementById('chat-starred-close');
+    if (!drawer || !body) return;
+
+    drawer.style.display = 'flex';
+    drawer.classList.add('open');
+    if (closeBtn) closeBtn.focus();
+    body.innerHTML = '<div style="color:var(--text-muted);padding:24px;text-align:center"><div class="chat-info-spinner"></div> Loading starred messages…</div>';
+
+    try {
+      const res = await fetch(`/api/chat/${encodeURIComponent(currentChat.id)}/starred?limit=100`);
+      if (!res.ok) {
+        body.innerHTML = '<div class="starred-empty"><span class="starred-empty-icon">⚠️</span><span>Failed to load starred messages</span></div>';
+        return;
+      }
+      const data = await res.json();
+      const messages = data.messages || [];
+      if (headerCount) {
+        headerCount.textContent = String(data.count || messages.length);
+      }
+
+      if (messages.length === 0) {
+        body.innerHTML = '<div class="starred-empty"><span class="starred-empty-icon">⭐</span><span>No starred messages in this chat</span></div>';
+        return;
+      }
+
+      body.innerHTML = '';
+      const subheader = document.createElement('div');
+      subheader.className = 'chat-starred-subheader';
+      subheader.textContent = `${messages.length} starred message${messages.length === 1 ? '' : 's'} in this conversation:`;
+      body.appendChild(subheader);
+
+      messages.forEach(m => {
+        const card = document.createElement('div');
+        card.className = 'starred-card';
+        card.setAttribute('tabindex', '0');
+        card.setAttribute('aria-label', `Starred message from ${m.sender_name}`);
+
+        const topRow = document.createElement('div');
+        topRow.className = 'starred-card-top';
+
+        const metaEl = document.createElement('span');
+        metaEl.className = 'starred-card-meta';
+        const dateStr = fmtDateSep(m.timestamp * 1000);
+        metaEl.textContent = `${m.sender_name || 'Unknown'} (${dateStr})`;
+
+        const chevron = document.createElement('span');
+        chevron.className = 'starred-card-chevron';
+        chevron.textContent = '›';
+
+        topRow.appendChild(metaEl);
+        topRow.appendChild(chevron);
+
+        const snippetEl = document.createElement('div');
+        snippetEl.className = 'starred-card-snippet';
+        let previewText = m.text || m.text_body || '';
+        if (m.media_type) {
+          const icon = m.media_type === 'photo' ? '📷' : (m.media_type === 'video' ? '🎬' : (m.media_type === 'document' ? '📄' : (m.media_type === 'audio' ? '🎵' : '📎')));
+          const label = MEDIA_LABELS[m.media_type] || 'Media';
+          previewText = previewText ? `${icon} ${previewText}` : `${icon} ${label}`;
+        }
+        snippetEl.textContent = previewText ? `"${previewText}"` : '…';
+
+        card.appendChild(topRow);
+        card.appendChild(snippetEl);
+
+        card.addEventListener('click', () => {
+          jumpToMessage({ msg_id: m.id, timestamp_ms: m.timestamp * 1000 }, 'gold');
+        });
+        card.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            card.click();
+          }
+        });
+
+        body.appendChild(card);
+      });
+    } catch {
+      body.innerHTML = '<div class="starred-empty"><span class="starred-empty-icon">⚠️</span><span>Unable to load starred messages</span></div>';
+    }
+  }
+
+  function toggleChatStarred() {
+    const drawer = document.getElementById('chat-starred-drawer');
+    if (drawer && drawer.classList.contains('open')) {
+      closeChatStarred();
+    } else {
+      openChatStarred();
+    }
+  }
+
+  const starredBtn = document.getElementById('chat-starred-btn');
+  if (starredBtn) {
+    starredBtn.addEventListener('click', toggleChatStarred);
+  }
+  const starredCloseBtn = document.getElementById('chat-starred-close');
+  if (starredCloseBtn) {
+    starredCloseBtn.addEventListener('click', closeChatStarred);
+  }
+  const starredDrawer = document.getElementById('chat-starred-drawer');
+  if (starredDrawer) {
+    starredDrawer.addEventListener('click', e => {
+      if (e.target === starredDrawer) closeChatStarred();
+    });
+    starredDrawer.addEventListener('keydown', e => {
+      if (e.key === 'Tab') {
+        const focusable = Array.from(starredDrawer.querySelectorAll('button, [tabindex="0"]')).filter(
+          el => el.offsetParent !== null
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    });
+  }
+
+  // ---- pinned message banner -----------------------------------------------
+
+  const _dismissedPins = new Set();
+  let _chatPins = [];
+  let _currentPinIndex = 0;
+  let _pinnedBannerPollGen = 0;
+
+  async function loadChatPinnedBanner(chatId, chatType) {
+    const banner = document.getElementById('pinned-banner');
+    if (!banner) return;
+    const gen = ++_pinnedBannerPollGen;
+    try {
+      const params = new URLSearchParams({ chat_type: chatType });
+      const res = await fetch(`/api/chat/${encodeURIComponent(chatId)}/pinned?` + params);
+      if (gen !== _pinnedBannerPollGen || !currentChat || String(currentChat.id) !== String(chatId)) return;
+      if (!res.ok) {
+        banner.style.display = 'none';
+        return;
+      }
+      const data = await res.json();
+      const rawPins = data.pinned_messages || (data.pinned_message ? [data.pinned_message] : []);
+      _chatPins = rawPins.filter(p => !_dismissedPins.has(p.id));
+      _currentPinIndex = 0;
+      renderPinnedBanner();
+    } catch {
+      if (gen === _pinnedBannerPollGen) banner.style.display = 'none';
+    }
+  }
+
+  function renderPinnedBanner() {
+    const banner = document.getElementById('pinned-banner');
+    if (!banner) return;
+    if (!_chatPins || _chatPins.length === 0 || _currentPinIndex >= _chatPins.length) {
+      banner.style.display = 'none';
+      return;
+    }
+    banner.style.display = 'flex';
+    const pin = _chatPins[_currentPinIndex];
+    const authorEl = document.getElementById('pinned-banner-author');
+    const snippetEl = document.getElementById('pinned-banner-snippet');
+    if (authorEl) {
+      authorEl.textContent = pin.sender_name ? `Pinned • ${pin.sender_name}:` : 'Pinned:';
+    }
+    if (snippetEl) {
+      let snippet = pin.text || pin.text_body || '';
+      if (!snippet && pin.media_type) {
+        snippet = MEDIA_LABELS[pin.media_type] || '📎 Media';
+      }
+      snippetEl.textContent = snippet || 'Message';
+    }
+
+    const navEl = document.getElementById('pinned-banner-nav');
+    const countEl = document.getElementById('pinned-banner-count');
+    if (navEl && countEl) {
+      if (_chatPins.length > 1) {
+        navEl.style.display = 'flex';
+        countEl.textContent = `${_currentPinIndex + 1} of ${_chatPins.length}`;
+      } else {
+        navEl.style.display = 'none';
+      }
+    }
+  }
+
+  const pinnedBanner = document.getElementById('pinned-banner');
+  if (pinnedBanner) {
+    const contentEl = pinnedBanner.querySelector('.pinned-banner-content');
+    if (contentEl) {
+      contentEl.addEventListener('click', () => {
+        if (_chatPins && _chatPins.length > 0 && _currentPinIndex < _chatPins.length) {
+          const pin = _chatPins[_currentPinIndex];
+          jumpToMessage({ msg_id: pin.id, timestamp_ms: pin.timestamp * 1000 }, 'emerald');
+        }
+      });
+      contentEl.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          contentEl.click();
+        }
+      });
+    }
+
+    const prevBtn = document.getElementById('pinned-banner-prev');
+    if (prevBtn) {
+      prevBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (_chatPins.length > 1) {
+          _currentPinIndex = (_currentPinIndex - 1 + _chatPins.length) % _chatPins.length;
+          renderPinnedBanner();
+        }
+      });
+    }
+
+    const nextBtn = document.getElementById('pinned-banner-next');
+    if (nextBtn) {
+      nextBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (_chatPins.length > 1) {
+          _currentPinIndex = (_currentPinIndex + 1) % _chatPins.length;
+          renderPinnedBanner();
+        }
+      });
+    }
+
+    const dismissBtn = document.getElementById('pinned-banner-dismiss');
+    if (dismissBtn) {
+      dismissBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (_chatPins && _chatPins.length > 0 && _currentPinIndex < _chatPins.length) {
+          const pin = _chatPins[_currentPinIndex];
+          _dismissedPins.add(pin.id);
+          _chatPins = _chatPins.filter(p => !_dismissedPins.has(p.id));
+          if (_currentPinIndex >= _chatPins.length) {
+            _currentPinIndex = 0;
+          }
+          renderPinnedBanner();
+        }
+      });
+    }
+  }
+
+  // ---- cross-chat jump engine ----------------------------------------------
+
+  async function openChatAtMessage(chatId, messageId) {
+    if (_jumpAbortController) {
+      _jumpAbortController.abort();
+    }
+    _jumpAbortController = new AbortController();
+    const abortSignal = _jumpAbortController.signal;
+    const gen = ++_loadGen;
+    loading = true;
+
+    let chat = allChats.find(c => String(c.id) === String(chatId) || c.jid === chatId);
+    if (!chat) {
+      await loadChats();
+      chat = allChats.find(c => String(c.id) === String(chatId) || c.jid === chatId);
+    }
+    if (!chat) {
+      loading = false;
+      throw new Error(`Chat with ID ${chatId} not found`);
+    }
+
+    currentChat = chat;
+    msgList = [];
+    noMoreOlder = false;
+    noMoreNewer = false;
+    isUserAtBottom = false;
+
+    closeChatInfo();
+    closeChatStarred();
+    closeMediaGallery();
+
+    resetFilterTo('all');
+
+    document.querySelectorAll('.chat-item').forEach(e => {
+      const match = e.dataset.id === String(chat.id) && e.dataset.type === chat.type;
+      e.classList.toggle('active', match);
+      if (match) e.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+
+    const scroll = document.getElementById('message-scroll');
+    scroll.innerHTML = '';
+    scroll.classList.add('is-navigating');
+    document.getElementById('scroll-to-bottom').classList.remove('visible');
+
+    document.getElementById('chat-header').style.display = 'flex';
+    document.getElementById('chat-title').textContent = chat.display_name;
+
+    const avatarEl = document.getElementById('chat-header-avatar');
+    if (avatarEl) {
+      const avatarKey = chat.phone_number || chat.id || chat.display_name;
+      avatarEl.style.backgroundColor = getAvatarColor(avatarKey);
+      avatarEl.textContent = getInitials(chat.display_name);
+    }
+
+    const subtitleEl = document.getElementById('chat-subtitle');
+    if (subtitleEl) {
+      if (chat.type === 'group') {
+        let subHtml = 'Group chat';
+        if (chat.is_preserved_only) {
+          subHtml += ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+        }
+        subtitleEl.innerHTML = subHtml;
+      } else {
+        const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
+        let subHtml = formattedPhone ? esc(formattedPhone) : '';
+        if (chat.is_preserved_only) {
+          subHtml += (subHtml ? ' ' : '') + '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+        }
+        subtitleEl.innerHTML = subHtml;
+      }
+    }
+
+    document.getElementById('empty-pane').style.display = 'none';
+    const sr = document.getElementById('search-results');
+    if (sr) {
+      sr.classList.remove('has-results');
+      sr.innerHTML = '';
+    }
+
+    document.getElementById('chat-search-input').value = '';
+    document.getElementById('chat-search-clear').style.display = 'none';
+    clearChatSearch();
+    document.getElementById('date-picker-input').value = '';
+    document.getElementById('date-go-btn').style.display = 'none';
+    document.getElementById('date-clear-btn').style.display = 'none';
+
+    updateChatStarredBadge(chat.id);
+    loadChatPinnedBanner(chat.id, chat.type);
+
+    const loadingEl = document.getElementById('chat-loading');
+    loadingEl.style.display = 'flex';
+    showJumpHud('Jumping to message in context…');
+
+    try {
+      const params = new URLSearchParams({
+        chat_id: chat.id,
+        chat_type: chat.type,
+        msg_id: messageId,
+        limit: 50
+      });
+      const res = await fetch('/api/messages/at?' + params, { signal: abortSignal });
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status} when loading messages at msg_id ${messageId}`);
+      }
+      const msgs = await res.json();
+      if (gen !== _loadGen) return null;
+
+      mergePage(msgs);
+      renderWindow();
+
+      let targetEl = rowForMsgId(messageId);
+      if (targetEl) {
+        await _pinToMsg(targetEl, gen);
+        flashHighlightRow(targetEl, 'gold');
+      }
+
+      const contextBanner = document.getElementById('context-jump-banner');
+      if (contextBanner) {
+        contextBanner.style.display = 'flex';
+        const switchBtn = document.getElementById('context-jump-switch-btn');
+        if (switchBtn) {
+          switchBtn.onclick = () => {
+            contextBanner.style.display = 'none';
+            switchNavTab('chats');
+            resetFilterTo('all');
+            const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+            if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          };
+        }
+      }
+
+      hideJumpHud();
+      return targetEl || null;
+    } catch (err) {
+      if (err.name === 'AbortError') return null;
+      showJumpHudError('Unable to load message');
+      throw err;
+    } finally {
+      if (scroll) scroll.classList.remove('is-navigating');
+      if (gen === _loadGen) {
+        loadingEl.style.display = 'none';
+        loading = false;
+      }
+    }
+  }
+
   // ---- message details popup ------------------------------------------------
 
   const msgDetailsPopup = document.getElementById('msg-details-popup');
@@ -4319,7 +4840,11 @@
   });
 
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') hideMsgDetails();
+    if (e.key === 'Escape') {
+      hideMsgDetails();
+      closeChatInfo();
+      closeChatStarred();
+    }
   });
 
   function fmtReceipt(ts) {
