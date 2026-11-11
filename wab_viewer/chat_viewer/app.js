@@ -463,12 +463,12 @@
     const btn = document.getElementById(btnId);
     if (!btn) return;
     if (!enabled) {
-      btn.classList.add('disabled', 'opacity-30', 'pointer-events-none');
+      btn.classList.add('disabled');
       btn.setAttribute('aria-disabled', 'true');
       btn.setAttribute('tabindex', '-1');
       btn.title = titleDisabled;
     } else {
-      btn.classList.remove('disabled', 'opacity-30', 'pointer-events-none');
+      btn.classList.remove('disabled');
       btn.removeAttribute('aria-disabled');
       btn.setAttribute('tabindex', '0');
       btn.title = titleEnabled;
@@ -544,10 +544,10 @@
         const d = await r.json();
         if (gen !== _indexPollGen) return;
         if (d.status === 'done') {
-          document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"] .index-spinner`)?.remove();
+          _findChatListItem(chat.id, chat.type)?.querySelector('.index-spinner')?.remove();
           return;
         }
-        const liveEl = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+        const liveEl = _findChatListItem(chat.id, chat.type);
         if (liveEl && !liveEl.querySelector('.index-spinner')) {
           const sp = document.createElement('span');
           sp.className = 'index-spinner';
@@ -586,24 +586,32 @@
     return (prefix + esc(text.slice(0, 60))) || '…';
   }
 
+  function _findChatListItem(chatId, chatType) {
+    const idSel = CSS.escape(String(chatId));
+    const typeSel = CSS.escape(String(chatType));
+    return document.querySelector(`.chat-item[data-id="${idSel}"][data-type="${typeSel}"]`);
+  }
+
+  function _createChatListItem(chat) {
+    const el = document.createElement('div');
+    const isActive = currentChat && String(currentChat.id) === String(chat.id) && currentChat.type === chat.type;
+    el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '') + (isActive ? ' active' : '');
+    el.dataset.id = chat.id;
+    el.dataset.type = chat.type;
+    const tagHtml = chat.is_preserved_only
+      ? '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
+      : '';
+    el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
+    el.addEventListener('click', () => selectChat(chat, el));
+    return el;
+  }
+
   function renderChatList() {
     const list = document.getElementById('chat-list');
     list.innerHTML = '';
     const activeChats = allChats.filter(c => !c.is_archived);
     const visible = currentFilter === 'all' ? activeChats : activeChats.filter(c => c.type === currentFilter);
-    visible.forEach(chat => {
-      const el = document.createElement('div');
-      const isActive = currentChat && String(currentChat.id) === String(chat.id) && currentChat.type === chat.type;
-      el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '') + (isActive ? ' active' : '');
-      el.dataset.id = chat.id;
-      el.dataset.type = chat.type;
-      const tagHtml = chat.is_preserved_only
-        ? '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
-        : '';
-      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
-      el.addEventListener('click', () => selectChat(chat, el));
-      list.appendChild(el);
-    });
+    visible.forEach(chat => list.appendChild(_createChatListItem(chat)));
   }
 
   function renderArchivedList(searchQuery) {
@@ -627,19 +635,7 @@
       return;
     }
 
-    matches.forEach(chat => {
-      const el = document.createElement('div');
-      const isActive = currentChat && String(currentChat.id) === String(chat.id) && currentChat.type === chat.type;
-      el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '') + (isActive ? ' active' : '');
-      el.dataset.id = chat.id;
-      el.dataset.type = chat.type;
-      const tagHtml = chat.is_preserved_only
-        ? '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
-        : '';
-      el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
-      el.addEventListener('click', () => selectChat(chat, el));
-      list.appendChild(el);
-    });
+    matches.forEach(chat => list.appendChild(_createChatListItem(chat)));
   }
 
   // ---- bottom navigation bar -----------------------------------------------
@@ -683,7 +679,7 @@
         const msgScroll = document.getElementById('message-scroll');
         const emptyPane = document.getElementById('empty-pane');
         if (chatHeader) chatHeader.style.display = 'flex';
-        if (msgScroll) msgScroll.style.display = 'block';
+        if (msgScroll) msgScroll.style.display = 'flex';
         if (emptyPane) emptyPane.style.display = 'none';
       } else {
         const emptyPane = document.getElementById('empty-pane');
@@ -805,28 +801,23 @@
 
   // ---- select chat ---------------------------------------------------------
 
-  async function selectChat(chat, el) {
-    _indexPollGen++;
-    _activeStarredMsgId = null;
-    const gen = ++_loadGen;
-    loading = false;
-    document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
-    el.classList.add('active');
-    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  function _prepareChatPane(chat, isJumping) {
     closeChatInfo();
     closeChatStarred();
     closeMediaGallery();
     currentChat = chat;
     msgList = [];
     noMoreOlder = false;
-    noMoreNewer = true;
-    isUserAtBottom = true;
+    noMoreNewer = !isJumping;
+    isUserAtBottom = !isJumping;
+
+    const callInspector = document.getElementById('pane-call-inspector');
+    if (callInspector) callInspector.style.display = 'none';
 
     const scroll = document.getElementById('message-scroll');
     scroll.innerHTML = '';
-    scroll.style.display = 'block';
-    const callInspector = document.getElementById('pane-call-inspector');
-    if (callInspector) callInspector.style.display = 'none';
+    scroll.style.display = 'flex';
+    scroll.classList.toggle('is-navigating', isJumping);
     document.getElementById('scroll-to-bottom').classList.remove('visible');
 
     document.getElementById('chat-header').style.display = 'flex';
@@ -856,16 +847,20 @@
         subtitleEl.innerHTML = subHtml;
       }
     }
-    document.getElementById('empty-pane').style.display = 'none';
-    document.getElementById('search-results').classList.remove('has-results');
-    document.getElementById('search-results').innerHTML = '';
 
-    // reset in-chat search and date picker when switching chats
-    if (_jumpAbortController) {
+    document.getElementById('empty-pane').style.display = 'none';
+    const sr = document.getElementById('search-results');
+    if (sr) {
+      sr.classList.remove('has-results');
+      sr.innerHTML = '';
+    }
+
+    if (_jumpAbortController && !isJumping) {
       _jumpAbortController.abort();
     }
-    hideJumpHud();
-    scroll.classList.remove('is-navigating');
+    if (!isJumping) {
+      hideJumpHud();
+    }
     document.getElementById('chat-search-input').value = '';
     document.getElementById('chat-search-clear').style.display = 'none';
     clearChatSearch();
@@ -873,11 +868,26 @@
     document.getElementById('date-go-btn').style.display = 'none';
     document.getElementById('date-clear-btn').style.display = 'none';
 
-    const contextBanner = document.getElementById('context-jump-banner');
-    if (contextBanner) contextBanner.style.display = 'none';
+    if (!isJumping) {
+      const contextBanner = document.getElementById('context-jump-banner');
+      if (contextBanner) contextBanner.style.display = 'none';
+    }
 
     updateChatStarredBadge(chat.id);
     loadChatPinnedBanner(chat.id, chat.type);
+    return scroll;
+  }
+
+  async function selectChat(chat, el) {
+    _indexPollGen++;
+    _activeStarredMsgId = null;
+    const gen = ++_loadGen;
+    loading = false;
+    document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
+    el.classList.add('active');
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+    const scroll = _prepareChatPane(chat, false);
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
@@ -941,22 +951,44 @@
     });
     if (direction === 'older' && msgList.length > 0) {
       params.set('before', msgList[0].timestamp_ms);
+      params.set('inclusive', '1');
     } else if (direction === 'newer' && msgList.length > 0) {
       params.set('after', msgList[msgList.length - 1].timestamp_ms);
+      params.set('inclusive', '1');
     }
 
     showSpinner(direction === 'older' ? 'top' : 'bottom');
 
     try {
-      const res = await fetch('/api/messages?' + params);
+      let res = await fetch('/api/messages?' + params);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       }
-      const msgs = await res.json();
-      removeSpinner(direction === 'older' ? 'top' : 'bottom');
-      if (gen !== _loadGen) return;
+      let msgs = await res.json();
+      if (gen !== _loadGen) {
+        removeSpinner(direction === 'older' ? 'top' : 'bottom');
+        return;
+      }
 
-      if (!msgs.length) {
+      let addedCount = mergePage(msgs);
+      if (addedCount === 0 && msgs.length >= 50 && params.has('inclusive')) {
+        // More than one page shares the boundary timestamp; fall back to strict < / >.
+        params.delete('inclusive');
+        res = await fetch('/api/messages?' + params);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+        msgs = await res.json();
+        if (gen !== _loadGen) {
+          removeSpinner(direction === 'older' ? 'top' : 'bottom');
+          return;
+        }
+        addedCount = mergePage(msgs);
+      }
+
+      removeSpinner(direction === 'older' ? 'top' : 'bottom');
+
+      if (!msgs.length || addedCount === 0) {
         if (direction === 'older') noMoreOlder = true;
         else noMoreNewer = true;
         return;
@@ -968,7 +1000,6 @@
       suppressScroll = true;
       try {
         const anchor = captureAnchor(direction);
-        mergePage(msgs);
         pruneList(direction);
         renderWindow();
         restoreAnchor(anchor);
@@ -1064,10 +1095,12 @@
 
   function mergePage(newMsgs) {
     const seenIds = new Map(msgList.map(m => [String(m.msg_id), m]));
+    let addedCount = 0;
     for (const m of newMsgs) {
       if (!seenIds.has(String(m.msg_id))) {
         seenIds.set(String(m.msg_id), m);
         msgList.push(m);
+        addedCount++;
       }
     }
     // Discard any preserved duplicates when matching non-deleted live messages are present
@@ -1096,6 +1129,7 @@
       if (!Number.isNaN(sa) && !Number.isNaN(sb) && sa !== sb) return sa - sb;
       return String(a.msg_id ?? '').localeCompare(String(b.msg_id ?? ''));
     });
+    return addedCount;
   }
 
   function pruneList(direction) {
@@ -1250,7 +1284,7 @@
       } else if (mt === 'video' || mt === 'gif') {
         const vid = document.createElement('video');
         vid.controls = (mt === 'video');
-        vid.preload = 'none';
+        vid.preload = 'metadata';
         vid.src = src;
         if (mt === 'gif') {
           vid.muted = true;
@@ -1266,18 +1300,14 @@
           wrap.appendChild(badgeWrap);
         }
         vid.addEventListener('click', () => showLightboxForGroup(group, idx));
-        wrap.appendChild(vid);
-        const probe = document.createElement('video');
-        probe.src = src;
-        probe.muted = true;
-        probe.preload = 'metadata';
-        probe.addEventListener('loadeddata', () => {
+        vid.addEventListener('loadeddata', () => {
+          if (vid.dataset.posterCaptured || !vid.videoWidth || !vid.videoHeight) return;
+          vid.dataset.posterCaptured = '1';
           const canvas = document.createElement('canvas');
-          canvas.width = probe.videoWidth;
-          canvas.height = probe.videoHeight;
-          canvas.getContext('2d').drawImage(probe, 0, 0);
+          canvas.width = vid.videoWidth;
+          canvas.height = vid.videoHeight;
+          canvas.getContext('2d').drawImage(vid, 0, 0);
           vid.poster = canvas.toDataURL('image/jpeg', 0.8);
-          probe.src = '';
           const scroll = document.getElementById('message-scroll');
           if (scroll && isUserAtBottom) {
             suppressScroll = true;
@@ -1285,7 +1315,7 @@
             suppressScroll = false;
           }
         }, { once: true });
-        probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
+        wrap.appendChild(vid);
       }
 
       cell.appendChild(wrap);
@@ -3946,7 +3976,7 @@
       document.getElementById('search-input').value = '';
       clearSearchResults();
       resetFilterTo('all');
-      const el2 = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+      const el2 = _findChatListItem(chat.id, chat.type);
       if (el2) selectChat(chat, el2);
     });
     return el;
@@ -3968,7 +3998,7 @@
       const chat = allChats.find(c => c.id === r.chat_id && c.type === r.chat_type);
       if (chat) {
         resetFilterTo('all');
-        const el2 = document.querySelector(`.chat-item[data-id="${r.chat_id}"][data-type="${r.chat_type}"]`);
+        const el2 = _findChatListItem(r.chat_id, r.chat_type);
         if (el2) {
           await selectChat(chat, el2);
           const row = await jumpToTimestamp(r.timestamp_ms, null, true, 'default');
@@ -5378,11 +5408,11 @@
     const dirEl = document.getElementById('call-inspect-dir');
     if (dirEl) {
       if (call.call_type === 'missed') {
-        dirEl.innerHTML = '<span class="call-icon-missed font-semibold">Missed</span>';
+        dirEl.innerHTML = '<span class="call-icon-missed call-dir-label">Missed</span>';
       } else if (call.call_type === 'incoming') {
-        dirEl.innerHTML = '<svg class="call-item-arrow call-icon-incoming" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg> <span class="call-icon-incoming font-semibold">Incoming</span>';
+        dirEl.innerHTML = '<svg class="call-item-arrow call-icon-incoming" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg> <span class="call-icon-incoming call-dir-label">Incoming</span>';
       } else {
-        dirEl.innerHTML = '<svg class="call-item-arrow call-icon-outgoing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg> <span class="call-icon-outgoing font-semibold">Outgoing</span>';
+        dirEl.innerHTML = '<svg class="call-item-arrow call-icon-outgoing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg> <span class="call-icon-outgoing call-dir-label">Outgoing</span>';
       }
     }
 
@@ -5538,16 +5568,6 @@
       }
     }
 
-    currentChat = chat;
-    msgList = [];
-    noMoreOlder = false;
-    noMoreNewer = false;
-    isUserAtBottom = false;
-
-    closeChatInfo();
-    closeChatStarred();
-    closeMediaGallery();
-
     if (currentNavTab === 'starred') {
       _activeStarredMsgId = String(messageId);
       document.querySelectorAll('.chat-item').forEach(e => {
@@ -5564,59 +5584,7 @@
       });
     }
 
-    const callInspector = document.getElementById('pane-call-inspector');
-    if (callInspector) callInspector.style.display = 'none';
-
-    const scroll = document.getElementById('message-scroll');
-    scroll.innerHTML = '';
-    scroll.style.display = 'block';
-    scroll.classList.add('is-navigating');
-    document.getElementById('scroll-to-bottom').classList.remove('visible');
-
-    document.getElementById('chat-header').style.display = 'flex';
-    document.getElementById('chat-title').textContent = chat.display_name;
-
-    const avatarEl = document.getElementById('chat-header-avatar');
-    if (avatarEl) {
-      const avatarKey = chat.phone_number || chat.id || chat.display_name;
-      avatarEl.style.backgroundColor = getAvatarColor(avatarKey);
-      avatarEl.textContent = getInitials(chat.display_name);
-    }
-
-    const subtitleEl = document.getElementById('chat-subtitle');
-    if (subtitleEl) {
-      if (chat.type === 'group') {
-        let subHtml = 'Group chat';
-        if (chat.is_preserved_only) {
-          subHtml += ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
-        }
-        subtitleEl.innerHTML = subHtml;
-      } else {
-        const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
-        let subHtml = formattedPhone ? esc(formattedPhone) : '';
-        if (chat.is_preserved_only) {
-          subHtml += (subHtml ? ' ' : '') + '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
-        }
-        subtitleEl.innerHTML = subHtml;
-      }
-    }
-
-    document.getElementById('empty-pane').style.display = 'none';
-    const sr = document.getElementById('search-results');
-    if (sr) {
-      sr.classList.remove('has-results');
-      sr.innerHTML = '';
-    }
-
-    document.getElementById('chat-search-input').value = '';
-    document.getElementById('chat-search-clear').style.display = 'none';
-    clearChatSearch();
-    document.getElementById('date-picker-input').value = '';
-    document.getElementById('date-go-btn').style.display = 'none';
-    document.getElementById('date-clear-btn').style.display = 'none';
-
-    updateChatStarredBadge(chat.id);
-    loadChatPinnedBanner(chat.id, chat.type);
+    const scroll = _prepareChatPane(chat, true);
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
@@ -5655,7 +5623,7 @@
           switchNavTab('chats');
           resetFilterTo('all');
         }
-        const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+        const activeItem = _findChatListItem(chat.id, chat.type);
         if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });
 
@@ -5696,75 +5664,13 @@
       return null;
     }
 
-    currentChat = chat;
-    msgList = [];
-    noMoreOlder = false;
-    noMoreNewer = false;
-    isUserAtBottom = false;
-
-    const callInspector = document.getElementById('pane-call-inspector');
-    if (callInspector) callInspector.style.display = 'none';
-
-    closeChatInfo();
-    closeChatStarred();
-    closeMediaGallery();
-
     document.querySelectorAll('.chat-item').forEach(e => {
       const match = e.dataset.id === String(chat.id) && e.dataset.type === chat.type;
       e.classList.toggle('active', match);
       if (match) e.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
 
-    const scroll = document.getElementById('message-scroll');
-    scroll.innerHTML = '';
-    scroll.style.display = 'block';
-    scroll.classList.add('is-navigating');
-    document.getElementById('scroll-to-bottom').classList.remove('visible');
-
-    document.getElementById('chat-header').style.display = 'flex';
-    document.getElementById('chat-title').textContent = chat.display_name;
-
-    const avatarEl = document.getElementById('chat-header-avatar');
-    if (avatarEl) {
-      const avatarKey = chat.phone_number || chat.id || chat.display_name;
-      avatarEl.style.backgroundColor = getAvatarColor(avatarKey);
-      avatarEl.textContent = getInitials(chat.display_name);
-    }
-
-    const subtitleEl = document.getElementById('chat-subtitle');
-    if (subtitleEl) {
-      if (chat.type === 'group') {
-        let subHtml = 'Group chat';
-        if (chat.is_preserved_only) {
-          subHtml += ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
-        }
-        subtitleEl.innerHTML = subHtml;
-      } else {
-        const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
-        let subHtml = formattedPhone ? esc(formattedPhone) : '';
-        if (chat.is_preserved_only) {
-          subHtml += (subHtml ? ' ' : '') + '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
-        }
-        subtitleEl.innerHTML = subHtml;
-      }
-    }
-
-    document.getElementById('empty-pane').style.display = 'none';
-    const sr = document.getElementById('search-results');
-    if (sr) {
-      sr.classList.remove('has-results');
-      sr.innerHTML = '';
-    }
-
-    document.getElementById('chat-search-input').value = '';
-    document.getElementById('chat-search-clear').style.display = 'none';
-    clearChatSearch();
-    document.getElementById('date-picker-input').value = '';
-    document.getElementById('date-go-btn').style.display = 'none';
-    document.getElementById('date-clear-btn').style.display = 'none';
-
-    updateChatStarredBadge(chat.id);
-    loadChatPinnedBanner(chat.id, chat.type);
+    const scroll = _prepareChatPane(chat, true);
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
@@ -5813,9 +5719,13 @@
       showContextJumpBanner('📞', `Viewing Call Moment in context${gapSuffix}`, () => {
         const contextBanner = document.getElementById('context-jump-banner');
         if (contextBanner) contextBanner.style.display = 'none';
-        switchNavTab('chats');
-        resetFilterTo('all');
-        const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
+        if (chat.is_archived) {
+          switchNavTab('archived');
+        } else {
+          switchNavTab('chats');
+          resetFilterTo('all');
+        }
+        const activeItem = _findChatListItem(chat.id, chat.type);
         if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });
 
