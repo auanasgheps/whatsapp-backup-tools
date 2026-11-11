@@ -25,19 +25,28 @@
       --sidebar-scale: 1;
       --sidebar-w: calc(clamp(300px, 24vw, 460px) * var(--sidebar-scale));
       --font-size: 15px;
-      --media-grid-size: 320px;
+      --media-w-land: 320px;
+      --media-w-port: 260px;
+      --media-grid-size: var(--media-w-land);
+      --media-stage-bg: rgba(0, 0, 0, 0.24);
     }
 
     [data-font-size="small"] {
       --sidebar-scale: 0.90;
+      --media-w-land: 280px;
+      --media-w-port: 230px;
       --media-grid-size: 280px;
     }
     [data-font-size="medium"] {
       --sidebar-scale: 1.00;
+      --media-w-land: 320px;
+      --media-w-port: 260px;
       --media-grid-size: 320px;
     }
     [data-font-size="large"] {
       --sidebar-scale: 1.15;
+      --media-w-land: 360px;
+      --media-w-port: 295px;
       --media-grid-size: 360px;
     }
 
@@ -64,6 +73,7 @@
       --call-missed-bg: rgba(220, 38, 38, 0.12);
       --call-out-bg: rgba(17, 27, 33, 0.08);
       --call-pres-bg: #fef3c7;
+      --media-stage-bg: rgba(17, 27, 33, 0.06);
     }
 
     /* ---- Pico overrides: reset opinionated defaults that break our layout ---- */
@@ -345,6 +355,7 @@
     .settings-section { padding: 16px 20px; border-bottom: 1px solid var(--border); }
     .settings-section:last-child { border-bottom: none; }
     .settings-label { font-size: 13px; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .settings-hint { font-size: 12px; color: var(--text-muted); margin-top: -6px; margin-bottom: 10px; }
     .settings-row { display: flex; gap: 8px; flex-wrap: wrap; }
     .pref-btn {
       background: var(--surface2); border: 1px solid var(--border);
@@ -816,6 +827,29 @@
       box-shadow: var(--bubble-shadow);
       border: none;
     }
+    .msg-bubble.has-media {
+      display: flex;
+      flex-direction: column;
+      width: fit-content;
+      max-width: min(calc(var(--media-w-land) + 20px), 70%);
+    }
+    .msg-bubble.has-media .msg-caption,
+    .msg-bubble.has-media .msg-quote,
+    .msg-bubble.has-media .msg-sender,
+    .msg-bubble.has-media .msg-meta {
+      contain: inline-size;
+      min-width: 0;
+      align-self: stretch;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 600px) {
+      .msg-bubble {
+        max-width: 85%;
+      }
+      .msg-bubble.has-media {
+        max-width: min(calc(var(--media-w-land) + 20px), 85%);
+      }
+    }
     .msg-row.sent .msg-bubble {
       background: var(--bubble-out);
       color: var(--bubble-out-text);
@@ -999,11 +1033,19 @@
     .msg-media {
       border-radius: 4px;
       overflow: hidden;
-      max-width: 320px;
+      max-width: var(--media-w-land);
       width: fit-content;
       position: relative;
     }
-    .msg-media:not(.sticker):not(.audio):not(.vcard) {
+    .msg-media.is-landscape {
+      width: var(--media-w-land);
+      max-width: 100%;
+    }
+    .msg-media.is-portrait {
+      width: var(--media-w-port);
+      max-width: 100%;
+    }
+    .msg-media:not(.sticker):not(.audio):not(.vcard):not(.doc) {
       min-width: 140px;
       min-height: 100px;
     }
@@ -1016,11 +1058,31 @@
       object-fit: contain;
       cursor: pointer;
     }
+    .msg-media.is-landscape img,
+    .msg-media.is-portrait img {
+      width: 100%;
+      height: 100%;
+      max-height: none;
+      object-fit: cover;
+    }
+    .msg-media.is-landscape video:not(.msg-gif-video):not(.live-photo-video),
+    .msg-media.is-portrait video:not(.msg-gif-video):not(.live-photo-video) {
+      width: 100%;
+      height: 100%;
+      max-height: none;
+      object-fit: contain;
+      background: var(--media-stage-bg);
+    }
+    .msg-media.doc {
+      min-width: min(var(--media-w-port), 100%);
+      max-width: var(--media-w-land);
+      width: fit-content;
+    }
     .msg-media:has(audio), .msg-media.audio {
-      width: 300px;
+      width: var(--media-w-land);
       max-width: 100%;
     }
-    .msg-media audio { display: block; max-width: 300px; width: 100%; margin: 4px 0; }
+    .msg-media audio { display: block; max-width: 100%; width: 100%; margin: 4px 0; }
     .msg-media.sticker { max-width: 180px; }
     .msg-media.sticker img { max-width: 180px; max-height: 180px; }
 
@@ -1042,7 +1104,6 @@
     .msg-media.msg-gif video {
       display: block;
       max-width: 100%;
-      max-height: 300px;
       width: 100%;
       height: 100%;
       object-fit: cover;
@@ -2147,8 +2208,9 @@
 
     /* ---- location message cards ---- */
     .msg-location-wrap {
-      max-width: 320px;
-      min-width: 230px;
+      width: var(--media-w-land);
+      max-width: 100%;
+      min-width: min(220px, 100%);
       margin-bottom: 2px;
     }
     .msg-location-card {
@@ -2932,8 +2994,8 @@
 /* Missing Media Placeholders & Blurred Previews */
 .media-missing-card {
   position: relative;
-  width: 100%;
-  max-width: 330px;
+  width: var(--media-w-land);
+  max-width: 100%;
   min-height: 140px;
   border-radius: 8px;
   overflow: hidden;

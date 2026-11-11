@@ -299,7 +299,8 @@ HTML_TEMPLATE = (
         </div>
       </div>
       <div class="settings-section">
-        <div class="settings-label">Font size</div>
+        <div class="settings-label">Display scale</div>
+        <div class="settings-hint">Scales text, sidebar, and media</div>
         <div class="settings-row">
           <button class="pref-btn" data-pref="font_size" data-value="small">Small</button>
           <button class="pref-btn" data-pref="font_size" data-value="medium">Medium</button>
