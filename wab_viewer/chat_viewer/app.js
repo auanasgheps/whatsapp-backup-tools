@@ -1007,9 +1007,12 @@
 
   function rowForMsgId(id) {
     const key = String(id);
-    const direct = document.querySelector(`.msg-row[data-msg-id="${key}"]`);
+    const escKey = (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+      ? CSS.escape(key)
+      : key.replace(/(["\\:])/g, '\\$1');
+    const direct = document.querySelector(`.msg-row[data-msg-id="${escKey}"]`);
     if (direct) return direct;
-    return document.querySelector(`.msg-row[data-group-ids~="${key}"]`) || null;
+    return document.querySelector(`.msg-row[data-group-ids~="${escKey}"]`) || null;
   }
 
   function nearestMsgToTs(ts) {
@@ -1081,7 +1084,14 @@
         return true;
       });
     }
-    msgList.sort((a, b) => (a.timestamp_ms - b.timestamp_ms) || ((a.sort_id ?? a.msg_id) - (b.sort_id ?? b.msg_id)) || (a.msg_id - b.msg_id));
+    msgList.sort((a, b) => {
+      const tsDiff = (a.timestamp_ms || 0) - (b.timestamp_ms || 0);
+      if (tsDiff !== 0) return tsDiff;
+      const sa = Number(a.sort_id ?? a.msg_id);
+      const sb = Number(b.sort_id ?? b.msg_id);
+      if (!Number.isNaN(sa) && !Number.isNaN(sb) && sa !== sb) return sa - sb;
+      return String(a.msg_id ?? '').localeCompare(String(b.msg_id ?? ''));
+    });
   }
 
   function pruneList(direction) {
@@ -1539,17 +1549,25 @@
       badge.textContent = 'You';
       meta.appendChild(badge);
     }
-    const showInfo = (msg.from_me && !msg.is_preserved && !!msg.msg_id && msg.media_type !== 'deleted') ||
+    const isCallEvent = msg.media_type === 'call' && !!msg.call;
+    const showInfo = isCallEvent ||
+                     (msg.from_me && !msg.is_preserved && !!msg.msg_id && msg.media_type !== 'deleted') ||
                      (!!msg.archive_path && msg.media_type !== 'deleted') ||
                      !!msg.is_preserved ||
                      (msg.is_edited && !!msg.original_text_body);
     if (showInfo) {
-      const infoBtn = document.createElement('span');
+      const infoBtn = document.createElement('button');
+      infoBtn.type = 'button';
       infoBtn.className = 'msg-info-btn';
-      infoBtn.title = 'Message details';
+      infoBtn.title = isCallEvent ? 'Call details' : 'Message details';
+      infoBtn.setAttribute('aria-label', isCallEvent ? 'Call details' : 'Message details');
       infoBtn.textContent = 'ⓘ';
       infoBtn.addEventListener('click', e => {
         e.stopPropagation();
+        if (isCallEvent) {
+          showCallDetails(msg, infoBtn);
+          return;
+        }
         showMsgDetails(
           (msg.from_me && !msg.is_preserved) ? msg.msg_id : null,
           infoBtn,
@@ -1632,6 +1650,19 @@
       voEl.appendChild(voIcon);
       voEl.appendChild(voLabel);
       bubble.appendChild(voEl);
+    } else if (isCallEvent) {
+      bubble.classList.add('call-event');
+      bubble.setAttribute('role', 'article');
+      const callMeta = msg.call;
+      const callLabelPrefix = callMeta.is_group ? 'Group ' : '';
+      const callKindLabel = callLabelPrefix + (callMeta.video ? 'video call' : 'voice call');
+      const outcomeLabel = _formatCallOutcomeText(
+        callMeta.call_type || (msg.from_me ? 'outgoing' : 'incoming'),
+        callMeta.outcome || 'unanswered',
+        callMeta.duration_sec || 0
+      );
+      bubble.setAttribute('aria-label', `${callKindLabel}, ${outcomeLabel}, ${fmtTime(msg.timestamp_ms)}`);
+      bubble.appendChild(renderCallCard(msg));
     } else if (msg.media_type === 'poll') {
       bubble.appendChild(renderPoll(msg));
     } else if (msg.media_type === 'location' || msg.media_type === 'live_location') {
@@ -4541,7 +4572,7 @@
     }
 
     if (info.calls_count) {
-      details.appendChild(_infoRow('Preserved calls', fmtNum(info.calls_count)).row);
+      details.appendChild(_infoRow('Calls', fmtNum(info.calls_count)).row);
     }
 
     // Gallery link row
@@ -5092,72 +5123,147 @@
     }
   }
 
+  function _getCallMediaSvg(isVideo, size) {
+    const px = size || 16;
+    if (isVideo) {
+      return `<svg width="${px}" height="${px}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`;
+    }
+    return `<svg width="${px}" height="${px}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`;
+  }
+
+  function _getCallDirectionSvg(callType) {
+    if (callType === 'missed') {
+      return '<svg class="call-item-arrow call-icon-missed" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/></svg>';
+    }
+    if (callType === 'incoming') {
+      return '<svg class="call-item-arrow call-icon-incoming" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg>';
+    }
+    return '<svg class="call-item-arrow call-icon-outgoing" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg>';
+  }
+
+  function _formatCallOutcomeText(callType, outcome, durationSec) {
+    if (callType === 'missed') {
+      return outcome === 'declined' ? 'Declined' : 'Missed';
+    }
+    const dirLabel = callType === 'incoming' ? 'Incoming' : 'Outgoing';
+    if (durationSec > 0) {
+      return `${dirLabel} · ${fmtDuration(durationSec)}`;
+    }
+    if (outcome === 'canceled') {
+      return `${dirLabel} · Canceled`;
+    }
+    return `${dirLabel} · No answer`;
+  }
+
+  function renderCallCard(msg) {
+    const c = msg.call || {};
+    const callType = c.call_type || (msg.from_me ? 'outgoing' : 'incoming');
+    const isMissed = callType === 'missed';
+
+    const card = document.createElement('div');
+    card.className = 'msg-call-card';
+
+    const iconWrap = document.createElement('div');
+    iconWrap.className = 'msg-call-icon' + (isMissed ? ' missed' : '');
+    iconWrap.innerHTML = _getCallMediaSvg(!!c.video, 18);
+    card.appendChild(iconWrap);
+
+    const body = document.createElement('div');
+    body.className = 'msg-call-body';
+
+    const title = document.createElement('div');
+    title.className = 'msg-call-title';
+    const baseLabel = c.video ? 'Video call' : 'Voice call';
+    title.textContent = c.is_group ? `Group ${baseLabel.toLowerCase()}` : baseLabel;
+    body.appendChild(title);
+
+    const status = document.createElement('div');
+    status.className = 'msg-call-status' + (isMissed ? ' missed' : '');
+
+    const arrowSpan = document.createElement('span');
+    arrowSpan.className = 'msg-call-arrow';
+    arrowSpan.innerHTML = _getCallDirectionSvg(callType);
+    status.appendChild(arrowSpan);
+
+    const statusLabel = document.createElement('span');
+    statusLabel.textContent = _formatCallOutcomeText(callType, c.outcome, c.duration_sec || 0);
+    status.appendChild(statusLabel);
+
+    body.appendChild(status);
+    card.appendChild(body);
+    return card;
+  }
+
   function renderCallItem(call) {
     const el = document.createElement('div');
     el.className = 'call-item';
     el.dataset.callId = call.id;
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
 
-    const left = document.createElement('div');
-    left.className = 'call-item-left';
+    const callerName = call.caller_name || 'Unknown';
+    const tsMs = call.timestamp_ms ?? (call.timestamp * 1000);
+    const timeLabel = fmtTime(tsMs);
+    const durSec = call.duration || 0;
+    const outcomeText = call.call_type === 'missed'
+      ? 'Missed'
+      : _formatCallOutcomeText(call.call_type, durSec > 0 ? 'answered' : 'unanswered', durSec);
+    el.setAttribute(
+      'aria-label',
+      `${callerName}, ${call.is_video ? 'Video call' : 'Voice call'}, ${outcomeText}, ${timeLabel}`
+    );
 
     const avatar = document.createElement('div');
     avatar.className = 'call-item-avatar';
     const avatarKey = call.caller_phone || call.caller_name || 'Call';
     avatar.style.backgroundColor = getAvatarColor(avatarKey);
-    avatar.textContent = getInitials(call.caller_name || 'Call');
-    left.appendChild(avatar);
+    avatar.textContent = getInitials(callerName);
+    el.appendChild(avatar);
 
     const body = document.createElement('div');
     body.className = 'call-item-body';
 
+    const row1 = document.createElement('div');
+    row1.className = 'call-item-row-1';
+
     const nameEl = document.createElement('div');
     nameEl.className = 'call-item-name';
-    nameEl.textContent = call.caller_name || 'Unknown';
-    body.appendChild(nameEl);
-
-    const sub = document.createElement('div');
-    sub.className = 'call-item-sub';
-
-    let arrowSvg = '';
-    let statusText = '';
-    if (call.call_type === 'missed') {
-      arrowSvg = '<svg class="call-item-arrow call-icon-missed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/></svg>';
-      statusText = '<span class="call-icon-missed font-semibold">Missed</span>';
-    } else if (call.call_type === 'incoming') {
-      arrowSvg = '<svg class="call-item-arrow call-icon-incoming" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg>';
-      statusText = `<span>Incoming (${fmtDuration(call.duration)})</span>`;
-    } else {
-      arrowSvg = '<svg class="call-item-arrow call-icon-outgoing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg>';
-      const durText = call.duration > 0 ? `(${fmtDuration(call.duration)})` : '(No answer)';
-      statusText = `<span>Outgoing ${durText}</span>`;
-    }
-    sub.innerHTML = arrowSvg + ' ' + statusText;
-    body.appendChild(sub);
-    left.appendChild(body);
-    el.appendChild(left);
-
-    const right = document.createElement('div');
-    right.className = 'call-item-right';
-
-    const timeEl = document.createElement('span');
-    timeEl.className = 'call-item-time';
-    timeEl.textContent = fmtTime(call.timestamp * 1000);
-    right.appendChild(timeEl);
+    nameEl.textContent = callerName;
+    row1.appendChild(nameEl);
 
     const mediaIcon = document.createElement('span');
     mediaIcon.className = 'call-item-media-icon';
-    if (call.is_video) {
-      mediaIcon.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
-      mediaIcon.title = 'Video call';
-    } else {
-      mediaIcon.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>';
-      mediaIcon.title = 'Voice call';
-    }
-    right.appendChild(mediaIcon);
-    el.appendChild(right);
+    mediaIcon.innerHTML = _getCallMediaSvg(!!call.is_video, 15);
+    mediaIcon.title = call.is_video ? 'Video call' : 'Voice call';
+    row1.appendChild(mediaIcon);
+    body.appendChild(row1);
+
+    const row2 = document.createElement('div');
+    row2.className = 'call-item-row-2';
+
+    const sub = document.createElement('div');
+    sub.className = 'call-item-sub';
+    const subClass = call.call_type === 'missed' ? ' call-icon-missed' : '';
+    sub.innerHTML = _getCallDirectionSvg(call.call_type) +
+      `<span class="call-item-sub-text${subClass}">${esc(outcomeText)}</span>`;
+    row2.appendChild(sub);
+
+    const timeEl = document.createElement('span');
+    timeEl.className = 'call-item-time';
+    timeEl.textContent = timeLabel;
+    row2.appendChild(timeEl);
+
+    body.appendChild(row2);
+    el.appendChild(body);
 
     el.addEventListener('click', () => {
       selectCallItem(call, el);
+    });
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectCallItem(call, el);
+      }
     });
 
     return el;
@@ -5304,11 +5410,14 @@
     }
   }
 
+  let _pendingJumpCallId = null;
+
   function jumpFromCallToChat(call, matchedChat) {
     if (!matchedChat) return;
     const callInspector = document.getElementById('pane-call-inspector');
     if (callInspector) callInspector.style.display = 'none';
-    openChatAtTimestamp(matchedChat.id, call.timestamp * 1000);
+    _pendingJumpCallId = call && call.id ? ('call:' + call.id) : null;
+    openChatAtTimestamp(matchedChat.id, call.timestamp_ms ?? (call.timestamp * 1000));
   }
 
   const chatListScroll = document.getElementById('chat-list');
@@ -5519,6 +5628,8 @@
   }
 
   async function openChatAtTimestamp(chatId, timestampMs) {
+    const targetCallMsgId = _pendingJumpCallId;
+    _pendingJumpCallId = null;
     if (_jumpAbortController) {
       _jumpAbortController.abort();
     }
@@ -5629,20 +5740,22 @@
       mergePage(msgs);
       renderWindow();
 
-      let targetEl = null;
-      let minDiff = Infinity;
-      let targetTs = 0;
-      document.querySelectorAll('.msg-row').forEach(row => {
-        const rowTs = Number(row.dataset.ts);
-        if (rowTs) {
-          const diff = Math.abs(rowTs - timestampMs);
-          if (diff < minDiff) {
-            minDiff = diff;
-            targetEl = row;
-            targetTs = rowTs;
+      let targetEl = targetCallMsgId ? rowForMsgId(targetCallMsgId) : null;
+      let minDiff = targetEl ? Math.abs(Number(targetEl.dataset.ts || timestampMs) - timestampMs) : Infinity;
+      let targetTs = targetEl ? Number(targetEl.dataset.ts || timestampMs) : 0;
+      if (!targetEl) {
+        document.querySelectorAll('.msg-row').forEach(row => {
+          const rowTs = Number(row.dataset.ts);
+          if (rowTs) {
+            const diff = Math.abs(rowTs - timestampMs);
+            if (diff < minDiff) {
+              minDiff = diff;
+              targetEl = row;
+              targetTs = rowTs;
+            }
           }
-        }
-      });
+        });
+      }
 
       if (targetEl) {
         await _pinToMsg(targetEl, gen);
@@ -5700,6 +5813,39 @@
     if (entry.read_ts) return fmtReceipt(entry.read_ts);
     if (entry.read_known) return '<span class="msg-details-na">Read (time not stored)</span>';
     return '—';
+  }
+
+  function showCallDetails(msg, anchorEl) {
+    const c = msg.call || {};
+    const kind = (c.is_group ? 'Group ' : '') + (c.video ? 'Video call' : 'Voice call');
+    const dir = c.from_me ? 'Outgoing' : 'Incoming';
+    const outcomeMap = {
+      answered: 'Answered',
+      missed: 'Missed',
+      declined: 'Declined',
+      canceled: 'Canceled',
+      unanswered: 'No answer'
+    };
+    const statusLabel = outcomeMap[c.outcome] || 'Recorded';
+    const durText = (c.duration_sec && c.duration_sec > 0) ? fmtDurationLong(c.duration_sec) : '—';
+
+    let html =
+      `<div class="msg-details-row"><span class="msg-details-label">Type</span><span class="msg-details-value">${esc(kind)}</span></div>` +
+      `<div class="msg-details-row"><span class="msg-details-label">Direction</span><span class="msg-details-value">${esc(dir)}</span></div>` +
+      `<div class="msg-details-row"><span class="msg-details-label">Outcome</span><span class="msg-details-value">${esc(statusLabel)}</span></div>` +
+      `<div class="msg-details-row"><span class="msg-details-label">Duration</span><span class="msg-details-value">${esc(durText)}</span></div>` +
+      `<div class="msg-details-row"><span class="msg-details-label">Time</span><span class="msg-details-value">${esc(fmtTime(msg.timestamp_ms))}</span></div>`;
+
+    if (c.is_group && c.participants > 1) {
+      html += `<div class="msg-details-row"><span class="msg-details-label">Participants</span><span class="msg-details-value">${esc(String(c.participants))}</span></div>`;
+    }
+    if (msg.is_preserved) {
+      html += `<div class="msg-details-row"><span class="msg-details-label">Source</span><span class="msg-details-value">Preserved from backup</span></div>`;
+    }
+
+    msgDetailsPopup.innerHTML = html;
+    positionPopup(anchorEl);
+    msgDetailsPopup.classList.add('visible');
   }
 
   async function showMsgDetails(msgId, anchorEl, archivePath, presInfo, editInfo) {

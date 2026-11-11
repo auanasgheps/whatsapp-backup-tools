@@ -17,18 +17,27 @@
       --preserved-text: #eab308;
       --preserved-border: rgba(234, 179, 8, 0.35);
       --star-color: #eab308;
-      --sidebar-w: 300px;
+      --call-missed: #f87171;
+      --call-answered-bg: rgba(0, 168, 132, 0.18);
+      --call-missed-bg: rgba(248, 113, 113, 0.18);
+      --call-out-bg: rgba(255, 255, 255, 0.14);
+      --call-pres-bg: rgba(234, 179, 8, 0.18);
+      --sidebar-scale: 1;
+      --sidebar-w: calc(clamp(300px, 24vw, 460px) * var(--sidebar-scale));
       --font-size: 15px;
       --media-grid-size: 320px;
     }
 
     [data-font-size="small"] {
+      --sidebar-scale: 0.90;
       --media-grid-size: 280px;
     }
     [data-font-size="medium"] {
+      --sidebar-scale: 1.00;
       --media-grid-size: 320px;
     }
     [data-font-size="large"] {
+      --sidebar-scale: 1.15;
       --media-grid-size: 360px;
     }
 
@@ -50,6 +59,11 @@
       --preserved-text: #854d0e;
       --preserved-border: #facc15;
       --star-color: #ca8a04;
+      --call-missed: #dc2626;
+      --call-answered-bg: rgba(0, 128, 105, 0.14);
+      --call-missed-bg: rgba(220, 38, 38, 0.12);
+      --call-out-bg: rgba(17, 27, 33, 0.08);
+      --call-pres-bg: #fef3c7;
     }
 
     /* ---- Pico overrides: reset opinionated defaults that break our layout ---- */
@@ -133,6 +147,7 @@
     /* ---- sidebar ---- */
     #sidebar {
       width: var(--sidebar-w);
+      max-width: 42vw;
       background: var(--surface);
       border-right: 1px solid var(--border);
       display: flex;
@@ -2085,6 +2100,7 @@
       transition: background 0.15s, color 0.15s, opacity 0.15s;
     }
     .msg-info-btn:hover { background: var(--accent); color: #fff; }
+    .msg-info-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
     #msg-details-popup {
       position: fixed;
@@ -3129,34 +3145,53 @@
   transform: none;
 }
 
-/* Sidebar Call Item Layout */
-.call-item {
+.call-inspect-jump-btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* Sidebar Call Item Layout (two-line card) */
+.call-item,
+.call-item[role="button"] {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 14px;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  margin: 0;
+  background: transparent;
+  background-color: transparent;
+  border: none;
   border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text);
+  font-weight: 400;
+  text-align: left;
   cursor: pointer;
   transition: background-color 0.15s;
 }
-.call-item:hover {
+.call-item:hover,
+.call-item[role="button"]:hover {
   background: var(--surface2);
+  background-color: var(--surface2);
 }
-.call-item.active {
+.call-item:focus-visible,
+.call-item[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.call-item.active,
+.call-item[role="button"].active {
   background: var(--surface2);
+  background-color: var(--surface2);
   border-left: 3px solid var(--accent);
-}
-.call-item-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  flex: 1;
+  padding-left: 11px;
 }
 .call-item-avatar {
-  width: 40px;
-  height: 40px;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   background: var(--accent);
   display: flex;
@@ -3172,52 +3207,132 @@
 .call-item-body {
   min-width: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.call-item-row-1,
+.call-item-row-2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
 }
 .call-item-name {
-  font-size: 13px;
+  font-size: var(--font-size);
   font-weight: 600;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
   line-height: 1.3;
 }
 .call-item-sub {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: 5px;
+  font-size: 12px;
   color: var(--text-muted);
-  margin-top: 2px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+.call-item-sub-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.call-item-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
 .call-item-time {
   font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .call-item-media-icon {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
+  flex-shrink: 0;
 }
 .call-icon-missed {
-  color: var(--wa-call-missed, #ef4444) !important;
+  color: var(--call-missed) !important;
+  font-weight: 600;
 }
 .call-icon-incoming {
-  color: var(--accent, #00a884);
+  color: var(--accent);
 }
 .call-icon-outgoing {
-  color: #3b82f6;
+  color: var(--accent);
+}
+
+/* In-chat Call Bubbles */
+.msg-bubble.call-event {
+  min-width: min(215px, 60vw);
+  max-width: 340px;
+}
+.msg-call-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 0;
+}
+.msg-call-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--call-answered-bg);
+  color: var(--accent);
+}
+.msg-row.sent .msg-call-icon {
+  background: var(--call-out-bg);
+  color: var(--bubble-out-text);
+}
+.msg-call-icon.missed {
+  background: var(--call-missed-bg);
+  color: var(--call-missed);
+}
+.msg-call-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.msg-call-title {
+  font-size: var(--font-size);
+  font-weight: 600;
+  color: inherit;
+  line-height: 1.3;
+}
+.msg-call-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--bubble-meta);
+  line-height: 1.3;
+  flex-wrap: wrap;
+}
+.msg-call-status.missed {
+  color: var(--call-missed);
+  font-weight: 500;
+}
+.msg-call-arrow {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
 }
