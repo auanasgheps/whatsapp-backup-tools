@@ -12078,6 +12078,11 @@ class TestTrack1Endpoints:
                     key_id TEXT,
                     starred INTEGER
                 );
+                CREATE TABLE message_media (
+                    message_row_id INTEGER PRIMARY KEY,
+                    file_path TEXT,
+                    mime_type TEXT
+                );
                 INSERT INTO jid VALUES (1, '15551111', '15551111@s.whatsapp.net');
                 INSERT INTO chat VALUES (10, 1, 'Project Alpha');
                 INSERT INTO message VALUES (
@@ -12123,6 +12128,105 @@ class TestTrack1Endpoints:
                 else data_empty
             )
             assert len(empty_items) == 0
+
+    def test_api_starred_android_contact_and_lid_chat_id_resolution(self, tmp_path):
+        """Android /api/starred must emit canonical chat_id matching /api/chats for 1:1, LID, and group chats."""
+        wa_path = tmp_path / "msgstore.db"
+        arch_path = tmp_path / ".wa_media_archiver.db"
+
+        with sqlite3.connect(str(arch_path)) as arch_conn:
+            arch_conn.execute(
+                "CREATE TABLE contacts (number TEXT PRIMARY KEY, display_name TEXT, folder TEXT)"
+            )
+            arch_conn.execute(
+                "INSERT INTO contacts VALUES ('15551234', 'Alice Contact', 'Alice Contact (15551234)')"
+            )
+            arch_conn.execute(
+                "INSERT INTO contacts VALUES ('15556789', 'Bob LID', 'Bob LID (15556789)')"
+            )
+            arch_conn.commit()
+
+        with make_android_db(wa_path) as conn:
+            conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+            conn.execute("ALTER TABLE message ADD COLUMN starred INTEGER DEFAULT 0")
+            conn.executescript("""
+                INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15551234', 's.whatsapp.net', '15551234@s.whatsapp.net');
+                INSERT INTO jid (_id, user, server, raw_string) VALUES (2, '999000111222333', 'lid', '999000111222333@lid');
+                INSERT INTO jid (_id, user, server, raw_string) VALUES (3, '15556789', 's.whatsapp.net', '15556789@s.whatsapp.net');
+                INSERT INTO jid (_id, user, server, raw_string) VALUES (4, '120363000111', 'g.us', '120363000111@g.us');
+                INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (2, 3);
+
+                INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden) VALUES (10, 1, NULL, 1793970000000, 0);
+                INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden) VALUES (20, 2, NULL, 1793971000000, 0);
+                INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden) VALUES (30, 4, 'Weekend Trip', 1793972000000, 0);
+
+                -- 1:1 incoming starred message (sender_jid_row_id = 0, standard Android convention)
+                INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id, starred)
+                VALUES (101, 10, 0, 0, 1793970000000, 'Alice starred note', 0, 'K1', 1);
+                INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id, starred)
+                VALUES (102, 10, 1, 0, 1793970010000, 'Reply to Alice', 0, 'K2', 0);
+
+                -- LID 1:1 outgoing starred message
+                INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id, starred)
+                VALUES (201, 20, 1, 0, 1793971000000, 'Bob LID starred note', 0, 'K3', 1);
+
+                -- Group starred message
+                INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id, starred)
+                VALUES (301, 30, 0, 1, 1793972000000, 'Group starred note', 0, 'K4', 1);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            chats = client.get("/api/chats").get_json()
+            chat_keys = {(c["id"], c["type"]): c for c in chats}
+
+            resp = client.get("/api/starred")
+            assert resp.status_code == 200
+            items = resp.get_json()["messages"]
+            assert len(items) == 3
+
+            by_id = {m["id"]: m for m in items}
+
+            # 1:1 standard contact
+            m_alice = by_id[101]
+            assert m_alice["chat_id"] == "15551234"
+            assert m_alice["chat_type"] == "contact"
+            assert m_alice["chat_name"] == "Alice Contact"
+            assert m_alice["sender_name"] == "Alice Contact"
+            assert (m_alice["chat_id"], m_alice["chat_type"]) in chat_keys
+
+            # 1:1 LID contact
+            m_bob = by_id[201]
+            assert m_bob["chat_id"] == "15556789"
+            assert m_bob["chat_type"] == "contact"
+            assert m_bob["chat_name"] == "Bob LID"
+            assert m_bob["sender_name"] == "You"
+            assert (m_bob["chat_id"], m_bob["chat_type"]) in chat_keys
+
+            # Group chat
+            m_grp = by_id[301]
+            assert m_grp["chat_id"] == "30"
+            assert m_grp["chat_type"] == "group"
+            assert m_grp["chat_name"] == "Weekend Trip"
+            assert m_grp["sender_name"] == "Alice Contact"
+            assert (m_grp["chat_id"], m_grp["chat_type"]) in chat_keys
+
+            # Scoped /api/chat/<id>/starred works for canonical contact & LID IDs
+            alice_scoped = client.get("/api/chat/15551234/starred").get_json()["messages"]
+            assert [m["id"] for m in alice_scoped] == [101]
+            bob_scoped = client.get("/api/chat/15556789/starred").get_json()["messages"]
+            assert [m["id"] for m in bob_scoped] == [201]
+
+            # Context jump endpoint resolves each starred message cleanly
+            for item in items:
+                ctx_resp = client.get(
+                    f"/api/messages/at?chat_id={item['chat_id']}&chat_type={item['chat_type']}&msg_id={item['id']}&limit=50"
+                )
+                assert ctx_resp.status_code == 200
+                ctx_msgs = ctx_resp.get_json()
+                assert any(cm["msg_id"] == item["id"] for cm in ctx_msgs)
 
     def test_api_pinned_android(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
@@ -13448,7 +13552,7 @@ class TestPhase3InBubbleIndicators:
             assert msgs[0]["is_pinned"] == 1
 
     def test_context_jump_banner_reset_helper(self, app_and_tmp):
-        """Verify showContextJumpBanner helper resets banner icon and text."""
+        """Verify showContextJumpBanner helper resets banner icon and text and preserves active nav tab."""
         client, _ = app_and_tmp
         resp = client.get("/static/app.js")
         assert resp.status_code == 200
@@ -13456,6 +13560,14 @@ class TestPhase3InBubbleIndicators:
         assert "function showContextJumpBanner(icon, text, onSwitch)" in js
         assert "showContextJumpBanner('⭐', 'Viewing message in context'" in js
         assert "showContextJumpBanner('📞', `Viewing Call Moment in context" in js
+        assert "if (currentNavTab === 'chats')" in js
+        assert "el.dataset.msgId = String(m.id);" in js
+        # openChatAtMessage must not prematurely reset filter/render chats while in Starred tab
+        fn_start = js.index("async function openChatAtMessage(")
+        fn_end = js.index("async function openChatAtTimestamp(")
+        open_msg_body = js[fn_start:fn_end]
+        banner_idx = open_msg_body.index("showContextJumpBanner(")
+        assert "resetFilterTo('all')" not in open_msg_body[:banner_idx]
 
     def test_css_indicator_styles(self, app_and_tmp):
         """Verify CSS classes for meta indicator icons in app.css."""

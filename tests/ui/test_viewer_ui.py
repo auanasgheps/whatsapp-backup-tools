@@ -1776,3 +1776,190 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
         """,
         3.0,
     )
+
+
+def test_android_starred_message_click_preserves_tab_and_loads_context(
+    tmp_path: Path, screenshot_dir: Path
+) -> None:
+    """Clicking an Android 1:1 starred message must stay on Starred tab and load message context."""
+    import threading
+    import urllib.request
+
+    from tests.test_wa_chat_viewer import make_android_db, make_archive_db
+    from wab_viewer.main import create_app
+
+    from .cdp_driver import find_free_port, launch_browser_session
+
+    wa_path = tmp_path / "msgstore.db"
+    arch_path = tmp_path / ".wa_media_archiver.db"
+
+    wa_conn = make_android_db(wa_path)
+    arch_conn = make_archive_db(arch_path)
+
+    msg_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(message)").fetchall()}
+    if "starred" not in msg_cols:
+        wa_conn.execute("ALTER TABLE message ADD COLUMN starred INTEGER DEFAULT 0")
+    jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+    if "server" not in jid_cols:
+        wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+    chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        wa_conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+
+    wa_conn.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15551234', 's.whatsapp.net', '15551234@s.whatsapp.net')"
+    )
+    wa_conn.execute(
+        "INSERT INTO jid (_id, user, server, raw_string) VALUES (2, '120363000111', 'g.us', '120363000111@g.us')"
+    )
+    wa_conn.execute(
+        "INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden) VALUES (10, 1, NULL, 1700000060000, 0)"
+    )
+    wa_conn.execute(
+        "INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden) VALUES (20, 2, 'Study Group', 1700000050000, 0)"
+    )
+
+    base_ts = 1700000000000
+    for idx in range(1, 61):
+        starred_val = 1 if idx == 30 else 0
+        from_me_val = 1 if idx % 2 == 0 else 0
+        text_val = "Crucial starred meeting detail" if idx == 30 else f"Context message {idx}"
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id, starred) "
+            "VALUES (?, 10, ?, 0, ?, ?, 0, ?, ?)",
+            (idx, from_me_val, base_ts + idx * 1000, text_val, f"K_1_{idx}", starred_val),
+        )
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id, starred) "
+        "VALUES (105, 20, 0, 1, ?, 'Group starred reminder', 0, 'K_2_105', 1)",
+        (base_ts + 5000,),
+    )
+    wa_conn.commit()
+    wa_conn.close()
+
+    arch_conn.execute(
+        "INSERT INTO contacts (number, folder, display_name) VALUES ('15551234', 'Alice Star (15551234)', 'Alice Star')"
+    )
+    arch_conn.commit()
+    arch_conn.close()
+
+    port = find_free_port()
+    app = create_app(tmp_path, rescan=False)
+    app.config["TESTING"] = True
+    server_thread = threading.Thread(
+        target=lambda: app.run(port=port, use_reloader=False),
+        daemon=True,
+    )
+    server_thread.start()
+
+    base_url = f"http://127.0.0.1:{port}"
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/chats", timeout=1.0) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            time.sleep(0.1)
+
+    cdp_port = find_free_port()
+    profile_dir = tmp_path / "browser_profile"
+    session = launch_browser_session(base_url, profile_dir, cdp_port, 30, 0.2)
+    try:
+        result = session.evaluate(
+            """
+            (async () => {
+                window.__testErrors = [];
+                window.addEventListener('error', e => window.__testErrors.push(String(e.message || e)));
+                window.addEventListener('unhandledrejection', e => window.__testErrors.push(String(e.reason || e)));
+
+                for (let i = 0; i < 60; i++) {
+                    if (document.querySelectorAll('.chat-item').length >= 2) break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+
+                // Switch chat filter to 'group' first to verify clicking Starred does not reset back to all chats
+                const grpFilter = document.querySelector('.filter-btn[data-filter="group"]');
+                if (grpFilter) grpFilter.click();
+                await new Promise(r => setTimeout(r, 100));
+
+                // Open Starred tab
+                const starredTab = document.getElementById('tab-btn-starred');
+                starredTab.click();
+
+                let starredItems = [];
+                for (let i = 0; i < 60; i++) {
+                    starredItems = Array.from(document.querySelectorAll('#chat-list .chat-item[data-msg-id]'));
+                    if (starredItems.length === 2) break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+
+                const targetItem = document.querySelector('#chat-list .chat-item[data-msg-id="30"]');
+                if (!targetItem) {
+                    return { error: 'Missing starred item 30', count: starredItems.length };
+                }
+                targetItem.click();
+
+                // Wait for context messages to finish loading
+                let loaded = false;
+                for (let i = 0; i < 80; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    const loadingEl = document.getElementById('chat-loading');
+                    const row30 = document.querySelector('.msg-row[data-msg-id="30"]');
+                    if (row30 && loadingEl && loadingEl.style.display === 'none') {
+                        loaded = true;
+                        break;
+                    }
+                }
+                await new Promise(r => setTimeout(r, 150));
+
+                const afterStarredItems = document.querySelectorAll('#chat-list .chat-item[data-msg-id]').length;
+                const allChatItems = document.querySelectorAll('#chat-list .chat-item').length;
+                const activeStarredItem = document.querySelector('#chat-list .chat-item[data-msg-id="30"]')?.classList.contains('active') || false;
+                const tabStillActive = document.getElementById('tab-btn-starred')?.classList.contains('active') || false;
+                const chatTitle = document.getElementById('chat-title')?.textContent || '';
+                const bannerEl = document.getElementById('context-jump-banner');
+                const bannerVisible = bannerEl ? getComputedStyle(bannerEl).display !== 'none' : false;
+                const bannerText = document.getElementById('context-jump-text')?.textContent || '';
+                const row30 = document.querySelector('.msg-row[data-msg-id="30"]');
+                const scroll = document.getElementById('message-scroll');
+                let rowInView = false;
+                if (row30 && scroll) {
+                    const rr = row30.getBoundingClientRect();
+                    const sr = scroll.getBoundingClientRect();
+                    rowInView = rr.bottom > sr.top && rr.top < sr.bottom;
+                }
+
+                return {
+                    loaded,
+                    afterStarredItems,
+                    allChatItems,
+                    activeStarredItem,
+                    tabStillActive,
+                    chatTitle,
+                    bannerVisible,
+                    bannerText,
+                    rowFound: Boolean(row30),
+                    rowInView,
+                    errors: window.__testErrors
+                };
+            })()
+            """,
+            20.0,
+        )
+
+        assert isinstance(result, dict), f"Unexpected result: {result}"
+        assert result.get("errors") == [], f"Browser errors: {result.get('errors')}"
+        assert result.get("loaded") is True, f"Failed to load starred context: {result}"
+        assert result.get("tabStillActive") is True
+        assert result.get("afterStarredItems") == 2
+        assert result.get("allChatItems") == 2
+        assert result.get("activeStarredItem") is True
+        assert result.get("chatTitle") == "Alice Star"
+        assert result.get("bannerVisible") is True
+        assert "Viewing message in context" in result.get("bannerText", "")
+        assert result.get("rowFound") is True
+        assert result.get("rowInView") is True
+
+        session.capture_screenshot(screenshot_dir / "starred_context_jump.png", 5.0)
+    finally:
+        session.close()

@@ -5085,6 +5085,14 @@ def _query_android_starred(
     if "starred" not in msg_cols:
         return []
 
+    has_jm_resolved = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_jid_map_resolved'"
+        ).fetchone()
+    )
+    if not has_jm_resolved:
+        _ensure_jid_map_resolved(conn, arch_conn)
+
     has_mm = bool(
         conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_media'"
@@ -5102,30 +5110,164 @@ def _query_android_starred(
     has_jid = bool(
         conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid'").fetchone()
     )
-    jid_c_join = "LEFT JOIN jid j_c ON j_c._id = c.jid_row_id" if (has_chat and has_jid) else ""
-    jid_s_join = "LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id" if has_jid else ""
+    jid_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(jid)").fetchall()} if has_jid else set()
+    )
+    has_jid_server = "server" in jid_cols
+    has_jid_raw_string = "raw_string" in jid_cols
+    has_ldn = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'"
+        ).fetchone()
+    )
+
+    if has_chat and has_jid:
+        chat_jid_joins = """
+            LEFT JOIN jid j_c ON j_c._id = c.jid_row_id
+            LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id
+            LEFT JOIN jid j_c_real ON j_c_real._id = jm_c.jid_row_id
+        """
+        con_c_join = (
+            f"LEFT JOIN _contacts_resolved con_c ON con_c.clean_number = "
+            f"{_clean_user_sql('COALESCE(j_c_real.user, j_c.user)')}"
+        )
+    else:
+        chat_jid_joins = ""
+        con_c_join = ""
+
+    if has_jid:
+        sender_jid_joins = """
+            LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
+            LEFT JOIN _jid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id
+            LEFT JOIN jid j_s_real ON j_s_real._id = jm_s.jid_row_id
+        """
+        con_s_join = (
+            f"LEFT JOIN _contacts_resolved con_s ON con_s.clean_number = "
+            f"{_clean_user_sql('COALESCE(j_s_real.user, j_s.user)')}"
+        )
+    else:
+        sender_jid_joins = ""
+        con_s_join = ""
+
+    ldn_c_join = (
+        "LEFT JOIN lid_display_name ldn_c ON ldn_c.lid_row_id = c.jid_row_id"
+        if (has_chat and has_ldn)
+        else ""
+    )
+    ldn_s_join = (
+        """
+            LEFT JOIN _lid_map_resolved jm_lid_s ON jm_lid_s.jid_row_id = m.sender_jid_row_id
+            LEFT JOIN lid_display_name ldn_s_direct ON ldn_s_direct.lid_row_id = m.sender_jid_row_id
+            LEFT JOIN lid_display_name ldn_s_mapped ON ldn_s_mapped.lid_row_id = jm_lid_s.lid_row_id
+        """
+        if (has_jid and has_ldn)
+        else ""
+    )
+
+    if has_chat:
+        group_c_parts = ["c.subject IS NOT NULL"]
+        if has_jid and has_jid_server:
+            group_c_parts.append("(j_c.server IS NOT NULL AND j_c.server = 'g.us')")
+        if has_jid and has_jid_raw_string:
+            group_c_parts.append("(j_c.raw_string IS NOT NULL AND j_c.raw_string LIKE '%@g.us')")
+        is_group_chat = " OR ".join(group_c_parts)
+    else:
+        is_group_chat = "0"
+
+    lid_c_parts = []
+    if has_jid_server:
+        lid_c_parts.append("(j_c.server IS NOT NULL AND j_c.server = 'lid')")
+    if has_jid_raw_string:
+        lid_c_parts.append("(j_c.raw_string IS NOT NULL AND j_c.raw_string LIKE '%@lid')")
+    j_c_is_lid = " OR ".join(lid_c_parts) if (has_chat and has_jid and lid_c_parts) else "0"
+
+    lid_s_parts = []
+    if has_jid_server:
+        lid_s_parts.append("(j_s.server IS NOT NULL AND j_s.server = 'lid')")
+    if has_jid_raw_string:
+        lid_s_parts.append("(j_s.raw_string IS NOT NULL AND j_s.raw_string LIKE '%@lid')")
+    j_s_is_lid = " OR ".join(lid_s_parts) if (has_jid and lid_s_parts) else "0"
 
     where_clauses = ["m.starred = 1"]
     params: list = []
     if target_chat_id is not None:
-        if has_chat and target_chat_id.isdigit():
+        clean_target = target_chat_id.split(":")[0] if ":" in target_chat_id else target_chat_id
+        if has_chat and has_jid and target_chat_id.isdigit():
             where_clauses.append(
-                "(m.chat_row_id = ? OR (c.jid_row_id IN (SELECT _id FROM jid WHERE user = ?)))"
+                f"(m.chat_row_id = ? OR ? IN ("
+                f"j_c_real.user, j_c.user, "
+                f"{_clean_user_sql('j_c_real.user')}, {_clean_user_sql('j_c.user')}))"
             )
-            params.extend([int(target_chat_id), target_chat_id])
-        elif has_chat:
-            where_clauses.append("c.jid_row_id IN (SELECT _id FROM jid WHERE user = ?)")
-            params.append(target_chat_id)
+            params.extend([int(target_chat_id), clean_target])
+        elif has_chat and has_jid:
+            where_clauses.append(
+                f"? IN (j_c_real.user, j_c.user, "
+                f"{_clean_user_sql('j_c_real.user')}, {_clean_user_sql('j_c.user')})"
+            )
+            params.append(clean_target)
         else:
             where_clauses.append("m.chat_row_id = ?")
-            params.append(target_chat_id)
+            params.append(int(target_chat_id) if target_chat_id.isdigit() else target_chat_id)
 
     where_sql = " AND ".join(where_clauses)
     limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
+
+    if has_chat and has_jid:
+        canonical_chat_id_expr = f"""
+            CASE WHEN ({is_group_chat}) THEN CAST(m.chat_row_id AS TEXT)
+                 ELSE COALESCE(
+                     {_clean_user_sql("j_c_real.user")},
+                     {_clean_user_sql("j_c.user")},
+                     CAST(m.chat_row_id AS TEXT)
+                 )
+            END
+        """
+        chat_user_expr = (
+            f"COALESCE({_clean_user_sql('j_c_real.user')}, {_clean_user_sql('j_c.user')})"
+        )
+        chat_is_unmapped_lid_expr = (
+            f"CASE WHEN ({j_c_is_lid}) AND j_c_real.user IS NULL THEN 1 ELSE 0 END"
+        )
+        con_c_name_expr = "COALESCE(NULLIF(con_c.display_name, ''), NULLIF(con_c.folder, ''))"
+    else:
+        canonical_chat_id_expr = "CAST(m.chat_row_id AS TEXT)"
+        chat_user_expr = "NULL"
+        chat_is_unmapped_lid_expr = "0"
+        con_c_name_expr = "NULL"
+
+    if has_jid:
+        sender_user_expr = (
+            f"COALESCE({_clean_user_sql('j_s_real.user')}, {_clean_user_sql('j_s.user')})"
+        )
+        sender_is_unmapped_lid_expr = (
+            f"CASE WHEN ({j_s_is_lid}) AND j_s_real.user IS NULL THEN 1 ELSE 0 END"
+        )
+        con_s_name_expr = "COALESCE(NULLIF(con_s.display_name, ''), NULLIF(con_s.folder, ''))"
+    else:
+        sender_user_expr = "NULL"
+        sender_is_unmapped_lid_expr = "0"
+        con_s_name_expr = "NULL"
+
+    ldn_c_name_expr = (
+        "COALESCE("
+        "CASE WHEN ldn_c.display_name NOT LIKE '%∙%' AND ldn_c.display_name NOT LIKE '%\u2219%' "
+        "THEN NULLIF(ldn_c.display_name, '') END, "
+        "NULLIF(ldn_c.username, ''))"
+        if (has_chat and has_ldn)
+        else "NULL"
+    )
+    ldn_s_name_expr = (
+        "COALESCE(NULLIF(ldn_s_direct.display_name, ''), NULLIF(ldn_s_mapped.display_name, ''))"
+        if (has_jid and has_ldn)
+        else "NULL"
+    )
+
     sql = f"""
         SELECT
             m._id AS id,
             m.chat_row_id AS chat_row_id,
+            {canonical_chat_id_expr} AS canonical_chat_id,
+            CASE WHEN ({is_group_chat}) THEN 'group' ELSE 'contact' END AS chat_type,
             m.from_me AS from_me,
             COALESCE(m.timestamp, 0) AS timestamp_ms,
             COALESCE(m.text_data, '') AS text,
@@ -5133,12 +5275,22 @@ def _query_android_starred(
             {mm_file} AS file_path,
             {mm_mime} AS mime_type,
             {"c.subject" if has_chat else "NULL"} AS chat_subject,
-            {"j_c.user" if (has_chat and has_jid) else "NULL"} AS chat_user,
-            {"j_s.user" if has_jid else "NULL"} AS sender_user
+            {chat_user_expr} AS chat_user,
+            {chat_is_unmapped_lid_expr} AS chat_is_unmapped_lid,
+            {con_c_name_expr} AS chat_contact_name,
+            {ldn_c_name_expr} AS chat_ldn_name,
+            {sender_user_expr} AS sender_user,
+            {sender_is_unmapped_lid_expr} AS sender_is_unmapped_lid,
+            {con_s_name_expr} AS sender_contact_name,
+            {ldn_s_name_expr} AS sender_ldn_name
         FROM message m
         {chat_join}
-        {jid_c_join}
-        {jid_s_join}
+        {chat_jid_joins}
+        {con_c_join}
+        {ldn_c_join}
+        {sender_jid_joins}
+        {con_s_join}
+        {ldn_s_join}
         {mm_join}
         WHERE {where_sql}
         ORDER BY m.timestamp DESC
@@ -5146,6 +5298,17 @@ def _query_android_starred(
     """
     rows = conn.execute(sql, params).fetchall()
     contacts_map = _get_contacts_lookup(arch_conn)
+    groups_map: dict[str, str] = {}
+    if arch_conn is not None:
+        try:
+            for gr in arch_conn.execute(
+                "SELECT chat_row_id, subject, folder FROM groups"
+            ).fetchall():
+                if gr[0]:
+                    groups_map[str(gr[0])] = gr[1] or gr[2] or ""
+        except sqlite3.OperationalError:
+            pass
+
     results = []
     for r in rows:
         row_dict = dict(r)
@@ -5181,36 +5344,66 @@ def _query_android_starred(
         else:
             media_type = None
 
+        chat_type = row_dict["chat_type"] or "contact"
+        c_user = row_dict["chat_user"] or ""
+        chat_name = row_dict["chat_subject"] or ""
+        if not chat_name and chat_type == "group" and row_dict["chat_row_id"] is not None:
+            chat_name = groups_map.get(str(row_dict["chat_row_id"]), "")
+        if not chat_name and row_dict.get("chat_contact_name"):
+            chat_name = row_dict["chat_contact_name"]
+        if not chat_name and c_user:
+            chat_name = contacts_map.get(c_user, "")
+        if not chat_name and c_user == "0":
+            chat_name = "WhatsApp"
+        if not chat_name and row_dict.get("chat_ldn_name"):
+            chat_name = row_dict["chat_ldn_name"]
+        if not chat_name:
+            if chat_type == "group":
+                chat_name = f"Unknown Group ({row_dict['chat_row_id']})"
+            elif c_user and c_user.isdigit() and not row_dict.get("chat_is_unmapped_lid"):
+                chat_name = f"+{c_user}"
+            elif c_user and not row_dict.get("chat_is_unmapped_lid"):
+                chat_name = c_user
+            elif row_dict["chat_row_id"] is not None:
+                chat_name = f"Unknown Contact ({row_dict['chat_row_id']})"
+            else:
+                chat_name = "Unknown Contact"
+
         from_me = int(row_dict["from_me"])
         s_user = row_dict["sender_user"] or ""
         if from_me == 1:
             sender_name = "You"
         else:
-            sender_name = contacts_map.get(s_user, "")
+            sender_name = row_dict.get("sender_contact_name") or ""
+            if not sender_name and s_user:
+                sender_name = contacts_map.get(s_user, "")
+            if not sender_name and s_user == "0":
+                sender_name = "WhatsApp"
+            if not sender_name and row_dict.get("sender_ldn_name"):
+                ldn_s_val = str(row_dict["sender_ldn_name"]).strip()
+                if "∙" not in ldn_s_val and "\u2219" not in ldn_s_val:
+                    sender_name = ldn_s_val
             if not sender_name:
-                sender_name = (
-                    f"+{s_user}" if (s_user and s_user.isdigit()) else (s_user or "Unknown")
-                )
+                if s_user and s_user.isdigit() and not row_dict.get("sender_is_unmapped_lid"):
+                    sender_name = f"+{s_user}"
+                elif s_user and not row_dict.get("sender_is_unmapped_lid"):
+                    sender_name = s_user
+                elif chat_type == "contact":
+                    sender_name = chat_name
+                else:
+                    sender_name = "Unknown"
 
-        c_user = row_dict["chat_user"] or ""
-        chat_name = row_dict["chat_subject"] or ""
-        if not chat_name and c_user:
-            chat_name = contacts_map.get(c_user, "")
-        if not chat_name:
-            chat_name = (
-                f"+{c_user}"
-                if (c_user and c_user.isdigit())
-                else (c_user or f"Chat {row_dict['chat_row_id']}")
-            )
-
-        chat_id_val = (
-            str(row_dict["chat_row_id"]) if row_dict["chat_row_id"] is not None else (c_user or "0")
+        chat_id_val = str(
+            row_dict["canonical_chat_id"]
+            if row_dict["canonical_chat_id"] is not None
+            else (c_user or row_dict["chat_row_id"] or "0")
         )
 
         results.append(
             {
                 "id": int(row_dict["id"]),
                 "chat_id": chat_id_val,
+                "chat_type": chat_type,
                 "chat_name": chat_name,
                 "sender_name": sender_name,
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
@@ -5253,6 +5446,12 @@ def _query_ios_starred(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACHATSESSION'"
         ).fetchone()
     )
+    cs_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if has_cs
+        else set()
+    )
+    has_cs_group = "ZGROUPINFO" in cs_cols
     cs_join = "LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION" if has_cs else ""
 
     where_clauses = ["m.ZSTARRED = 1"]
@@ -5275,7 +5474,8 @@ def _query_ios_starred(
             m.ZFROMJID AS from_jid,
             {mi_path} AS media_path,
             {"cs.ZPARTNERNAME" if has_cs else "NULL"} AS partner_name,
-            {"cs.ZCONTACTJID" if has_cs else "NULL"} AS contact_jid
+            {"cs.ZCONTACTJID" if has_cs else "NULL"} AS contact_jid,
+            {"cs.ZGROUPINFO" if has_cs_group else "NULL"} AS group_info
         FROM ZWAMESSAGE m
         {cs_join}
         {mi_join}
@@ -5340,10 +5540,12 @@ def _query_ios_starred(
                 else (c_phone or f"Chat {row_dict['chat_session']}")
             )
 
+        is_group = bool(row_dict.get("group_info") is not None or contact_jid.endswith("@g.us"))
         results.append(
             {
                 "id": int(row_dict["id"]),
                 "chat_id": str(row_dict["chat_session"]),
+                "chat_type": "group" if is_group else "contact",
                 "chat_name": chat_name,
                 "sender_name": sender_name,
                 "timestamp": int(round(float(row_dict["msg_date"]) + 978307200)),
@@ -5383,15 +5585,27 @@ def _query_preserved_starred(
 
         where_sql = " AND ".join(where_clauses)
         limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
+        sender_col = (
+            "sender"
+            if "sender" in cols
+            else (
+                "sender_name"
+                if "sender_name" in cols
+                else ("participant_name" if "participant_name" in cols else "NULL")
+            )
+        )
+        chat_type_col = "chat_type" if "chat_type" in cols else "'contact'"
         sql = f"""
             SELECT
+                rowid,
                 msg_id,
                 chat_id,
+                {chat_type_col} AS chat_type,
                 timestamp_ms,
                 text_body,
                 media_type,
                 from_me,
-                participant_name
+                {sender_col} AS sender_display
             FROM preserved_messages
             WHERE {where_sql}
             ORDER BY timestamp_ms DESC
@@ -5413,12 +5627,13 @@ def _query_preserved_starred(
             media_type = None
 
         from_me = int(row_dict["from_me"])
-        sender_name = "You" if from_me == 1 else (row_dict["participant_name"] or "Unknown")
+        sender_name = "You" if from_me == 1 else (row_dict["sender_display"] or "Unknown")
 
         results.append(
             {
-                "id": int(row_dict["msg_id"]),
+                "id": -int(row_dict["rowid"]),
                 "chat_id": str(row_dict["chat_id"]),
+                "chat_type": row_dict.get("chat_type") or "contact",
                 "chat_name": f"Chat {row_dict['chat_id']}",
                 "sender_name": sender_name,
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),

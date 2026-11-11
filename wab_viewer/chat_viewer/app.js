@@ -490,13 +490,20 @@
   // ---- load chats ----------------------------------------------------------
 
   async function loadChats() {
-    document.getElementById('chat-list').innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading Chats…</div>';
+    if (currentNavTab === 'chats') {
+      document.getElementById('chat-list').innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading Chats…</div>';
+    }
     const res = await fetch('/api/chats');
     allChats = await res.json();
     const hasArchived = allChats.some(c => c.is_archived);
     setTabEnabled('tab-btn-archived', hasArchived, 'Archived', 'No archived chats in this backup');
     await checkCallsAvailability();
-    renderChatList();
+    if (currentNavTab === 'chats') {
+      renderChatList();
+    } else if (currentNavTab === 'archived') {
+      const q = document.getElementById('search-input')?.value || '';
+      renderArchivedList(q);
+    }
   }
 
   let currentFilter = 'all';
@@ -516,7 +523,9 @@
     document.querySelectorAll('.filter-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.filter === filter);
     });
-    renderChatList();
+    if (currentNavTab === 'chats') {
+      renderChatList();
+    }
   }
 
   let _indexPollGen = 0;
@@ -580,7 +589,8 @@
     const visible = currentFilter === 'all' ? activeChats : activeChats.filter(c => c.type === currentFilter);
     visible.forEach(chat => {
       const el = document.createElement('div');
-      el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
+      const isActive = currentChat && String(currentChat.id) === String(chat.id) && currentChat.type === chat.type;
+      el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '') + (isActive ? ' active' : '');
       el.dataset.id = chat.id;
       el.dataset.type = chat.type;
       const tagHtml = chat.is_preserved_only
@@ -615,7 +625,8 @@
 
     matches.forEach(chat => {
       const el = document.createElement('div');
-      el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '');
+      const isActive = currentChat && String(currentChat.id) === String(chat.id) && currentChat.type === chat.type;
+      el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '') + (isActive ? ' active' : '');
       el.dataset.id = chat.id;
       el.dataset.type = chat.type;
       const tagHtml = chat.is_preserved_only
@@ -706,6 +717,7 @@
 
         loadCallsList(true);
       } else if (tabName === 'starred') {
+        _activeStarredMsgId = null;
         if (searchInput) searchInput.placeholder = 'Search starred bookmarks…';
         const emptyPane = document.getElementById('empty-pane');
         const chatHeader = document.getElementById('chat-header');
@@ -791,6 +803,7 @@
 
   async function selectChat(chat, el) {
     _indexPollGen++;
+    _activeStarredMsgId = null;
     const gen = ++_loadGen;
     loading = false;
     document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
@@ -4909,6 +4922,7 @@
 
   let _starredList = [];
   let _starredLoading = false;
+  let _activeStarredMsgId = null;
 
   async function loadStarredList(reset) {
     if (_starredLoading) return;
@@ -4946,16 +4960,21 @@
 
   function renderStarredItem(m) {
     const el = document.createElement('div');
-    el.className = 'chat-item';
+    const isActive = _activeStarredMsgId !== null && _activeStarredMsgId === String(m.id);
+    el.className = 'chat-item' + (m.chat_type === 'group' ? ' group' : '') + (isActive ? ' active' : '');
+    el.dataset.msgId = String(m.id);
+    el.dataset.chatId = String(m.chat_id);
+    if (m.chat_type) el.dataset.chatType = m.chat_type;
     let preview = m.text || m.text_body || '';
     if (m.media_type) {
-      const label = MEDIA_LABELS[m.media_type] || '📎 Media';
+      const mediaKey = m.media_type === 'photo' ? 'image' : m.media_type;
+      const label = MEDIA_LABELS[mediaKey] || '📎 Media';
       preview = preview ? `${label} • ${preview}` : label;
     }
     const authorPrefix = m.sender_name ? `${m.sender_name}: ` : '';
     el.innerHTML = `<div class="chat-name">${esc(m.chat_name || 'Chat')}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
     el.addEventListener('click', () => {
-      openChatAtMessage(m.chat_id, m.id);
+      openChatAtMessage(m.chat_id, m.id, m.chat_type, m.chat_name);
     });
     return el;
   }
@@ -5319,7 +5338,16 @@
     }
   }
 
-  async function openChatAtMessage(chatId, messageId) {
+  function _findChatInList(chatId, chatType) {
+    const cid = String(chatId);
+    if (chatType) {
+      const exact = allChats.find(c => String(c.id) === cid && c.type === chatType);
+      if (exact) return exact;
+    }
+    return allChats.find(c => String(c.id) === cid || c.jid === chatId) || null;
+  }
+
+  async function openChatAtMessage(chatId, messageId, chatType, chatName) {
     if (_jumpAbortController) {
       _jumpAbortController.abort();
     }
@@ -5328,14 +5356,30 @@
     const gen = ++_loadGen;
     loading = true;
 
-    let chat = allChats.find(c => String(c.id) === String(chatId) || c.jid === chatId);
+    let chat = _findChatInList(chatId, chatType);
     if (!chat) {
-      await loadChats();
-      chat = allChats.find(c => String(c.id) === String(chatId) || c.jid === chatId);
+      try {
+        await loadChats();
+        chat = _findChatInList(chatId, chatType);
+      } catch (err) {
+        if (err.name === 'AbortError') return null;
+      }
     }
     if (!chat) {
-      loading = false;
-      throw new Error(`Chat with ID ${chatId} not found`);
+      if (chatId !== undefined && chatId !== null && String(chatId) !== '') {
+        chat = {
+          id: String(chatId),
+          type: chatType || 'contact',
+          display_name: chatName || String(chatId),
+          phone_number: '',
+          is_archived: 0,
+          is_preserved_only: false
+        };
+      } else {
+        loading = false;
+        showJumpHudError('Unable to locate chat for this message');
+        return null;
+      }
     }
 
     currentChat = chat;
@@ -5348,13 +5392,21 @@
     closeChatStarred();
     closeMediaGallery();
 
-    resetFilterTo('all');
-
-    document.querySelectorAll('.chat-item').forEach(e => {
-      const match = e.dataset.id === String(chat.id) && e.dataset.type === chat.type;
-      e.classList.toggle('active', match);
-      if (match) e.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    });
+    if (currentNavTab === 'starred') {
+      _activeStarredMsgId = String(messageId);
+      document.querySelectorAll('.chat-item').forEach(e => {
+        const match = e.dataset.msgId === String(messageId);
+        e.classList.toggle('active', match);
+        if (match) e.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    } else {
+      _activeStarredMsgId = null;
+      document.querySelectorAll('.chat-item').forEach(e => {
+        const match = e.dataset.id === String(chat.id) && e.dataset.type === chat.type;
+        e.classList.toggle('active', match);
+        if (match) e.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    }
 
     const callInspector = document.getElementById('pane-call-inspector');
     if (callInspector) callInspector.style.display = 'none';
@@ -5440,8 +5492,13 @@
       showContextJumpBanner('⭐', 'Viewing message in context', () => {
         const contextBanner = document.getElementById('context-jump-banner');
         if (contextBanner) contextBanner.style.display = 'none';
-        switchNavTab('chats');
-        resetFilterTo('all');
+        _activeStarredMsgId = null;
+        if (chat.is_archived) {
+          switchNavTab('archived');
+        } else {
+          switchNavTab('chats');
+          resetFilterTo('all');
+        }
         const activeItem = document.querySelector(`.chat-item[data-id="${chat.id}"][data-type="${chat.type}"]`);
         if (activeItem) activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });
@@ -5477,7 +5534,8 @@
     }
     if (!chat) {
       loading = false;
-      throw new Error(`Chat with ID ${chatId} not found`);
+      showJumpHudError('Unable to locate chat for this call');
+      return null;
     }
 
     currentChat = chat;
@@ -5492,8 +5550,6 @@
     closeChatInfo();
     closeChatStarred();
     closeMediaGallery();
-
-    resetFilterTo('all');
 
     document.querySelectorAll('.chat-item').forEach(e => {
       const match = e.dataset.id === String(chat.id) && e.dataset.type === chat.type;
