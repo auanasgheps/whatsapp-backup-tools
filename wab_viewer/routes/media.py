@@ -52,7 +52,9 @@ def api_media():
     select = ctx.queries.android_select if ctx.source_type == "android" else ctx.queries.ios_select
     extra = ctx.queries.android_filter if ctx.source_type == "android" else ctx.queries.ios_filter
     if ctx.source_type == "android":
-        chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+        chat_pred, chat_params = _resolve_android_chat_filter(
+            conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
+        )
         is_media, ts_col = ctx.queries.android_is_media, ctx.queries.android_ts
         is_link = ctx.queries.android_is_link
         is_doc = ctx.queries.android_is_document_undownloaded
@@ -202,7 +204,9 @@ def api_media_links():
         return jsonify([])
     select = ctx.queries.android_select if ctx.source_type == "android" else ctx.queries.ios_select
     if ctx.source_type == "android":
-        chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+        chat_pred, chat_params = _resolve_android_chat_filter(
+            conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
+        )
         is_link = ctx.queries.android_is_link
         ts_col = ctx.queries.android_ts
     else:
@@ -241,7 +245,9 @@ def api_media_documents():
         return jsonify([])
     select = ctx.queries.android_select if ctx.source_type == "android" else ctx.queries.ios_select
     if ctx.source_type == "android":
-        chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+        chat_pred, chat_params = _resolve_android_chat_filter(
+            conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
+        )
         is_doc = ctx.queries.android_is_document_undownloaded
         ts_col = ctx.queries.android_ts
     else:
@@ -267,7 +273,9 @@ def api_media_count():
     select = ctx.queries.android_select if ctx.source_type == "android" else ctx.queries.ios_select
     extra = ctx.queries.android_filter if ctx.source_type == "android" else ctx.queries.ios_filter
     if ctx.source_type == "android":
-        chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+        chat_pred, chat_params = _resolve_android_chat_filter(
+            conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
+        )
         is_media = ctx.queries.android_is_media
         is_link = ctx.queries.android_is_link
         is_doc_undownloaded = ctx.queries.android_is_document_undownloaded

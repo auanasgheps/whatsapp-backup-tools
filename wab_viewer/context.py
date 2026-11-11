@@ -164,6 +164,7 @@ class ViewerContext:
         self.schema_alert = schema_alert
         self.caps = caps
         self.queries = queries
+        self.android_chat_row_ids_cache: dict[tuple[str, str], list[int]] = {}
 
     def get_wa(self) -> sqlite3.Connection | None:
         """Return thread-local SQLite connection to the WhatsApp source DB with ancillary attaches."""

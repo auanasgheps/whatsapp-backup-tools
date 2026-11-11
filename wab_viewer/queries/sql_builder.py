@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -66,19 +67,17 @@ def _check_ios_hd_association(wa_db_path: str, ext_db_path: Path | None) -> bool
     if ext_db_path is None or not ext_db_path.is_file():
         return False
     try:
-        conn = sqlite3.connect(wa_db_path)
-        conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db_path),))
-        has_table = conn.execute(
-            "SELECT 1 FROM ext.sqlite_master WHERE type='table' AND name='message_parent_association'"
-        ).fetchone()
-        if not has_table:
-            conn.close()
-            return False
-        has_hd = conn.execute(
-            "SELECT 1 FROM ext.message_parent_association WHERE type IN (10, 5) LIMIT 1"
-        ).fetchone()
-        conn.close()
-        return bool(has_hd)
+        with contextlib.closing(sqlite3.connect(wa_db_path)) as conn:
+            conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db_path),))
+            has_table = conn.execute(
+                "SELECT 1 FROM ext.sqlite_master WHERE type='table' AND name='message_parent_association'"
+            ).fetchone()
+            if not has_table:
+                return False
+            has_hd = conn.execute(
+                "SELECT 1 FROM ext.message_parent_association WHERE type IN (10, 5) LIMIT 1"
+            ).fetchone()
+            return bool(has_hd)
     except sqlite3.OperationalError:
         return False
 
@@ -100,22 +99,22 @@ def _android_chat_filter(chat_id: str, chat_type: str) -> tuple[str, list]:
     return pred, [clean_id]
 
 
-_android_chat_row_ids_cache: dict[tuple[str, str], list[int]] = {}
-
-
 def _resolve_android_chat_row_ids(
-    conn: sqlite3.Connection, chat_id: str, chat_type: str
+    conn: sqlite3.Connection,
+    chat_id: str,
+    chat_type: str,
+    cache: dict[tuple[str, str], list[int]],
 ) -> list[int]:
-    """Resolve a chat ID and chat type to physical chat row IDs using in-memory cache."""
+    """Resolve a chat ID and chat type to physical chat row IDs using a per-context cache."""
     cache_key = (chat_id, chat_type)
-    cached = _android_chat_row_ids_cache.get(cache_key)
+    cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
     if chat_type == "group":
         try:
             row_ids = [int(chat_id)]
-            _android_chat_row_ids_cache[cache_key] = row_ids
+            cache[cache_key] = row_ids
             return row_ids
         except ValueError:
             return []
@@ -148,15 +147,18 @@ def _resolve_android_chat_row_ids(
         row_ids = []
 
     if row_ids:
-        _android_chat_row_ids_cache[cache_key] = row_ids
+        cache[cache_key] = row_ids
     return row_ids
 
 
 def _resolve_android_chat_filter(
-    conn: sqlite3.Connection, chat_id: str, chat_type: str
+    conn: sqlite3.Connection,
+    chat_id: str,
+    chat_type: str,
+    cache: dict[tuple[str, str], list[int]],
 ) -> tuple[str, list]:
     """Return physical column predicate and parameters for an Android chat."""
-    row_ids = _resolve_android_chat_row_ids(conn, chat_id, chat_type)
+    row_ids = _resolve_android_chat_row_ids(conn, chat_id, chat_type, cache)
     if len(row_ids) == 1:
         return "m.chat_row_id = ?", [row_ids[0]]
     if row_ids:
@@ -587,161 +589,168 @@ def detect_schema_capabilities(
     has_cs_ident = False
     has_cs_last_msg_date = False
     if wa_db_path is not None:
-        _tmp_wa = sqlite3.connect(str(wa_db_path))
-        _wa_tables = {
-            r[0]
-            for r in _tmp_wa.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }
-        has_message_view_once_media = "message_view_once_media" in _wa_tables
-        has_message_revoked = "message_revoked" in _wa_tables
-        has_reactions = "message_add_on" in _wa_tables and "message_add_on_reaction" in _wa_tables
-        has_message_poll = "message_poll" in _wa_tables
-        has_pin_in_chat_table = "message_add_on_pin_in_chat" in _wa_tables
-        _mao_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_add_on)").fetchall()}
-            if "message_add_on" in _wa_tables
-            else set()
-        )
-        has_message_add_on = "message_add_on" in _wa_tables and "message_add_on_type" in _mao_cols
-        has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
-        has_lid_dn = "lid_display_name" in _wa_tables
-        has_message_system = "message_system" in _wa_tables
-        has_mcp = "message_system_chat_participant" in _wa_tables
-        has_message_thumbnail = "message_thumbnail" in _wa_tables
-        has_media_hash_thumbnail = "media_hash_thumbnail" in _wa_tables
-        has_message_quoted_media = "message_quoted_media" in _wa_tables
-        has_message_quoted_text = "message_quoted_text" in _wa_tables
-        has_message_quoted_location = "message_quoted_location" in _wa_tables
-        _mq_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_quoted)").fetchall()}
-            if "message_quoted" in _wa_tables
-            else set()
-        )
-        has_mq_key_id = "key_id" in _mq_cols
-        has_mq_msg_type = "message_type" in _mq_cols
-        has_mq_pm_chat = "parent_message_chat_row_id" in _mq_cols
-        _mm_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_media)").fetchall()}
-            if "message_media" in _wa_tables
-            else set()
-        )
-        has_mm_width = "width" in _mm_cols
-        has_mm_height = "height" in _mm_cols
-        has_mm_size = "file_size" in _mm_cols
-        has_mm_duration = "media_duration" in _mm_cols
-        has_mm_file_hash = "file_hash" in _mm_cols
-        has_mm_gif_attribution = "gif_attribution" in _mm_cols
-        _msg_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message)").fetchall()}
-            if "message" in _wa_tables
-            else set()
-        )
-        has_android_key_id = "key_id" in _msg_cols
-        _mei_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_edit_info)").fetchall()}
-            if "message_edit_info" in _wa_tables
-            else set()
-        )
-        has_android_edit_info = "message_edit_info" in _wa_tables and "message_row_id" in _mei_cols
-        has_mei_ts = "edited_timestamp" in _mei_cols
+        with contextlib.closing(sqlite3.connect(str(wa_db_path))) as _tmp_wa:
+            _wa_tables = {
+                r[0]
+                for r in _tmp_wa.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            has_message_view_once_media = "message_view_once_media" in _wa_tables
+            has_message_revoked = "message_revoked" in _wa_tables
+            has_reactions = (
+                "message_add_on" in _wa_tables and "message_add_on_reaction" in _wa_tables
+            )
+            has_message_poll = "message_poll" in _wa_tables
+            has_pin_in_chat_table = "message_add_on_pin_in_chat" in _wa_tables
+            _mao_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_add_on)").fetchall()}
+                if "message_add_on" in _wa_tables
+                else set()
+            )
+            has_message_add_on = (
+                "message_add_on" in _wa_tables and "message_add_on_type" in _mao_cols
+            )
+            has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
+            has_lid_dn = "lid_display_name" in _wa_tables
+            has_message_system = "message_system" in _wa_tables
+            has_mcp = "message_system_chat_participant" in _wa_tables
+            has_message_thumbnail = "message_thumbnail" in _wa_tables
+            has_media_hash_thumbnail = "media_hash_thumbnail" in _wa_tables
+            has_message_quoted_media = "message_quoted_media" in _wa_tables
+            has_message_quoted_text = "message_quoted_text" in _wa_tables
+            has_message_quoted_location = "message_quoted_location" in _wa_tables
+            _mq_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_quoted)").fetchall()}
+                if "message_quoted" in _wa_tables
+                else set()
+            )
+            has_mq_key_id = "key_id" in _mq_cols
+            has_mq_msg_type = "message_type" in _mq_cols
+            has_mq_pm_chat = "parent_message_chat_row_id" in _mq_cols
+            _mm_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_media)").fetchall()}
+                if "message_media" in _wa_tables
+                else set()
+            )
+            has_mm_width = "width" in _mm_cols
+            has_mm_height = "height" in _mm_cols
+            has_mm_size = "file_size" in _mm_cols
+            has_mm_duration = "media_duration" in _mm_cols
+            has_mm_file_hash = "file_hash" in _mm_cols
+            has_mm_gif_attribution = "gif_attribution" in _mm_cols
+            _msg_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message)").fetchall()}
+                if "message" in _wa_tables
+                else set()
+            )
+            has_android_key_id = "key_id" in _msg_cols
+            _mei_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_edit_info)").fetchall()}
+                if "message_edit_info" in _wa_tables
+                else set()
+            )
+            has_android_edit_info = (
+                "message_edit_info" in _wa_tables and "message_row_id" in _mei_cols
+            )
+            has_mei_ts = "edited_timestamp" in _mei_cols
 
-        _mao_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_add_on)").fetchall()}
-            if "message_add_on" in _wa_tables
-            else set()
-        )
-        has_android_add_on = (
-            "message_add_on" in _wa_tables
-            and "message_add_on_type" in _mao_cols
-            and "parent_message_row_id" in _mao_cols
-        )
-        has_mao_ts = "timestamp" in _mao_cols
-        has_message_media_map = (
-            "message_media_map" in _wa_tables
-            and "extended_media_data" in _wa_tables
-            and bool(_tmp_wa.execute("SELECT 1 FROM message_media_map LIMIT 1").fetchone())
-        )
-        _jid_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(jid)").fetchall()}
-            if "jid" in _wa_tables
-            else set()
-        )
-        has_jid_server = "server" in _jid_cols
-        has_jid_raw_string = "raw_string" in _jid_cols
-        _mi_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
-            if "ZWAMEDIAITEM" in _wa_tables
-            else set()
-        )
-        has_ios_vcard_name = "ZVCARDNAME" in _mi_cols
-        has_ios_vcard_string = "ZVCARDSTRING" in _mi_cols
-        has_ios_aspect_ratio = "ZASPECTRATIO" in _mi_cols
-        has_ios_filesize = "ZFILESIZE" in _mi_cols
-        has_ios_duration = "ZMOVIEDURATION" in _mi_cols
-        has_ios_title = "ZTITLE" in _mi_cols
-        has_ios_mediaurl = "ZMEDIAURL" in _mi_cols
-        has_ios_metadata = "ZMETADATA" in _mi_cols
-        has_message_text = "message_text" in _wa_tables
-        _mt_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_text)").fetchall()}
-            if has_message_text
-            else set()
-        )
-        has_mt_title = "page_title" in _mt_cols
-        has_mt_desc = "description" in _mt_cols
-        has_mt_url = "url" in _mt_cols
-        has_mt_preview_type = "preview_type" in _mt_cols
-        has_message_location = "message_location" in _wa_tables
-        _ml_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_location)").fetchall()}
-            if has_message_location
-            else set()
-        )
-        has_ml_lat = "latitude" in _ml_cols
-        has_ml_lng = "longitude" in _ml_cols
-        has_ml_name = "place_name" in _ml_cols
-        has_ml_address = "place_address" in _ml_cols
-        has_ml_url = "url" in _ml_cols
-        has_ml_duration = "live_location_share_duration" in _ml_cols
-        has_ios_lat = "ZLATITUDE" in _mi_cols
-        has_ios_lng = "ZLONGITUDE" in _mi_cols
-        _mdi_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGEDATAITEM)").fetchall()}
-            if "ZWAMESSAGEDATAITEM" in _wa_tables
-            else set()
-        )
-        has_ios_mdi = bool(_mdi_cols)
-        has_ios_mdi_thumb = "ZTHUMBNAILPATH" in _mdi_cols
-        has_ios_mdi_matched = "ZMATCHEDTEXT" in _mdi_cols
-        has_ios_mdi_title = "ZTITLE" in _mdi_cols
-        has_ios_mdi_summary = "ZSUMMARY" in _mdi_cols
-        _zwa_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
-            if "ZWAMESSAGE" in _wa_tables
-            else set()
-        )
-        has_ios_group_event = "ZGROUPEVENTTYPE" in _zwa_cols
-        has_ios_stanza_id = "ZSTANZAID" in _zwa_cols
-        _chat_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(chat)").fetchall()}
-            if "chat" in _wa_tables
-            else set()
-        )
-        has_chat_archived = "archived" in _chat_cols
-        _cs_cols = (
-            {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
-            if "ZWACHATSESSION" in _wa_tables
-            else set()
-        )
-        has_cs_archived = "ZARCHIVED" in _cs_cols or "ZISARCHIVED" in _cs_cols
-        cs_archived_col_name = (
-            "ZARCHIVED"
-            if "ZARCHIVED" in _cs_cols
-            else ("ZISARCHIVED" if "ZISARCHIVED" in _cs_cols else "ZARCHIVED")
-        )
-        has_cs_ident = "ZCONTACTIDENTIFIER" in _cs_cols
-        has_cs_last_msg_date = "ZLASTMESSAGEDATE" in _cs_cols
-        _tmp_wa.close()
+            _mao_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_add_on)").fetchall()}
+                if "message_add_on" in _wa_tables
+                else set()
+            )
+            has_android_add_on = (
+                "message_add_on" in _wa_tables
+                and "message_add_on_type" in _mao_cols
+                and "parent_message_row_id" in _mao_cols
+            )
+            has_mao_ts = "timestamp" in _mao_cols
+            has_message_media_map = (
+                "message_media_map" in _wa_tables
+                and "extended_media_data" in _wa_tables
+                and bool(_tmp_wa.execute("SELECT 1 FROM message_media_map LIMIT 1").fetchone())
+            )
+            _jid_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(jid)").fetchall()}
+                if "jid" in _wa_tables
+                else set()
+            )
+            has_jid_server = "server" in _jid_cols
+            has_jid_raw_string = "raw_string" in _jid_cols
+            _mi_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
+                if "ZWAMEDIAITEM" in _wa_tables
+                else set()
+            )
+            has_ios_vcard_name = "ZVCARDNAME" in _mi_cols
+            has_ios_vcard_string = "ZVCARDSTRING" in _mi_cols
+            has_ios_aspect_ratio = "ZASPECTRATIO" in _mi_cols
+            has_ios_filesize = "ZFILESIZE" in _mi_cols
+            has_ios_duration = "ZMOVIEDURATION" in _mi_cols
+            has_ios_title = "ZTITLE" in _mi_cols
+            has_ios_mediaurl = "ZMEDIAURL" in _mi_cols
+            has_ios_metadata = "ZMETADATA" in _mi_cols
+            has_message_text = "message_text" in _wa_tables
+            _mt_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_text)").fetchall()}
+                if has_message_text
+                else set()
+            )
+            has_mt_title = "page_title" in _mt_cols
+            has_mt_desc = "description" in _mt_cols
+            has_mt_url = "url" in _mt_cols
+            has_mt_preview_type = "preview_type" in _mt_cols
+            has_message_location = "message_location" in _wa_tables
+            _ml_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_location)").fetchall()}
+                if has_message_location
+                else set()
+            )
+            has_ml_lat = "latitude" in _ml_cols
+            has_ml_lng = "longitude" in _ml_cols
+            has_ml_name = "place_name" in _ml_cols
+            has_ml_address = "place_address" in _ml_cols
+            has_ml_url = "url" in _ml_cols
+            has_ml_duration = "live_location_share_duration" in _ml_cols
+            has_ios_lat = "ZLATITUDE" in _mi_cols
+            has_ios_lng = "ZLONGITUDE" in _mi_cols
+            _mdi_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGEDATAITEM)").fetchall()}
+                if "ZWAMESSAGEDATAITEM" in _wa_tables
+                else set()
+            )
+            has_ios_mdi = bool(_mdi_cols)
+            has_ios_mdi_thumb = "ZTHUMBNAILPATH" in _mdi_cols
+            has_ios_mdi_matched = "ZMATCHEDTEXT" in _mdi_cols
+            has_ios_mdi_title = "ZTITLE" in _mdi_cols
+            has_ios_mdi_summary = "ZSUMMARY" in _mdi_cols
+            _zwa_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
+                if "ZWAMESSAGE" in _wa_tables
+                else set()
+            )
+            has_ios_group_event = "ZGROUPEVENTTYPE" in _zwa_cols
+            has_ios_stanza_id = "ZSTANZAID" in _zwa_cols
+            _chat_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(chat)").fetchall()}
+                if "chat" in _wa_tables
+                else set()
+            )
+            has_chat_archived = "archived" in _chat_cols
+            _cs_cols = (
+                {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+                if "ZWACHATSESSION" in _wa_tables
+                else set()
+            )
+            has_cs_archived = "ZARCHIVED" in _cs_cols or "ZISARCHIVED" in _cs_cols
+            cs_archived_col_name = (
+                "ZARCHIVED"
+                if "ZARCHIVED" in _cs_cols
+                else ("ZISARCHIVED" if "ZISARCHIVED" in _cs_cols else "ZARCHIVED")
+            )
+            has_cs_ident = "ZCONTACTIDENTIFIER" in _cs_cols
+            has_cs_last_msg_date = "ZLASTMESSAGEDATE" in _cs_cols
 
     has_ios_sort = "ZSORT" in _zwa_cols if wa_db_path is not None else False
     has_ios_starred = "ZSTARRED" in _zwa_cols if wa_db_path is not None else False

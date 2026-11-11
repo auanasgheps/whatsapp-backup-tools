@@ -96,7 +96,9 @@ def api_starred():
     live_starred: list[dict] = []
     conn = ctx.get_wa()
     if conn is not None and ctx.source_type == "android":
-        live_starred = _query_android_starred(conn, None, ctx.get_archive(), fetch_limit)
+        live_starred = _query_android_starred(
+            conn, None, ctx.get_archive(), fetch_limit, ctx.android_chat_row_ids_cache
+        )
     elif conn is not None and ctx.source_type == "ios":
         live_starred = _query_ios_starred(conn, None, ctx.get_archive(), fetch_limit)
 
@@ -145,7 +147,9 @@ def api_chat_starred(chat_id: str):
     conn = ctx.get_wa()
     pres = ctx.get_preserved()
     if conn is not None and ctx.source_type == "android":
-        live_starred = _query_android_starred(conn, chat_id_clean, ctx.get_archive(), fetch_limit)
+        live_starred = _query_android_starred(
+            conn, chat_id_clean, ctx.get_archive(), fetch_limit, ctx.android_chat_row_ids_cache
+        )
     elif conn is not None and ctx.source_type == "ios":
         live_starred = _query_ios_starred(conn, chat_id_clean, ctx.get_archive(), fetch_limit)
 
@@ -166,7 +170,9 @@ def api_chat_starred(chat_id: str):
             merged.append(m)
 
     merged.sort(key=lambda x: x["timestamp"], reverse=True)
-    total_count = _count_chat_starred(conn, pres, ctx.source_type, chat_id_clean)
+    total_count = _count_chat_starred(
+        conn, pres, ctx.source_type, chat_id_clean, ctx.android_chat_row_ids_cache
+    )
     if total_count < len(merged):
         total_count = len(merged)
     has_more = total_count > offset + limit
@@ -191,7 +197,9 @@ def api_chat_pinned(chat_id: str):
     live_pins: list[dict] = []
     conn = ctx.get_wa()
     if conn is not None and ctx.source_type == "android":
-        live_pins = _query_android_pinned(conn, chat_id_clean, chat_type, ctx.get_archive())
+        live_pins = _query_android_pinned(
+            conn, chat_id_clean, chat_type, ctx.get_archive(), ctx.android_chat_row_ids_cache
+        )
     elif conn is not None and ctx.source_type == "ios":
         ext_db_p = (
             _find_ios_db(ctx.wa_db_path, "ExtChatDatabase.sqlite", ctx.output_root)

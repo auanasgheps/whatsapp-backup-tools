@@ -150,7 +150,7 @@ def _fts_android_chat(
     hd_clause: str,
 ):
     _ensure_jid_map_resolved(wa_conn, None)
-    chat_pred, chat_params = _resolve_android_chat_filter(wa_conn, chat_id, chat_type)
+    chat_pred, chat_params = _resolve_android_chat_filter(wa_conn, chat_id, chat_type, {})
     has_poll_opt = wa_conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_poll_option'"
     ).fetchone()

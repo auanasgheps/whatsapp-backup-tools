@@ -106,6 +106,10 @@ def reset_ui_state(browser: CDPSession) -> Generator[None, None, None]:
             if (galClose) galClose.click();
             const infoClose = document.getElementById('chat-info-close');
             if (infoClose) infoClose.click();
+            const detailsPopup = document.getElementById('msg-details-popup');
+            if (detailsPopup) detailsPopup.classList.remove('visible');
+            const lbClose = document.querySelector('#img-lightbox .lb-close');
+            if (lbClose) lbClose.click();
         })()
         """,
         3.0,
