@@ -2702,3 +2702,324 @@ def test_review_fix_ui_contracts(tmp_path: Path) -> None:
         assert res["hasTailwindTabClasses"] is False
     finally:
         session.close()
+
+
+def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) -> None:
+    """Verify 750-char/15-line collapse, hysteresis, two-way Read More/Show Less toggle, pagination, search jump, and themes."""
+    import threading
+    import urllib.request
+
+    from tests.conftest import make_android_db, make_archive_db
+    from wab_viewer.main import create_app
+
+    from .cdp_driver import find_free_port, launch_browser_session
+
+    wa_path = tmp_path / "msgstore.db"
+    arch_path = tmp_path / ".wa_media_archiver.db"
+    media_file = tmp_path / "Contacts" / "Alice (15551112222)" / "2023" / "Received" / "photo.jpg"
+    media_file.parent.mkdir(parents=True, exist_ok=True)
+    # Minimal 1x1 JPEG bytes
+    media_file.write_bytes(
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xdb\x00C\x00\x03\x02\x02\x03\x02\x02\x03"
+        b"\x03\x03\x03\x04\x03\x03\x04\x05\x08\x05\x05\x04\x04\x05\n\x07\x07\x06\x08\x0c\n\x0c\x0c\x0b\n\x0b\x0b"
+        b"\r\x0e\x12\x10\r\x0e\x11\x0e\x0b\x0b\x10\x16\x10\x11\x13\x14\x15\x15\x15\x0c\x0f\x17\x18\x16\x14\x18\x12"
+        b"\x14\x15\x14\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00"
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\t\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00"
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xd2\xcf \xff\xd9"
+    )
+
+    wa_conn = make_android_db(wa_path)
+    arch_conn = make_archive_db(arch_path)
+
+    jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+    if "server" not in jid_cols:
+        wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+    chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        wa_conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+    if "archived" not in chat_cols:
+        wa_conn.execute("ALTER TABLE chat ADD COLUMN archived INTEGER DEFAULT 0")
+
+    wa_conn.executescript("""
+        INSERT INTO jid (_id, user, server, raw_string)
+        VALUES (1, '15551112222', 's.whatsapp.net', '15551112222@s.whatsapp.net'),
+               (2, '15553334444', 's.whatsapp.net', '15553334444@s.whatsapp.net');
+        INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden, archived)
+        VALUES (10, 1, NULL, 1700000900000, 0, 0),
+               (20, 2, NULL, 1700000050000, 0, 0);
+    """)
+
+    # 60 older filler messages so scrolling up triggers loadMessages('older') + renderWindow()
+    base_ts = 1700000000000
+    for idx in range(1, 61):
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+            "VALUES (?, 10, ?, 1, ?, ?, 0, ?)",
+            (idx, idx % 2, base_ts + idx * 1000, f"Older history message #{idx}", f"OLD_{idx}"),
+        )
+
+    long_formatted_msg = (
+        "Start *bold intro section* with family emoji 👨‍👩‍👧‍👦 and link https://example.com/docs . "
+        + ("Repeated sentence for readability testing across lines. " * 14)
+        + "UNIQUETAILSEARCHNEEDLE end."
+    )
+    tall_list_msg = "\n".join(f"- Checklist item number {n}" for n in range(1, 23))
+    hysteresis_msg = "Boundary check " + ("word " * 150) + "end."  # ~769 chars -> under 750+60
+    long_caption_msg = "Caption stays uncollapsed: " + ("caption text " * 70) + "CAP_END"
+
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+        "VALUES (101, 10, 0, 1, ?, ?, 0, 'LONG_1')",
+        (base_ts + 70000, long_formatted_msg),
+    )
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+        "VALUES (102, 10, 1, 1, ?, ?, 0, 'LIST_1')",
+        (base_ts + 71000, tall_list_msg),
+    )
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+        "VALUES (103, 10, 0, 1, ?, ?, 0, 'HYST_1')",
+        (base_ts + 72000, hysteresis_msg),
+    )
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+        "VALUES (104, 10, 0, 1, ?, ?, 1, 'CAP_1')",
+        (base_ts + 73000, long_caption_msg),
+    )
+    wa_conn.execute(
+        "INSERT INTO message_media (_id, message_row_id, chat_row_id, file_path, media_name, mime_type) "
+        "VALUES (1, 104, 10, 'Media/WhatsApp Images/photo.jpg', 'photo.jpg', 'image/jpeg')"
+    )
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+        "VALUES (201, 20, 0, 2, ?, 'Other chat msg', 0, 'OTHER_1')",
+        (base_ts + 10000,),
+    )
+    wa_conn.commit()
+    wa_conn.close()
+
+    arch_conn.execute(
+        "INSERT INTO contacts (number, folder, display_name) VALUES ('15551112222', 'Alice (15551112222)', 'Alice')"
+    )
+    arch_conn.execute(
+        "INSERT INTO contacts (number, folder, display_name) VALUES ('15553334444', 'Bob (15553334444)', 'Bob')"
+    )
+    arch_conn.execute(
+        "INSERT INTO files (original_path, md5) VALUES ('Media/WhatsApp Images/photo.jpg', X'00010203')"
+    )
+    arch_conn.execute(
+        "INSERT INTO archive_copies (original_path, archive_path) "
+        "VALUES ('Media/WhatsApp Images/photo.jpg', 'Contacts/Alice (15551112222)/2023/Received/photo.jpg')"
+    )
+    arch_conn.commit()
+    arch_conn.close()
+
+    port = find_free_port()
+    app = create_app(tmp_path, rescan=False)
+    app.config["TESTING"] = True
+    server_thread = threading.Thread(
+        target=lambda: app.run(port=port, use_reloader=False),
+        daemon=True,
+    )
+    server_thread.start()
+
+    base_url = f"http://127.0.0.1:{port}"
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/chats", timeout=1.0) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            time.sleep(0.1)
+
+    cdp_port = find_free_port()
+    profile_dir = tmp_path / "browser_profile_collapse"
+    session = launch_browser_session(base_url, profile_dir, cdp_port, 30, 0.2)
+    try:
+        for _ in range(60):
+            ready = session.evaluate(
+                "Boolean(document.querySelector('.chat-item[data-id=\"15551112222\"]'))",
+                5.0,
+            )
+            if ready:
+                break
+            time.sleep(0.15)
+
+        res = session.evaluate(
+            """
+            (async () => {
+                window.__colErrors = [];
+                window.addEventListener('error', e => window.__colErrors.push(String(e.message || e)));
+                window.addEventListener('unhandledrejection', e => window.__colErrors.push(String(e.reason || e)));
+
+                document.querySelector('.chat-item[data-id="15551112222"]').click();
+                for (let i = 0; i < 60; i++) {
+                    const loadingEl = document.getElementById('chat-loading');
+                    if (document.querySelector('.msg-row[data-msg-id="104"]') && loadingEl && loadingEl.style.display === 'none') break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+
+                const r101 = document.querySelector('.msg-row[data-msg-id="101"]');
+                const r102 = document.querySelector('.msg-row[data-msg-id="102"]');
+                const r103 = document.querySelector('.msg-row[data-msg-id="103"]');
+                const r104 = document.querySelector('.msg-row[data-msg-id="104"]');
+
+                const btn101 = r101.querySelector('.msg-read-more');
+                const btn102 = r102.querySelector('.msg-read-more');
+                const btn103 = r103.querySelector('.msg-read-more');
+                const btn104 = r104.querySelector('.msg-read-more');
+
+                const btnStyle = getComputedStyle(btn101);
+                const collapsed101 = {
+                    hasBtn: Boolean(btn101),
+                    btnText: btn101 ? btn101.textContent : '',
+                    ariaExpanded: btn101 ? btn101.getAttribute('aria-expanded') : '',
+                    endsWithEllipsisBtn: r101.querySelector('.msg-text').textContent.endsWith('... Read More'),
+                    hasStrong: Boolean(r101.querySelector('.msg-text strong')),
+                    hasBrokenReplacement: r101.querySelector('.msg-text').textContent.includes('\\uFFFD'),
+                    hidesTailNeedle: !r101.querySelector('.msg-text').textContent.includes('UNIQUETAILSEARCHNEEDLE'),
+                    bgColor: btnStyle.backgroundColor,
+                    borderTopWidth: btnStyle.borderTopWidth,
+                };
+                const listCollapsed = {
+                    hasBtn: Boolean(btn102),
+                    btnText: btn102 ? btn102.textContent : '',
+                    liCountCollapsed: r102.querySelectorAll('.msg-text li').length,
+                };
+                const hysteresisSkipped = !btn103 && r103.querySelector('.msg-text').textContent.includes('end.');
+                const captionSkipped = !btn104 && r104.querySelector('.msg-caption').textContent.includes('CAP_END');
+
+                // Expand 101 & 102
+                btn101.click();
+                btn102.click();
+                const expanded101 = {
+                    btnText: r101.querySelector('.msg-read-more').textContent,
+                    ariaExpanded: r101.querySelector('.msg-read-more').getAttribute('aria-expanded'),
+                    showsTailNeedle: r101.querySelector('.msg-text').textContent.includes('UNIQUETAILSEARCHNEEDLE'),
+                };
+                const listExpandedCount = r102.querySelectorAll('.msg-text li').length;
+
+                // Trigger older pagination and verify 101 stays expanded across renderWindow()
+                const scroll = document.getElementById('message-scroll');
+                scroll.scrollTop = 0;
+                scroll.dispatchEvent(new Event('scroll'));
+                for (let i = 0; i < 60; i++) {
+                    if (document.querySelector('.msg-row[data-msg-id="1"]')) break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                const r101AfterPage = document.querySelector('.msg-row[data-msg-id="101"]');
+                const stayedExpandedAfterPage = Boolean(
+                    r101AfterPage && r101AfterPage.querySelector('.msg-text').textContent.includes('UNIQUETAILSEARCHNEEDLE')
+                );
+
+                // Toggle 101 back to collapsed ("Show Less")
+                r101AfterPage.querySelector('.msg-read-more').click();
+                const recollapsed101 = {
+                    btnText: r101AfterPage.querySelector('.msg-read-more').textContent,
+                    ariaExpanded: r101AfterPage.querySelector('.msg-read-more').getAttribute('aria-expanded'),
+                    hidesTailNeedle: !r101AfterPage.querySelector('.msg-text').textContent.includes('UNIQUETAILSEARCHNEEDLE'),
+                };
+
+                // Switch away to Bob and back to Alice -> _prepareChatPane resets 102 back to collapsed
+                document.querySelector('.chat-item[data-id="15553334444"]').click();
+                for (let i = 0; i < 40; i++) {
+                    if (document.querySelector('.msg-row[data-msg-id="201"]')) break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                document.querySelector('.chat-item[data-id="15551112222"]').click();
+                for (let i = 0; i < 60; i++) {
+                    const loadingEl = document.getElementById('chat-loading');
+                    if (document.querySelector('.msg-row[data-msg-id="102"]') && loadingEl && loadingEl.style.display === 'none') break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                const reset102Btn = document.querySelector('.msg-row[data-msg-id="102"] .msg-read-more');
+                const resetOnSwitch = Boolean(reset102Btn && reset102Btn.getAttribute('aria-expanded') === 'false');
+
+                // In-chat search for UNIQUETAILSEARCHNEEDLE auto-expands 101
+                document.getElementById('toolbar-toggle').click();
+                const searchInp = document.getElementById('chat-search-input');
+                searchInp.value = 'UNIQUETAILSEARCHNEEDLE';
+                searchInp.dispatchEvent(new Event('input'));
+                let autoExpandedOnSearch = false;
+                for (let i = 0; i < 80; i++) {
+                    const msg101 = document.querySelector('.msg-row[data-msg-id="101"]');
+                    const countEl = document.getElementById('chat-search-count');
+                    if (msg101 && countEl && countEl.textContent === '1/1' &&
+                        msg101.querySelector('.msg-text').textContent.includes('UNIQUETAILSEARCHNEEDLE')) {
+                        autoExpandedOnSearch = true;
+                        break;
+                    }
+                    await new Promise(r => setTimeout(r, 100));
+                }
+
+                // Collapse 101 again for dark screenshot showing "... Read More"
+                const btnAfterSearch = document.querySelector('.msg-row[data-msg-id="101"] .msg-read-more');
+                if (btnAfterSearch && btnAfterSearch.getAttribute('aria-expanded') === 'true') {
+                    btnAfterSearch.click();
+                }
+
+                return {
+                    errors: window.__colErrors,
+                    collapsed101,
+                    listCollapsed,
+                    hysteresisSkipped,
+                    captionSkipped,
+                    expanded101,
+                    listExpandedCount,
+                    stayedExpandedAfterPage,
+                    recollapsed101,
+                    resetOnSwitch,
+                    autoExpandedOnSearch,
+                };
+            })()
+            """,
+            25.0,
+        )
+
+        assert res["errors"] == []
+        assert res["collapsed101"]["hasBtn"] is True
+        assert res["collapsed101"]["btnText"] == "Read More"
+        assert res["collapsed101"]["ariaExpanded"] == "false"
+        assert res["collapsed101"]["endsWithEllipsisBtn"] is True
+        assert res["collapsed101"]["hasStrong"] is True
+        assert res["collapsed101"]["hasBrokenReplacement"] is False
+        assert res["collapsed101"]["hidesTailNeedle"] is True
+        assert res["collapsed101"]["bgColor"] == "rgba(0, 0, 0, 0)"
+        assert res["collapsed101"]["borderTopWidth"] == "0px"
+
+        assert res["listCollapsed"]["hasBtn"] is True
+        assert res["listCollapsed"]["btnText"] == "Read More"
+        assert res["listCollapsed"]["liCountCollapsed"] == 15
+
+        assert res["hysteresisSkipped"] is True
+        assert res["captionSkipped"] is True
+
+        assert res["expanded101"]["btnText"] == "Show Less"
+        assert res["expanded101"]["ariaExpanded"] == "true"
+        assert res["expanded101"]["showsTailNeedle"] is True
+        assert res["listExpandedCount"] == 22
+
+        assert res["stayedExpandedAfterPage"] is True
+        assert res["recollapsed101"]["btnText"] == "Read More"
+        assert res["recollapsed101"]["ariaExpanded"] == "false"
+        assert res["recollapsed101"]["hidesTailNeedle"] is True
+        assert res["resetOnSwitch"] is True
+        assert res["autoExpandedOnSearch"] is True
+
+        session.capture_screenshot(screenshot_dir / "long_msg_collapse_dark.png", 5.0)
+        session.evaluate(
+            """
+            (async () => {
+                document.getElementById('settings-btn').click();
+                await new Promise(r => setTimeout(r, 100));
+                document.querySelector('.pref-btn[data-pref="theme"][data-value="light"]').click();
+                document.getElementById('settings-close').click();
+                await new Promise(r => setTimeout(r, 150));
+            })()
+            """,
+            5.0,
+        )
+        session.capture_screenshot(screenshot_dir / "long_msg_collapse_light.png", 5.0)
+    finally:
+        session.close()

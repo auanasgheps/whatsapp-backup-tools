@@ -14627,3 +14627,23 @@ class TestReviewFixRegressions:
             chats = client.get("/api/chats").get_json()
             assert len(chats) == 1
             assert chats[0]["last_msg_type"] == "location"
+
+    def test_long_message_collapse_assets_present(self, tmp_path):
+        """app.css and app.js must include dual-theme Read More tokens, Pico resets, and collapse helpers."""
+        make_archive_db(tmp_path / ".wa_media_archiver.db").close()
+        make_android_db(tmp_path / "msgstore.db").close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            css = client.get("/static/app.css").get_data(as_text=True)
+            js = client.get("/static/app.js").get_data(as_text=True)
+
+        assert "--bubble-action:" in css
+        assert "--bubble-action-sent:" in css
+        assert ".msg-text .msg-read-more" in css
+        assert "COLLAPSE_CHAR_LIMIT = 750" in js
+        assert "COLLAPSE_LINE_LIMIT = 15" in js
+        assert "COLLAPSE_MIN_REMAINDER = 60" in js
+        assert "function renderCollapsibleMessageText(" in js
+        assert "expandedMsgIds.clear()" in js
