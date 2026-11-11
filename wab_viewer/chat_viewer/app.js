@@ -451,6 +451,298 @@
     return result;
   }
 
+  const COLLAPSE_CHAR_LIMIT = 750;
+  const COLLAPSE_LINE_LIMIT = 15;
+  const COLLAPSE_MIN_REMAINDER = 60;
+  const COLLAPSE_MIN_LINE_REMAINDER = 2;
+  const COLLAPSE_WORD_SNAP_WINDOW = 40;
+  const COLLAPSE_LINE_BLOCK_TAGS = new Set(['PRE', 'LI', 'BLOCKQUOTE', 'H1', 'H2', 'H3']);
+  const COLLAPSE_TAIL_BLOCK_TAGS = new Set(['PRE', 'UL', 'OL', 'BLOCKQUOTE', 'H1', 'H2', 'H3']);
+  const expandedMsgIds = new Set();
+
+  function measureRenderedContent(rootEl) {
+    const state = { chars: 0, lineBreaks: 0, hasContent: false, justHadBreak: false };
+    function walk(node) {
+      for (const child of node.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          const val = child.nodeValue || '';
+          if (!val) continue;
+          const cps = Array.from(val);
+          state.chars += cps.length;
+          for (const cp of cps) {
+            if (cp === '\n') {
+              state.lineBreaks++;
+              state.justHadBreak = true;
+            } else {
+              state.justHadBreak = false;
+            }
+          }
+          state.hasContent = true;
+          continue;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+        if (child.tagName === 'BR') {
+          if (node.tagName === 'UL' || node.tagName === 'OL') continue;
+          state.lineBreaks++;
+          state.justHadBreak = true;
+          state.hasContent = true;
+          continue;
+        }
+        if (COLLAPSE_LINE_BLOCK_TAGS.has(child.tagName)) {
+          if (state.hasContent && !state.justHadBreak) {
+            state.lineBreaks++;
+          }
+          state.justHadBreak = false;
+          state.hasContent = true;
+          walk(child);
+          state.justHadBreak = false;
+          continue;
+        }
+        walk(child);
+      }
+    }
+    walk(rootEl);
+    const lineCount = (state.chars > 0 || state.lineBreaks > 0) ? state.lineBreaks + 1 : 0;
+    return { charCount: state.chars, lineCount };
+  }
+
+  function _trimTrailingCollapsedNodes(fragment) {
+    while (fragment.lastChild) {
+      const last = fragment.lastChild;
+      if (last.nodeType === Node.ELEMENT_NODE && last.tagName === 'BR') {
+        fragment.removeChild(last);
+        continue;
+      }
+      if (last.nodeType === Node.TEXT_NODE) {
+        const trimmed = last.nodeValue.replace(/\s+$/, '');
+        if (!trimmed) {
+          fragment.removeChild(last);
+          continue;
+        }
+        last.nodeValue = trimmed;
+        break;
+      }
+      if (last.nodeType === Node.ELEMENT_NODE) {
+        _trimTrailingCollapsedNodes(last);
+        if (!last.hasChildNodes() && last.tagName !== 'BR') {
+          fragment.removeChild(last);
+          continue;
+        }
+      }
+      break;
+    }
+  }
+
+  function truncateFormattedTree(rootEl, charLimit, lineLimit) {
+    const fragment = document.createDocumentFragment();
+    const maxBreaks = lineLimit - 1;
+    const state = { chars: 0, lineBreaks: 0, hasContent: false, justHadBreak: false, stopped: false };
+
+    function visit(srcNode, destParent) {
+      for (const child of srcNode.childNodes) {
+        if (state.stopped) return;
+
+        if (child.nodeType === Node.TEXT_NODE) {
+          const val = child.nodeValue || '';
+          if (!val) continue;
+          const cps = Array.from(val);
+          let take = 0;
+          let hitCharLimit = false;
+          for (let i = 0; i < cps.length; i++) {
+            const cp = cps[i];
+            if (cp === '\n') {
+              if (state.lineBreaks + 1 > maxBreaks) {
+                state.stopped = true;
+                break;
+              }
+              state.lineBreaks++;
+              state.justHadBreak = true;
+            } else {
+              state.justHadBreak = false;
+            }
+            if (state.chars + 1 > charLimit) {
+              hitCharLimit = true;
+              state.stopped = true;
+              break;
+            }
+            state.chars++;
+            state.hasContent = true;
+            take = i + 1;
+          }
+
+          if (hitCharLimit && take > 0) {
+            const minSnap = Math.max(0, take - COLLAPSE_WORD_SNAP_WINDOW);
+            for (let j = take - 1; j >= minSnap; j--) {
+              if (/\s/.test(cps[j])) {
+                if (j > 0 || state.chars > take) {
+                  take = j;
+                }
+                break;
+              }
+            }
+          }
+
+          if (take > 0) {
+            destParent.appendChild(document.createTextNode(cps.slice(0, take).join('')));
+          }
+          continue;
+        }
+
+        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+
+        if (child.tagName === 'BR') {
+          if (srcNode.tagName === 'UL' || srcNode.tagName === 'OL') continue;
+          if (state.lineBreaks + 1 > maxBreaks) {
+            state.stopped = true;
+            return;
+          }
+          state.lineBreaks++;
+          state.justHadBreak = true;
+          state.hasContent = true;
+          destParent.appendChild(document.createElement('br'));
+          continue;
+        }
+
+        if (child.tagName === 'A' && state.chars > 0) {
+          const linkLen = Array.from(child.textContent || '').length;
+          if (state.chars + linkLen > charLimit) {
+            state.stopped = true;
+            return;
+          }
+        }
+
+        if (COLLAPSE_LINE_BLOCK_TAGS.has(child.tagName)) {
+          if (state.hasContent && !state.justHadBreak) {
+            if (state.lineBreaks + 1 > maxBreaks) {
+              state.stopped = true;
+              return;
+            }
+            state.lineBreaks++;
+          }
+          state.justHadBreak = false;
+          state.hasContent = true;
+        }
+
+        const clone = child.cloneNode(false);
+        visit(child, clone);
+        if (clone.hasChildNodes() || !child.hasChildNodes()) {
+          destParent.appendChild(clone);
+        }
+        if (COLLAPSE_LINE_BLOCK_TAGS.has(child.tagName)) {
+          state.justHadBreak = false;
+        }
+      }
+    }
+
+    visit(rootEl, fragment);
+    _trimTrailingCollapsedNodes(fragment);
+    return fragment;
+  }
+
+  function createTextToggleButton(isExpanded, isBlockTail, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = isBlockTail ? 'msg-read-more is-block-tail' : 'msg-read-more';
+    btn.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+    btn.setAttribute('aria-label', isExpanded ? 'Collapse message' : 'Read full message');
+    btn.textContent = isExpanded ? 'Show Less' : 'Read More';
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  function renderCollapsibleMessageText(containerEl, text, msgId) {
+    const raw = text || '';
+    const key = (msgId !== undefined && msgId !== null) ? String(msgId) : '';
+    const canTrack = key !== '';
+
+    if (raw.length <= COLLAPSE_CHAR_LIMIT) {
+      let nlCount = 0;
+      for (let i = 0; i < raw.length; i++) {
+        if (raw.charCodeAt(i) === 10) {
+          nlCount++;
+          if (nlCount >= COLLAPSE_LINE_LIMIT) break;
+        }
+      }
+      if (nlCount < COLLAPSE_LINE_LIMIT) {
+        containerEl.innerHTML = highlight(raw, '');
+        return;
+      }
+    }
+
+    const fullHtml = highlight(raw, '');
+    const parsed = document.createElement('div');
+    parsed.innerHTML = fullHtml;
+    const metrics = measureRenderedContent(parsed);
+    const exceedsChars = metrics.charCount > (COLLAPSE_CHAR_LIMIT + COLLAPSE_MIN_REMAINDER);
+    const exceedsLines = metrics.lineCount > (COLLAPSE_LINE_LIMIT + COLLAPSE_MIN_LINE_REMAINDER);
+
+    if (!exceedsChars && !exceedsLines) {
+      containerEl.innerHTML = fullHtml;
+      return;
+    }
+
+    const isExpanded = canTrack && expandedMsgIds.has(key);
+    if (isExpanded) {
+      containerEl.innerHTML = fullHtml;
+      const lastNode = containerEl.lastChild;
+      const endsWithBlock = Boolean(
+        lastNode && lastNode.nodeType === Node.ELEMENT_NODE && COLLAPSE_TAIL_BLOCK_TAGS.has(lastNode.tagName)
+      );
+      if (!endsWithBlock) {
+        containerEl.appendChild(document.createTextNode(' '));
+      }
+      const btn = createTextToggleButton(true, endsWithBlock, e => {
+        e.stopPropagation();
+        const focusNext = e.detail === 0;
+        if (canTrack) expandedMsgIds.delete(key);
+        renderCollapsibleMessageText(containerEl, raw, msgId);
+        const row = containerEl.closest('.msg-row');
+        const scroll = document.getElementById('message-scroll');
+        if (row && scroll) {
+          const rowRect = row.getBoundingClientRect();
+          const scrollRect = scroll.getBoundingClientRect();
+          if (rowRect.top < scrollRect.top || rowRect.bottom > scrollRect.bottom) {
+            suppressScroll = true;
+            try {
+              row.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+            } finally {
+              suppressScroll = false;
+            }
+          }
+        }
+        if (focusNext) {
+          const nextBtn = containerEl.querySelector('.msg-read-more');
+          if (nextBtn) nextBtn.focus();
+        }
+      });
+      containerEl.appendChild(btn);
+      return;
+    }
+
+    containerEl.innerHTML = '';
+    const truncatedFrag = truncateFormattedTree(parsed, COLLAPSE_CHAR_LIMIT, COLLAPSE_LINE_LIMIT);
+    containerEl.appendChild(truncatedFrag);
+    const lastNode = containerEl.lastChild;
+    const endsWithBlock = Boolean(
+      lastNode && lastNode.nodeType === Node.ELEMENT_NODE && COLLAPSE_TAIL_BLOCK_TAGS.has(lastNode.tagName)
+    );
+    const ellipsis = document.createElement('span');
+    ellipsis.className = endsWithBlock ? 'msg-read-more-ellipsis is-block-tail' : 'msg-read-more-ellipsis';
+    ellipsis.textContent = '... ';
+    const btn = createTextToggleButton(false, endsWithBlock, e => {
+      e.stopPropagation();
+      const focusNext = e.detail === 0;
+      if (canTrack) expandedMsgIds.add(key);
+      renderCollapsibleMessageText(containerEl, raw, msgId);
+      if (focusNext) {
+        const nextBtn = containerEl.querySelector('.msg-read-more');
+        if (nextBtn) nextBtn.focus();
+      }
+    });
+    containerEl.appendChild(ellipsis);
+    containerEl.appendChild(btn);
+  }
+
   function makeDateSeparator(ts) {
     const el = document.createElement('div');
     el.className = 'date-separator';
@@ -807,6 +1099,7 @@
     closeMediaGallery();
     currentChat = chat;
     msgList = [];
+    expandedMsgIds.clear();
     noMoreOlder = false;
     noMoreNewer = !isJumping;
     isUserAtBottom = !isJumping;
@@ -1715,7 +2008,7 @@
       } else {
         const txt = document.createElement('div');
         txt.className = 'msg-text';
-        txt.innerHTML = highlight(msg.text_body, '');
+        renderCollapsibleMessageText(txt, msg.text_body, msg.msg_id);
         bubble.appendChild(txt);
         if (msg.link_title || msg.link_url || msg.link_desc) {
           bubble.appendChild(renderLinkPreview(msg));
@@ -4001,8 +4294,20 @@
         const el2 = _findChatListItem(r.chat_id, r.chat_type);
         if (el2) {
           await selectChat(chat, el2);
+          if (r.msg_id !== undefined && r.msg_id !== null) {
+            expandedMsgIds.add(String(r.msg_id));
+          }
           const row = await jumpToTimestamp(r.timestamp_ms, null, true, 'default');
           if (row) {
+            const jumpedId = row.dataset.msgId;
+            if (jumpedId && !expandedMsgIds.has(jumpedId)) {
+              const jumpedMsg = msgList.find(m => String(m.msg_id) === jumpedId);
+              const txtEl = row.querySelector('.msg-text');
+              if (jumpedMsg && txtEl) {
+                expandedMsgIds.add(jumpedId);
+                renderCollapsibleMessageText(txtEl, jumpedMsg.text_body, jumpedMsg.msg_id);
+              }
+            }
             const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
             if (bubble) {
               bubble.classList.add('search-jump-highlight');
@@ -4142,8 +4447,16 @@
     const result = chatSearchResults[idx];
     if (!result) return;
     document.querySelectorAll('.search-highlight').forEach(el => el.classList.remove('search-highlight'));
+    if (result.msg_id !== undefined && result.msg_id !== null) {
+      expandedMsgIds.add(String(result.msg_id));
+    }
     const existing = rowForMsgId(result.msg_id);
     if (existing) {
+      const txtEl = existing.querySelector('.msg-text');
+      const matchedMsg = msgList.find(m => String(m.msg_id) === String(result.msg_id));
+      if (txtEl && matchedMsg) {
+        renderCollapsibleMessageText(txtEl, matchedMsg.text_body, matchedMsg.msg_id);
+      }
       highlightMessageRow(existing);
       return;
     }
