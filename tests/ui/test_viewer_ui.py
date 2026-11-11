@@ -1045,33 +1045,38 @@ def test_chat_bubble_media_aspect_ratio_and_lightbox_zoom(
     screenshot_dir: Path,
 ) -> None:
     """Verify chat bubble images preserve intrinsic aspect ratio and lightbox supports wheel zoom."""
-    # 1. Open contact chat Sarah Jenkins
-    opened = browser.evaluate(
-        """
-        (async () => {
-            for (let i = 0; i < 60; i++) {
-                const item = [...document.querySelectorAll('.chat-item')].find(
-                    el => el.querySelector('.chat-name')?.textContent.includes('Sarah Jenkins')
-                );
-                if (item) {
-                    item.click();
-                    for (let j = 0; j < 80; j++) {
-                        await new Promise(r => setTimeout(r, 50));
-                        const loading = document.getElementById('chat-loading');
-                        if (loading && loading.style.display === 'none') {
-                            await new Promise(r => setTimeout(r, 150));
-                            return true;
+    # 1. Open contact chat Sarah Jenkins (retry if initial page load is still settling)
+    opened = None
+    for _ in range(3):
+        opened = browser.evaluate(
+            """
+            (async () => {
+                for (let i = 0; i < 60; i++) {
+                    const item = [...document.querySelectorAll('.chat-item')].find(
+                        el => el.querySelector('.chat-name')?.textContent.includes('Sarah Jenkins')
+                    );
+                    if (item) {
+                        item.click();
+                        for (let j = 0; j < 80; j++) {
+                            await new Promise(r => setTimeout(r, 50));
+                            const loading = document.getElementById('chat-loading');
+                            if (loading && loading.style.display === 'none') {
+                                await new Promise(r => setTimeout(r, 150));
+                                return true;
+                            }
                         }
+                        return true;
                     }
-                    return true;
+                    await new Promise(r => setTimeout(r, 100));
                 }
-                await new Promise(r => setTimeout(r, 100));
-            }
-            return false;
-        })()
-        """,
-        15.0,
-    )
+                return false;
+            })()
+            """,
+            15.0,
+        )
+        if opened is True:
+            break
+        time.sleep(0.5)
     assert opened is True
 
     # 2. Inspect media element aspect ratio and bubble wrapping
@@ -1108,17 +1113,23 @@ def test_chat_bubble_media_aspect_ratio_and_lightbox_zoom(
     )
     assert isinstance(media_info, dict)
     if media_info.get("ready"):
-        diff = abs(media_info["naturalAspect"] - media_info["renderedAspect"])
+        is_portrait = media_info["naturalAspect"] < 1.0
+        expected_aspect = (
+            max(0.75, min(media_info["naturalAspect"], 0.999))
+            if is_portrait
+            else max(1.0, min(media_info["naturalAspect"], 1.778))
+        )
+        diff = abs(expected_aspect - media_info["renderedAspect"])
         assert diff < 0.05, (
-            f"Aspect ratio distorted: natural={media_info['naturalAspect']:.3f}, "
+            f"Clamped orientation aspect mismatch: expected={expected_aspect:.3f}, "
             f"rendered={media_info['renderedAspect']:.3f}"
         )
-        if not media_info.get("hasCaption"):
-            wasted_space = media_info["bubbleWidth"] - media_info["renderedWidth"] - 20
-            assert wasted_space < 60, (
-                f"Too much wasted space in media bubble: bubbleWidth={media_info['bubbleWidth']}, "
-                f"mediaWidth={media_info['renderedWidth']}, wasted={wasted_space}"
-            )
+        wasted_space = media_info["bubbleWidth"] - media_info["renderedWidth"] - 20
+        assert abs(wasted_space) < 25, (
+            f"Media bubble width must match media + padding even with captions: "
+            f"bubbleWidth={media_info['bubbleWidth']}, mediaWidth={media_info['renderedWidth']}, "
+            f"wasted={wasted_space}"
+        )
 
     # 2. Click the image to open Lightbox
     lb_opened = browser.evaluate(
@@ -1129,8 +1140,13 @@ def test_chat_bubble_media_aspect_ratio_and_lightbox_zoom(
             for (let i = 0; i < 40; i++) {
                 const lb = document.getElementById('img-lightbox');
                 const lbImg = lb?.querySelector('img');
-                if (lb && lbImg) {
-                    return { opened: true };
+                if (lb && lbImg && lbImg.naturalWidth > 0) {
+                    const rect = lbImg.getBoundingClientRect();
+                    return {
+                        opened: true,
+                        naturalAspect: lbImg.naturalWidth / lbImg.naturalHeight,
+                        renderedAspect: rect.width / rect.height,
+                    };
                 }
                 await new Promise(r => setTimeout(r, 50));
             }
@@ -1141,6 +1157,10 @@ def test_chat_bubble_media_aspect_ratio_and_lightbox_zoom(
     )
     assert isinstance(lb_opened, dict)
     assert lb_opened["opened"] is True
+    assert abs(lb_opened["naturalAspect"] - lb_opened["renderedAspect"]) < 0.05, (
+        f"Lightbox must preserve uncropped natural aspect ratio: "
+        f"natural={lb_opened['naturalAspect']:.3f}, rendered={lb_opened['renderedAspect']:.3f}"
+    )
 
     # 3. Simulate wheel zoom on the lightbox
     zoom_result = browser.evaluate(
@@ -1209,6 +1229,229 @@ def test_chat_bubble_media_aspect_ratio_and_lightbox_zoom(
         5.0,
     )
     assert closed_lb is True
+
+
+def test_captioned_media_orientation_sizing_and_display_scale(
+    browser: CDPSession,
+    screenshot_dir: Path,
+) -> None:
+    """Verify captioned landscape/portrait media bubbles lock to Display scale widths,
+    wrap captions without horizontal bloat, and adapt cleanly on mobile viewports."""
+    open_chat_by_id(browser, "15550101", 15.0)
+
+    # Ensure settings modal shows 'Display scale'
+    settings_label = browser.evaluate(
+        """
+        (() => {
+            const labels = [...document.querySelectorAll('#settings-modal .settings-label')];
+            return labels.map(el => el.textContent.trim());
+        })()
+        """,
+        5.0,
+    )
+    assert isinstance(settings_label, list)
+    assert "Display scale" in settings_label
+
+    try:
+        # Ensure desktop viewport (1280x800) so Display scale widths aren't clamped by narrow default headless window
+        browser.ws.send_json(
+            {
+                "id": 8900,
+                "method": "Emulation.setDeviceMetricsOverride",
+                "params": {
+                    "width": 1280,
+                    "height": 800,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+            }
+        )
+        time.sleep(0.2)
+        results = browser.evaluate(
+            """
+            (async () => {
+                const scroll = document.getElementById('message-scroll');
+                if (!scroll) return { error: 'no message-scroll' };
+
+                const container = document.createElement('div');
+                container.id = 'test-captioned-media-harness';
+                const longCaption =
+                    'This is a deliberately multi-word caption designed to wrap cleanly ' +
+                    'to the media container width without expanding the bubble horizontally ' +
+                    'https://example.com/very/long/unbroken/path/segment/to/verify/containment';
+                const longQuote =
+                    'A very long quoted message reply that would previously stretch a media bubble out to 70 percent width';
+
+                function addCard(cls, mediaClass, aspectRatio, extraInner) {
+                    const row = document.createElement('div');
+                    row.className = 'msg-row recv';
+                    const bubble = document.createElement('div');
+                    bubble.className = 'msg-bubble has-media';
+
+                    const quote = document.createElement('div');
+                    quote.className = 'msg-quote';
+                    quote.innerHTML = '<div class="msg-quote-content"><div class="msg-quote-sender">Alex</div><div class="msg-quote-text">' + longQuote + '</div></div>';
+                    bubble.appendChild(quote);
+
+                    const media = document.createElement('div');
+                    media.className = mediaClass;
+                    if (aspectRatio) media.style.aspectRatio = aspectRatio;
+                    media.innerHTML = extraInner;
+                    bubble.appendChild(media);
+
+                    const cap = document.createElement('div');
+                    cap.className = 'msg-caption';
+                    cap.textContent = longCaption;
+                    bubble.appendChild(cap);
+
+                    const meta = document.createElement('div');
+                    meta.className = 'msg-meta';
+                    meta.textContent = '15:42';
+                    bubble.appendChild(meta);
+
+                    row.appendChild(bubble);
+                    row.dataset.case = cls;
+                    container.appendChild(row);
+                    return { row, bubble, media, cap };
+                }
+
+                const svgLandscape = '<img src="data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'800\\' height=\\'450\\'><rect width=\\'100%25\\' height=\\'100%25\\' fill=\\'%2300a884\\'/></svg>" alt="land"/>';
+                const svgPortrait = '<img src="data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'450\\' height=\\'800\\'><rect width=\\'100%25\\' height=\\'100%25\\' fill=\\'%230284c7\\'/></svg>" alt="port"/>';
+
+                const items = [
+                    addCard('landscape', 'msg-media is-landscape', '1.778', svgLandscape),
+                    addCard('portrait', 'msg-media is-portrait', '0.750', svgPortrait),
+                    addCard('missing', 'media-missing-card', '1.333', '<div class="media-missing-overlay"><div class="media-missing-label">Photo</div></div>'),
+                    addCard('grid', 'media-grid', '', '<div class="media-grid-cell"><div class="msg-media">' + svgLandscape + '</div></div><div class="media-grid-cell"><div class="msg-media">' + svgPortrait + '</div></div>'),
+                ];
+                scroll.appendChild(container);
+                scroll.scrollTop = scroll.scrollHeight;
+
+                const out = {};
+                for (const scale of ['small', 'medium', 'large']) {
+                    const btn = document.querySelector(`.pref-btn[data-pref="font_size"][data-value="${scale}"]`);
+                    if (btn) btn.click();
+                    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                    await new Promise(r => setTimeout(r, 80));
+
+                    const measurements = {};
+                    for (const it of items) {
+                        const bRect = it.bubble.getBoundingClientRect();
+                        const mRect = it.media.getBoundingClientRect();
+                        const cRect = it.cap.getBoundingClientRect();
+                        measurements[it.row.dataset.case] = {
+                            bubbleWidth: Math.round(bRect.width),
+                            mediaWidth: Math.round(mRect.width),
+                            mediaHeight: Math.round(mRect.height),
+                            captionWidth: Math.round(cRect.width),
+                            captionHeight: Math.round(cRect.height),
+                        };
+                    }
+                    out[scale] = measurements;
+                }
+                return out;
+            })()
+            """,
+            15.0,
+        )
+        assert isinstance(results, dict) and "error" not in results, f"Harness error: {results}"
+
+        expected_land = {"small": 280, "medium": 320, "large": 360}
+        expected_port = {"small": 230, "medium": 260, "large": 295}
+        for scale in ("small", "medium", "large"):
+            sc = results[scale]
+            assert abs(sc["landscape"]["mediaWidth"] - expected_land[scale]) <= 2
+            assert abs(sc["portrait"]["mediaWidth"] - expected_port[scale]) <= 2
+            assert abs(sc["missing"]["mediaWidth"] - expected_land[scale]) <= 2
+            assert abs(sc["grid"]["mediaWidth"] - expected_land[scale]) <= 2
+            for key in ("landscape", "portrait", "missing", "grid"):
+                m = sc[key]
+                assert abs(m["bubbleWidth"] - (m["mediaWidth"] + 20)) <= 2, (
+                    f"{scale}/{key}: bubbleWidth={m['bubbleWidth']} != mediaWidth+20 ({m['mediaWidth'] + 20})"
+                )
+                assert m["captionWidth"] <= m["mediaWidth"] + 1, (
+                    f"{scale}/{key}: caption overflowed mediaWidth"
+                )
+                assert m["captionHeight"] >= 40, (
+                    f"{scale}/{key}: caption did not wrap across multiple lines"
+                )
+
+        # Reset to medium and capture desktop screenshot
+        browser.evaluate(
+            """
+            (async () => {
+                const btn = document.querySelector('.pref-btn[data-pref="font_size"][data-value="medium"]');
+                if (btn) btn.click();
+                await new Promise(r => setTimeout(r, 80));
+            })()
+            """,
+            5.0,
+        )
+        browser.capture_screenshot(screenshot_dir / "captioned_media_desktop.png", 5.0)
+
+        # Verify mobile viewport (390x844) does not overflow horizontally
+        browser.ws.send_json(
+            {
+                "id": 8901,
+                "method": "Emulation.setDeviceMetricsOverride",
+                "params": {
+                    "width": 390,
+                    "height": 844,
+                    "deviceScaleFactor": 2,
+                    "mobile": True,
+                },
+            }
+        )
+        time.sleep(0.3)
+        mobile_ok = browser.evaluate(
+            """
+            (async () => {
+                const scroll = document.getElementById('message-scroll');
+                const h = document.getElementById('test-captioned-media-harness');
+                if (!scroll || !h) return { ok: false };
+                scroll.scrollTop = scroll.scrollHeight;
+                await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                const scrollRect = scroll.getBoundingClientRect();
+                const scrollW = scroll.clientWidth;
+                const bubbles = [...h.querySelectorAll('.msg-bubble')];
+                const maxBubbleW = Math.max(...bubbles.map(b => b.getBoundingClientRect().width));
+                const allInside = bubbles.every(b => {
+                    const r = b.getBoundingClientRect();
+                    return r.left >= scrollRect.left - 1 && r.right <= scrollRect.right + 1;
+                });
+                return {
+                    ok: maxBubbleW <= scrollW * 0.86 && allInside,
+                    scrollW,
+                    maxBubbleW,
+                    allInside,
+                };
+            })()
+            """,
+            5.0,
+        )
+        assert isinstance(mobile_ok, dict) and mobile_ok.get("ok") is True, (
+            f"Mobile overflow: {mobile_ok}"
+        )
+        browser.capture_screenshot(screenshot_dir / "captioned_media_mobile.png", 5.0)
+    finally:
+        browser.ws.send_json(
+            {
+                "id": 8902,
+                "method": "Emulation.clearDeviceMetricsOverride",
+                "params": {},
+            }
+        )
+        time.sleep(0.3)
+        browser.evaluate(
+            """
+            (() => {
+                document.getElementById('test-captioned-media-harness')?.remove();
+                const btn = document.querySelector('.pref-btn[data-pref="font_size"][data-value="medium"]');
+                if (btn) btn.click();
+            })()
+            """,
+            5.0,
+        )
 
 
 def test_chat_bubble_voice_message_audio_player(

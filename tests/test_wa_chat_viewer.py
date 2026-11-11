@@ -2208,28 +2208,40 @@ class TestHtmlTemplate:
         )
 
     def test_msg_media_aspect_ratio_preservation_css(self):
-        """msg-media img/video must preserve aspect ratio with width: auto and object-fit: contain,
-        preventing horizontal stretching for tall/vertical photos with captions."""
+        """Orientation-locked media boxes must scale with Display scale tokens, clamp aspect ratios,
+        keep inline video/stickers uncropped, and contain captions/quotes within media width."""
         css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
         css = css_path.read_text(encoding="utf-8")
+        tpl_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "template.py"
+        tpl = tpl_path.read_text(encoding="utf-8")
+
+        assert "Display scale" in tpl, "Settings modal must label the scale control 'Display scale'"
 
         rule_match = re.search(r"\.msg-media\s+img[^{]*\{([^}]+)\}", css)
         assert rule_match, ".msg-media img rule missing in app.css"
         rule_body = rule_match.group(1)
         assert "width: auto" in rule_body, (
-            "Media must use width: auto to avoid forced horizontal stretch"
+            "Fallback media rule must use width: auto to avoid unguarded horizontal stretch"
         )
         assert "object-fit: contain" in rule_body, (
-            "Media must use object-fit: contain to preserve aspect ratio"
+            "Fallback media rule must use object-fit: contain"
         )
-        assert "max-height:" in rule_body, "Media must specify max-height constraint"
 
         wrap_match = re.search(r"(?<!-)\.msg-media\s*\{([^}]+)\}", css)
         assert wrap_match, ".msg-media rule missing in app.css"
         wrap_body = wrap_match.group(1)
-        assert "max-width: 320px" in wrap_body, "Media container must clamp max-width to 320px"
+        assert "max-width: var(--media-w-land)" in wrap_body, (
+            "Media container must clamp max-width to var(--media-w-land)"
+        )
         assert "width: fit-content" in wrap_body, (
             "Media container must use width: fit-content to prevent empty wasted space"
+        )
+
+        assert ".msg-media.is-landscape" in css and "width: var(--media-w-land)" in css
+        assert ".msg-media.is-portrait" in css and "width: var(--media-w-port)" in css
+        assert "object-fit: cover;" in css
+        assert "contain: inline-size;" in css, (
+            "Captions and quotes in media bubbles must use contain: inline-size"
         )
 
     def test_lightbox_wheel_zoom_implemented(self):

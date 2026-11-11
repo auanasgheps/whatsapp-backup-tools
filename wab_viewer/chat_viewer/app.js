@@ -22,8 +22,12 @@
     document.getElementById('date-picker-input').style.colorScheme = scheme;
     const sizeMap = { small: '13px', medium: '15px', large: '17px' };
     document.documentElement.style.setProperty('--font-size', sizeMap[prefs.font_size] || '15px');
-    const gridMap = { small: '280px', medium: '320px', large: '360px' };
-    document.documentElement.style.setProperty('--media-grid-size', gridMap[prefs.font_size] || '320px');
+    const landMap = { small: '280px', medium: '320px', large: '360px' };
+    const portMap = { small: '230px', medium: '260px', large: '295px' };
+    const landSize = landMap[prefs.font_size] || '320px';
+    document.documentElement.style.setProperty('--media-w-land', landSize);
+    document.documentElement.style.setProperty('--media-w-port', portMap[prefs.font_size] || '260px');
+    document.documentElement.style.setProperty('--media-grid-size', landSize);
     document.documentElement.dataset.fontSize = prefs.font_size || 'medium';
     document.querySelectorAll('.pref-btn').forEach(btn => {
       btn.classList.toggle('active', prefs[btn.dataset.pref] === btn.dataset.value);
@@ -1380,7 +1384,7 @@
       row.dataset.groupIds = group.map(m => String(m.msg_id)).join(' ');
 
       const bubble = document.createElement('div');
-      bubble.className = 'msg-bubble';
+      bubble.className = 'msg-bubble has-media';
 
       if (!msg.from_me && msg.sender) {
         const senderEl = document.createElement('div');
@@ -1666,9 +1670,11 @@
     } else if (msg.media_type === 'poll') {
       bubble.appendChild(renderPoll(msg));
     } else if (msg.media_type === 'location' || msg.media_type === 'live_location') {
+      bubble.classList.add('has-media');
       bubble.appendChild(renderLocation(msg));
     } else if (msg.media_type === 'text' || !msg.archive_path) {
       if (!msg.archive_path && msg.media_type !== 'text' && msg.media_type !== 'link') {
+        bubble.classList.add('has-media');
         bubble.appendChild(renderMissingMedia(msg));
         if (msg.text_body && msg.media_type !== 'vcard') {
           const cap = document.createElement('div');
@@ -1686,6 +1692,7 @@
         }
       }
     } else {
+      bubble.classList.add('has-media');
       const mediaEl = renderMedia(msg);
       bubble.appendChild(mediaEl);
       if (msg.text_body && msg.media_type !== 'vcard') {
@@ -1876,19 +1883,38 @@
     return card;
   }
 
+  function _extractMsgAspectRatio(msg) {
+    let ratio = Number(msg.aspect_ratio) || 0;
+    if (!ratio && msg.media_width > 0 && msg.media_height > 0) {
+      ratio = msg.media_width / msg.media_height;
+    }
+    return ratio;
+  }
+
+  function _applyMediaOrientationBox(wrap, rawRatio) {
+    wrap.classList.remove('is-portrait', 'is-landscape');
+    if (rawRatio > 0 && rawRatio < 1) {
+      wrap.classList.add('is-portrait');
+      const clamped = Math.max(0.75, Math.min(rawRatio, 0.999));
+      wrap.style.aspectRatio = clamped.toFixed(3);
+    } else if (rawRatio >= 1) {
+      wrap.classList.add('is-landscape');
+      const clamped = Math.max(1.0, Math.min(rawRatio, 1.778));
+      wrap.style.aspectRatio = clamped.toFixed(3);
+    } else {
+      wrap.classList.add('is-landscape');
+      wrap.style.aspectRatio = '1.333';
+    }
+  }
+
   function renderGif(msg) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-media msg-gif';
     wrap.setAttribute('tabindex', '0');
     wrap.setAttribute('aria-label', 'Animated GIF: click to play');
 
-    let ratio = msg.aspect_ratio || 0;
-    if (!ratio && msg.media_width > 0 && msg.media_height > 0) {
-      ratio = msg.media_width / msg.media_height;
-    }
-    if (ratio > 0) {
-      wrap.style.aspectRatio = ratio.toFixed(3);
-    }
+    const ratio = _extractMsgAspectRatio(msg);
+    _applyMediaOrientationBox(wrap, ratio);
 
     const src = '/media/' + msg.archive_path;
     const isImageGif = (msg.archive_path || '').toLowerCase().endsWith('.gif');
@@ -1896,6 +1922,13 @@
       const img = document.createElement('img');
       img.src = src;
       img.loading = 'lazy';
+      if (ratio <= 0) {
+        img.addEventListener('load', () => {
+          if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+            _applyMediaOrientationBox(wrap, img.naturalWidth / img.naturalHeight);
+          }
+        }, { once: true });
+      }
       img.addEventListener('click', () => showLightbox(msg));
       wrap.appendChild(img);
       return wrap;
@@ -1914,6 +1947,9 @@
     probe.muted = true;
     probe.preload = 'metadata';
     probe.addEventListener('loadeddata', () => {
+      if (ratio <= 0 && probe.videoWidth > 0 && probe.videoHeight > 0) {
+        _applyMediaOrientationBox(wrap, probe.videoWidth / probe.videoHeight);
+      }
       const canvas = document.createElement('canvas');
       canvas.width = probe.videoWidth;
       canvas.height = probe.videoHeight;
@@ -1991,20 +2027,26 @@
     const src = '/media/' + path;
     const mt = msg.media_type;
 
-    let ratio = msg.aspect_ratio || 0;
-    if (!ratio && msg.media_width > 0 && msg.media_height > 0) {
-      ratio = msg.media_width / msg.media_height;
-    }
-    if (ratio > 0) {
-      wrap.style.aspectRatio = ratio.toFixed(3);
-    }
+    const ratio = _extractMsgAspectRatio(msg);
 
     if (mt === 'image' || mt === 'sticker') {
-      if (mt === 'sticker') wrap.classList.add('sticker');
+      if (mt === 'sticker') {
+        wrap.classList.add('sticker');
+        if (ratio > 0) wrap.style.aspectRatio = ratio.toFixed(3);
+      } else {
+        _applyMediaOrientationBox(wrap, ratio);
+      }
       const img = document.createElement('img');
       img.src = src;
       img.loading = 'lazy';
       img.alt = msg.media_name || 'image';
+      if (mt !== 'sticker' && ratio <= 0) {
+        img.addEventListener('load', () => {
+          if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+            _applyMediaOrientationBox(wrap, img.naturalWidth / img.naturalHeight);
+          }
+        }, { once: true });
+      }
       img.addEventListener('click', () => showLightbox(msg));
       _attachMediaScrollAnchor(img);
       wrap.appendChild(img);
@@ -2060,6 +2102,7 @@
         });
       }
     } else if (mt === 'video') {
+      _applyMediaOrientationBox(wrap, ratio);
       const vid = document.createElement('video');
       vid.controls = true;
       vid.preload = 'none';
@@ -2071,6 +2114,9 @@
       probe.muted = true;
       probe.preload = 'metadata';
       probe.addEventListener('loadeddata', () => {
+        if (ratio <= 0 && probe.videoWidth > 0 && probe.videoHeight > 0) {
+          _applyMediaOrientationBox(wrap, probe.videoWidth / probe.videoHeight);
+        }
         const canvas = document.createElement('canvas');
         canvas.width = probe.videoWidth;
         canvas.height = probe.videoHeight;
@@ -2128,6 +2174,7 @@
       wrap.appendChild(card);
       wrap.appendChild(downloadLink);
     } else {
+      wrap.classList.add('doc');
       const a = document.createElement('a');
       a.href = src;
       a.className = 'doc-link';
