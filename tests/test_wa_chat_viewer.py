@@ -24,12 +24,19 @@ from tests.conftest import (
     make_ios_db,
     seed_android_db,
 )
+from wab_viewer import db_cache as viewer_db_cache
+from wab_viewer import fts as viewer_fts
+from wab_viewer import hydration as viewer_hydration
 from wab_viewer import main as viewer
+from wab_viewer import preserved as viewer_preserved
+from wab_viewer import protobuf as viewer_protobuf
+from wab_viewer.chat_viewer.template import HTML_TEMPLATE as VIEWER_HTML_TEMPLATE
+from wab_viewer.queries import sql_builder as viewer_sql_builder
 
 
 def make_cache_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
-    conn.executescript(viewer.CACHE_SCHEMA)
+    conn.executescript(viewer_db_cache.CACHE_SCHEMA)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -41,58 +48,64 @@ def make_cache_db(path: Path) -> sqlite3.Connection:
 
 class TestMediaTypeFromPath:
     def test_image_jpg(self):
-        assert viewer._media_type_from_path("foo/bar.jpg") == "image"
+        assert viewer_hydration._media_type_from_path("foo/bar.jpg") == "image"
 
     def test_image_png(self):
-        assert viewer._media_type_from_path("foo/IMG.png") == "image"
+        assert viewer_hydration._media_type_from_path("foo/IMG.png") == "image"
 
     def test_video_mp4(self):
-        assert viewer._media_type_from_path("foo/video.mp4") == "video"
+        assert viewer_hydration._media_type_from_path("foo/video.mp4") == "video"
 
     def test_audio_mp3(self):
-        assert viewer._media_type_from_path("foo/voice.mp3") == "audio"
+        assert viewer_hydration._media_type_from_path("foo/voice.mp3") == "audio"
 
     def test_gif(self):
-        assert viewer._media_type_from_path("foo/anim.gif") == "gif"
+        assert viewer_hydration._media_type_from_path("foo/anim.gif") == "gif"
         assert (
-            viewer._media_type_from_path("Media/WhatsApp Animated Gifs/VID-20230101-WA0001.mp4")
+            viewer_hydration._media_type_from_path(
+                "Media/WhatsApp Animated Gifs/VID-20230101-WA0001.mp4"
+            )
             == "gif"
         )
-        assert viewer._media_type_from_path("WhatsApp Animated Gifs/GIF-123.mp4") == "gif"
-        assert viewer._media_type_from_path("foo/GIF-123.mp4") == "gif"
+        assert viewer_hydration._media_type_from_path("WhatsApp Animated Gifs/GIF-123.mp4") == "gif"
+        assert viewer_hydration._media_type_from_path("foo/GIF-123.mp4") == "gif"
 
     def test_sticker(self):
-        assert viewer._media_type_from_path("foo/Sticker/abc.webp") == "sticker"
-        assert viewer._media_type_from_path("foo/stickers/abc.webp") == "sticker"
+        assert viewer_hydration._media_type_from_path("foo/Sticker/abc.webp") == "sticker"
+        assert viewer_hydration._media_type_from_path("foo/stickers/abc.webp") == "sticker"
         assert (
-            viewer._media_type_from_path("Groups/Chat/2026/STK-20260101-WA0001.webp") == "sticker"
+            viewer_hydration._media_type_from_path("Groups/Chat/2026/STK-20260101-WA0001.webp")
+            == "sticker"
         )
-        assert viewer._media_type_from_path("Groups/Chat/2026/STK-20260101-WA0001.was") == "sticker"
+        assert (
+            viewer_hydration._media_type_from_path("Groups/Chat/2026/STK-20260101-WA0001.was")
+            == "sticker"
+        )
 
     def test_document(self):
-        assert viewer._media_type_from_path("foo/document.pdf") == "document"
+        assert viewer_hydration._media_type_from_path("foo/document.pdf") == "document"
 
     def test_none_returns_text(self):
-        assert viewer._media_type_from_path(None) == "text"
+        assert viewer_hydration._media_type_from_path(None) == "text"
 
     def test_empty_string_returns_document(self):
         # No extension → falls through to "document"
-        assert viewer._media_type_from_path("") == "document"
+        assert viewer_hydration._media_type_from_path("") == "document"
 
     def test_no_extension_returns_document(self):
         # No recognized extension → falls through to "document"
-        assert viewer._media_type_from_path("foo/bar") == "document"
+        assert viewer_hydration._media_type_from_path("foo/bar") == "document"
 
     def test_uppercase_extension_normalized(self):
-        assert viewer._media_type_from_path("foo/bar.MP4") == "video"
+        assert viewer_hydration._media_type_from_path("foo/bar.MP4") == "video"
 
     def test_path_with_multiple_dots(self):
         # Last extension wins
-        assert viewer._media_type_from_path("foo/file.name.tar.gz") == "document"
-        assert viewer._media_type_from_path("foo/file.name.jpg") == "image"
+        assert viewer_hydration._media_type_from_path("foo/file.name.tar.gz") == "document"
+        assert viewer_hydration._media_type_from_path("foo/file.name.jpg") == "image"
 
     def test_mixed_case_extension(self):
-        assert viewer._media_type_from_path("photo.JpG") == "image"
+        assert viewer_hydration._media_type_from_path("photo.JpG") == "image"
 
 
 # ---------------------------------------------------------------------------
@@ -103,24 +116,24 @@ class TestMediaTypeFromPath:
 class TestDetectSourceDb:
     def test_android_detected(self, tmp_path):
         (tmp_path / "msgstore.db").touch()
-        typ, path = viewer._detect_source_db(tmp_path)
+        typ, path = viewer_db_cache._detect_source_db(tmp_path)
         assert typ == "android"
         assert path == str(tmp_path / "msgstore.db")
 
     def test_ios_detected(self, tmp_path):
         (tmp_path / "ChatStorage.sqlite").touch()
-        typ, path = viewer._detect_source_db(tmp_path)
+        typ, path = viewer_db_cache._detect_source_db(tmp_path)
         assert typ == "ios"
         assert path == str(tmp_path / "ChatStorage.sqlite")
 
     def test_android_wins_when_both_present(self, tmp_path):
         (tmp_path / "msgstore.db").touch()
         (tmp_path / "ChatStorage.sqlite").touch()
-        typ, path = viewer._detect_source_db(tmp_path)
+        typ, path = viewer_db_cache._detect_source_db(tmp_path)
         assert typ == "android"
 
     def test_none_when_no_source_db(self, tmp_path):
-        typ, path = viewer._detect_source_db(tmp_path)
+        typ, path = viewer_db_cache._detect_source_db(tmp_path)
         assert typ is None
         assert path is None
 
@@ -128,7 +141,7 @@ class TestDetectSourceDb:
         db_dir = tmp_path / "Whatsapp Databases"
         db_dir.mkdir()
         (db_dir / "msgstore.db").touch()
-        typ, path = viewer._detect_source_db(tmp_path)
+        typ, path = viewer_db_cache._detect_source_db(tmp_path)
         assert typ == "android"
         assert path == str(db_dir / "msgstore.db")
 
@@ -136,7 +149,7 @@ class TestDetectSourceDb:
         db_dir = tmp_path / "Whatsapp Databases"
         db_dir.mkdir()
         (db_dir / "ChatStorage.sqlite").touch()
-        typ, path = viewer._detect_source_db(tmp_path)
+        typ, path = viewer_db_cache._detect_source_db(tmp_path)
         assert typ == "ios"
         assert path == str(db_dir / "ChatStorage.sqlite")
 
@@ -150,7 +163,7 @@ class TestCacheSchema:
     def test_schema_creates_tables(self, tmp_path):
         cache_path = tmp_path / ".wa_viewer.db"
         conn = sqlite3.connect(str(cache_path))
-        conn.executescript(viewer.CACHE_SCHEMA)
+        conn.executescript(viewer_db_cache.CACHE_SCHEMA)
 
         tables = {
             t[0]
@@ -179,10 +192,10 @@ class TestCacheSchema:
         conn.close()
 
     def test_schema_no_contentless_delete(self):
-        assert "contentless_delete" not in viewer.CACHE_SCHEMA
+        assert "contentless_delete" not in viewer_db_cache.CACHE_SCHEMA
 
     def test_clear_fts_index_resets_fts_table(self, tmp_path):
-        cache_conn = viewer._open_cache_db(tmp_path)
+        cache_conn = viewer_db_cache._open_cache_db(tmp_path)
         cache_conn.execute(
             "INSERT INTO message_index (rowid, chat_id, chat_type, timestamp_ms) VALUES (1, 'c1', 'contact', 1000)"
         )
@@ -194,7 +207,7 @@ class TestCacheSchema:
         )
         cache_conn.commit()
 
-        viewer._clear_fts_index(cache_conn)
+        viewer_fts._clear_fts_index(cache_conn)
 
         assert cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0] == 0
         assert cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0] == 0
@@ -212,7 +225,7 @@ class TestCacheSchema:
         cache_conn.close()
 
     def test_open_cache_db_recovers_from_incompatible_fts(self, tmp_path, monkeypatch):
-        conn = viewer._open_cache_db(tmp_path)
+        conn = viewer_db_cache._open_cache_db(tmp_path)
         conn.close()
 
         first_call = True
@@ -234,8 +247,8 @@ class TestCacheSchema:
                 return FailingConn()
             return real_conn
 
-        monkeypatch.setattr(viewer.sqlite3, "connect", mock_connect)
-        recovered_conn = viewer._open_cache_db(tmp_path)
+        monkeypatch.setattr(viewer_db_cache.sqlite3, "connect", mock_connect)
+        recovered_conn = viewer_db_cache._open_cache_db(tmp_path)
         assert recovered_conn is not None
         assert not first_call
         recovered_conn.close()
@@ -251,22 +264,22 @@ class TestFreshnessCheck:
         db_path = tmp_path / "msgstore.db"
         db_path.write_text("x")
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        assert viewer._source_changed(cache_conn, str(db_path)) is True
+        assert viewer_db_cache._source_changed(cache_conn, str(db_path)) is True
 
     def test_unchanged_after_stamp_saved(self, tmp_path):
         db_path = tmp_path / "msgstore.db"
         db_path.write_text("x")
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._save_source_stamp(cache_conn, str(db_path))
-        assert viewer._source_changed(cache_conn, str(db_path)) is False
+        viewer_db_cache._save_source_stamp(cache_conn, str(db_path))
+        assert viewer_db_cache._source_changed(cache_conn, str(db_path)) is False
 
     def test_changed_after_file_grows(self, tmp_path):
         db_path = tmp_path / "msgstore.db"
         db_path.write_text("x")
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._save_source_stamp(cache_conn, str(db_path))
+        viewer_db_cache._save_source_stamp(cache_conn, str(db_path))
         db_path.write_text("xxxx")  # size changed
-        assert viewer._source_changed(cache_conn, str(db_path)) is True
+        assert viewer_db_cache._source_changed(cache_conn, str(db_path)) is True
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +299,7 @@ class TestFtsBuildAndroid:
         archive_conn.close()
 
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
+        viewer_fts._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
         assert len(rows) == 1
@@ -303,7 +316,7 @@ class TestFtsBuildAndroid:
         archive_conn.close()
 
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
+        viewer_fts._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         results = cache_conn.execute("""
             SELECT mi.rowid, mi.chat_id FROM message_index mi
@@ -335,7 +348,7 @@ class TestFtsBuildAndroid:
         archive_conn.close()
 
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
+        viewer_fts._build_fts_chat(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         rows = cache_conn.execute("SELECT * FROM message_index").fetchall()
         assert len(rows) == 1  # both system events excluded
@@ -746,7 +759,7 @@ class TestLazyIndexing:
     def test_ensure_chat_indexed_builds_fts(self, tmp_path):
         wa_path = self._setup(tmp_path)
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
+        viewer_fts._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         row = cache_conn.execute(
             "SELECT 1 FROM indexed_chats WHERE chat_id = ? AND chat_type = ?",
@@ -764,8 +777,8 @@ class TestLazyIndexing:
     def test_ensure_chat_indexed_is_idempotent(self, tmp_path):
         wa_path = self._setup(tmp_path)
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
-        viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
-        viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
+        viewer_fts._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
+        viewer_fts._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
 
         count = cache_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
         assert count == 1
@@ -788,7 +801,7 @@ class TestLazyIndexing:
 
         cache_conn = make_cache_db(tmp_path / ".wa_viewer.db")
         # must not raise
-        viewer._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
+        viewer_fts._ensure_chat_indexed(cache_conn, "android", str(wa_path), "123456789", "contact")
         rows = cache_conn.execute("SELECT COUNT(*) FROM message_index").fetchone()[0]
         assert rows == 1  # system event excluded, only the text message indexed
 
@@ -1364,17 +1377,17 @@ class TestChatFilter:
     """Tests for _android_chat_filter and _ios_chat_filter."""
 
     def test_android_contact_filter_uses_jid_user(self):
-        pred, params = viewer._android_chat_filter("391234567890", "contact")
+        pred, params = viewer_sql_builder._android_chat_filter("391234567890", "contact")
         assert "j_chat.user" in pred
         assert params == ["391234567890"]
 
     def test_android_group_filter_uses_chat_row_id(self):
-        pred, params = viewer._android_chat_filter("42", "group")
+        pred, params = viewer_sql_builder._android_chat_filter("42", "group")
         assert "m.chat_row_id = CAST" in pred
         assert params == ["42"]
 
     def test_ios_filter_uses_zchatsession(self):
-        pred, params = viewer._ios_chat_filter("99")
+        pred, params = viewer_sql_builder._ios_chat_filter("99")
         assert "m.ZCHATSESSION = CAST" in pred
         assert params == ["99"]
 
@@ -1530,7 +1543,7 @@ class TestAndroidReactions:
         wa_conn.commit()
 
         rows = [{"chat_id": "123", "msg_id": 100}]
-        viewer._resolve_and_cache_reactions("android", wa_conn, arc_conn, rows)
+        viewer_hydration._resolve_and_cache_reactions("android", wa_conn, arc_conn, rows)
         assert rows[0]["reactions"] == "👍"
 
         cached = arc_conn.execute(
@@ -1540,9 +1553,11 @@ class TestAndroidReactions:
         assert cached[0] == "👍"
 
         # Edge cases
-        viewer._resolve_and_cache_reactions("ios", wa_conn, arc_conn, rows)
-        viewer._resolve_and_cache_reactions("android", wa_conn, arc_conn, [])
-        viewer._resolve_and_cache_reactions("android", wa_conn, arc_conn, [{"chat_id": "123"}])
+        viewer_hydration._resolve_and_cache_reactions("ios", wa_conn, arc_conn, rows)
+        viewer_hydration._resolve_and_cache_reactions("android", wa_conn, arc_conn, [])
+        viewer_hydration._resolve_and_cache_reactions(
+            "android", wa_conn, arc_conn, [{"chat_id": "123"}]
+        )
 
         wa_conn.close()
         arc_conn.close()
@@ -1687,7 +1702,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "1234567890123", "delivered_delta": 10, "read_delta": None, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == (base_ts + 10) * 1000
         assert members[0]["read_ts"] is None
@@ -1700,7 +1715,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 20, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000  # delta 0 is a real delivery
         assert members[0]["read_ts"] == (base_ts + 20) * 1000
@@ -1714,7 +1729,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 0, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert members[0]["delivered_ts"] == base_ts * 1000
         assert members[0]["read_ts"] == base_ts * 1000
 
@@ -1732,7 +1747,7 @@ class TestIosReceiptBlobParser:
                 },
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert members[0]["delivered_ts"] == (base_ts + 17) * 1000
         assert members[0]["read_ts"] is None
 
@@ -1745,7 +1760,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "1234567890123", "delivered_delta": 0, "read_delta": None, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert members[0]["jid"] == "1234567890123"
 
     def test_group_multiple_members(self):
@@ -1757,7 +1772,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "2222222222222", "delivered_delta": 15, "read_delta": None, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 2
         assert members[0]["read_ts"] == (base_ts + 5) * 1000
         assert members[1]["read_ts"] is None
@@ -1780,7 +1795,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "3333333333333", "delivered_delta": 0, "read_delta": 0, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert members[0]["read_ts"] == (base_ts + 5926) * 1000
         assert members[1]["read_ts"] is None  # read receipts disabled
         assert members[1]["delivered_ts"] == (base_ts + 17) * 1000
@@ -1796,7 +1811,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "1234567890123", "delivered_delta": 0, "read_delta": 120, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000
         assert members[0]["read_ts"] == (base_ts + 120) * 1000
@@ -1809,7 +1824,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "1234567890123", "delivered_delta": 0, "read_delta": None, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000
         assert members[0]["read_ts"] is None
@@ -1823,7 +1838,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "2222222222222", "delivered_delta": 26, "read_delta": None, "noise4": None},
             ],
         )
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == base_ts * 1000  # min delta = 0
         assert members[0]["read_ts"] == (base_ts + 253) * 1000
@@ -1838,7 +1853,7 @@ class TestIosReceiptBlobParser:
                 {"lid": "2222222222222", "delivered_delta": 60},
             ]
         )
-        members = viewer._parse_ios_receipt_blob(
+        members = viewer_hydration._parse_ios_receipt_blob(
             blob, _NoOpConn(), is_group=True, msg_ts_s=msg_ts_s
         )
         assert len(members) == 2
@@ -1848,7 +1863,7 @@ class TestIosReceiptBlobParser:
         assert members[1]["read_ts"] is None
 
     def test_empty_blob_returns_empty_list(self):
-        members = viewer._parse_ios_receipt_blob(b"", _NoOpConn())
+        members = viewer_hydration._parse_ios_receipt_blob(b"", _NoOpConn())
         assert members == []
 
     def test_unknown_fixed64_wire_type_is_skipped(self):
@@ -1864,7 +1879,7 @@ class TestIosReceiptBlobParser:
         blob = _encode_varint((3 << 3) | 0) + _encode_varint(base_ts)
         blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
 
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=True)
         assert len(members) == 1
         assert members[0]["read_ts"] == (base_ts + 10) * 1000
         assert members[0]["delivered_ts"] == base_ts * 1000
@@ -1875,18 +1890,18 @@ class TestIosReadWithoutTimestamp:
     no longer stores per-recipient read timestamps; the route surfaces that state."""
 
     def test_read_status_without_timestamp_is_flagged(self):
-        assert viewer._ios_read_without_timestamp(8, None) is True
+        assert viewer_hydration._ios_read_without_timestamp(8, None) is True
 
     def test_read_status_with_timestamp_is_not_flagged(self):
         # A stored timestamp already conveys the read state.
-        assert viewer._ios_read_without_timestamp(8, 1700000000000) is False
+        assert viewer_hydration._ios_read_without_timestamp(8, 1700000000000) is False
 
     def test_delivered_status_is_not_flagged(self):
         # Status 6 = delivered, not read.
-        assert viewer._ios_read_without_timestamp(6, None) is False
+        assert viewer_hydration._ios_read_without_timestamp(6, None) is False
 
     def test_sent_status_is_not_flagged(self):
-        assert viewer._ios_read_without_timestamp(1, None) is False
+        assert viewer_hydration._ios_read_without_timestamp(1, None) is False
 
 
 # ---------------------------------------------------------------------------
@@ -1963,7 +1978,7 @@ def _make_ios_reaction_blob(entries: list) -> bytes:
 class TestIOSReactions:
     def test_parse_heart_reaction(self):
         blob = _make_zreceipt_blob_with_reactions([("334142384436", "❤️".encode())])
-        result = viewer._extract_ios_reactions(blob)
+        result = viewer_protobuf._extract_ios_reactions(blob)
         assert len(result) == 1
         sender, emoji = result[0]
         assert sender == "334142384436"
@@ -1976,7 +1991,7 @@ class TestIOSReactions:
                 ("334135434342", "😂".encode()),
             ]
         )
-        result = viewer._extract_ios_reactions(blob)
+        result = viewer_protobuf._extract_ios_reactions(blob)
         assert len(result) == 2
         assert result[0][1] == "❤️"
         assert result[1][1] == "😂"
@@ -1988,18 +2003,18 @@ class TestIOSReactions:
                 _make_zreceipt_blob_with_reactions([("334142384436", emoji.encode("utf-8"))])
             )
         for i, emoji in enumerate(["😂", "😮", "😭", "👏"]):
-            result = viewer._extract_ios_reactions(blobs[i])
+            result = viewer_protobuf._extract_ios_reactions(blobs[i])
             assert len(result) == 1, f"Failed for {emoji}"
             assert result[0][1] == emoji, f"Expected {emoji}, got {result[0][1]}"
 
     def test_parse_empty_blob(self):
-        result = viewer._extract_ios_reactions(b"")
+        result = viewer_protobuf._extract_ios_reactions(b"")
         assert result == []
 
     def test_parse_no_field7(self):
         # Blob with a different field (e.g. field 1)
         blob = bytes([(1 << 3) | 2, 2, 0x41, 0x42])
-        result = viewer._extract_ios_reactions(blob)
+        result = viewer_protobuf._extract_ios_reactions(blob)
         assert result == []
 
     def test_vs16_is_skipped_between_emoji(self):
@@ -2009,7 +2024,7 @@ class TestIOSReactions:
                 ("334142384436", "❤️".encode() + "👏".encode()),
             ]
         )
-        result = viewer._extract_ios_reactions(blob)
+        result = viewer_protobuf._extract_ios_reactions(blob)
         # Both emoji returned; VS16 is a presentation modifier, not a standalone emoji
         assert len(result) == 2
         emojis = sorted(r[1] for r in result)
@@ -2023,7 +2038,7 @@ class TestIOSReactions:
         reactors = [(f"33414238{i:04d}", "❤️".encode()) for i in range(11)]
         blob = _make_zreceipt_blob_with_reactions(reactors)
         assert len(blob) > 128  # forces a multi-byte varint length on field 7
-        result = viewer._extract_ios_reactions(blob)
+        result = viewer_protobuf._extract_ios_reactions(blob)
         assert len(result) == 11
         assert all(emoji == "❤️" for _, emoji in result)
 
@@ -2047,7 +2062,7 @@ class TestIOSReactions:
         field7 = entry(3, heart) + entry(3, laugh) + entry(3, laugh) + entry(2, laugh)
         blob = _encode_varint((7 << 3) | 2) + _encode_varint(len(field7)) + field7
         assert len(field7) > 128  # forces a 2-byte varint length on field 7
-        result = viewer._extract_ios_reactions(blob)
+        result = viewer_protobuf._extract_ios_reactions(blob)
         counts = Counter(emoji for _, emoji in result)
         assert counts == Counter({"😂": 3, "❤️": 1})
 
@@ -2057,7 +2072,7 @@ class TestIOSReactions:
         entry_data = bytes([0x41, 0x42])  # field 8, wire 1 = deprecated
         inner = bytes([0x0A, len(entry_data) + 1]) + bytes([6]) + entry_data
         blob = bytes([(7 << 3) | 2, len(inner)]) + inner
-        result = viewer._extract_ios_reactions(blob)
+        result = viewer_protobuf._extract_ios_reactions(blob)
         assert result == []
 
     def test_ios_reactions_me_detection_contact_chat(self, tmp_path):
@@ -2103,7 +2118,7 @@ class TestIOSReactions:
         )
         conn.commit()
 
-        result = viewer._ios_reactions(conn, "10", [2])
+        result = viewer_hydration._ios_reactions(conn, "10", [2])
         assert 2 in result
         reactors = result[2]
         assert len(reactors) == 1
@@ -2154,7 +2169,7 @@ class TestIOSReactions:
         conn.commit()
 
         # Must not raise AttributeError: 'NoneType' object has no attribute 'find'
-        result = viewer._ios_reactions(conn, "10", [2])
+        result = viewer_hydration._ios_reactions(conn, "10", [2])
         assert 2 in result
         sender, emoji, from_me = result[2][0]
         assert emoji == "😂"
@@ -2171,7 +2186,7 @@ class TestHtmlTemplate:
         """Every getElementById('id') in app.js must refer to an element defined
         in the HTML before the external script tag.  A missing or late-placed
         element causes a TypeError that silently kills the entire IIFE."""
-        template = viewer.HTML_TEMPLATE
+        template = VIEWER_HTML_TEMPLATE
 
         script_start = template.index("<script>")
         html_before_script = template[:script_start]
@@ -2710,7 +2725,7 @@ class TestChatInfo:
         assert data["description"] is None
 
     def test_protobuf_extract_ios_group_description_edge_cases(self):
-        from wab_viewer.main import _extract_ios_group_description
+        from wab_viewer.protobuf import _extract_ios_group_description
 
         assert _extract_ios_group_description(None) is None
         assert _extract_ios_group_description("") is None
@@ -3358,7 +3373,9 @@ class TestIosReceiptDeviceParser:
             },
         ]
 
-        members = viewer._parse_ios_receipt_device_rows(infra_rows, _MockConn(), is_group=False)
+        members = viewer_hydration._parse_ios_receipt_device_rows(
+            infra_rows, _MockConn(), is_group=False
+        )
         assert len(members) == 1
         entry = members[0]
         assert entry["delivered_ts"] == 1700000010 * 1000
@@ -3390,7 +3407,7 @@ class TestIosReceiptDeviceParser:
             },
         ]
 
-        members = viewer._parse_ios_receipt_device_rows(infra_rows, conn, is_group=True)
+        members = viewer_hydration._parse_ios_receipt_device_rows(infra_rows, conn, is_group=True)
         assert len(members) == 2
         m_map = {m["jid"]: m for m in members}
         assert m_map["15550002222"]["name"] == "Alice"
@@ -3762,7 +3779,7 @@ class TestIosHdDeduplication:
         ext_conn.close()
 
         cache_conn = make_cache_db(cache_path)
-        viewer._build_fts_chat(cache_conn, "ios", str(wa_path), "10", "group", None)
+        viewer_fts._build_fts_chat(cache_conn, "ios", str(wa_path), "10", "group", None)
 
         indexed = cache_conn.execute("SELECT rowid FROM message_index").fetchall()
         rowids = [r["rowid"] for r in indexed]
@@ -5653,7 +5670,7 @@ class TestServiceMessages:
             },
         ]
 
-        viewer._stream_fts_rows(raw_rows, cache_conn, 2000, None)
+        viewer_fts._stream_fts_rows(raw_rows, cache_conn, 2000, None)
 
         indexed_fts = cache_conn.execute(
             "SELECT rowid, text_body FROM message_index_fts"
@@ -5670,19 +5687,19 @@ class TestServiceMessages:
             "55555@lid": ("Bob", "55555"),
             "77777": ("Charlie", "77777"),
         }
-        assert viewer._resolve_ios_jid("", cmap) == "Someone"
-        assert viewer._resolve_ios_jid("0", cmap) == "WhatsApp"
-        assert viewer._resolve_ios_jid("0@s.whatsapp.net", cmap) == "WhatsApp"
-        assert viewer._resolve_ios_jid("12345@s.whatsapp.net", cmap) == "Alice"
-        assert viewer._resolve_ios_jid("99999@s.whatsapp.net", cmap) == "+99999"
-        assert viewer._resolve_ios_jid("55555@lid", cmap) == "Bob"
-        assert viewer._resolve_ios_jid("12345", cmap) == "Alice"
-        assert viewer._resolve_ios_jid("77777@s.whatsapp.net", cmap) == "Charlie"
-        assert viewer._resolve_ios_jid("77777@lid", cmap) == "Charlie"
-        assert viewer._resolve_ios_jid("33333@s.whatsapp.net", cmap) == "+33333"
-        assert viewer._resolve_ios_jid("44444@lid", cmap) == "Unknown"
-        assert viewer._resolve_ios_jid("1234567890", cmap) == "+1234567890"
-        assert viewer._resolve_ios_jid("random_string", cmap) == "random_string"
+        assert viewer_hydration._resolve_ios_jid("", cmap) == "Someone"
+        assert viewer_hydration._resolve_ios_jid("0", cmap) == "WhatsApp"
+        assert viewer_hydration._resolve_ios_jid("0@s.whatsapp.net", cmap) == "WhatsApp"
+        assert viewer_hydration._resolve_ios_jid("12345@s.whatsapp.net", cmap) == "Alice"
+        assert viewer_hydration._resolve_ios_jid("99999@s.whatsapp.net", cmap) == "+99999"
+        assert viewer_hydration._resolve_ios_jid("55555@lid", cmap) == "Bob"
+        assert viewer_hydration._resolve_ios_jid("12345", cmap) == "Alice"
+        assert viewer_hydration._resolve_ios_jid("77777@s.whatsapp.net", cmap) == "Charlie"
+        assert viewer_hydration._resolve_ios_jid("77777@lid", cmap) == "Charlie"
+        assert viewer_hydration._resolve_ios_jid("33333@s.whatsapp.net", cmap) == "+33333"
+        assert viewer_hydration._resolve_ios_jid("44444@lid", cmap) == "Unknown"
+        assert viewer_hydration._resolve_ios_jid("1234567890", cmap) == "+1234567890"
+        assert viewer_hydration._resolve_ios_jid("random_string", cmap) == "random_string"
 
 
 class TestFaviconAndStaticAssets:
@@ -5959,7 +5976,7 @@ class TestDatabaseOptimizationsAndMaintenance:
         assert len(idxs) == 1  # one index, not duplicated
 
     def test_cache_db_pragmas_and_covering_index(self, tmp_path):
-        conn = viewer._open_cache_db(tmp_path)
+        conn = viewer_db_cache._open_cache_db(tmp_path)
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
         assert user_version == 1
         auto_vacuum = conn.execute("PRAGMA auto_vacuum").fetchone()[0]
@@ -5972,9 +5989,9 @@ class TestDatabaseOptimizationsAndMaintenance:
         conn.close()
 
     def test_run_db_maintenance(self, tmp_path):
-        cache_conn = viewer._open_cache_db(tmp_path)
+        cache_conn = viewer_db_cache._open_cache_db(tmp_path)
         arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
-        viewer._run_db_maintenance(cache_conn, arc_conn)
+        viewer_db_cache._run_db_maintenance(cache_conn, arc_conn)
         cache_conn.close()
         arc_conn.close()
 
@@ -5998,7 +6015,7 @@ class TestDatabaseOptimizationsAndMaintenance:
                 "reactions": "❤️",
             }
         ]
-        viewer._backfill_recent_messages(arc_conn, rows)
+        viewer_hydration._backfill_recent_messages(arc_conn, rows)
         saved = arc_conn.execute(
             "SELECT reactions FROM recent_messages WHERE msg_id = 100"
         ).fetchone()[0]
@@ -6289,7 +6306,7 @@ class TestMessageReceipts:
 
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
-            with patch("wab_viewer.main._parse_ios_receipt_blob") as mock_parse:
+            with patch("wab_viewer.routes.messages._parse_ios_receipt_blob") as mock_parse:
                 mock_parse.return_value = [
                     {"jid": "member1", "delivered_ts": 1000, "read_ts": 2000},
                     {"jid": "stranger", "delivered_ts": 1000, "read_ts": 2000},
@@ -6380,7 +6397,7 @@ class TestMessageReceipts:
 
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
-            with patch("wab_viewer.main._parse_ios_receipt_blob") as mock_parse:
+            with patch("wab_viewer.routes.messages._parse_ios_receipt_blob") as mock_parse:
                 mock_parse.return_value = [
                     {"jid": "member1", "delivered_ts": 1000, "read_ts": 2000},
                     {"jid": "silent_reader", "delivered_ts": 1100, "read_ts": 2100},
@@ -6545,13 +6562,13 @@ class TestIosChatInfoAndMedia:
 
 class TestProtobufParserEdgeCases:
     def test_read_varint(self):
-        val, pos = viewer._read_varint(b"\x96\x01", 0)
+        val, pos = viewer_protobuf._read_varint(b"\x96\x01", 0)
         assert val == 150
         assert pos == 2
 
     def test_extract_ios_group_description_invalid(self):
-        assert viewer._extract_ios_group_description("") is None
-        assert viewer._extract_ios_group_description("not-valid-base64!!!") is None
+        assert viewer_protobuf._extract_ios_group_description("") is None
+        assert viewer_protobuf._extract_ios_group_description("not-valid-base64!!!") is None
 
     def test_extract_ios_group_description_wire_types_and_subfields(self):
         import base64
@@ -6559,7 +6576,7 @@ class TestProtobufParserEdgeCases:
         sub = bytes([32, 5, 41]) + b"12345678" + bytes([53]) + b"1234" + bytes([26, 4]) + b"Desc"
         top = bytes([16, 2, 25]) + b"abcdefgh" + bytes([37]) + b"abcd" + bytes([10, len(sub)]) + sub
         b64 = "+" + base64.b64encode(top).decode("ascii")
-        desc = viewer._extract_ios_group_description(b64)
+        desc = viewer_protobuf._extract_ios_group_description(b64)
         assert desc == "Desc"
 
 
@@ -6594,7 +6611,7 @@ class TestProtobufWireTypesInReceiptBlob:
         blob += _encode_varint((12 << 3) | 5) + b"\x00" * 4  # top-level wire 5
         blob += _encode_varint((2 << 3) | 2) + _encode_varint(len(entry)) + entry
 
-        members = viewer._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, _NoOpConn(), is_group=False)
         assert len(members) == 1
         assert members[0]["delivered_ts"] == (base_ts + 45) * 1000
 
@@ -6745,8 +6762,8 @@ class TestChatInfoMediaSizeAndStatus:
 
 class TestVcardViewer:
     def test_media_type_from_path_vcf(self):
-        assert viewer._media_type_from_path("Contacts/Alice/Bob.vcf") == "vcard"
-        assert viewer._media_type_from_path("Contacts/Alice/Bob.VCF") == "vcard"
+        assert viewer_hydration._media_type_from_path("Contacts/Alice/Bob.vcf") == "vcard"
+        assert viewer_hydration._media_type_from_path("Contacts/Alice/Bob.VCF") == "vcard"
 
     def test_android_vcard_messages_endpoint(self, tmp_path):
         from tests.test_wa_chat_viewer import make_archive_db
@@ -8042,7 +8059,7 @@ class TestStickerSupport:
                 "is_view_once": 1,
             }
         ]
-        viewer._backfill_recent_messages(archive_conn, rows)
+        viewer_hydration._backfill_recent_messages(archive_conn, rows)
 
         res = archive_conn.execute("SELECT * FROM recent_messages WHERE msg_id = 1").fetchone()
         assert res["is_view_once"] == 1
@@ -8122,7 +8139,7 @@ class TestPollSupport:
             },
         ]
         blob = self._make_poll_blob("Weekend plan?", ["Option A", "Option B"], True, votes)
-        parsed = viewer._parse_ios_poll_blob(blob)
+        parsed = viewer_protobuf._parse_ios_poll_blob(blob)
         assert parsed is not None
         assert parsed["question"] == "Weekend plan?"
         assert parsed["options"] == ["Option A", "Option B"]
@@ -8132,8 +8149,8 @@ class TestPollSupport:
         assert parsed["votes"][1]["option_indices"] == [0, 1]
 
         # Empty/corrupt blob
-        assert viewer._parse_ios_poll_blob(b"") is None
-        assert viewer._parse_ios_poll_blob(b"random bytes") is None
+        assert viewer_protobuf._parse_ios_poll_blob(b"") is None
+        assert viewer_protobuf._parse_ios_poll_blob(b"random bytes") is None
 
     def test_android_poll_messages_and_details(self, tmp_path):
         """Test Android poll hydration in /api/messages and /api/poll_details."""
@@ -9290,7 +9307,7 @@ class TestDeviceSuffixAndCoverageIndex:
         )
         wa_conn.commit()
 
-        pred, params = viewer._android_chat_filter("393401234567", "contact")
+        pred, params = viewer_sql_builder._android_chat_filter("393401234567", "contact")
         plan = wa_conn.execute(
             f"EXPLAIN QUERY PLAN SELECT m._id FROM message m WHERE {pred} ORDER BY m.timestamp DESC LIMIT 50",
             params,
@@ -11516,7 +11533,7 @@ class TestLivePhotoPairing:
             {"msg_id": 11, "media_type": "video", "archive_path": "Media/VID_001.mp4"},
         ]
 
-        viewer._hydrate_live_photos(rows, "android", conn)
+        viewer_hydration._hydrate_live_photos(rows, "android", conn)
 
         assert rows[0].get("is_live_photo") == 1
         assert rows[0].get("live_photo_path") == "Media/VID_001.mp4"
@@ -11580,7 +11597,7 @@ class TestLivePhotoPairing:
             {"stanza_id": "STANZA_VID", "msg_id": 11, "media_type": "video"},
         ]
 
-        viewer._hydrate_live_photos(rows, "ios", conn)
+        viewer_hydration._hydrate_live_photos(rows, "ios", conn)
 
         assert rows[0].get("is_live_photo") == 1
         assert rows[0].get("live_photo_path") == "Media/VID_001.mp4"
@@ -11837,7 +11854,7 @@ class TestExtendedMediaMap:
         # Give row 101 a text_body so row 102 can backfill from local_map
         rows[1]["text_body"] = "I am message 101"
 
-        viewer._resolve_quoted_msg_ids(rows, "ios", conn, None)
+        viewer_preserved._resolve_quoted_msg_ids(rows, "ios", conn, None)
 
         # Row 100 resolved against ZWAMESSAGE (parent 10)
         assert rows[0]["quoted_msg_id"] == 10
@@ -14441,3 +14458,96 @@ class TestReviewFixRegressions:
             assert any(
                 m["msg_id"] == -42 and m["text_body"] == "Preserved Pin Target" for m in jump_pin
             )
+
+    def test_multi_app_context_isolation(self, tmp_path):
+        """Multiple create_app() instances retain independent ViewerContext and QuerySet state."""
+        rich_dir = tmp_path / "android_rich"
+        plain_dir = tmp_path / "android_plain"
+        ios_dir = tmp_path / "ios_workspace"
+        for d in (rich_dir, plain_dir, ios_dir):
+            d.mkdir()
+
+        # 1. Android workspace WITH message_edit_info
+        make_archive_db(rich_dir / ".wa_media_archiver.db").close()
+        rich_conn = make_android_db(rich_dir / "msgstore.db")
+        rich_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS message_edit_info (
+                message_row_id INTEGER PRIMARY KEY,
+                original_key_id TEXT,
+                edited_timestamp INTEGER DEFAULT 0,
+                sender_timestamp INTEGER DEFAULT 0
+            );
+            INSERT INTO jid (_id, user, raw_string)
+            VALUES (1, '15551110001', '15551110001@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp)
+            VALUES (10, 1, 'Rich Chat', 1700000010000);
+            INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id)
+            VALUES (1, 10, 0, 1, 1700000010000, 'Edited Hello', 0, 'RICH_1');
+            INSERT INTO message_edit_info (message_row_id, original_key_id, edited_timestamp, sender_timestamp)
+            VALUES (1, 'RICH_1', 1700000015000, 1700000010000);
+        """)
+        rich_conn.commit()
+        rich_conn.close()
+
+        # 2. Android workspace WITHOUT message_edit_info
+        make_archive_db(plain_dir / ".wa_media_archiver.db").close()
+        plain_conn = make_android_db(plain_dir / "msgstore.db")
+        plain_conn.executescript("""
+            INSERT INTO jid (_id, user, raw_string)
+            VALUES (1, '15551110002', '15551110002@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp)
+            VALUES (10, 1, 'Plain Chat', 1700000020000);
+            INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id)
+            VALUES (1, 10, 0, 1, 1700000020000, 'Plain Hello', 0, 'PLAIN_1');
+        """)
+        plain_conn.commit()
+        plain_conn.close()
+
+        # 3. iOS workspace
+        make_archive_db(ios_dir / ".wa_media_archiver.db").close()
+        ios_conn = make_ios_db(ios_dir / "ChatStorage.sqlite")
+        ios_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZLASTMESSAGEDATE)
+            VALUES (1, '15551110003@s.whatsapp.net', 'iOS Contact', 0, 720000000.0);
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZTEXT)
+            VALUES (1, 1, 0, 720000000.0, 'IOS_1', 0, 'iOS Hello');
+        """)
+        ios_conn.commit()
+        ios_conn.close()
+
+        rich_app = viewer.create_app(rich_dir, rescan=False)
+        plain_app = viewer.create_app(plain_dir, rescan=False)
+        ios_app = viewer.create_app(ios_dir, rescan=False)
+        for a in (rich_app, plain_app, ios_app):
+            a.config["TESTING"] = True
+
+        rich_ctx = rich_app.extensions["viewer"]
+        plain_ctx = plain_app.extensions["viewer"]
+        ios_ctx = ios_app.extensions["viewer"]
+
+        assert rich_ctx.source_type == "android"
+        assert rich_ctx.caps.has_android_edit_info is True
+        assert plain_ctx.source_type == "android"
+        assert plain_ctx.caps.has_android_edit_info is False
+        assert ios_ctx.source_type == "ios"
+
+        # Query all three apps interleaved in the same process after all apps are built
+        with (
+            rich_app.test_client() as rc,
+            plain_app.test_client() as pc,
+            ios_app.test_client() as ic,
+        ):
+            r_msgs = rc.get("/api/messages?chat_id=15551110001&chat_type=contact").get_json()
+            p_msgs = pc.get("/api/messages?chat_id=15551110002&chat_type=contact").get_json()
+            i_msgs = ic.get("/api/messages?chat_id=1&chat_type=contact").get_json()
+
+            assert len(r_msgs) == 1
+            assert r_msgs[0]["text_body"] == "Edited Hello"
+            assert r_msgs[0]["is_edited"] == 1
+
+            assert len(p_msgs) == 1
+            assert p_msgs[0]["text_body"] == "Plain Hello"
+            assert p_msgs[0]["is_edited"] == 0
+
+            assert len(i_msgs) == 1
+            assert i_msgs[0]["text_body"] == "iOS Hello"

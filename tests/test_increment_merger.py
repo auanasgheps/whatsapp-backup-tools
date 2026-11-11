@@ -4186,7 +4186,7 @@ def test_migrate_restored_backup_to_lid_repoints_companion_senders(mock_db):
 
 
 def test_ensure_jid_map_resolved_bridges_companion_lids(mock_db):
-    from wab_viewer.main import _ensure_jid_map_resolved
+    from wab_viewer.db_cache import _ensure_jid_map_resolved
 
     conn = sqlite3.connect(mock_db)
     cur = conn.cursor()
@@ -4462,7 +4462,7 @@ def test_apply_poll_vote_with_option_hashes(tmp_path):
 
 
 def test_hydrate_poll_rows_resilience():
-    from wab_viewer.main import _hydrate_poll_rows
+    from wab_viewer.hydration import _hydrate_poll_rows
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
