@@ -2,11 +2,9 @@ import json
 import sqlite3
 from pathlib import Path
 
-from wab_viewer.main import (
-    _hydrate_link_preview_rows,
-    _stream_fts_rows,
-    create_app,
-)
+from wab_viewer.fts import _stream_fts_rows
+from wab_viewer.hydration import _hydrate_link_preview_rows
+from wab_viewer.main import create_app
 
 
 def _encode_varint(value: int) -> bytes:

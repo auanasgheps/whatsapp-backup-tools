@@ -2331,7 +2331,7 @@ def test_viewer_preserved_messages_integration(tmp_path: Path) -> None:
 
 
 def test_merge_messages_same_timestamp_burst_not_dropped() -> None:
-    from wab_viewer.main import _merge_messages
+    from wab_viewer.preserved import _merge_messages
 
     live_rows = [
         {
@@ -3879,7 +3879,7 @@ def test_record_preserved_calls_batch_lookups(tmp_path: Path) -> None:
 
 def test_merge_messages_empty_revoked_not_preserved() -> None:
     """Verify that a live revoked message matched against an empty preserved stub is not marked as preserved."""
-    from wab_viewer.main import _merge_messages
+    from wab_viewer.preserved import _merge_messages
 
     live_rows = [
         {
