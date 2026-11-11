@@ -12804,7 +12804,7 @@ class TestPhase1CallsFeature:
         )
         wa_conn.execute("INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (1, 2)")
 
-        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (20, 2, 'Bob')")
+        wa_conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (20, 2, NULL)")
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data) VALUES (1, 20, 0, 1700000000000, 'Hello')"
         )
@@ -12836,7 +12836,7 @@ class TestPhase1CallsFeature:
         app = viewer.create_app(tmp_path, rescan=False)
         app.config["TESTING"] = True
         with app.test_client() as client:
-            resp = client.get("/api/chat/15559876543/info")
+            resp = client.get("/api/chat-info?chat_id=15559876543&chat_type=contact")
             assert resp.status_code == 200
             info = resp.get_json()
             assert info["calls_count"] == 1
@@ -13007,7 +13007,7 @@ class TestPhase1CallsFeature:
             assert c["chat_id"] == "50"
 
     def test_api_chat_info_ios_calls_count_with_companion_lid(self, tmp_path):
-        """GET /api/chat/<id>/info on iOS accurately counts calls logged under companion Privacy LID."""
+        """GET /api/chat-info on iOS accurately counts calls logged under companion Privacy LID."""
         cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
         cs_cols = {r[1] for r in cs_conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
         if "ZCONTACTIDENTIFIER" not in cs_cols:
@@ -13055,7 +13055,7 @@ class TestPhase1CallsFeature:
         app = viewer.create_app(tmp_path, rescan=False)
         app.config["TESTING"] = True
         with app.test_client() as client:
-            resp = client.get("/api/chat/50/info")
+            resp = client.get("/api/chat-info?chat_id=50&chat_type=contact")
             assert resp.status_code == 200
             info = resp.get_json()
             assert info["calls_count"] == 1
@@ -13179,10 +13179,10 @@ class TestPhase2ArchivedAndSearch:
         wa_conn.execute("INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (2, 1)")
 
         wa_conn.execute(
-            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (10, 1, 'Alice Dual', 1, 1000)"
+            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (10, 1, NULL, 1, 1000)"
         )
         wa_conn.execute(
-            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (20, 2, 'Alice Dual', 0, 2000)"
+            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (20, 2, NULL, 0, 2000)"
         )
 
         wa_conn.execute(
@@ -13228,7 +13228,7 @@ class TestPhase2ArchivedAndSearch:
             "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15550002222', 's.whatsapp.net', '15550002222@s.whatsapp.net')"
         )
         wa_conn.execute(
-            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (30, 1, 'Empty Archived', 1, 1000)"
+            "INSERT INTO chat (_id, jid_row_id, subject, archived, sort_timestamp) VALUES (30, 1, NULL, 1, 1000)"
         )
         wa_conn.commit()
 
@@ -14551,3 +14551,79 @@ class TestReviewFixRegressions:
 
             assert len(i_msgs) == 1
             assert i_msgs[0]["text_body"] == "iOS Hello"
+
+    def test_multi_app_android_chat_row_cache_isolation(self, tmp_path):
+        """Two Android apps sharing the same contact/group chat_id must not cross-contaminate row ID caches."""
+        dir_a = tmp_path / "android_a"
+        dir_b = tmp_path / "android_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+
+        make_archive_db(dir_a / ".wa_media_archiver.db").close()
+        conn_a = make_android_db(dir_a / "msgstore.db")
+        conn_a.executescript("""
+            INSERT INTO jid (_id, user, raw_string)
+            VALUES (1, '15559990001', '15559990001@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp)
+            VALUES (10, 1, NULL, 1700000010000);
+            INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id)
+            VALUES (1, 10, 0, 1, 1700000010000, 'From App A', 0, 'A_1');
+        """)
+        conn_a.commit()
+        conn_a.close()
+
+        make_archive_db(dir_b / ".wa_media_archiver.db").close()
+        conn_b = make_android_db(dir_b / "msgstore.db")
+        conn_b.executescript("""
+            INSERT INTO jid (_id, user, raw_string)
+            VALUES (1, '15559990001', '15559990001@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp)
+            VALUES (99, 1, NULL, 1700000020000);
+            INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id)
+            VALUES (1, 99, 0, 1, 1700000020000, 'From App B', 0, 'B_1');
+        """)
+        conn_b.commit()
+        conn_b.close()
+
+        app_a = viewer.create_app(dir_a, rescan=False)
+        app_b = viewer.create_app(dir_b, rescan=False)
+        app_a.config["TESTING"] = True
+        app_b.config["TESTING"] = True
+
+        with app_a.test_client() as ca, app_b.test_client() as cb:
+            assert len(ca.get("/api/chats").get_json()) == 1
+            msgs_a = ca.get("/api/messages?chat_id=15559990001&chat_type=contact").get_json()
+            msgs_b = cb.get("/api/messages?chat_id=15559990001&chat_type=contact").get_json()
+
+            assert len(msgs_a) == 1
+            assert msgs_a[0]["text_body"] == "From App A"
+            assert len(msgs_b) == 1
+            assert msgs_b[0]["text_body"] == "From App B"
+
+    def test_indexing_routes_not_duplicated_and_ios_location_chat_preview(self, tmp_path):
+        """Indexing blueprint must register each route once and iOS location preview must not fail on sqlite3.Row."""
+        make_archive_db(tmp_path / ".wa_media_archiver.db").close()
+        ios_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        ios_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZLASTMESSAGEDATE)
+            VALUES (1, '15559990002@s.whatsapp.net', 'Location Contact', 0, 720000000.0);
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZTEXT)
+            VALUES (1, 1, 0, 720000000.0, 'LOC_1', 5, 'Cafe Spot');
+        """)
+        ios_conn.commit()
+        ios_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        rule_counts: dict[str, int] = {}
+        for rule in app.url_map.iter_rules():
+            if rule.rule.startswith("/api/"):
+                rule_counts[rule.rule] = rule_counts.get(rule.rule, 0) + 1
+        assert rule_counts["/api/index-status"] == 1
+        assert rule_counts["/api/preferences"] == 2  # GET and POST
+
+        with app.test_client() as client:
+            chats = client.get("/api/chats").get_json()
+            assert len(chats) == 1
+            assert chats[0]["last_msg_type"] == "location"

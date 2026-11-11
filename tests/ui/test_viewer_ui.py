@@ -63,25 +63,26 @@ def open_chat_by_id(browser: CDPSession, chat_id: str, timeout: float) -> str:
     """Wait for chat list, click chat matching data-id, and wait for messages to load."""
     js_code = f"""
     (async () => {{
-        for (let i = 0; i < 200; i++) {{
+        for (let i = 0; i < 120; i++) {{
             const item = document.querySelector('.chat-item[data-id="{chat_id}"]');
             if (item) {{
                 const name = item.querySelector('.chat-name')?.textContent || '';
                 const loading = document.getElementById('chat-loading');
                 const alreadyActive = item.classList.contains('active') && loading && loading.style.display === 'none';
-                if (!alreadyActive) {{
-                    item.click();
-                    for (let j = 0; j < 100; j++) {{
-                        await new Promise(r => setTimeout(r, 50));
-                        if (loading && loading.style.display === 'none') {{
-                            await new Promise(r => setTimeout(r, 150));
-                            return name;
-                        }}
+                if (alreadyActive) {{
+                    return name;
+                }}
+                item.click();
+                for (let j = 0; j < 160; j++) {{
+                    await new Promise(r => setTimeout(r, 50));
+                    if (loading && loading.style.display === 'none') {{
+                        await new Promise(r => setTimeout(r, 150));
+                        return name;
                     }}
                 }}
-                return name;
+                return '';
             }}
-            await new Promise(r => setTimeout(r, 100));
+            await new Promise(r => setTimeout(r, 50));
         }}
         return '';
     }})()
@@ -700,13 +701,19 @@ def test_media_gallery_viewport_hydration_and_unloading(
         (() => {
             const grid = document.getElementById('media-gallery-grid');
             const items = [...grid.querySelectorAll('.gallery-item')];
-            const mediaItems = items.filter(el => el.dataset.src);
+            const mediaItems = items.filter(
+                el => !el.classList.contains('type-hidden') && el.dataset.src && el.dataset.type !== 'link'
+            );
             const hydrated = mediaItems.filter(el => el.dataset.hydrated === 'true');
             const heights = mediaItems.map(el => el.getBoundingClientRect().height);
-            const allStandardHeight = heights.every(h => Math.abs(h - 120) < 2);
+            const allStandardHeight = mediaItems.length > 0 && heights.every(h => Math.abs(h - 120) < 2);
 
-            const firstImage = items.find(el => el.dataset.type === 'image');
-            const firstVideo = items.find(el => el.dataset.type === 'video');
+            const firstImage = items.find(
+                el => !el.classList.contains('type-hidden') && el.dataset.type === 'image'
+            );
+            const firstVideo = items.find(
+                el => !el.classList.contains('type-hidden') && el.dataset.type === 'video'
+            );
 
             return {
                 totalMediaItems: mediaItems.length,
@@ -1846,7 +1853,8 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
         """
         (async () => {
             const btn = document.querySelector('#message-scroll .msg-poll .msg-poll-view-votes-btn');
-            if (btn) btn.click();
+            if (!btn) return { open: false };
+            btn.click();
 
             for (let i = 0; i < 50; i++) {
                 const popup = document.getElementById('msg-details-popup');
@@ -1962,7 +1970,8 @@ def test_poll_messages_visual_rendering(browser: CDPSession, screenshot_dir: Pat
         """
         (async () => {
             const btn = document.querySelector('#message-scroll .msg-poll .msg-poll-view-votes-btn');
-            if (btn) btn.click();
+            if (!btn) return { open: false };
+            btn.click();
 
             for (let i = 0; i < 50; i++) {
                 const popup = document.getElementById('msg-details-popup');

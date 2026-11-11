@@ -28,7 +28,6 @@ from ..queries.calls import (
 from ..queries.group_members import _group_members_android, _group_members_ios
 from ..queries.sql_builder import (
     _SUPPORTED_ANDROID_SYSTEM_ACTIONS,
-    _android_chat_row_ids_cache,
     _clean_user_sql,
     _ios_chat_filter,
     _resolve_android_chat_filter,
@@ -535,11 +534,11 @@ def api_chats():
         c_row_id = d.pop("chat_row_id", None)
         if ctx.source_type == "android" and c_row_id is not None:
             c_key = (d["id"], d["type"])
-            existing_c = _android_chat_row_ids_cache.get(c_key)
+            existing_c = ctx.android_chat_row_ids_cache.get(c_key)
             if existing_c is None:
-                _android_chat_row_ids_cache[c_key] = [c_row_id]
+                ctx.android_chat_row_ids_cache[c_key] = [c_row_id]
             elif c_row_id not in existing_c:
-                existing_c.append(c_row_id)
+                ctx.android_chat_row_ids_cache[c_key] = [*existing_c, c_row_id]
         raw_type = d.pop("last_msg_type", 0)
         media_path = d.pop("last_msg_media_path", None)
         last_msg_id = d.pop("last_msg_id", None)
@@ -554,6 +553,7 @@ def api_chats():
         last_msg_sender = d.pop("last_msg_sender", None)
         last_msg_sender_jid = d.pop("last_msg_sender_jid", None)
         last_msg_member_jid = d.pop("last_msg_member_jid", None)
+        last_msg_duration = d.pop("last_msg_duration", None)
 
         if (
             ctx.source_type == "android"
@@ -698,18 +698,14 @@ def api_chats():
                 elif (ctx.source_type == "android" and raw_type == 5) or (
                     ctx.source_type == "ios"
                     and raw_type == 5
-                    and not (r.get("last_msg_duration") and r["last_msg_duration"] > 0)
+                    and not (last_msg_duration and last_msg_duration > 0)
                 ):
                     d["last_msg_type"] = "location"
                 elif (ctx.source_type == "android" and raw_type == 16) or (
                     ctx.source_type == "ios"
                     and (
                         raw_type == 16
-                        or (
-                            raw_type == 5
-                            and r.get("last_msg_duration")
-                            and r["last_msg_duration"] > 0
-                        )
+                        or (raw_type == 5 and last_msg_duration and last_msg_duration > 0)
                     )
                 ):
                     d["last_msg_type"] = "live_location"
@@ -753,7 +749,9 @@ def api_chat_info():
 
     if conn is not None:
         if ctx.source_type == "android":
-            chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+            chat_pred, chat_params = _resolve_android_chat_filter(
+                conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
+            )
             extra = ctx.queries.android_filter
             stat_row = conn.execute(
                 f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts,"
@@ -799,7 +797,9 @@ def api_chat_info():
 
     if conn is not None:
         if ctx.source_type == "android":
-            chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+            chat_pred, chat_params = _resolve_android_chat_filter(
+                conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
+            )
             extra = ctx.queries.android_filter
 
             if chat_type == "contact":
@@ -1215,7 +1215,7 @@ def api_chat_info():
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_log'"
         ).fetchone():
             contact_jids, group_jids = _resolve_android_call_targets(
-                conn_wa, ctx.get_archive(), chat_id, chat_type
+                conn_wa, ctx.get_archive(), chat_id, chat_type, ctx.android_chat_row_ids_cache
             )
             cl_cols = {row[1] for row in conn_wa.execute("PRAGMA table_info(call_log)").fetchall()}
             has_group = "group_jid_row_id" in cl_cols

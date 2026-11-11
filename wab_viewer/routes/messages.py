@@ -112,7 +112,7 @@ def api_messages():
                     min_ts = rows[-1]["timestamp_ms"]
                     max_ts = rows[0]["timestamp_ms"]
                     chat_pred, chat_params = _resolve_android_chat_filter(
-                        ctx.get_wa(), chat_id, chat_type
+                        ctx.get_wa(), chat_id, chat_type, ctx.android_chat_row_ids_cache
                     )
                     try:
                         missing_rev = (
@@ -276,6 +276,7 @@ def api_messages():
                         False,
                         False,
                         limit,
+                        ctx.android_chat_row_ids_cache,
                     )
                     rows = _merge_chat_calls_with_messages(
                         rows, live_calls, pres_calls, True, limit
@@ -306,6 +307,7 @@ def api_messages():
             inclusive,
             inclusive,
             limit,
+            ctx.android_chat_row_ids_cache,
         )
         merged = _merge_chat_calls_with_messages(pres_rows, [], pres_calls, descending, limit)
         return jsonify(merged)
@@ -326,7 +328,9 @@ def api_messages():
     extra = ctx.queries.android_filter if ctx.source_type == "android" else ctx.queries.ios_filter
 
     if ctx.source_type == "android":
-        chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+        chat_pred, chat_params = _resolve_android_chat_filter(
+            conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
+        )
         ts_col = ctx.queries.android_ts
         sort_phys_col = "m._id"
     else:
@@ -456,6 +460,7 @@ def api_messages():
         inclusive,
         inclusive,
         limit,
+        ctx.android_chat_row_ids_cache,
     )
     rows = _merge_chat_calls_with_messages(rows, live_calls, pres_calls, descending, limit)
     return jsonify(rows)
@@ -586,6 +591,7 @@ def api_messages_at():
             True,
             False,
             half,
+            ctx.android_chat_row_ids_cache,
         )
         _, pres_calls_after = _fetch_chat_calls_for_window(
             ctx.source_type,
@@ -601,6 +607,7 @@ def api_messages_at():
             False,
             False,
             half,
+            ctx.android_chat_row_ids_cache,
         )
         merged_before = _merge_chat_calls_with_messages(
             pres_before, [], pres_calls_before, True, half
@@ -621,7 +628,9 @@ def api_messages_at():
     extra = ctx.queries.android_filter if ctx.source_type == "android" else ctx.queries.ios_filter
 
     if ctx.source_type == "android":
-        chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+        chat_pred, chat_params = _resolve_android_chat_filter(
+            conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
+        )
         ts_col = ctx.queries.android_ts
         sort_phys_col = "m._id"
     else:
@@ -718,6 +727,7 @@ def api_messages_at():
         True,
         False,
         half,
+        ctx.android_chat_row_ids_cache,
     )
     live_calls_after, pres_calls_after = _fetch_chat_calls_for_window(
         ctx.source_type,
@@ -733,6 +743,7 @@ def api_messages_at():
         False,
         False,
         half,
+        ctx.android_chat_row_ids_cache,
     )
     msgs_before = [r for r in combined_msgs if r["timestamp_ms"] <= ts]
     msgs_after = [r for r in combined_msgs if r["timestamp_ms"] > ts]
@@ -1048,7 +1059,7 @@ def api_reaction_details(message_id):
         }
         if "message_add_on" not in tables:
             return jsonify({"available": False})
-        _ensure_jid_map_resolved(conn, ctx.archive_conn)
+        _ensure_jid_map_resolved(conn, ctx.get_archive())
         mao_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_add_on)").fetchall()}
         chat_join_expr = (
             "COALESCE(ao.chat_row_id, m.chat_row_id)"

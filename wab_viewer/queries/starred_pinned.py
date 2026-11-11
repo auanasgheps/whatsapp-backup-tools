@@ -20,6 +20,7 @@ def _query_android_starred(
     target_chat_id: str | None,
     arch_conn: sqlite3.Connection | None,
     fetch_limit: int | None,
+    row_ids_cache: dict[tuple[str, str], list[int]],
 ) -> list[dict]:
     """Query starred messages from Android msgstore.db."""
     has_msg = conn.execute(
@@ -140,7 +141,9 @@ def _query_android_starred(
     if target_chat_id is not None:
         clean_target = target_chat_id.split(":")[0] if ":" in target_chat_id else target_chat_id
         if has_chat and has_jid:
-            resolved_ids = _resolve_android_chat_row_ids(conn, clean_target, "contact")
+            resolved_ids = _resolve_android_chat_row_ids(
+                conn, clean_target, "contact", row_ids_cache
+            )
             if resolved_ids:
                 r_ph = ",".join("?" * len(resolved_ids))
                 where_clauses.append(f"m.chat_row_id IN ({r_ph})")
@@ -595,6 +598,7 @@ def _query_android_pinned(
     chat_id: str,
     chat_type: str,
     arch_conn: sqlite3.Connection | None,
+    row_ids_cache: dict[tuple[str, str], list[int]],
 ) -> list[dict]:
     """Query active pinned messages for a chat from Android msgstore.db."""
     has_ao = conn.execute(
@@ -622,7 +626,7 @@ def _query_android_pinned(
     )
     pin_cond = "AND pic.pin_in_chat_state = 1" if has_pin_table else ""
 
-    chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type)
+    chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type, row_ids_cache)
 
     sql = f"""
         SELECT
@@ -964,6 +968,7 @@ def _count_chat_starred(
     pres_conn: sqlite3.Connection | None,
     source_type: str | None,
     target_chat_id: str,
+    row_ids_cache: dict[tuple[str, str], list[int]],
 ) -> int:
     """Return exact count of starred messages in a chat across live + preserved DBs."""
     live_cnt = 0
@@ -988,7 +993,9 @@ def _count_chat_starred(
                     ).fetchone()
                 )
                 if has_chat and has_jid:
-                    resolved_ids = _resolve_android_chat_row_ids(wa_conn, clean_target, "contact")
+                    resolved_ids = _resolve_android_chat_row_ids(
+                        wa_conn, clean_target, "contact", row_ids_cache
+                    )
                     if resolved_ids:
                         r_ph = ",".join("?" * len(resolved_ids))
                         cnt_row = wa_conn.execute(

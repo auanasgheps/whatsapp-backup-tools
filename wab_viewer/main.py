@@ -42,7 +42,6 @@ from .db_cache import (
 from .fts import _clear_fts_index
 from .preserved import _detect_preserved_db
 from .queries.sql_builder import (
-    _android_chat_row_ids_cache,
     build_viewer_queries,
     detect_schema_capabilities,
 )
@@ -160,11 +159,9 @@ def create_app(output_root: Path, rescan: bool = False):
     caps = detect_schema_capabilities(wa_db_path, source_type, output_root)
     queries = build_viewer_queries(caps, source_type)
 
-    _archive_conn, _cleared_recent = open_and_migrate_archive_db(
+    _archive_conn, _ = open_and_migrate_archive_db(
         archive_db_path, rescan, source_is_changed, has_prior_stamp
     )
-    if _cleared_recent:
-        _android_chat_row_ids_cache.clear()
     _run_db_maintenance(cache_conn, _archive_conn)
 
     ctx = ViewerContext(

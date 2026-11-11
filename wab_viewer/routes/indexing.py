@@ -14,7 +14,6 @@ bp = Blueprint("indexing", __name__)
 
 
 @bp.route("/api/index-status")
-@bp.route("/api/index-status")
 def api_index_status():
     ctx = get_viewer_context()
     cache = ctx.get_cache()
@@ -22,7 +21,6 @@ def api_index_status():
     return jsonify({"indexed": indexed})
 
 
-@bp.route("/api/chat-index-status")
 @bp.route("/api/chat-index-status")
 def api_chat_index_status():
     ctx = get_viewer_context()
@@ -44,7 +42,6 @@ def api_chat_index_status():
 
 
 @bp.route("/api/index/source-size")
-@bp.route("/api/index/source-size")
 def api_index_source_size():
     ctx = get_viewer_context()
     row = (
@@ -55,7 +52,6 @@ def api_index_source_size():
 
 
 @bp.route("/api/index/progress")
-@bp.route("/api/index/progress")
 def api_index_progress():
     ctx = get_viewer_context()
     with ctx.indexing_lock:
@@ -63,7 +59,6 @@ def api_index_progress():
     return jsonify(state)
 
 
-@bp.route("/api/index/all", methods=["POST"])
 @bp.route("/api/index/all", methods=["POST"])
 def api_index_all():
     ctx = get_viewer_context()
@@ -80,7 +75,6 @@ def api_index_all():
 
 
 @bp.route("/api/index/clear", methods=["POST"])
-@bp.route("/api/index/clear", methods=["POST"])
 def api_index_clear():
     ctx = get_viewer_context()
     with ctx.indexing_lock:
@@ -91,7 +85,6 @@ def api_index_clear():
     return jsonify({"ok": True})
 
 
-@bp.route("/api/index/optimize", methods=["POST"])
 @bp.route("/api/index/optimize", methods=["POST"])
 def api_index_optimize():
     ctx = get_viewer_context()
@@ -126,14 +119,12 @@ def api_index_optimize():
 
 
 @bp.route("/api/preferences", methods=["GET"])
-@bp.route("/api/preferences", methods=["GET"])
 def api_preferences_get():
     ctx = get_viewer_context()
     rows = ctx.get_cache().execute("SELECT key, value FROM user_preferences").fetchall()
     return jsonify({r["key"]: r["value"] for r in rows})
 
 
-@bp.route("/api/preferences", methods=["POST"])
 @bp.route("/api/preferences", methods=["POST"])
 def api_preferences_post():
     ctx = get_viewer_context()

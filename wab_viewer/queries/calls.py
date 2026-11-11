@@ -894,10 +894,11 @@ def _resolve_android_call_targets(
     arch_conn: sqlite3.Connection | None,
     chat_id: str,
     chat_type: str,
+    row_ids_cache: dict[tuple[str, str], list[int]],
 ) -> tuple[set[int], set[int]]:
     """Return (contact_jid_row_ids, group_jid_row_ids) for an Android chat."""
     _ensure_jid_map_resolved(conn, arch_conn)
-    row_ids = _resolve_android_chat_row_ids(conn, chat_id, chat_type)
+    row_ids = _resolve_android_chat_row_ids(conn, chat_id, chat_type, row_ids_cache)
 
     chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
     has_account_jid = "account_jid_row_id" in chat_cols
@@ -965,6 +966,7 @@ def _resolve_preserved_call_jids(
     source_type: str,
     chat_id: str,
     chat_type: str,
+    row_ids_cache: dict[tuple[str, str], list[int]],
 ) -> list[str]:
     """Resolve possible chat_jid strings used by preserved_calls for a chat."""
     candidates: set[str] = {str(chat_id)}
@@ -978,7 +980,7 @@ def _resolve_preserved_call_jids(
     if source_type == "ios":
         candidates.update(_resolve_ios_chat_jids(wa_conn, chat_id))
     elif source_type == "android":
-        row_ids = _resolve_android_chat_row_ids(wa_conn, chat_id, chat_type)
+        row_ids = _resolve_android_chat_row_ids(wa_conn, chat_id, chat_type, row_ids_cache)
         if row_ids:
             ph = ",".join("?" * len(row_ids))
             with contextlib.suppress(sqlite3.OperationalError):
@@ -1011,6 +1013,7 @@ def _query_android_chat_calls(
     before_inclusive: bool,
     after_inclusive: bool,
     limit: int,
+    row_ids_cache: dict[tuple[str, str], list[int]],
 ) -> list[dict]:
     """Query calls belonging to a single Android chat within the requested window."""
     has_table = conn.execute(
@@ -1034,7 +1037,7 @@ def _query_android_chat_calls(
         return []
 
     contact_jid_ids, group_jid_ids = _resolve_android_call_targets(
-        conn, arch_conn, chat_id, chat_type
+        conn, arch_conn, chat_id, chat_type, row_ids_cache
     )
     if chat_type == "group":
         if not group_jid_ids:
@@ -1433,6 +1436,7 @@ def _query_preserved_chat_calls(
     before_inclusive: bool,
     after_inclusive: bool,
     limit: int,
+    row_ids_cache: dict[tuple[str, str], list[int]],
 ) -> list[dict]:
     """Query preserved calls belonging to a single chat within the requested window."""
     if pres_conn is None:
@@ -1460,7 +1464,9 @@ def _query_preserved_chat_calls(
         has_pres_at = "preserved_at" in cols
         has_platform = "source_platform" in cols
 
-        cand_jids = _resolve_preserved_call_jids(wa_conn, source_type, chat_id, chat_type)
+        cand_jids = _resolve_preserved_call_jids(
+            wa_conn, source_type, chat_id, chat_type, row_ids_cache
+        )
         where_parts: list[str] = []
         params: list = []
 
@@ -1647,6 +1653,7 @@ def _fetch_chat_calls_for_window(
     before_inclusive: bool,
     after_inclusive: bool,
     limit: int,
+    row_ids_cache: dict[tuple[str, str], list[int]],
 ) -> tuple[list[dict], list[dict]]:
     """Fetch (live_calls, preserved_calls) for a chat pagination window."""
     live_calls: list[dict] = []
@@ -1662,6 +1669,7 @@ def _fetch_chat_calls_for_window(
                 before_inclusive,
                 after_inclusive,
                 limit,
+                row_ids_cache,
             )
         elif source_type == "ios" and wa_db_path is not None:
             call_db_p = _find_ios_call_history_db(wa_db_path, output_root)
@@ -1689,5 +1697,6 @@ def _fetch_chat_calls_for_window(
         before_inclusive,
         after_inclusive,
         limit,
+        row_ids_cache,
     )
     return live_calls, pres_calls
