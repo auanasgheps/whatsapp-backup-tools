@@ -1963,3 +1963,294 @@ def test_android_starred_message_click_preserves_tab_and_loads_context(
         session.capture_screenshot(screenshot_dir / "starred_context_jump.png", 5.0)
     finally:
         session.close()
+
+
+def _set_viewport_size(session: CDPSession, width: int, height: int) -> None:
+    """Resize the headless browser viewport via CDP Emulation."""
+    req_id = session._next_id
+    session._next_id += 1
+    session.ws.send_json(
+        {
+            "id": req_id,
+            "method": "Emulation.setDeviceMetricsOverride",
+            "params": {
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+            },
+        }
+    )
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        msg = session.ws.recv_json(1.0)
+        if msg.get("id") == req_id:
+            return
+    raise TimeoutError("Timed out setting CDP viewport size")
+
+
+def test_call_ui_refinements_and_in_chat_bubbles_e2e(tmp_path: Path, screenshot_dir: Path) -> None:
+    """Validate sidebar responsive sizing, two-line call cards, in-chat call bubbles, popover, and Chat Info label."""
+    import threading
+    import urllib.request
+
+    from tests.conftest import make_android_db, make_archive_db
+    from wab_viewer.main import create_app
+
+    from .cdp_driver import find_free_port, launch_browser_session
+
+    wa_path = tmp_path / "msgstore.db"
+    arch_path = tmp_path / ".wa_media_archiver.db"
+
+    wa_conn = make_android_db(wa_path)
+    arch_conn = make_archive_db(arch_path)
+
+    jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+    if "server" not in jid_cols:
+        wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+    chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        wa_conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+
+    wa_conn.executescript("""
+        CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+        CREATE TABLE IF NOT EXISTS call_log (
+            _id INTEGER PRIMARY KEY,
+            call_id TEXT,
+            jid_row_id INTEGER,
+            from_me INTEGER,
+            timestamp INTEGER,
+            video_call INTEGER,
+            duration INTEGER,
+            call_result INTEGER,
+            group_jid_row_id INTEGER
+        );
+        INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15557654321', 's.whatsapp.net', '15557654321@s.whatsapp.net');
+        INSERT INTO jid (_id, user, server, raw_string) VALUES (2, '120363000999', 'g.us', '120363000999@g.us');
+        INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden) VALUES (10, 1, NULL, 1700000090000, 0);
+        INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden) VALUES (20, 2, 'Design Sync Group', 1700000080000, 0);
+
+        INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id)
+        VALUES (1, 10, 0, 1, 1700000010000, 'Ready for our quick call?', 0, 'MSG_1');
+        INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id)
+        VALUES (2, 10, 1, 0, 1700000050000, 'Just shared the updated mockups!', 0, 'MSG_2');
+
+        INSERT INTO call_log VALUES (101, 'call_missed_1', 1, 0, 1700000020000, 0, 0, 2, NULL);
+        INSERT INTO call_log VALUES (102, 'call_video_2', 1, 1, 1700000035000, 1, 754, 1, NULL);
+        INSERT INTO call_log VALUES (103, 'call_group_3', 1, 0, 1700000060000, 1, 125, 1, 2);
+    """)
+    wa_conn.commit()
+    wa_conn.close()
+
+    arch_conn.execute(
+        "INSERT INTO contacts (number, folder, display_name) VALUES ('15557654321', 'Elena Vance (15557654321)', 'Elena Vance')"
+    )
+    arch_conn.commit()
+    arch_conn.close()
+
+    port = find_free_port()
+    app = create_app(tmp_path, rescan=False)
+    app.config["TESTING"] = True
+    server_thread = threading.Thread(
+        target=lambda: app.run(port=port, use_reloader=False),
+        daemon=True,
+    )
+    server_thread.start()
+
+    base_url = f"http://127.0.0.1:{port}"
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/chats", timeout=1.0) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            time.sleep(0.1)
+
+    cdp_port = find_free_port()
+    profile_dir = tmp_path / "browser_profile_calls"
+    session = launch_browser_session(base_url, profile_dir, cdp_port, 30, 0.2)
+    try:
+        # 1. Wait for app bootstrap and verify sidebar width responsiveness at 1280x800 vs 1920x1080
+        for _ in range(60):
+            ready = session.evaluate(
+                "Boolean(document.getElementById('sidebar') && document.querySelectorAll('.chat-item').length >= 1)",
+                5.0,
+            )
+            if ready:
+                break
+            time.sleep(0.15)
+
+        _set_viewport_size(session, 1280, 800)
+        w_1280_med = session.evaluate(
+            """
+            (() => {
+                window.__testErrors = [];
+                window.__badFetches = [];
+                window.addEventListener('error', e => window.__testErrors.push(String(e.message || e)));
+                window.addEventListener('unhandledrejection', e => window.__testErrors.push(String(e.reason || e)));
+                const origFetch = window.fetch;
+                window.fetch = async (...args) => {
+                    const res = await origFetch(...args);
+                    if (!res.ok) window.__badFetches.push({ url: String(args[0]), status: res.status });
+                    return res;
+                };
+                return document.getElementById('sidebar').getBoundingClientRect().width;
+            })()
+            """,
+            10.0,
+        )
+        assert isinstance(w_1280_med, (int, float))
+
+        _set_viewport_size(session, 1920, 1080)
+        size_metrics = session.evaluate(
+            """
+            (async () => {
+                await new Promise(r => setTimeout(r, 100));
+                const medW = document.getElementById('sidebar').getBoundingClientRect().width;
+                document.getElementById('settings-btn').click();
+                await new Promise(r => setTimeout(r, 100));
+                document.querySelector('.pref-btn[data-pref="font_size"][data-value="small"]').click();
+                await new Promise(r => setTimeout(r, 100));
+                const smallW = document.getElementById('sidebar').getBoundingClientRect().width;
+                document.querySelector('.pref-btn[data-pref="font_size"][data-value="large"]').click();
+                await new Promise(r => setTimeout(r, 100));
+                const largeW = document.getElementById('sidebar').getBoundingClientRect().width;
+                document.querySelector('.pref-btn[data-pref="font_size"][data-value="medium"]').click();
+                document.getElementById('settings-close').click();
+                await new Promise(r => setTimeout(r, 100));
+                return {
+                    medW,
+                    smallW,
+                    largeW,
+                    overflowX: document.documentElement.scrollWidth > window.innerWidth,
+                };
+            })()
+            """,
+            10.0,
+        )
+        assert isinstance(size_metrics, dict)
+        assert size_metrics["medW"] > w_1280_med
+        assert size_metrics["smallW"] < size_metrics["medW"] < size_metrics["largeW"]
+        assert size_metrics["overflowX"] is False
+
+        # 2. Switch to Calls tab and inspect two-line cards
+        calls_ui = session.evaluate(
+            """
+            (async () => {
+                document.getElementById('tab-btn-calls').click();
+                let cards = [];
+                for (let i = 0; i < 60; i++) {
+                    cards = Array.from(document.querySelectorAll('#chat-list .call-item'));
+                    if (cards.length >= 3) break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                const first = cards[0];
+                const r1 = first.querySelector('.call-item-row-1').getBoundingClientRect();
+                const r2 = first.querySelector('.call-item-row-2').getBoundingClientRect();
+                const nameRect = first.querySelector('.call-item-name').getBoundingClientRect();
+                const timeRect = first.querySelector('.call-item-time').getBoundingClientRect();
+                first.click();
+                await new Promise(r => setTimeout(r, 100));
+                return {
+                    count: cards.length,
+                    row2BelowRow1: r2.top >= r1.bottom - 1,
+                    sameLineNoTimeOverlap: timeRect.top >= r1.bottom - 1 && nameRect.right <= first.querySelector('.call-item-media-icon').getBoundingClientRect().left + 1,
+                    cardHeight: first.getBoundingClientRect().height,
+                };
+            })()
+            """,
+            10.0,
+        )
+        assert calls_ui["count"] == 3
+        assert calls_ui["row2BelowRow1"] is True
+        assert calls_ui["sameLineNoTimeOverlap"] is True
+        assert calls_ui["cardHeight"] >= 56
+        session.capture_screenshot(screenshot_dir / "calls_list_two_line.png", 5.0)
+
+        # 3. Open Elena Vance 1:1 chat and inspect chronological in-chat call bubbles + info popover + Chat Info
+        chat_ui = session.evaluate(
+            """
+            (async () => {
+                document.getElementById('tab-btn-chats').click();
+                for (let i = 0; i < 40; i++) {
+                    if (document.querySelector('.chat-item[data-id="15557654321"]')) break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                document.querySelector('.chat-item[data-id="15557654321"]').click();
+                let callRows = [];
+                for (let i = 0; i < 60; i++) {
+                    callRows = Array.from(document.querySelectorAll('.msg-row .msg-bubble.call-event'));
+                    const loadingEl = document.getElementById('chat-loading');
+                    if (callRows.length === 2 && loadingEl && loadingEl.style.display === 'none') break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                const allRows = Array.from(document.querySelectorAll('#message-scroll .msg-row')).map(r => r.dataset.msgId);
+                const bubble = callRows[0];
+                const bubbleBorder = getComputedStyle(bubble).borderTopWidth;
+                const infoBtn = bubble.querySelector('button.msg-info-btn');
+                infoBtn.click();
+                await new Promise(r => setTimeout(r, 150));
+                const popup = document.getElementById('msg-details-popup');
+                const popupText = popup ? popup.textContent : '';
+                const popupVisible = popup ? popup.classList.contains('visible') : false;
+
+                document.getElementById('chat-info-btn').click();
+                let infoText = '';
+                for (let i = 0; i < 40; i++) {
+                    const body = document.getElementById('chat-info-body');
+                    if (body && body.textContent.includes('Calls')) {
+                        infoText = body.textContent;
+                        break;
+                    }
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                return {
+                    callCount: callRows.length,
+                    allRows,
+                    bubbleBorder,
+                    popupVisible,
+                    popupText,
+                    infoHasCallsLabel: infoText.includes('Calls') && !infoText.includes('Preserved calls'),
+                    errors: window.__testErrors,
+                    badFetches: window.__badFetches,
+                };
+            })()
+            """,
+            15.0,
+        )
+        assert chat_ui["errors"] == []
+        assert chat_ui["badFetches"] == []
+        assert chat_ui["callCount"] == 2
+        assert chat_ui["allRows"] == ["1", "call:call_missed_1", "call:call_video_2", "2"]
+        assert chat_ui["bubbleBorder"] == "0px"
+        assert chat_ui["popupVisible"] is True
+        assert "Voice call" in chat_ui["popupText"] or "Video call" in chat_ui["popupText"]
+        assert chat_ui["infoHasCallsLabel"] is True
+
+        # Close Chat Info & popup, then capture dark + light visual evidence screenshots
+        session.evaluate(
+            """
+            (() => {
+                document.getElementById('chat-info-close')?.click();
+                document.getElementById('msg-details-popup')?.classList.remove('visible');
+            })()
+            """,
+            3.0,
+        )
+        session.capture_screenshot(screenshot_dir / "in_chat_call_bubbles.png", 5.0)
+
+        session.evaluate(
+            """
+            (async () => {
+                document.getElementById('settings-btn').click();
+                await new Promise(r => setTimeout(r, 100));
+                document.querySelector('.pref-btn[data-pref="theme"][data-value="light"]').click();
+                document.getElementById('settings-close').click();
+                await new Promise(r => setTimeout(r, 150));
+            })()
+            """,
+            5.0,
+        )
+        session.capture_screenshot(screenshot_dir / "in_chat_call_bubbles_light.png", 5.0)
+    finally:
+        session.close()

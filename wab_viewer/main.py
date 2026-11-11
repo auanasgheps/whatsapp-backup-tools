@@ -2187,8 +2187,15 @@ def _hydrate_live_photos(
 def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: list) -> None:
     if not rows or not archive_target:
         return
-    # Only cache live messages, never synthetic preserved messages (negative msg_id or is_preserved)
-    rows = [r for r in rows if not r.get("is_preserved") and (r.get("msg_id") or 0) > 0]
+    # Only cache live messages, never synthetic preserved or call-event entries
+    rows = [
+        r
+        for r in rows
+        if not r.get("is_preserved")
+        and r.get("media_type") != "call"
+        and isinstance(r.get("msg_id"), int)
+        and r["msg_id"] > 0
+    ]
     if not rows:
         return
     conn = None
@@ -4462,6 +4469,72 @@ def _get_contacts_lookup(arch_conn: sqlite3.Connection | None) -> dict[str, str]
         return {}
 
 
+def _map_android_call_outcome(from_me: int, result_code: int, duration_sec: int) -> tuple[str, str]:
+    """Return (call_type, outcome) for an Android call_log entry."""
+    if from_me == 1:
+        call_type = "outgoing"
+    elif result_code in (2, 3, 5):
+        call_type = "missed"
+    else:
+        call_type = "incoming"
+
+    if duration_sec > 0:
+        outcome = "answered"
+    elif from_me == 1:
+        outcome = "unanswered"
+    elif result_code == 3:
+        outcome = "declined"
+    elif result_code in (2, 5):
+        outcome = "missed"
+    else:
+        outcome = "unanswered"
+    return call_type, outcome
+
+
+def _map_ios_call_outcome(from_me: int, outcome_code: int, duration_sec: int) -> tuple[str, str]:
+    """Return (call_type, outcome) for an iOS ZWACDCALLEVENT entry."""
+    if from_me == 1:
+        call_type = "outgoing"
+    elif outcome_code in (2, 3) or (outcome_code == 4 and duration_sec == 0):
+        call_type = "missed"
+    else:
+        call_type = "incoming"
+
+    if duration_sec > 0:
+        outcome = "answered"
+    elif from_me == 1:
+        outcome = "unanswered"
+    elif outcome_code == 3:
+        outcome = "declined"
+    elif outcome_code in (2, 4):
+        outcome = "missed"
+    elif outcome_code == 1:
+        outcome = "canceled"
+    else:
+        outcome = "unanswered"
+    return call_type, outcome
+
+
+def _resolve_android_caller_info(
+    row_dict: dict, contacts_map: dict[str, str]
+) -> tuple[str, str, str]:
+    """Resolve (raw_num, caller_phone, caller_name) for an Android call row."""
+    raw_num = row_dict.get("caller_number") or ""
+    caller_phone = f"+{raw_num}" if (raw_num and raw_num.isdigit()) else raw_num
+    caller_name = contacts_map.get(raw_num, "")
+    if not caller_name and row_dict.get("con_display_name"):
+        caller_name = row_dict["con_display_name"]
+    if not caller_name and row_dict.get("con_folder"):
+        caller_name = re.sub(r"\s*\(\+?\d+\)$", "", row_dict["con_folder"]).strip()
+    if not caller_name and row_dict.get("ldn_display_name"):
+        ldn_n = str(row_dict["ldn_display_name"]).strip()
+        if "∙" not in ldn_n and "\u2219" not in ldn_n:
+            caller_name = ldn_n
+    if not caller_name:
+        caller_name = row_dict.get("chat_subject") or caller_phone or "Unknown"
+    return raw_num, caller_phone, caller_name
+
+
 def _query_android_calls(
     conn: sqlite3.Connection,
     filter_type: str,
@@ -4520,7 +4593,7 @@ def _query_android_calls(
         if has_jid_row
         else ""
     )
-    if has_account_jid and has_jid_row:
+    if has_group and has_account_jid and has_jid_row:
         chat_join = """
         LEFT JOIN chat c ON (
             (cl.group_jid_row_id IS NOT NULL AND cl.group_jid_row_id > 0 AND c.jid_row_id = cl.group_jid_row_id)
@@ -4535,7 +4608,7 @@ def _query_android_calls(
             ))
         )
         """
-    elif has_jid_row:
+    elif has_group and has_jid_row:
         chat_join = """
         LEFT JOIN chat c ON (
             (cl.group_jid_row_id IS NOT NULL AND cl.group_jid_row_id > 0 AND c.jid_row_id = cl.group_jid_row_id)
@@ -4546,14 +4619,42 @@ def _query_android_calls(
             ))
         )
         """
+    elif has_account_jid and has_jid_row:
+        chat_join = """
+        LEFT JOIN chat c ON (
+            c.jid_row_id = cl.jid_row_id
+            OR c.account_jid_row_id = cl.jid_row_id
+            OR (jm_caller.jid_row_id IS NOT NULL AND (
+                c.jid_row_id = jm_caller.jid_row_id
+                OR c.account_jid_row_id = jm_caller.jid_row_id
+            ))
+        )
+        """
+    elif has_jid_row:
+        chat_join = """
+        LEFT JOIN chat c ON (
+            c.jid_row_id = cl.jid_row_id
+            OR (jm_caller.jid_row_id IS NOT NULL AND c.jid_row_id = jm_caller.jid_row_id)
+        )
+        """
     else:
         chat_join = ""
 
+    jid_cols = (
+        {row[1] for row in conn.execute("PRAGMA table_info(jid)").fetchall()}
+        if has_jid_row
+        else set()
+    )
+    caller_non_lid_expr = (
+        "CASE WHEN j_caller.server != 'lid' THEN j_caller.user END"
+        if "server" in jid_cols
+        else "CASE WHEN COALESCE(j_caller.raw_string, '') NOT LIKE '%@lid' THEN j_caller.user END"
+    )
     con_caller_join = (
-        """
+        f"""
         LEFT JOIN _contacts_resolved con_caller ON con_caller.clean_number = COALESCE(
             j_caller_real.user,
-            CASE WHEN j_caller.server != 'lid' THEN j_caller.user END,
+            {caller_non_lid_expr},
             j_caller.user
         )
         """
@@ -4592,7 +4693,7 @@ def _query_android_calls(
             {is_group_expr} AS is_group_call,
             COALESCE(
                 j_caller_real.user,
-                CASE WHEN j_caller.server != 'lid' THEN j_caller.user END,
+                {caller_non_lid_expr},
                 j_caller.user
             ) AS caller_number,
             COALESCE(j_caller_real.raw_string, j_caller.raw_string) AS caller_raw,
@@ -4618,32 +4719,15 @@ def _query_android_calls(
         from_me = int(row_dict["from_me"])
         result_code = int(row_dict["call_result"])
         is_video = bool(row_dict["is_video"] == 1)
-
-        if from_me == 1:
-            call_type = "outgoing"
-        elif result_code in (2, 3, 5):
-            call_type = "missed"
-        else:
-            call_type = "incoming"
+        duration_sec = max(0, int(row_dict["duration"] or 0))
+        call_type, _ = _map_android_call_outcome(from_me, result_code, duration_sec)
 
         if filter_type == "missed" and call_type != "missed":
             continue
         if filter_type == "video" and not is_video:
             continue
 
-        raw_num = row_dict["caller_number"] or ""
-        caller_phone = f"+{raw_num}" if (raw_num and raw_num.isdigit()) else raw_num
-        caller_name = contacts_map.get(raw_num, "")
-        if not caller_name and row_dict.get("con_display_name"):
-            caller_name = row_dict["con_display_name"]
-        if not caller_name and row_dict.get("con_folder"):
-            caller_name = re.sub(r"\s*\(\+?\d+\)$", "", row_dict["con_folder"]).strip()
-        if not caller_name and row_dict.get("ldn_display_name"):
-            ldn_n = str(row_dict["ldn_display_name"]).strip()
-            if "∙" not in ldn_n and "\u2219" not in ldn_n:
-                caller_name = ldn_n
-        if not caller_name:
-            caller_name = row_dict["chat_subject"] or caller_phone or "Unknown"
+        raw_num, caller_phone, caller_name = _resolve_android_caller_info(row_dict, contacts_map)
 
         is_group_call = bool(row_dict.get("is_group_call") == 1)
         if is_group_call:
@@ -4657,6 +4741,7 @@ def _query_android_calls(
                 str(row_dict["chat_row_id"]) if row_dict["chat_row_id"] is not None else "call"
             )
 
+        ts_ms = int(row_dict["timestamp_ms"])
         results.append(
             {
                 "id": str(row_dict["id"]),
@@ -4667,8 +4752,9 @@ def _query_android_calls(
                 "is_missed": bool(call_type == "missed"),
                 "from_me": bool(from_me == 1),
                 "is_video": is_video,
-                "duration": int(row_dict["duration"]),
-                "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
+                "duration": duration_sec,
+                "timestamp": int(round(ts_ms / 1000)),
+                "timestamp_ms": ts_ms,
             }
         )
     return results
@@ -4748,6 +4834,7 @@ def _query_ios_calls(
             where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
             limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
 
+            raw_zdate_expr = "cl.ZDATE AS raw_zdate," if has_date else "NULL AS raw_zdate,"
             sql = f"""
                 SELECT
                     cl.Z_PK AS call_pk,
@@ -4756,6 +4843,7 @@ def _query_ios_calls(
                     {group_jid_expr} AS group_jid,
                     {creator_expr} AS creator_jid,
                     {ts_expr} AS timestamp,
+                    {raw_zdate_expr}
                     {dur_expr} AS duration,
                     {video_expr} AS is_video,
                     {outcome_expr} AS outcome,
@@ -4954,6 +5042,13 @@ def _query_ios_calls(
             if not caller_name:
                 caller_name = caller_phone or "Unknown"
 
+        duration_sec = max(0, int(r["duration"] or 0))
+        raw_zdate = r.get("raw_zdate")
+        ts_ms = (
+            int(round((float(raw_zdate) + 978307200.0) * 1000.0))
+            if raw_zdate is not None
+            else int(r["timestamp"]) * 1000
+        )
         results.append(
             {
                 "id": str(r["id"]),
@@ -4964,8 +5059,9 @@ def _query_ios_calls(
                 "is_missed": bool(call_type == "missed"),
                 "from_me": bool(call_type == "outgoing"),
                 "is_video": is_video,
-                "duration": int(r["duration"]),
+                "duration": duration_sec,
                 "timestamp": int(r["timestamp"]),
+                "timestamp_ms": ts_ms,
             }
         )
 
@@ -5051,6 +5147,7 @@ def _query_preserved_calls(
         caller_name = row_dict["caller_name"] or caller_phone or "Unknown"
         chat_id_val = str(row_dict["chat_id"]) if row_dict["chat_id"] else "call"
 
+        ts_ms = int(row_dict["timestamp_ms"])
         results.append(
             {
                 "id": str(row_dict["call_id"]),
@@ -5062,10 +5159,934 @@ def _query_preserved_calls(
                 "from_me": bool(call_type == "outgoing"),
                 "is_video": is_video,
                 "duration": int(row_dict["duration_seconds"] or 0),
-                "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
+                "timestamp": int(round(ts_ms / 1000)),
+                "timestamp_ms": ts_ms,
             }
         )
     return results
+
+
+def _build_chat_call_bubble(
+    call_id: str,
+    source: str,
+    timestamp_ms: int,
+    from_me: bool,
+    is_video: bool,
+    call_type: str,
+    outcome: str,
+    duration_sec: int,
+    participants: int,
+    is_group: bool,
+    sender_name: str | None,
+    is_preserved: bool,
+    preservation_reason: str | None,
+    preserved_at: str | int | None,
+    source_platform: str | None,
+) -> dict:
+    """Build a message-compatible call bubble payload for chat timelines."""
+    return {
+        "msg_id": f"call:{call_id}",
+        "sort_id": 0,
+        "stanza_id": None,
+        "timestamp_ms": int(timestamp_ms),
+        "sender": sender_name,
+        "from_me": 1 if from_me else 0,
+        "archive_path": None,
+        "media_type": "call",
+        "media_name": None,
+        "text_body": None,
+        "quoted_text": None,
+        "quoted_sender": None,
+        "quoted_ts": None,
+        "quoted_msg_id": None,
+        "quoted_has_thumb": 0,
+        "reactions": None,
+        "is_edited": 0,
+        "edited_ts": None,
+        "is_view_once": 0,
+        "link_title": None,
+        "link_desc": None,
+        "link_url": None,
+        "link_preview_type": 0,
+        "has_thumbnail": 0,
+        "is_starred": 0,
+        "is_pinned": 0,
+        "is_preserved": 1 if is_preserved else 0,
+        "preservation_reason": preservation_reason,
+        "preserved_at": preserved_at,
+        "source_platform": source_platform,
+        "call": {
+            "id": str(call_id),
+            "source": source,
+            "video": bool(is_video),
+            "from_me": bool(from_me),
+            "call_type": call_type,
+            "outcome": outcome,
+            "duration_sec": max(0, int(duration_sec)),
+            "participants": max(0, int(participants)),
+            "is_group": bool(is_group),
+            "sender_name": sender_name,
+        },
+    }
+
+
+def _resolve_ios_chat_jids(wa_conn: sqlite3.Connection | None, chat_id: str) -> list[str]:
+    """Resolve canonical JID and companion LID candidates for an iOS chat_id."""
+    if not chat_id:
+        return []
+    target_jid = None
+    ident_jid = None
+    if wa_conn is not None and str(chat_id).isdigit():
+        with contextlib.suppress(sqlite3.OperationalError):
+            cs_cols = {
+                r[1] for r in wa_conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()
+            }
+            ident_col = ", ZCONTACTIDENTIFIER" if "ZCONTACTIDENTIFIER" in cs_cols else ""
+            csr = wa_conn.execute(
+                f"SELECT ZCONTACTJID{ident_col} FROM ZWACHATSESSION WHERE Z_PK = ?",
+                (int(chat_id),),
+            ).fetchone()
+            if csr:
+                target_jid = csr[0]
+                if len(csr) > 1 and csr[1]:
+                    ident_jid = csr[1]
+
+    candidates: set[str] = set()
+    if target_jid:
+        candidates.add(target_jid)
+    if ident_jid:
+        candidates.add(ident_jid)
+    if not candidates and "@" in str(chat_id):
+        candidates.add(str(chat_id))
+    elif not candidates and str(chat_id).lstrip("+").isdigit():
+        candidates.add(f"{str(chat_id).lstrip('+')}@s.whatsapp.net")
+
+    if wa_conn is not None and candidates:
+        for c_jid in list(candidates):
+            with contextlib.suppress(sqlite3.OperationalError):
+                clean_p = c_jid.split("@")[0]
+                c_rows = wa_conn.execute(
+                    "SELECT jid, phone_number FROM _ios_contacts WHERE jid = ? OR phone_number = ?",
+                    (c_jid, clean_p),
+                ).fetchall()
+                for cr in c_rows:
+                    if cr[0]:
+                        candidates.add(cr[0])
+                    if cr[1]:
+                        candidates.add(f"{cr[1]}@s.whatsapp.net")
+    return sorted(candidates)
+
+
+def _resolve_android_call_targets(
+    conn: sqlite3.Connection,
+    arch_conn: sqlite3.Connection | None,
+    chat_id: str,
+    chat_type: str,
+) -> tuple[set[int], set[int]]:
+    """Return (contact_jid_row_ids, group_jid_row_ids) for an Android chat."""
+    _ensure_jid_map_resolved(conn, arch_conn)
+    row_ids = _resolve_android_chat_row_ids(conn, chat_id, chat_type)
+
+    chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
+    has_account_jid = "account_jid_row_id" in chat_cols
+
+    if chat_type == "group":
+        if not row_ids:
+            return set(), set()
+        ph = ",".join("?" * len(row_ids))
+        g_rows = conn.execute(
+            f"SELECT jid_row_id FROM chat WHERE _id IN ({ph}) AND jid_row_id IS NOT NULL",
+            row_ids,
+        ).fetchall()
+        return set(), {int(r[0]) for r in g_rows if r[0] is not None}
+
+    base_jid_ids: set[int] = set()
+    if row_ids:
+        ph = ",".join("?" * len(row_ids))
+        acct_col = ", account_jid_row_id" if has_account_jid else ""
+        c_rows = conn.execute(
+            f"SELECT jid_row_id{acct_col} FROM chat WHERE _id IN ({ph})",
+            row_ids,
+        ).fetchall()
+        for cr in c_rows:
+            if cr[0] is not None:
+                base_jid_ids.add(int(cr[0]))
+            if has_account_jid and len(cr) > 1 and cr[1] is not None:
+                base_jid_ids.add(int(cr[1]))
+
+    clean_id = chat_id.split(":")[0] if ":" in chat_id else chat_id
+    if clean_id and not row_ids:
+        with contextlib.suppress(sqlite3.OperationalError):
+            j_rows = conn.execute(
+                "SELECT _id FROM jid WHERE user = ?",
+                (clean_id,),
+            ).fetchall()
+            for jr in j_rows:
+                if jr[0] is not None:
+                    base_jid_ids.add(int(jr[0]))
+
+    if not base_jid_ids:
+        return set(), set()
+
+    expanded = set(base_jid_ids)
+    jid_list = list(base_jid_ids)
+    ph = ",".join("?" * len(jid_list))
+    with contextlib.suppress(sqlite3.OperationalError):
+        jm_rows = conn.execute(
+            f"""
+            SELECT lid_row_id, jid_row_id
+            FROM _jid_map_resolved
+            WHERE lid_row_id IN ({ph}) OR jid_row_id IN ({ph})
+            """,
+            jid_list + jid_list,
+        ).fetchall()
+        for jm in jm_rows:
+            if jm[0] is not None:
+                expanded.add(int(jm[0]))
+            if jm[1] is not None:
+                expanded.add(int(jm[1]))
+    return expanded, set()
+
+
+def _resolve_preserved_call_jids(
+    wa_conn: sqlite3.Connection | None,
+    source_type: str,
+    chat_id: str,
+    chat_type: str,
+) -> list[str]:
+    """Resolve possible chat_jid strings used by preserved_calls for a chat."""
+    candidates: set[str] = {str(chat_id)}
+    if "@" not in str(chat_id):
+        suffix = "@g.us" if chat_type == "group" else "@s.whatsapp.net"
+        candidates.add(f"{chat_id}{suffix}")
+
+    if wa_conn is None:
+        return sorted(candidates)
+
+    if source_type == "ios":
+        candidates.update(_resolve_ios_chat_jids(wa_conn, chat_id))
+    elif source_type == "android":
+        row_ids = _resolve_android_chat_row_ids(wa_conn, chat_id, chat_type)
+        if row_ids:
+            ph = ",".join("?" * len(row_ids))
+            with contextlib.suppress(sqlite3.OperationalError):
+                j_rows = wa_conn.execute(
+                    f"""
+                    SELECT j.raw_string, j_real.raw_string
+                    FROM chat c
+                    LEFT JOIN jid j ON j._id = c.jid_row_id
+                    LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = c.jid_row_id
+                    LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
+                    WHERE c._id IN ({ph})
+                    """,
+                    row_ids,
+                ).fetchall()
+                for jr in j_rows:
+                    if jr[0]:
+                        candidates.add(str(jr[0]))
+                    if jr[1]:
+                        candidates.add(str(jr[1]))
+    return sorted(candidates)
+
+
+def _query_android_chat_calls(
+    conn: sqlite3.Connection,
+    arch_conn: sqlite3.Connection | None,
+    chat_id: str,
+    chat_type: str,
+    before_ms: int | None,
+    after_ms: int | None,
+    before_inclusive: bool,
+    limit: int,
+) -> list[dict]:
+    """Query calls belonging to a single Android chat within the requested window."""
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_log'"
+    ).fetchone()
+    if not has_table:
+        return []
+
+    cl_cols = {r[1] for r in conn.execute("PRAGMA table_info(call_log)").fetchall()}
+    if "timestamp" not in cl_cols or "jid_row_id" not in cl_cols:
+        return []
+
+    has_video = "video_call" in cl_cols
+    has_duration = "duration" in cl_cols
+    has_result = "call_result" in cl_cols
+    has_from_me = "from_me" in cl_cols
+    has_group = "group_jid_row_id" in cl_cols
+    has_call_id = "call_id" in cl_cols
+
+    if chat_type == "group" and not has_group:
+        return []
+
+    contact_jid_ids, group_jid_ids = _resolve_android_call_targets(
+        conn, arch_conn, chat_id, chat_type
+    )
+    if chat_type == "group":
+        if not group_jid_ids:
+            return []
+        target_ids = sorted(group_jid_ids)
+        scope_ph = ",".join("?" * len(target_ids))
+        scope_pred = f"cl.group_jid_row_id IN ({scope_ph})"
+        scope_params: list = list(target_ids)
+    else:
+        if not contact_jid_ids:
+            return []
+        target_ids = sorted(contact_jid_ids)
+        scope_ph = ",".join("?" * len(target_ids))
+        if has_group:
+            scope_pred = (
+                f"cl.jid_row_id IN ({scope_ph}) "
+                "AND (cl.group_jid_row_id IS NULL OR cl.group_jid_row_id = 0)"
+            )
+        else:
+            scope_pred = f"cl.jid_row_id IN ({scope_ph})"
+        scope_params = list(target_ids)
+
+    where_parts = [scope_pred]
+    params: list = list(scope_params)
+    if before_ms is not None:
+        op = "<=" if before_inclusive else "<"
+        where_parts.append(f"cl.timestamp {op} ?")
+        params.append(before_ms)
+    elif after_ms is not None:
+        where_parts.append("cl.timestamp > ?")
+        params.append(after_ms)
+
+    order_dir = "ASC" if (after_ms is not None and before_ms is None) else "DESC"
+    params.append(limit)
+
+    has_ldn = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'"
+        ).fetchone()
+    )
+    jid_cols = {r[1] for r in conn.execute("PRAGMA table_info(jid)").fetchall()}
+    non_lid_cond = (
+        "j_caller.server != 'lid'"
+        if "server" in jid_cols
+        else "COALESCE(j_caller.raw_string, '') NOT LIKE '%@lid'"
+    )
+    id_expr = (
+        "COALESCE(NULLIF(cl.call_id, ''), 'call_' || cl._id)"
+        if has_call_id
+        else "'call_' || cl._id"
+    )
+    video_expr = "COALESCE(cl.video_call, 0)" if has_video else "0"
+    dur_expr = "COALESCE(cl.duration, 0)" if has_duration else "0"
+    result_expr = "COALESCE(cl.call_result, 0)" if has_result else "0"
+    from_me_expr = "COALESCE(cl.from_me, 0)" if has_from_me else "0"
+    is_group_expr = (
+        "CASE WHEN cl.group_jid_row_id IS NOT NULL AND cl.group_jid_row_id > 0 THEN 1 ELSE 0 END"
+        if has_group
+        else "0"
+    )
+    ldn_join = (
+        "LEFT JOIN lid_display_name ldn_caller ON ldn_caller.lid_row_id = cl.jid_row_id"
+        if has_ldn
+        else ""
+    )
+    ldn_col = (
+        "ldn_caller.display_name AS ldn_display_name," if has_ldn else "NULL AS ldn_display_name,"
+    )
+
+    sql = f"""
+        SELECT
+            cl._id AS call_log_id,
+            {id_expr} AS id,
+            {from_me_expr} AS from_me,
+            cl.timestamp AS timestamp_ms,
+            {dur_expr} AS duration,
+            {video_expr} AS is_video,
+            {result_expr} AS call_result,
+            {is_group_expr} AS is_group_call,
+            COALESCE(
+                j_caller_real.user,
+                CASE WHEN {non_lid_cond} THEN j_caller.user END,
+                j_caller.user
+            ) AS caller_number,
+            con_caller.display_name AS con_display_name,
+            con_caller.folder AS con_folder,
+            {ldn_col}
+            NULL AS chat_subject
+        FROM call_log cl
+        LEFT JOIN jid j_caller ON j_caller._id = cl.jid_row_id
+        LEFT JOIN _jid_map_resolved jm_caller ON jm_caller.lid_row_id = cl.jid_row_id
+        LEFT JOIN jid j_caller_real ON j_caller_real._id = jm_caller.jid_row_id
+        LEFT JOIN _contacts_resolved con_caller ON con_caller.clean_number = COALESCE(
+            j_caller_real.user,
+            CASE WHEN {non_lid_cond} THEN j_caller.user END,
+            j_caller.user
+        )
+        {ldn_join}
+        WHERE {" AND ".join(where_parts)}
+        ORDER BY cl.timestamp {order_dir}, cl._id {order_dir}
+        LIMIT ?
+    """
+    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    if not rows:
+        return []
+
+    participant_counts: dict[int, int] = {}
+    if chat_type == "group":
+        has_parts = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_log_participant_v2'"
+            ).fetchone()
+        )
+        if has_parts:
+            p_cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(call_log_participant_v2)").fetchall()
+            }
+            if "call_log_row_id" in p_cols:
+                row_pks = [r["call_log_id"] for r in rows]
+                ph = ",".join("?" * len(row_pks))
+                with contextlib.suppress(sqlite3.OperationalError):
+                    for pr in conn.execute(
+                        f"SELECT call_log_row_id, COUNT(*) FROM call_log_participant_v2 WHERE call_log_row_id IN ({ph}) GROUP BY call_log_row_id",
+                        row_pks,
+                    ).fetchall():
+                        participant_counts[int(pr[0])] = int(pr[1])
+
+    contacts_map = _get_contacts_lookup(arch_conn) if chat_type == "group" else {}
+    bubbles: list[dict] = []
+    for row_dict in rows:
+        from_me_int = int(row_dict["from_me"] or 0)
+        from_me = from_me_int == 1
+        duration_sec = max(0, int(row_dict["duration"] or 0))
+        is_video = bool(row_dict["is_video"] == 1)
+        result_code = int(row_dict["call_result"] or 0)
+        call_type, outcome = _map_android_call_outcome(from_me_int, result_code, duration_sec)
+        is_group = bool(row_dict.get("is_group_call") == 1) or chat_type == "group"
+
+        sender_name = None
+        if is_group and not from_me:
+            _, _, sender_name = _resolve_android_caller_info(row_dict, contacts_map)
+
+        parts_count = participant_counts.get(int(row_dict["call_log_id"]), 1 if not is_group else 2)
+        bubbles.append(
+            _build_chat_call_bubble(
+                str(row_dict["id"]),
+                "android",
+                int(row_dict["timestamp_ms"]),
+                from_me,
+                is_video,
+                call_type,
+                outcome,
+                duration_sec,
+                parts_count,
+                is_group,
+                sender_name,
+                False,
+                None,
+                None,
+                "android",
+            )
+        )
+    return bubbles
+
+
+def _query_ios_chat_calls(
+    call_db_path: Path | None,
+    wa_conn: sqlite3.Connection | None,
+    arch_conn: sqlite3.Connection | None,
+    chat_id: str,
+    chat_type: str,
+    before_ms: int | None,
+    after_ms: int | None,
+    before_inclusive: bool,
+    limit: int,
+) -> list[dict]:
+    """Query calls belonging to a single iOS chat within the requested window."""
+    if call_db_path is None or not call_db_path.is_file() or wa_conn is None:
+        return []
+
+    candidate_jids = _resolve_ios_chat_jids(wa_conn, chat_id)
+    if not candidate_jids:
+        return []
+
+    try:
+        with contextlib.closing(sqlite3.connect(str(call_db_path))) as call_conn:
+            call_conn.row_factory = sqlite3.Row
+            tables = {
+                r[0]
+                for r in call_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "ZWACDCALLEVENT" not in tables:
+                return []
+
+            cl_cols = {
+                r[1] for r in call_conn.execute("PRAGMA table_info(ZWACDCALLEVENT)").fetchall()
+            }
+            if "ZDATE" not in cl_cols:
+                return []
+
+            has_call_id = "ZCALLIDSTRING" in cl_cols
+            has_group_jid = "ZGROUPJIDSTRING" in cl_cols
+            has_duration = "ZDURATION" in cl_cols
+            has_outcome = "ZOUTCOME" in cl_cols
+            has_creator = "ZGROUPCALLCREATORUSERJIDSTRING" in cl_cols
+            agg_fk_col = (
+                "Z1CALLEVENTS"
+                if "Z1CALLEVENTS" in cl_cols
+                else ("ZAGGREGATECALLEVENT" if "ZAGGREGATECALLEVENT" in cl_cols else None)
+            )
+            has_aggregate = agg_fk_col is not None and "ZWAAGGREGATECALLEVENT" in tables
+            has_participants = "ZWACDCALLEVENTPARTICIPANT" in tables
+
+            if chat_type == "group" and not has_group_jid:
+                return []
+
+            part_fk = None
+            part_jid_col = None
+            if has_participants:
+                part_cols = {
+                    r[1]
+                    for r in call_conn.execute(
+                        "PRAGMA table_info(ZWACDCALLEVENTPARTICIPANT)"
+                    ).fetchall()
+                }
+                part_fk = (
+                    "Z1PARTICIPANTS"
+                    if "Z1PARTICIPANTS" in part_cols
+                    else ("ZCALLEVENT" if "ZCALLEVENT" in part_cols else None)
+                )
+                part_jid_col = (
+                    "ZJIDSTRING"
+                    if "ZJIDSTRING" in part_cols
+                    else ("ZJID" if "ZJID" in part_cols else None)
+                )
+
+            ph = ",".join("?" * len(candidate_jids))
+            where_parts: list[str] = []
+            params: list = []
+
+            if chat_type == "group":
+                where_parts.append(f"cl.ZGROUPJIDSTRING IN ({ph})")
+                params.extend(candidate_jids)
+            else:
+                if has_group_jid:
+                    where_parts.append("(cl.ZGROUPJIDSTRING IS NULL OR cl.ZGROUPJIDSTRING = '')")
+                match_clauses: list[str] = []
+                if part_fk and part_jid_col:
+                    fk_match = (
+                        f"(p.{part_fk} = cl.{agg_fk_col} OR p.{part_fk} = cl.Z_PK)"
+                        if agg_fk_col
+                        else f"p.{part_fk} = cl.Z_PK"
+                    )
+                    match_clauses.append(
+                        f"EXISTS (SELECT 1 FROM ZWACDCALLEVENTPARTICIPANT p WHERE {fk_match} AND p.{part_jid_col} IN ({ph}))"
+                    )
+                    params.extend(candidate_jids)
+                if has_creator:
+                    match_clauses.append(f"cl.ZGROUPCALLCREATORUSERJIDSTRING IN ({ph})")
+                    params.extend(candidate_jids)
+                if not match_clauses:
+                    return []
+                where_parts.append("(" + " OR ".join(match_clauses) + ")")
+
+            if before_ms is not None:
+                before_apple = (float(before_ms) / 1000.0) - 978307200.0 + 0.002
+                where_parts.append("cl.ZDATE <= ?")
+                params.append(before_apple)
+            elif after_ms is not None:
+                after_apple = (float(after_ms) / 1000.0) - 978307200.0 - 0.002
+                where_parts.append("cl.ZDATE >= ?")
+                params.append(after_apple)
+
+            order_dir = "ASC" if (after_ms is not None and before_ms is None) else "DESC"
+            params.append(limit + 8)
+
+            call_id_expr = (
+                "COALESCE(NULLIF(cl.ZCALLIDSTRING, ''), 'call_' || cl.Z_PK)"
+                if has_call_id
+                else "'call_' || cl.Z_PK"
+            )
+            group_jid_expr = "cl.ZGROUPJIDSTRING" if has_group_jid else "NULL"
+            creator_expr = "cl.ZGROUPCALLCREATORUSERJIDSTRING" if has_creator else "NULL"
+            dur_expr = "COALESCE(cl.ZDURATION, 0)" if has_duration else "0"
+            outcome_expr = "COALESCE(cl.ZOUTCOME, 0)" if has_outcome else "0"
+            agg_join = (
+                f"LEFT JOIN ZWAAGGREGATECALLEVENT agg ON agg.Z_PK = cl.{agg_fk_col}"
+                if has_aggregate
+                else ""
+            )
+            agg_pk_expr = f"cl.{agg_fk_col}" if has_aggregate else "NULL"
+            video_expr = "COALESCE(agg.ZVIDEO, 0)" if has_aggregate else "0"
+            from_me_expr = "CASE WHEN agg.ZINCOMING = 0 THEN 1 ELSE 0 END" if has_aggregate else "0"
+
+            sql = f"""
+                SELECT
+                    cl.Z_PK AS call_pk,
+                    {agg_pk_expr} AS agg_pk,
+                    {call_id_expr} AS id,
+                    {group_jid_expr} AS group_jid,
+                    {creator_expr} AS creator_jid,
+                    cl.ZDATE AS raw_zdate,
+                    {dur_expr} AS duration,
+                    {video_expr} AS is_video,
+                    {outcome_expr} AS outcome,
+                    {from_me_expr} AS from_me
+                FROM ZWACDCALLEVENT cl
+                {agg_join}
+                WHERE {" AND ".join(where_parts)}
+                ORDER BY cl.ZDATE {order_dir}, cl.Z_PK {order_dir}
+                LIMIT ?
+            """
+            call_rows = [dict(r) for r in call_conn.execute(sql, params).fetchall()]
+            if not call_rows:
+                return []
+
+            part_counts: dict[int, int] = {}
+            first_part_jid: dict[int, str] = {}
+            if part_fk and part_jid_col:
+                all_keys = {
+                    k
+                    for r in call_rows
+                    for k in (r.get("call_pk"), r.get("agg_pk"))
+                    if k is not None
+                }
+                if all_keys:
+                    key_list = list(all_keys)
+                    k_ph = ",".join("?" * len(key_list))
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        for pr in call_conn.execute(
+                            f"SELECT p.{part_fk}, p.{part_jid_col} FROM ZWACDCALLEVENTPARTICIPANT p WHERE p.{part_fk} IN ({k_ph})",
+                            key_list,
+                        ).fetchall():
+                            kid = pr[0]
+                            part_counts[kid] = part_counts.get(kid, 0) + 1
+                            if kid not in first_part_jid and pr[1]:
+                                first_part_jid[kid] = pr[1]
+    except sqlite3.OperationalError:
+        return []
+
+    has_ios_contacts = bool(
+        wa_conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_ios_contacts'"
+        ).fetchone()
+    )
+    contacts_map = _get_contacts_lookup(arch_conn) if chat_type == "group" else {}
+
+    bubbles: list[dict] = []
+    for r in call_rows:
+        if r.get("raw_zdate") is None:
+            continue
+        ts_ms = int(round((float(r["raw_zdate"]) + 978307200.0) * 1000.0))
+        if before_ms is not None:
+            if before_inclusive and ts_ms > before_ms:
+                continue
+            if not before_inclusive and ts_ms >= before_ms:
+                continue
+        elif after_ms is not None and ts_ms <= after_ms:
+            continue
+
+        from_me_int = int(r["from_me"] or 0)
+        from_me = from_me_int == 1
+        duration_sec = max(0, int(r["duration"] or 0))
+        is_video = bool(r["is_video"] == 1)
+        outcome_code = int(r["outcome"] or 0)
+        call_type, outcome = _map_ios_call_outcome(from_me_int, outcome_code, duration_sec)
+        is_group = bool(r.get("group_jid")) or chat_type == "group"
+
+        agg_pk = r.get("agg_pk")
+        call_pk = r["call_pk"]
+        parts_count = part_counts.get(agg_pk, part_counts.get(call_pk, 1 if not is_group else 2))
+
+        sender_name = None
+        if is_group and not from_me:
+            caller_jid = (
+                r.get("creator_jid")
+                or first_part_jid.get(agg_pk)
+                or first_part_jid.get(call_pk)
+                or ""
+            )
+            if caller_jid:
+                if has_ios_contacts:
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        ic_row = wa_conn.execute(
+                            "SELECT full_name, phone_number FROM _ios_contacts WHERE jid = ?",
+                            (caller_jid,),
+                        ).fetchone()
+                        if ic_row and ic_row[0]:
+                            sender_name = ic_row[0]
+                if not sender_name and "@" in caller_jid:
+                    clean_num = caller_jid.split("@")[0]
+                    sender_name = contacts_map.get(clean_num) or f"+{clean_num}"
+
+        bubbles.append(
+            _build_chat_call_bubble(
+                str(r["id"]),
+                "ios",
+                ts_ms,
+                from_me,
+                is_video,
+                call_type,
+                outcome,
+                duration_sec,
+                parts_count,
+                is_group,
+                sender_name,
+                False,
+                None,
+                None,
+                "ios",
+            )
+        )
+        if len(bubbles) >= limit:
+            break
+    return bubbles
+
+
+def _query_preserved_chat_calls(
+    pres_conn: sqlite3.Connection | None,
+    wa_conn: sqlite3.Connection | None,
+    source_type: str,
+    chat_id: str,
+    chat_type: str,
+    before_ms: int | None,
+    after_ms: int | None,
+    before_inclusive: bool,
+    limit: int,
+) -> list[dict]:
+    """Query preserved calls belonging to a single chat within the requested window."""
+    if pres_conn is None:
+        return []
+
+    try:
+        has_table = pres_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='preserved_calls'"
+        ).fetchone()
+        if not has_table:
+            return []
+
+        cols = {r[1] for r in pres_conn.execute("PRAGMA table_info(preserved_calls)").fetchall()}
+        dur_expr = (
+            "duration_seconds"
+            if "duration_seconds" in cols
+            else ("duration_sec" if "duration_sec" in cols else "0")
+        )
+        video_expr = (
+            "is_video" if "is_video" in cols else ("video_call" if "video_call" in cols else "0")
+        )
+        has_chat_jid = "chat_jid" in cols
+        has_is_group = "is_group_call" in cols
+        has_parts = "participants" in cols
+        has_pres_at = "preserved_at" in cols
+        has_platform = "source_platform" in cols
+
+        cand_jids = _resolve_preserved_call_jids(wa_conn, source_type, chat_id, chat_type)
+        where_parts: list[str] = []
+        params: list = []
+
+        if has_chat_jid and cand_jids:
+            ph = ",".join("?" * len(cand_jids))
+            where_parts.append(f"(chat_id = ? OR chat_jid IN ({ph}))")
+            params.append(str(chat_id))
+            params.extend(cand_jids)
+        else:
+            where_parts.append("chat_id = ?")
+            params.append(str(chat_id))
+
+        if has_is_group:
+            where_parts.append("COALESCE(is_group_call, 0) = ?")
+            params.append(1 if chat_type == "group" else 0)
+
+        if before_ms is not None:
+            op = "<=" if before_inclusive else "<"
+            where_parts.append(f"timestamp_ms {op} ?")
+            params.append(before_ms)
+        elif after_ms is not None:
+            where_parts.append("timestamp_ms > ?")
+            params.append(after_ms)
+
+        order_dir = "ASC" if (after_ms is not None and before_ms is None) else "DESC"
+        params.append(limit)
+
+        group_col = (
+            "COALESCE(is_group_call, 0) AS is_group_call,"
+            if has_is_group
+            else "0 AS is_group_call,"
+        )
+        parts_col = "participants," if has_parts else "NULL AS participants,"
+        pres_at_col = "preserved_at," if has_pres_at else "NULL AS preserved_at,"
+        platform_col = "source_platform," if has_platform else "NULL AS source_platform,"
+
+        rows = [
+            dict(r)
+            for r in pres_conn.execute(
+                f"""
+                SELECT
+                    call_id,
+                    caller_jid,
+                    caller_name,
+                    from_me,
+                    timestamp_ms,
+                    {dur_expr} AS duration_seconds,
+                    {video_expr} AS is_video,
+                    call_result,
+                    {group_col}
+                    {parts_col}
+                    {pres_at_col}
+                    {platform_col}
+                    chat_id
+                FROM preserved_calls
+                WHERE {" AND ".join(where_parts)}
+                ORDER BY timestamp_ms {order_dir}
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        ]
+    except sqlite3.OperationalError:
+        return []
+
+    bubbles: list[dict] = []
+    for row_dict in rows:
+        from_me_int = int(row_dict.get("from_me") or 0)
+        from_me = from_me_int == 1
+        duration_sec = max(0, int(row_dict.get("duration_seconds") or 0))
+        is_video = bool(row_dict.get("is_video") == 1)
+        result_code = int(row_dict.get("call_result") or 0)
+        platform = str(row_dict.get("source_platform") or source_type or "").lower()
+        if platform == "ios":
+            call_type, outcome = _map_ios_call_outcome(from_me_int, result_code, duration_sec)
+        else:
+            call_type, outcome = _map_android_call_outcome(from_me_int, result_code, duration_sec)
+
+        is_group = bool(row_dict.get("is_group_call") == 1) or chat_type == "group"
+        parts_count = 1 if not is_group else 2
+        raw_parts = row_dict.get("participants")
+        if raw_parts:
+            try:
+                parsed_parts = json.loads(raw_parts) if isinstance(raw_parts, str) else raw_parts
+                if isinstance(parsed_parts, list) and parsed_parts:
+                    parts_count = len(parsed_parts)
+            except (TypeError, ValueError):
+                pass
+
+        sender_name = row_dict.get("caller_name") if (is_group and not from_me) else None
+        bubbles.append(
+            _build_chat_call_bubble(
+                str(row_dict["call_id"]),
+                "preserved",
+                int(row_dict["timestamp_ms"]),
+                from_me,
+                is_video,
+                call_type,
+                outcome,
+                duration_sec,
+                parts_count,
+                is_group,
+                sender_name,
+                True,
+                "deleted_on_device",
+                row_dict.get("preserved_at"),
+                row_dict.get("source_platform"),
+            )
+        )
+    return bubbles
+
+
+def _merge_chat_calls_with_messages(
+    msg_rows: list[dict],
+    live_calls: list[dict],
+    pres_calls: list[dict],
+    descending: bool,
+    limit: int,
+) -> list[dict]:
+    """Deduplicate preserved vs live calls and merge sorted items up to limit."""
+    deduped_calls = list(live_calls)
+    live_ids = {c["call"]["id"] for c in live_calls}
+    for pc in pres_calls:
+        if pc["call"]["id"] in live_ids:
+            continue
+        pc_ts = pc["timestamp_ms"]
+        pc_fm = pc["from_me"]
+        pc_vid = pc["call"]["video"]
+        is_dup = any(
+            lc["from_me"] == pc_fm
+            and lc["call"]["video"] == pc_vid
+            and abs(lc["timestamp_ms"] - pc_ts) <= 2000
+            for lc in live_calls
+        )
+        if not is_dup:
+            deduped_calls.append(pc)
+
+    if not deduped_calls:
+        return msg_rows[:limit]
+
+    combined = list(msg_rows) + deduped_calls
+    combined.sort(
+        key=lambda r: (
+            int(r.get("timestamp_ms") or 0),
+            int(r["sort_id"])
+            if isinstance(r.get("sort_id"), int)
+            else (int(r["msg_id"]) if isinstance(r.get("msg_id"), int) else 0),
+            str(r.get("msg_id") or ""),
+        ),
+        reverse=descending,
+    )
+    return combined[:limit]
+
+
+def _fetch_chat_calls_for_window(
+    source_type: str,
+    wa_conn: sqlite3.Connection | None,
+    arch_conn: sqlite3.Connection | None,
+    pres_conn: sqlite3.Connection | None,
+    wa_db_path: str | None,
+    output_root: Path | None,
+    chat_id: str,
+    chat_type: str,
+    before_ms: int | None,
+    after_ms: int | None,
+    before_inclusive: bool,
+    limit: int,
+) -> tuple[list[dict], list[dict]]:
+    """Fetch (live_calls, preserved_calls) for a chat pagination window."""
+    live_calls: list[dict] = []
+    if wa_conn is not None:
+        if source_type == "android":
+            live_calls = _query_android_chat_calls(
+                wa_conn,
+                arch_conn,
+                chat_id,
+                chat_type,
+                before_ms,
+                after_ms,
+                before_inclusive,
+                limit,
+            )
+        elif source_type == "ios" and wa_db_path is not None:
+            call_db_p = _find_ios_call_history_db(wa_db_path, output_root)
+            live_calls = _query_ios_chat_calls(
+                call_db_p,
+                wa_conn,
+                arch_conn,
+                chat_id,
+                chat_type,
+                before_ms,
+                after_ms,
+                before_inclusive,
+                limit,
+            )
+
+    pres_calls = _query_preserved_chat_calls(
+        pres_conn,
+        wa_conn,
+        source_type,
+        chat_id,
+        chat_type,
+        before_ms,
+        after_ms,
+        before_inclusive,
+        limit,
+    )
+    return live_calls, pres_calls
 
 
 def _query_android_starred(
@@ -8637,16 +9658,49 @@ def create_app(output_root: Path, rescan: bool = False):
                             if pres_rows:
                                 rows = _merge_messages(rows, pres_rows, True, limit)
                         _resolve_quoted_msg_ids(rows, source_type, get_wa(), pres)
+                        live_calls, pres_calls = _fetch_chat_calls_for_window(
+                            source_type,
+                            get_wa(),
+                            get_archive(),
+                            pres,
+                            wa_db_path,
+                            output_root,
+                            chat_id,
+                            chat_type,
+                            None,
+                            None,
+                            False,
+                            limit,
+                        )
+                        rows = _merge_chat_calls_with_messages(
+                            rows, live_calls, pres_calls, True, limit
+                        )
                         return jsonify(rows)
 
         conn = get_wa()
         if conn is None:
             pres = get_preserved()
+            pres_rows: list[dict] = []
             if pres is not None:
                 pres_rows = _query_preserved_messages(pres, chat_id, chat_type, b_val, a_val, limit)
                 _resolve_quoted_msg_ids(pres_rows, source_type, None, pres)
-                return jsonify(pres_rows)
-            return jsonify([])
+            descending = a_val is None
+            _, pres_calls = _fetch_chat_calls_for_window(
+                source_type,
+                None,
+                get_archive(),
+                pres,
+                wa_db_path,
+                output_root,
+                chat_id,
+                chat_type,
+                b_val,
+                a_val,
+                False,
+                limit,
+            )
+            merged = _merge_chat_calls_with_messages(pres_rows, [], pres_calls, descending, limit)
+            return jsonify(merged)
 
         if b_val is None and a_val is None:
             _maybe_start_indexing(
@@ -8769,6 +9823,22 @@ def create_app(output_root: Path, rescan: bool = False):
                 daemon=True,
             ).start()
 
+        descending = a_val is None
+        live_calls, pres_calls = _fetch_chat_calls_for_window(
+            source_type,
+            conn,
+            get_archive(),
+            pres,
+            wa_db_path,
+            output_root,
+            chat_id,
+            chat_type,
+            b_val,
+            a_val,
+            False,
+            limit,
+        )
+        rows = _merge_chat_calls_with_messages(rows, live_calls, pres_calls, descending, limit)
         return jsonify(rows)
 
     # ---- API: messages around a timestamp ----------------------------------
@@ -8783,10 +9853,11 @@ def create_app(output_root: Path, rescan: bool = False):
 
         target_msg_id: int | None = None
         if msg_id_raw:
-            try:
-                target_msg_id = int(msg_id_raw)
-            except ValueError:
-                return jsonify({"error": "msg_id must be an integer"}), 400
+            if not msg_id_raw.startswith("call:"):
+                try:
+                    target_msg_id = int(msg_id_raw)
+                except ValueError:
+                    return jsonify({"error": "msg_id must be an integer"}), 400
 
         ts: int | None = None
         if ts_raw:
@@ -8868,15 +9939,51 @@ def create_app(output_root: Path, rescan: bool = False):
         conn = get_wa()
         if conn is None:
             pres = get_preserved()
+            pres_before: list[dict] = []
+            pres_after: list[dict] = []
             if pres is not None:
                 pres_before = _query_preserved_messages(
                     pres, chat_id, chat_type, ts + 1, None, half
                 )
                 pres_after = _query_preserved_messages(pres, chat_id, chat_type, None, ts, half)
-                combined = list(reversed(pres_before)) + pres_after
-                _resolve_quoted_msg_ids(combined, source_type, None, pres)
-                return jsonify(combined)
-            return jsonify([])
+                _resolve_quoted_msg_ids(pres_before, source_type, None, pres)
+                _resolve_quoted_msg_ids(pres_after, source_type, None, pres)
+            _, pres_calls_before = _fetch_chat_calls_for_window(
+                source_type,
+                None,
+                get_archive(),
+                pres,
+                wa_db_path,
+                output_root,
+                chat_id,
+                chat_type,
+                ts,
+                None,
+                True,
+                half,
+            )
+            _, pres_calls_after = _fetch_chat_calls_for_window(
+                source_type,
+                None,
+                get_archive(),
+                pres,
+                wa_db_path,
+                output_root,
+                chat_id,
+                chat_type,
+                None,
+                ts,
+                False,
+                half,
+            )
+            merged_before = _merge_chat_calls_with_messages(
+                pres_before, [], pres_calls_before, True, half
+            )
+            merged_after = _merge_chat_calls_with_messages(
+                pres_after, [], pres_calls_after, False, half
+            )
+            combined = list(reversed(merged_before)) + merged_after
+            return jsonify(combined)
 
         select = _ANDROID_SELECT if source_type == "android" else _IOS_SELECT
         extra = _ANDROID_FILTER if source_type == "android" else _IOS_FILTER
@@ -8928,15 +10035,56 @@ def create_app(output_root: Path, rescan: bool = False):
         _hydrate_link_preview_rows(combined, source_type)
         _hydrate_live_photos(combined, source_type, conn)
         pres = get_preserved()
+        live_before = [r for r in combined if r["timestamp_ms"] <= ts]
+        live_after = [r for r in combined if r["timestamp_ms"] > ts]
         if pres is not None:
             pres_before = _query_preserved_messages(pres, chat_id, chat_type, ts + 1, None, half)
             pres_after = _query_preserved_messages(pres, chat_id, chat_type, None, ts, half)
-            live_before = [r for r in combined if r["timestamp_ms"] <= ts]
-            live_after = [r for r in combined if r["timestamp_ms"] > ts]
             merged_before = _merge_messages(live_before, pres_before, True, half)
             merged_after = _merge_messages(live_after, pres_after, False, half)
-            combined = list(reversed(merged_before)) + merged_after
-        _resolve_quoted_msg_ids(combined, source_type, conn, pres)
+        else:
+            merged_before = list(reversed(live_before))
+            merged_after = live_after
+
+        combined_msgs = list(reversed(merged_before)) + merged_after
+        _resolve_quoted_msg_ids(combined_msgs, source_type, conn, pres)
+        live_calls_before, pres_calls_before = _fetch_chat_calls_for_window(
+            source_type,
+            conn,
+            get_archive(),
+            pres,
+            wa_db_path,
+            output_root,
+            chat_id,
+            chat_type,
+            ts,
+            None,
+            True,
+            half,
+        )
+        live_calls_after, pres_calls_after = _fetch_chat_calls_for_window(
+            source_type,
+            conn,
+            get_archive(),
+            pres,
+            wa_db_path,
+            output_root,
+            chat_id,
+            chat_type,
+            None,
+            ts,
+            False,
+            half,
+        )
+        msgs_before = [r for r in combined_msgs if r["timestamp_ms"] <= ts]
+        msgs_after = [r for r in combined_msgs if r["timestamp_ms"] > ts]
+        final_before = _merge_chat_calls_with_messages(
+            list(reversed(msgs_before)), live_calls_before, pres_calls_before, True, half
+        )
+        final_after = _merge_chat_calls_with_messages(
+            msgs_after, live_calls_after, pres_calls_after, False, half
+        )
+        combined = list(reversed(final_before)) + final_after
         return jsonify(_strip_none_reactions(combined))
 
     # ---- API: media gallery ------------------------------------------------
@@ -9241,7 +10389,7 @@ def create_app(output_root: Path, rescan: bool = False):
                 seen_ids.add(cid)
                 merged.append(c)
 
-        merged.sort(key=lambda x: x["timestamp"], reverse=True)
+        merged.sort(key=lambda x: x.get("timestamp_ms") or (x["timestamp"] * 1000), reverse=True)
         has_more = len(merged) > offset + limit
         paged = merged[offset : offset + limit]
         return jsonify(
@@ -11124,29 +12272,37 @@ def create_app(output_root: Path, rescan: bool = False):
         # Also count live calls for this chat
         conn_wa = get_wa()
         if conn_wa is not None and source_type == "android":
-            with contextlib.suppress(sqlite3.OperationalError):
-                if conn_wa.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_log'"
-                ).fetchone():
+            if conn_wa.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_log'"
+            ).fetchone():
+                contact_jids, group_jids = _resolve_android_call_targets(
+                    conn_wa, get_archive(), chat_id, chat_type
+                )
+                cl_cols = {
+                    row[1] for row in conn_wa.execute("PRAGMA table_info(call_log)").fetchall()
+                }
+                has_group = "group_jid_row_id" in cl_cols
+                if chat_type == "group" and group_jids and has_group:
+                    ph = ",".join("?" for _ in group_jids)
                     c_cnt_row = conn_wa.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM call_log cl
-                        LEFT JOIN chat c ON (
-                            c.jid_row_id = cl.jid_row_id
-                            OR (c.account_jid_row_id IS NOT NULL AND c.account_jid_row_id = cl.jid_row_id)
-                        )
-                        LEFT JOIN jid j ON j._id = cl.jid_row_id
-                        LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = cl.jid_row_id
-                        LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
-                        WHERE CAST(c._id AS TEXT) = ?
-                           OR j.user = ?
-                           OR (j_real.user IS NOT NULL AND j_real.user = ?)
-                        """,
-                        (str(chat_id), str(chat_id), str(chat_id)),
+                        f"SELECT COUNT(*) FROM call_log WHERE group_jid_row_id IN ({ph})",
+                        tuple(group_jids),
                     ).fetchone()
-                    if c_cnt_row and c_cnt_row[0]:
-                        calls_count += int(c_cnt_row[0])
+                elif chat_type != "group" and contact_jids and "jid_row_id" in cl_cols:
+                    ph = ",".join("?" for _ in contact_jids)
+                    group_filter = (
+                        "AND (group_jid_row_id IS NULL OR group_jid_row_id = 0)"
+                        if has_group
+                        else ""
+                    )
+                    c_cnt_row = conn_wa.execute(
+                        f"SELECT COUNT(*) FROM call_log WHERE jid_row_id IN ({ph}) {group_filter}",
+                        tuple(contact_jids),
+                    ).fetchone()
+                else:
+                    c_cnt_row = None
+                if c_cnt_row and c_cnt_row[0]:
+                    calls_count += int(c_cnt_row[0])
         elif source_type == "ios" and wa_db_path is not None:
             call_db_p = _find_ios_call_history_db(wa_db_path, output_root)
             if call_db_p is not None:
@@ -11155,49 +12311,8 @@ def create_app(output_root: Path, rescan: bool = False):
                         if call_conn.execute(
                             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACDCALLEVENT'"
                         ).fetchone():
-                            target_jid = None
-                            ident_jid = None
-                            if conn_wa is not None and str(chat_id).isdigit():
-                                cs_cols = {
-                                    r[1]
-                                    for r in conn_wa.execute(
-                                        "PRAGMA table_info(ZWACHATSESSION)"
-                                    ).fetchall()
-                                }
-                                ident_col = (
-                                    ", ZCONTACTIDENTIFIER"
-                                    if "ZCONTACTIDENTIFIER" in cs_cols
-                                    else ""
-                                )
-                                csr = conn_wa.execute(
-                                    f"SELECT ZCONTACTJID{ident_col} FROM ZWACHATSESSION WHERE Z_PK = ?",
-                                    (int(chat_id),),
-                                ).fetchone()
-                                if csr:
-                                    target_jid = csr[0]
-                                    if len(csr) > 1 and csr[1]:
-                                        ident_jid = csr[1]
-
-                            candidates = set()
-                            if target_jid:
-                                candidates.add(target_jid)
-                            if ident_jid:
-                                candidates.add(ident_jid)
-                            if conn_wa is not None:
-                                for c_jid in list(candidates):
-                                    with contextlib.suppress(sqlite3.OperationalError):
-                                        clean_p = c_jid.split("@")[0]
-                                        c_rows = conn_wa.execute(
-                                            "SELECT jid, phone_number FROM _ios_contacts WHERE jid = ? OR phone_number = ?",
-                                            (c_jid, clean_p),
-                                        ).fetchall()
-                                        for cr in c_rows:
-                                            if cr[0]:
-                                                candidates.add(cr[0])
-                                            if cr[1]:
-                                                candidates.add(f"{cr[1]}@s.whatsapp.net")
-
-                            if candidates:
+                            cand_list = _resolve_ios_chat_jids(conn_wa, chat_id)
+                            if cand_list:
                                 cl_cols = {
                                     r[1]
                                     for r in call_conn.execute(
@@ -11235,7 +12350,6 @@ def create_app(output_root: Path, rescan: bool = False):
                                 )
                                 has_creator = "ZGROUPCALLCREATORUSERJIDSTRING" in cl_cols
 
-                                cand_list = list(candidates)
                                 ph = ",".join("?" * len(cand_list))
                                 creator_clause = (
                                     f"OR cl.ZGROUPCALLCREATORUSERJIDSTRING IN ({ph})"
