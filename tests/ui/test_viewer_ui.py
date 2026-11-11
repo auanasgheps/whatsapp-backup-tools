@@ -2497,3 +2497,199 @@ def test_call_ui_refinements_and_in_chat_bubbles_e2e(tmp_path: Path, screenshot_
         session.capture_screenshot(screenshot_dir / "in_chat_call_bubbles_light.png", 5.0)
     finally:
         session.close()
+
+
+def test_review_fix_ui_contracts(tmp_path: Path) -> None:
+    """Verify #message-scroll flex layout, archived call-moment return tab, call-dir-label, and disabled tab classes."""
+    import threading
+    import urllib.request
+
+    from tests.conftest import make_android_db, make_archive_db
+    from wab_viewer.main import create_app
+
+    from .cdp_driver import find_free_port, launch_browser_session
+
+    wa_path = tmp_path / "msgstore.db"
+    arch_path = tmp_path / ".wa_media_archiver.db"
+
+    wa_conn = make_android_db(wa_path)
+    arch_conn = make_archive_db(arch_path)
+
+    jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+    if "server" not in jid_cols:
+        wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+    chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        wa_conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+    if "archived" not in chat_cols:
+        wa_conn.execute("ALTER TABLE chat ADD COLUMN archived INTEGER DEFAULT 0")
+
+    wa_conn.executescript("""
+        CREATE TABLE IF NOT EXISTS call_log (
+            _id INTEGER PRIMARY KEY,
+            call_id TEXT NOT NULL,
+            jid_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            video_call INTEGER,
+            duration INTEGER,
+            call_result INTEGER,
+            group_jid_row_id INTEGER
+        );
+        INSERT INTO jid (_id, user, server, raw_string)
+        VALUES (1, '15551112222', 's.whatsapp.net', '15551112222@s.whatsapp.net'),
+               (2, '15553334444', 's.whatsapp.net', '15553334444@s.whatsapp.net');
+        INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden, archived)
+        VALUES (10, 1, NULL, 1700000090000, 0, 0),
+               (20, 2, NULL, 1700000080000, 0, 1);
+        INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id)
+        VALUES (1, 10, 0, 1, 1700000010000, 'Active msg', 0, 'M1'),
+               (2, 20, 0, 2, 1700000020000, 'Archived call context', 0, 'M2');
+        INSERT INTO call_log VALUES (101, 'arch_call_1', 2, 1, 1700000025000, 0, 40, 1, NULL);
+    """)
+    wa_conn.commit()
+    wa_conn.close()
+
+    arch_conn.execute(
+        "INSERT INTO contacts (number, folder, display_name) VALUES ('15551112222', 'Alice (15551112222)', 'Alice')"
+    )
+    arch_conn.execute(
+        "INSERT INTO contacts (number, folder, display_name) VALUES ('15553334444', 'Archived Bob (15553334444)', 'Archived Bob')"
+    )
+    arch_conn.commit()
+    arch_conn.close()
+
+    port = find_free_port()
+    app = create_app(tmp_path, rescan=False)
+    app.config["TESTING"] = True
+    server_thread = threading.Thread(
+        target=lambda: app.run(port=port, use_reloader=False),
+        daemon=True,
+    )
+    server_thread.start()
+
+    base_url = f"http://127.0.0.1:{port}"
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/chats", timeout=1.0) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            time.sleep(0.1)
+
+    cdp_port = find_free_port()
+    profile_dir = tmp_path / "browser_profile_fixes"
+    session = launch_browser_session(base_url, profile_dir, cdp_port, 30, 0.2)
+    try:
+        for _ in range(60):
+            ready = session.evaluate(
+                "Boolean(document.getElementById('sidebar') && document.querySelector('.chat-item[data-id=\"15551112222\"]'))",
+                5.0,
+            )
+            if ready:
+                break
+            time.sleep(0.15)
+
+        res = session.evaluate(
+            """
+            (async () => {
+                window.__fixErrors = [];
+                window.__fixBadFetches = [];
+                window.addEventListener('error', e => window.__fixErrors.push(String(e.message || e)));
+                window.addEventListener('unhandledrejection', e => window.__fixErrors.push(String(e.reason || e)));
+                const origFetch = window.fetch;
+                window.fetch = async (...args) => {
+                    const r = await origFetch(...args);
+                    if (!r.ok) window.__fixBadFetches.push({ url: String(args[0]), status: r.status });
+                    return r;
+                };
+
+                // 1. Open active chat -> #message-scroll must stay display:flex
+                document.querySelector('.chat-item[data-id="15551112222"]').click();
+                for (let i = 0; i < 40; i++) {
+                    const loadingEl = document.getElementById('chat-loading');
+                    if (loadingEl && loadingEl.style.display === 'none') break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                const scroll = document.getElementById('message-scroll');
+                const directDisplay = getComputedStyle(scroll).display;
+
+                // 2. Switch to Calls and back to Chats -> #message-scroll must restore as flex
+                document.getElementById('tab-btn-calls').click();
+                let callCard = null;
+                for (let i = 0; i < 50; i++) {
+                    callCard = document.querySelector('#chat-list .call-item');
+                    if (callCard) break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                callCard.click();
+                await new Promise(r => setTimeout(r, 100));
+                const dirLabel = document.querySelector('#call-inspect-dir .call-dir-label');
+                const dirFontWeight = dirLabel ? getComputedStyle(dirLabel).fontWeight : '';
+
+                document.getElementById('tab-btn-chats').click();
+                await new Promise(r => setTimeout(r, 50));
+                const restoredDisplay = getComputedStyle(scroll).display;
+
+                // 3. Jump from archived chat's call moment -> check flex & Return switches to archived tab
+                document.getElementById('tab-btn-calls').click();
+                let jumpCallCard = null;
+                for (let i = 0; i < 50; i++) {
+                    jumpCallCard = document.querySelector('#chat-list .call-item');
+                    if (jumpCallCard) break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                jumpCallCard.click();
+                let jumpMomentBtn = null;
+                for (let i = 0; i < 40; i++) {
+                    jumpMomentBtn = document.getElementById('call-inspect-jump-btn');
+                    if (jumpMomentBtn && !jumpMomentBtn.disabled) break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                jumpMomentBtn.click();
+                let banner = null;
+                for (let i = 0; i < 60; i++) {
+                    banner = document.getElementById('context-jump-banner');
+                    const loadingEl = document.getElementById('chat-loading');
+                    if (banner && banner.style.display !== 'none' && loadingEl && loadingEl.style.display === 'none') break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                const jumpDisplay = getComputedStyle(scroll).display;
+                const switchBtn = document.getElementById('context-jump-switch-btn');
+                if (switchBtn) switchBtn.click();
+                for (let i = 0; i < 40; i++) {
+                    if (document.getElementById('tab-btn-archived').classList.contains('active')) break;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                const archivedActive = document.getElementById('tab-btn-archived').classList.contains('active');
+                const chatsActive = document.getElementById('tab-btn-chats').classList.contains('active');
+
+                const tabBtns = Array.from(document.querySelectorAll('#sidebar-bottom-bar .tab-btn'));
+                const hasTailwindTabClasses = tabBtns.some(b => b.classList.contains('opacity-30') || b.classList.contains('pointer-events-none'));
+
+                return {
+                    directDisplay,
+                    restoredDisplay,
+                    jumpDisplay,
+                    dirFontWeight,
+                    archivedActive,
+                    chatsActive,
+                    hasTailwindTabClasses,
+                    errors: window.__fixErrors,
+                    badFetches: window.__fixBadFetches,
+                };
+            })()
+            """,
+            20.0,
+        )
+        assert res["errors"] == []
+        assert res["badFetches"] == []
+        assert res["directDisplay"] == "flex"
+        assert res["restoredDisplay"] == "flex"
+        assert res["jumpDisplay"] == "flex"
+        assert res["dirFontWeight"] in ("600", "bold")
+        assert res["archivedActive"] is True
+        assert res["chatsActive"] is False
+        assert res["hasTailwindTabClasses"] is False
+    finally:
+        session.close()

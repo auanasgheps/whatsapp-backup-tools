@@ -3398,3 +3398,6 @@
   align-items: center;
   flex-shrink: 0;
 }
+.call-dir-label {
+  font-weight: 600;
+}

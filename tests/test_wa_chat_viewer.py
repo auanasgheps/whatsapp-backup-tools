@@ -12937,7 +12937,7 @@ class TestPhase1CallsFeature:
             cs_conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZCONTACTIDENTIFIER TEXT")
         cs_conn.execute("""
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZHIDDEN)
-            VALUES (50, '15559876543@s.whatsapp.net', '145500000000001@lid', 'Salvatore Test', 0)
+            VALUES (50, '15559876543@s.whatsapp.net', '145500000000001@lid', 'Alice Test', 0)
         """)
         cs_conn.commit()
         cs_conn.close()
@@ -12947,22 +12947,23 @@ class TestPhase1CallsFeature:
         call_conn.executescript("""
             CREATE TABLE ZWACDCALLEVENT (
                 Z_PK INTEGER PRIMARY KEY,
-                ZCALLIDSTRING TEXT,
+                ZCALLIDSTRING TEXT NOT NULL,
                 ZGROUPJIDSTRING TEXT,
                 ZDURATION REAL DEFAULT 0,
                 ZOUTCOME INTEGER DEFAULT 0,
                 ZDATE REAL NOT NULL,
-                Z1CALLEVENTS INTEGER
+                Z1CALLEVENTS INTEGER NOT NULL
             );
             CREATE TABLE ZWAAGGREGATECALLEVENT (
                 Z_PK INTEGER PRIMARY KEY,
                 ZVIDEO INTEGER DEFAULT 0,
-                ZINCOMING INTEGER DEFAULT 1
+                ZINCOMING INTEGER DEFAULT 1,
+                ZMISSED INTEGER DEFAULT 0
             );
             CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
                 Z_PK INTEGER PRIMARY KEY,
-                Z1PARTICIPANTS INTEGER,
-                ZJIDSTRING TEXT,
+                Z1PARTICIPANTS INTEGER NOT NULL,
+                ZJIDSTRING TEXT NOT NULL,
                 ZOUTCOME INTEGER DEFAULT 0
             );
             INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (1, 0, 1);
@@ -12985,7 +12986,7 @@ class TestPhase1CallsFeature:
             c = calls[0]
             assert c["id"] == "ios_lid_call"
             assert c["caller_phone"] == "+15559876543"
-            assert c["caller_name"] == "Salvatore Test"
+            assert c["caller_name"] == "Alice Test"
             assert c["chat_id"] == "50"
 
     def test_api_chat_info_ios_calls_count_with_companion_lid(self, tmp_path):
@@ -12996,7 +12997,7 @@ class TestPhase1CallsFeature:
             cs_conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZCONTACTIDENTIFIER TEXT")
         cs_conn.execute("""
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZHIDDEN)
-            VALUES (50, '15559876543@s.whatsapp.net', '145500000000001@lid', 'Salvatore Test', 0)
+            VALUES (50, '15559876543@s.whatsapp.net', '145500000000001@lid', 'Alice Test', 0)
         """)
         cs_conn.commit()
         cs_conn.close()
@@ -13006,22 +13007,23 @@ class TestPhase1CallsFeature:
         call_conn.executescript("""
             CREATE TABLE ZWACDCALLEVENT (
                 Z_PK INTEGER PRIMARY KEY,
-                ZCALLIDSTRING TEXT,
+                ZCALLIDSTRING TEXT NOT NULL,
                 ZGROUPJIDSTRING TEXT,
                 ZDURATION REAL DEFAULT 0,
                 ZOUTCOME INTEGER DEFAULT 0,
                 ZDATE REAL NOT NULL,
-                Z1CALLEVENTS INTEGER
+                Z1CALLEVENTS INTEGER NOT NULL
             );
             CREATE TABLE ZWAAGGREGATECALLEVENT (
                 Z_PK INTEGER PRIMARY KEY,
                 ZVIDEO INTEGER DEFAULT 0,
-                ZINCOMING INTEGER DEFAULT 1
+                ZINCOMING INTEGER DEFAULT 1,
+                ZMISSED INTEGER DEFAULT 0
             );
             CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
                 Z_PK INTEGER PRIMARY KEY,
-                Z1PARTICIPANTS INTEGER,
-                ZJIDSTRING TEXT,
+                Z1PARTICIPANTS INTEGER NOT NULL,
+                ZJIDSTRING TEXT NOT NULL,
                 ZOUTCOME INTEGER DEFAULT 0
             );
             INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (1, 0, 1);
@@ -13546,9 +13548,13 @@ class TestPhase3InBubbleIndicators:
         ext_conn.executescript("""
             CREATE TABLE thread_messages (
                 rowid INTEGER PRIMARY KEY,
-                key_id TEXT
+                chat_jid TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                pin_timestamp INTEGER,
+                thread_type INTEGER
             );
-            INSERT INTO thread_messages (rowid, key_id) VALUES (1, 'ext_stanza_pin_1');
+            INSERT INTO thread_messages (rowid, chat_jid, key_id, pin_timestamp, thread_type)
+            VALUES (1, '123456789@s.whatsapp.net', 'ext_stanza_pin_1', 1700000000, 0);
         """)
         ext_conn.commit()
         ext_conn.close()
@@ -13614,13 +13620,13 @@ class TestInChatCallBubblesAndUI:
             wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
 
         wa_conn.executescript("""
-            CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS call_log (
                 _id INTEGER PRIMARY KEY,
-                call_id TEXT,
-                jid_row_id INTEGER,
-                from_me INTEGER,
-                timestamp INTEGER,
+                call_id TEXT NOT NULL,
+                jid_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
                 video_call INTEGER,
                 duration INTEGER,
                 call_result INTEGER,
@@ -13679,13 +13685,19 @@ class TestInChatCallBubblesAndUI:
             assert g_calls[0]["call"]["is_group"] is True
             assert g_calls[0]["sender"] == "Alice"
 
-            # Wait briefly for background _backfill_recent_messages thread and verify calls are NOT cached in recent_messages
-            time.sleep(0.2)
-            with sqlite3.connect(str(arch_path)) as ac:
-                cached = ac.execute(
-                    "SELECT msg_id, media_type FROM recent_messages WHERE chat_id = '15551234'"
-                ).fetchall()
-                assert all(row[1] != "call" and isinstance(row[0], int) for row in cached)
+            # Wait deterministically for background _backfill_recent_messages thread and verify calls are NOT cached in recent_messages
+            cached = []
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                with sqlite3.connect(str(arch_path)) as ac:
+                    cached = ac.execute(
+                        "SELECT msg_id, media_type FROM recent_messages WHERE chat_id = '15551234'"
+                    ).fetchall()
+                if cached:
+                    break
+                time.sleep(0.05)
+            assert len(cached) > 0
+            assert all(row[1] != "call" and isinstance(row[0], int) for row in cached)
 
             # Second request exercises recent_messages fast-path and must still return the call bubbles
             resp2 = client.get("/api/messages?chat_id=15551234&chat_type=contact&limit=50")
@@ -13701,7 +13713,7 @@ class TestInChatCallBubblesAndUI:
             cs_conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZCONTACTIDENTIFIER TEXT")
         cs_conn.execute(
             "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZHIDDEN) "
-            "VALUES (5, '15559876543@s.whatsapp.net', '145500000000001@lid', 'Salvatore', 0)"
+            "VALUES (5, '15559876543@s.whatsapp.net', '145500000000001@lid', 'Alice', 0)"
         )
         cs_conn.execute(
             "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID) "
@@ -13718,22 +13730,23 @@ class TestInChatCallBubblesAndUI:
         call_conn.executescript("""
             CREATE TABLE ZWACDCALLEVENT (
                 Z_PK INTEGER PRIMARY KEY,
-                ZCALLIDSTRING TEXT,
+                ZCALLIDSTRING TEXT NOT NULL,
                 ZGROUPJIDSTRING TEXT,
                 ZDURATION REAL DEFAULT 0,
                 ZOUTCOME INTEGER DEFAULT 0,
                 ZDATE REAL NOT NULL,
-                Z1CALLEVENTS INTEGER
+                Z1CALLEVENTS INTEGER NOT NULL
             );
             CREATE TABLE ZWAAGGREGATECALLEVENT (
                 Z_PK INTEGER PRIMARY KEY,
                 ZVIDEO INTEGER DEFAULT 0,
-                ZINCOMING INTEGER DEFAULT 1
+                ZINCOMING INTEGER DEFAULT 1,
+                ZMISSED INTEGER DEFAULT 0
             );
             CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
                 Z_PK INTEGER PRIMARY KEY,
-                Z1PARTICIPANTS INTEGER,
-                ZJIDSTRING TEXT,
+                Z1PARTICIPANTS INTEGER NOT NULL,
+                ZJIDSTRING TEXT NOT NULL,
                 ZOUTCOME INTEGER DEFAULT 0
             );
             INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (10, 1, 0);
@@ -13776,13 +13789,13 @@ class TestInChatCallBubblesAndUI:
         if "server" not in jid_cols:
             wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
         wa_conn.executescript("""
-            CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS call_log (
                 _id INTEGER PRIMARY KEY,
-                call_id TEXT,
-                jid_row_id INTEGER,
-                from_me INTEGER,
-                timestamp INTEGER,
+                call_id TEXT NOT NULL,
+                jid_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
                 video_call INTEGER,
                 duration INTEGER,
                 call_result INTEGER,
@@ -13845,13 +13858,13 @@ class TestInChatCallBubblesAndUI:
         if "server" not in jid_cols:
             wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
         wa_conn.executescript("""
-            CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE IF NOT EXISTS jid_map (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS call_log (
                 _id INTEGER PRIMARY KEY,
-                call_id TEXT,
-                jid_row_id INTEGER,
-                from_me INTEGER,
-                timestamp INTEGER,
+                call_id TEXT NOT NULL,
+                jid_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
                 video_call INTEGER,
                 duration INTEGER,
                 call_result INTEGER,
@@ -13917,3 +13930,514 @@ class TestInChatCallBubblesAndUI:
         assert "_infoRow('Calls'" in js
         assert "'Preserved calls'" not in js
         assert "async function openChatAtTimestamp(chatId, timestampMs)" in js
+
+
+class TestReviewFixRegressions:
+    """Regression suite covering critical fixes and optimizations from review."""
+
+    def test_ios_pinned_cross_chat_scoping(self, tmp_path):
+        """iOS /api/chat/<id>/pinned scopes ExtChatDatabase thread_messages and ZWAMESSAGE pins to the target chat."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '1110001@s.whatsapp.net', 'Alice', 0),
+                   (2, '2220002@s.whatsapp.net', 'Bob', 0);
+
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID)
+            VALUES (10, 1, 0, 720000000, 'Alice pinned msg', 0, 'pin_chat_1'),
+                   (20, 2, 0, 720000010, 'Bob ext pinned msg', 0, 'pin_chat_2'),
+                   (21, 2, 0, 720000020, 'Bob legacy pinned msg', 0, 'pin_chat_2_legacy'),
+                   (22, 2, 0, 720000030, NULL, 66, 'pin_event_chat_2');
+            UPDATE ZWAMESSAGE SET ZPARENTMESSAGE = 21 WHERE Z_PK = 22;
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        ext_conn = sqlite3.connect(str(tmp_path / "ExtChatDatabase.sqlite"))
+        ext_conn.executescript("""
+            CREATE TABLE thread_messages (
+                rowid INTEGER PRIMARY KEY,
+                chat_jid TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                pin_timestamp INTEGER,
+                thread_type INTEGER
+            );
+            INSERT INTO thread_messages (rowid, chat_jid, key_id, pin_timestamp, thread_type)
+            VALUES (1, '1110001@s.whatsapp.net', 'pin_chat_1', 1700000000, 0),
+                   (2, '2220002@s.whatsapp.net', 'pin_chat_2', 1700000010, 0);
+        """)
+        ext_conn.commit()
+        ext_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            r1 = client.get("/api/chat/1/pinned?chat_type=contact")
+            assert r1.status_code == 200
+            pins1 = r1.get_json()["pinned_messages"]
+            assert [m["id"] for m in pins1] == [10]
+
+            r2 = client.get("/api/chat/2/pinned?chat_type=contact")
+            assert r2.status_code == 200
+            pins2 = r2.get_json()["pinned_messages"]
+            assert {m["id"] for m in pins2} == {20, 21}
+
+    def test_api_chat_info_ios_legacy_call_schema(self, tmp_path):
+        """iOS /api/chat-info supports legacy ZAGGREGATECALLEVENT/ZCALLEVENT/ZJID schemas and isolates group calls."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_cols = {r[1] for r in cs_conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if "ZCONTACTIDENTIFIER" not in cs_cols:
+            cs_conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZCONTACTIDENTIFIER TEXT")
+        cs_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZCONTACTIDENTIFIER, ZPARTNERNAME, ZHIDDEN)
+            VALUES (10, '15551112222@s.whatsapp.net', '9990001@lid', 'Alice', 0),
+                   (20, '120363999@g.us', NULL, 'Team Group', 0);
+            UPDATE ZWACHATSESSION SET ZGROUPINFO = 1 WHERE Z_PK = 20;
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        call_conn = sqlite3.connect(str(tmp_path / "CallHistory.sqlite"))
+        call_conn.executescript("""
+            CREATE TABLE ZWACDCALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCALLIDSTRING TEXT NOT NULL,
+                ZGROUPJIDSTRING TEXT,
+                ZDURATION REAL DEFAULT 0,
+                ZOUTCOME INTEGER DEFAULT 0,
+                ZDATE REAL NOT NULL,
+                ZAGGREGATECALLEVENT INTEGER NOT NULL
+            );
+            CREATE TABLE ZWAAGGREGATECALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZVIDEO INTEGER DEFAULT 0,
+                ZINCOMING INTEGER DEFAULT 1
+            );
+            CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCALLEVENT INTEGER NOT NULL,
+                ZJID TEXT NOT NULL,
+                ZOUTCOME INTEGER DEFAULT 0
+            );
+            INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (1, 0, 1), (2, 1, 0);
+            INSERT INTO ZWACDCALLEVENT (Z_PK, ZCALLIDSTRING, ZGROUPJIDSTRING, ZDURATION, ZOUTCOME, ZDATE, ZAGGREGATECALLEVENT)
+            VALUES (1, 'legacy_1to1', NULL, 42, 0, 720000000, 1),
+                   (2, 'legacy_grp', '120363999@g.us', 120, 0, 720000100, 2);
+            INSERT INTO ZWACDCALLEVENTPARTICIPANT (Z_PK, ZCALLEVENT, ZJID, ZOUTCOME)
+            VALUES (1, 1, '9990001@lid', 0),
+                   (2, 2, '9990001@lid', 0);
+        """)
+        call_conn.commit()
+        call_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            c_info = client.get("/api/chat-info?chat_id=10&chat_type=contact").get_json()
+            assert c_info["calls_count"] == 1
+            g_info = client.get("/api/chat-info?chat_id=20&chat_type=group").get_json()
+            assert g_info["calls_count"] == 1
+
+    def test_api_chats_ios_without_zlastmessagedate_and_empty_chat(self, tmp_path):
+        """iOS /api/chats works when ZWACHATSESSION lacks ZLASTMESSAGEDATE and yields newest_ts=0 for empty chats."""
+        cs_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        cs_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZGROUPINFO INTEGER,
+                ZCONTACTJID TEXT,
+                ZPARTNERNAME TEXT,
+                ZHIDDEN INTEGER DEFAULT 0,
+                ZARCHIVED INTEGER DEFAULT 0,
+                ZCONTACTABID INTEGER
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZMEDIAURL TEXT,
+                ZTITLE TEXT,
+                ZXMPPTHUMBPATH TEXT,
+                ZVCARDNAME TEXT,
+                ZVCARDSTRING TEXT,
+                ZMETADATA BLOB
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT,
+                ZISACTIVE INTEGER DEFAULT 1
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY, ZCREATIONDATE REAL, ZCREATORJID TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER NOT NULL,
+                ZISFROMME INTEGER NOT NULL DEFAULT 0,
+                ZMESSAGEDATE REAL,
+                ZSTANZAID TEXT,
+                ZMESSAGETYPE INTEGER DEFAULT 0,
+                ZGROUPEVENTTYPE INTEGER DEFAULT 0,
+                ZMEDIAITEM INTEGER,
+                ZGROUPMEMBER INTEGER,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZTEXT TEXT,
+                ZFROMJID TEXT,
+                ZTOJID TEXT,
+                ZRECEIPTINFO BLOB,
+                ZMESSAGESTATUS INTEGER DEFAULT 0
+            );
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZARCHIVED)
+            VALUES (1, '15551110001@s.whatsapp.net', 'Has Msg', 0, 0),
+                   (2, '15551110002@s.whatsapp.net', 'Empty Chat', 0, 1);
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE)
+            VALUES (10, 1, 0, 720000000, 'Hello', 0);
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = {c["id"]: c for c in resp.get_json()}
+            assert chats["1"]["newest_ts"] > 0
+            assert chats["2"]["newest_ts"] == 0
+
+    def test_ios_calls_missed_fallback_and_filter_limit(self, tmp_path):
+        """iOS /api/calls detects missed calls via ZOUTCOME=4 without ZMISSED and does not truncate filtered queries."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN) "
+            "VALUES (1, '15557778888@s.whatsapp.net', NULL, 0)"
+        )
+        cs_conn.commit()
+        cs_conn.close()
+
+        arch_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arch_conn.commit()
+        arch_conn.close()
+
+        cv_conn = sqlite3.connect(str(tmp_path / "ContactsV2.sqlite"))
+        cv_conn.execute(
+            "CREATE TABLE ZWAADDRESSBOOKCONTACT ("
+            "Z_PK INTEGER PRIMARY KEY, ZWHATSAPPID TEXT, ZLID TEXT, ZFULLNAME TEXT, ZPHONESTATUS TEXT)"
+        )
+        cv_conn.execute(
+            "INSERT INTO ZWAADDRESSBOOKCONTACT (Z_PK, ZWHATSAPPID, ZLID, ZFULLNAME, ZPHONESTATUS) "
+            "VALUES (1, '15557778888@s.whatsapp.net', NULL, 'Saved Caller Name', NULL)"
+        )
+        cv_conn.commit()
+        cv_conn.close()
+
+        call_conn = sqlite3.connect(str(tmp_path / "CallHistory.sqlite"))
+        call_conn.executescript("""
+            CREATE TABLE ZWACDCALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCALLIDSTRING TEXT NOT NULL,
+                ZGROUPJIDSTRING TEXT,
+                ZDURATION REAL DEFAULT 0,
+                ZOUTCOME INTEGER DEFAULT 0,
+                ZDATE REAL NOT NULL,
+                Z1CALLEVENTS INTEGER NOT NULL
+            );
+            CREATE TABLE ZWAAGGREGATECALLEVENT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZVIDEO INTEGER DEFAULT 0,
+                ZINCOMING INTEGER DEFAULT 1
+            );
+            CREATE TABLE ZWACDCALLEVENTPARTICIPANT (
+                Z_PK INTEGER PRIMARY KEY,
+                Z1PARTICIPANTS INTEGER NOT NULL,
+                ZJIDSTRING TEXT NOT NULL,
+                ZOUTCOME INTEGER DEFAULT 0
+            );
+        """)
+        # 55 newer connected audio outgoing calls + 5 older missed incoming + 2 older video calls
+        for i in range(1, 56):
+            call_conn.execute(
+                "INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (?, 0, 0)",
+                (i,),
+            )
+            call_conn.execute(
+                "INSERT INTO ZWACDCALLEVENT (Z_PK, ZCALLIDSTRING, ZDURATION, ZOUTCOME, ZDATE, Z1CALLEVENTS) "
+                "VALUES (?, ?, 30, 0, ?, ?)",
+                (i, f"conn_{i}", 720001000 + i, i),
+            )
+            call_conn.execute(
+                "INSERT INTO ZWACDCALLEVENTPARTICIPANT (Z_PK, Z1PARTICIPANTS, ZJIDSTRING, ZOUTCOME) "
+                "VALUES (?, ?, '15557778888@s.whatsapp.net', 0)",
+                (i, i),
+            )
+        for i in range(56, 61):
+            call_conn.execute(
+                "INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (?, 0, 1)",
+                (i,),
+            )
+            call_conn.execute(
+                "INSERT INTO ZWACDCALLEVENT (Z_PK, ZCALLIDSTRING, ZDURATION, ZOUTCOME, ZDATE, Z1CALLEVENTS) "
+                "VALUES (?, ?, 0, 4, ?, ?)",
+                (i, f"missed_{i}", 720000000 + i, i),
+            )
+            call_conn.execute(
+                "INSERT INTO ZWACDCALLEVENTPARTICIPANT (Z_PK, Z1PARTICIPANTS, ZJIDSTRING, ZOUTCOME) "
+                "VALUES (?, ?, '15557778888@s.whatsapp.net', 4)",
+                (i, i),
+            )
+        for i in range(61, 63):
+            call_conn.execute(
+                "INSERT INTO ZWAAGGREGATECALLEVENT (Z_PK, ZVIDEO, ZINCOMING) VALUES (?, 1, 0)",
+                (i,),
+            )
+            call_conn.execute(
+                "INSERT INTO ZWACDCALLEVENT (Z_PK, ZCALLIDSTRING, ZDURATION, ZOUTCOME, ZDATE, Z1CALLEVENTS) "
+                "VALUES (?, ?, 45, 0, ?, ?)",
+                (i, f"vid_{i}", 720000100 + i, i),
+            )
+            call_conn.execute(
+                "INSERT INTO ZWACDCALLEVENTPARTICIPANT (Z_PK, Z1PARTICIPANTS, ZJIDSTRING, ZOUTCOME) "
+                "VALUES (?, ?, '15557778888@s.whatsapp.net', 0)",
+                (i, i),
+            )
+        call_conn.commit()
+        call_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            missed_resp = client.get("/api/calls?filter=missed&limit=10").get_json()
+            assert len(missed_resp["calls"]) == 5
+            assert all(c["call_type"] == "missed" for c in missed_resp["calls"])
+            assert missed_resp["calls"][0]["caller_name"] == "Saved Caller Name"
+
+            video_resp = client.get("/api/calls?filter=video&limit=10").get_json()
+            assert len(video_resp["calls"]) == 2
+            assert all(c["is_video"] is True for c in video_resp["calls"])
+
+    def test_android_calls_group_preserves_subject(self, tmp_path):
+        """Android /api/calls preserves group chat subject instead of overwriting with caller's contact name."""
+        arch_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arch_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15551234', 'Alice (15551234)', 'Alice')"
+        )
+        arch_conn.commit()
+        arch_conn.close()
+
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+        if "server" not in jid_cols:
+            wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS call_log (
+                _id INTEGER PRIMARY KEY,
+                call_id TEXT NOT NULL,
+                jid_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
+                video_call INTEGER,
+                duration INTEGER,
+                call_result INTEGER,
+                group_jid_row_id INTEGER
+            );
+            INSERT INTO jid (_id, user, server, raw_string)
+            VALUES (1, '15551234', 's.whatsapp.net', '15551234@s.whatsapp.net'),
+                   (2, '120363000111', 'g.us', '120363000111@g.us');
+            INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp)
+            VALUES (20, 2, 'Weekend Crew', 1700000050000);
+            INSERT INTO call_log VALUES (1, 'grp_call_1', 1, 0, 1700000040000, 1, 90, 1, 2);
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            calls = client.get("/api/calls?limit=10").get_json()["calls"]
+            assert len(calls) == 1
+            assert calls[0]["chat_id"] == "20"
+            assert calls[0]["caller_name"] == "Weekend Crew"
+
+    def test_api_chat_starred_exact_total_and_pagination_beyond_100(self, tmp_path):
+        """GET /api/chat/<id>/starred returns exact count regardless of limit and paginates past 100."""
+        arch_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arch_conn.close()
+
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        msg_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(message)").fetchall()}
+        if "starred" not in msg_cols:
+            wa_conn.execute("ALTER TABLE message ADD COLUMN starred INTEGER DEFAULT 0")
+        wa_conn.executescript("""
+            INSERT INTO jid (_id, user, raw_string) VALUES (1, '15551234', '15551234@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp) VALUES (10, 1, NULL, 1700000200000);
+        """)
+        for i in range(1, 106):
+            wa_conn.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id, starred) "
+                "VALUES (?, 10, 0, 1, ?, ?, 0, ?, 1)",
+                (i, 1700000000000 + i * 1000, f"Starred {i}", f"STAR_{i}"),
+            )
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            r1 = client.get(
+                "/api/chat/15551234/starred?chat_type=contact&limit=5&offset=0"
+            ).get_json()
+            assert r1["count"] == 105
+            assert len(r1["messages"]) == 5
+
+            r2 = client.get(
+                "/api/chat/15551234/starred?chat_type=contact&limit=10&offset=100"
+            ).get_json()
+            assert r2["count"] == 105
+            assert len(r2["messages"]) == 5
+
+    def test_recent_messages_user_version_3_migration(self, tmp_path):
+        """Upgrading archive DB from user_version=3 clears stale recent_messages and bumps user_version to 4."""
+        arch_path = tmp_path / ".wa_media_archiver.db"
+        arch_conn = make_archive_db(arch_path)
+        arch_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0"
+        )
+        arch_conn.execute(
+            "ALTER TABLE recent_messages ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0"
+        )
+        arch_conn.execute("""
+            INSERT INTO recent_messages (
+                chat_id, chat_type, msg_id, stanza_id, timestamp_ms, sender,
+                from_me, media_type, text_body, is_starred, is_pinned
+            ) VALUES (
+                '15551234', 'contact', 1, 'M_STAR_PIN', 1700000010000, 'Alice',
+                0, 'text', 'Important msg', 0, 0
+            )
+        """)
+        arch_conn.execute("PRAGMA user_version = 3")
+        arch_conn.commit()
+        arch_conn.close()
+
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        msg_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(message)").fetchall()}
+        if "starred" not in msg_cols:
+            wa_conn.execute("ALTER TABLE message ADD COLUMN starred INTEGER DEFAULT 0")
+        wa_conn.executescript("""
+            CREATE TABLE message_add_on (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_message_row_id INTEGER NOT NULL,
+                message_add_on_type INTEGER NOT NULL,
+                expiry_timestamp INTEGER,
+                timestamp INTEGER
+            );
+            CREATE TABLE message_add_on_pin_in_chat (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_add_on_row_id INTEGER NOT NULL,
+                pin_in_chat_state INTEGER NOT NULL
+            );
+            INSERT INTO jid (_id, user, raw_string) VALUES (1, '15551234', '15551234@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp) VALUES (10, 1, NULL, 1700000010000);
+            INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id, starred)
+            VALUES (1, 10, 0, 1, 1700000010000, 'Important msg', 0, 'M_STAR_PIN', 1);
+            INSERT INTO message_add_on (_id, parent_message_row_id, message_add_on_type) VALUES (1, 1, 79);
+            INSERT INTO message_add_on_pin_in_chat (message_add_on_row_id, pin_in_chat_state) VALUES (1, 1);
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with sqlite3.connect(str(arch_path)) as ac:
+            uv = ac.execute("PRAGMA user_version").fetchone()[0]
+            assert uv == 4
+            cnt = ac.execute("SELECT COUNT(*) FROM recent_messages").fetchone()[0]
+            assert cnt == 0
+
+        with app.test_client() as client:
+            msgs = client.get(
+                "/api/messages?chat_id=15551234&chat_type=contact&limit=10"
+            ).get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["is_starred"] == 1
+            assert msgs[0]["is_pinned"] == 1
+
+    def test_messages_inclusive_pagination_and_preserved_pin_jump(self, tmp_path):
+        """inclusive=1 includes boundary ties, api/messages/at keeps target with dense calls, and preserved pin jumps by -rowid."""
+        from wab_archiver.preservation import PRESERVED_SCHEMA
+
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+        if "server" not in jid_cols:
+            wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS call_log (
+                _id INTEGER PRIMARY KEY,
+                call_id TEXT NOT NULL,
+                jid_row_id INTEGER NOT NULL,
+                from_me INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
+                video_call INTEGER,
+                duration INTEGER,
+                call_result INTEGER,
+                group_jid_row_id INTEGER
+            );
+            INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '15556789', 's.whatsapp.net', '15556789@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp) VALUES (10, 1, NULL, 1700000010000);
+            INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id)
+            VALUES (1, 10, 0, 1, 1700000001000, 'Oldest', 0, 'T_OLD'),
+                   (2, 10, 0, 1, 1700000005000, 'Tie 1', 0, 'T_1'),
+                   (3, 10, 0, 1, 1700000005000, 'Tie 2', 0, 'T_2'),
+                   (4, 10, 0, 1, 1700000005000, 'Tie 3', 0, 'T_3');
+        """)
+        for idx in range(1, 6):
+            wa_conn.execute(
+                "INSERT INTO call_log VALUES (?, ?, 1, 0, 1700000005000, 0, 10, 1, NULL)",
+                (idx, f"tie_call_{idx}"),
+            )
+        wa_conn.commit()
+        wa_conn.close()
+
+        pres_conn = sqlite3.connect(str(tmp_path / "preserved_messages.db"))
+        pres_conn.executescript(PRESERVED_SCHEMA)
+        pres_conn.executescript("""
+            INSERT INTO preserved_chats (chat_id, chat_type, subject, description, created_ts, oldest_ts, newest_ts, msg_count, members_json)
+            VALUES ('15556789', 'contact', 'Alice', NULL, NULL, 1700000000000, 1700000009000, 1, NULL);
+            INSERT INTO preserved_messages (
+                rowid, chat_id, chat_type, msg_id, stanza_id, timestamp_ms,
+                sender, from_me, media_type, text_body, is_pinned, preserved_at, preservation_reason, source_platform
+            ) VALUES (
+                42, '15556789', 'contact', '999', 'PRES_PIN_1', 1700000009000,
+                'Alice', 0, 'text', 'Preserved Pin Target', 1, '2026-01-01T00:00:00Z', 'deleted', 'android'
+            );
+        """)
+        pres_conn.commit()
+        pres_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # 1. inclusive=1 includes tied timestamp_ms rows on upward pagination
+            inc_page = client.get(
+                "/api/messages?chat_id=15556789&chat_type=contact&limit=10&before=1700000005000&inclusive=1"
+            ).get_json()
+            inc_ids = [m["msg_id"] for m in inc_page]
+            assert 2 in inc_ids and 3 in inc_ids and 4 in inc_ids and 1 in inc_ids
+
+            # 2. api/messages/at keeps requested target even with dense same-timestamp calls
+            at_tie = client.get(
+                "/api/messages/at?chat_id=15556789&chat_type=contact&ts=1700000005000&msg_id=2&limit=4"
+            ).get_json()
+            assert any(m["msg_id"] == 2 for m in at_tie)
+
+            # 3. Preserved pin uses negative -rowid and jumps accurately via api/messages/at
+            pins = client.get("/api/chat/15556789/pinned?chat_type=contact").get_json()[
+                "pinned_messages"
+            ]
+            assert any(p["id"] == -42 for p in pins)
+            jump_pin = client.get(
+                "/api/messages/at?chat_id=15556789&chat_type=contact&msg_id=-42&limit=10"
+            ).get_json()
+            assert any(
+                m["msg_id"] == -42 and m["text_body"] == "Preserved Pin Target" for m in jump_pin
+            )
