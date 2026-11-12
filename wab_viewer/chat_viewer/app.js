@@ -346,8 +346,29 @@
     return result;
   }
 
-  function waFormat(text) {
+  function _buildMentionRegex(mentions) {
+    if (!mentions || typeof mentions !== 'object') return null;
+    const keys = Object.keys(mentions).filter(Boolean).sort((a, b) => b.length - a.length);
+    if (!keys.length) return null;
+    const escaped = keys.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    return new RegExp('(^|[^A-Za-z0-9_])@(' + escaped + ')(?!\\d)', 'g');
+  }
+
+  function resolveMentionsPlainText(text, mentions) {
     if (!text) return '';
+    const re = _buildMentionRegex(mentions);
+    if (!re) return text;
+    return text.replace(re, (full, prefix, tok) => {
+      const m = mentions[tok];
+      return m && m.name ? prefix + '@' + m.name : full;
+    });
+  }
+
+  function waFormat(text, mentions) {
+    if (!text) return '';
+
+    const mentionRe = _buildMentionRegex(mentions);
+    const mentionPlaceholders = [];
 
     // 1. Extract ``` code blocks — protect from any inner formatting
     const codeBlocks = [];
@@ -384,6 +405,17 @@
         codespans.push(inner);
         return '\x00CS' + (codespans.length - 1) + '\x00';
       });
+
+      // Protect @mentions from markdown formatting and XSS
+      if (mentionRe) {
+        mentionRe.lastIndex = 0;
+        s = s.replace(mentionRe, (full, prefix, tok) => {
+          const m = mentions[tok];
+          if (!m || !m.name) return full;
+          mentionPlaceholders.push(m);
+          return prefix + '\x00MN' + (mentionPlaceholders.length - 1) + '\x00';
+        });
+      }
 
       // Inline: bold *text*, italic _text_, strikethrough ~text~
       // Markers must touch non-space on both inner sides
@@ -424,7 +456,21 @@
         out.push(ln);
       }
       closeLists();
-      return out.join('<br>');
+      let seg = out.join('<br>');
+      if (mentionPlaceholders.length) {
+        seg = seg.replace(/\x00MN(\d+)\x00/g, (_, i) => {
+          const m = mentionPlaceholders[+i];
+          if (!m || !m.name) return '';
+          const label = '@' + esc(m.name);
+          if (m.chat_id) {
+            const cid = esc(String(m.chat_id));
+            const ctype = esc(String(m.chat_type || 'contact'));
+            return `<a href="#chat-${cid}" class="wa-mention wa-mention-link" data-chat-id="${cid}" data-chat-type="${ctype}" title="Open chat with ${esc(m.name)}">${label}</a>`;
+          }
+          return `<span class="wa-mention">${label}</span>`;
+        });
+      }
+      return seg;
 
       function closeLists() {
         if (inUl) { inUl = false; out.push('</ul>'); }
@@ -438,10 +484,10 @@
     );
   }
 
-  function highlight(text, q) {
-    if (!q || !text) return waFormat(text || '');
+  function highlight(text, q, mentions) {
+    if (!q || !text) return waFormat(text || '', mentions);
     const words = q.trim().split(/\s+/);
-    let result = waFormat(text);
+    let result = waFormat(text, mentions);
     for (const w of words) {
       const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
       result = result.replace(/(<[^>]+>)|([^<]+)/g, (_, tag, txt) =>
@@ -650,7 +696,7 @@
     return btn;
   }
 
-  function renderCollapsibleMessageText(containerEl, text, msgId) {
+  function renderCollapsibleMessageText(containerEl, text, msgId, mentions) {
     const raw = text || '';
     const key = (msgId !== undefined && msgId !== null) ? String(msgId) : '';
     const canTrack = key !== '';
@@ -664,12 +710,12 @@
         }
       }
       if (nlCount < COLLAPSE_LINE_LIMIT) {
-        containerEl.innerHTML = highlight(raw, '');
+        containerEl.innerHTML = highlight(raw, '', mentions);
         return;
       }
     }
 
-    const fullHtml = highlight(raw, '');
+    const fullHtml = highlight(raw, '', mentions);
     const parsed = document.createElement('div');
     parsed.innerHTML = fullHtml;
     const metrics = measureRenderedContent(parsed);
@@ -695,7 +741,7 @@
         e.stopPropagation();
         const focusNext = e.detail === 0;
         if (canTrack) expandedMsgIds.delete(key);
-        renderCollapsibleMessageText(containerEl, raw, msgId);
+        renderCollapsibleMessageText(containerEl, raw, msgId, mentions);
         const row = containerEl.closest('.msg-row');
         const scroll = document.getElementById('message-scroll');
         if (row && scroll) {
@@ -733,7 +779,7 @@
       e.stopPropagation();
       const focusNext = e.detail === 0;
       if (canTrack) expandedMsgIds.add(key);
-      renderCollapsibleMessageText(containerEl, raw, msgId);
+      renderCollapsibleMessageText(containerEl, raw, msgId, mentions);
       if (focusNext) {
         const nextBtn = containerEl.querySelector('.msg-read-more');
         if (nextBtn) nextBtn.focus();
@@ -1177,8 +1223,10 @@
     const gen = ++_loadGen;
     loading = false;
     document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
-    el.classList.add('active');
-    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (el) {
+      el.classList.add('active');
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
 
     const scroll = _prepareChatPane(chat, false);
 
@@ -1722,7 +1770,7 @@
       if (lastMsg.text_body) {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        cap.innerHTML = highlight(lastMsg.text_body, '');
+        cap.innerHTML = highlight(lastMsg.text_body, '', lastMsg.mentions);
         bubble.appendChild(cap);
       }
 
@@ -1750,7 +1798,7 @@
             editedSpan,
             null,
             null,
-            editedMember ? { original_text: editedMember.original_text_body || null, edited_ts: editedMember.edited_ts || null } : null
+            editedMember ? { original_text: editedMember.original_text_body || null, edited_ts: editedMember.edited_ts || null, mentions: editedMember.mentions || null } : null
           );
         });
         meta.appendChild(editedSpan);
@@ -1829,7 +1877,7 @@
       qSender.textContent = qs || (currentChat && currentChat.type === 'contact' ? currentChat.display_name : '');
       const qText = document.createElement('div');
       qText.className = 'msg-quote-text';
-      qText.textContent = msg.quoted_text || (msg.quoted_msg_id ? 'Quoted message' : '');
+      qText.textContent = resolveMentionsPlainText(msg.quoted_text, msg.mentions) || (msg.quoted_msg_id ? 'Quoted message' : '');
       qContent.appendChild(qSender);
       qContent.appendChild(qText);
       quote.appendChild(qContent);
@@ -1900,7 +1948,7 @@
           infoBtn,
           msg.archive_path || null,
           msg.is_preserved ? { reason: msg.preservation_reason, at: msg.preserved_at, platform: msg.source_platform || null } : null,
-          msg.is_edited ? { original_text: msg.original_text_body || null, edited_ts: msg.edited_ts || null } : null
+          msg.is_edited ? { original_text: msg.original_text_body || null, edited_ts: msg.edited_ts || null, mentions: msg.mentions || null } : null
         );
       });
       meta.appendChild(infoBtn);
@@ -1934,7 +1982,7 @@
           editedSpan,
           msg.archive_path || null,
           msg.is_preserved ? { reason: msg.preservation_reason, at: msg.preserved_at, platform: msg.source_platform || null } : null,
-          { original_text: msg.original_text_body || null, edited_ts: msg.edited_ts || null }
+          { original_text: msg.original_text_body || null, edited_ts: msg.edited_ts || null, mentions: msg.mentions || null }
         );
       });
       meta.appendChild(editedSpan);
@@ -2002,13 +2050,13 @@
         if (msg.text_body && msg.media_type !== 'vcard') {
           const cap = document.createElement('div');
           cap.className = 'msg-caption';
-          cap.innerHTML = highlight(msg.text_body, '');
+          cap.innerHTML = highlight(msg.text_body, '', msg.mentions);
           bubble.appendChild(cap);
         }
       } else {
         const txt = document.createElement('div');
         txt.className = 'msg-text';
-        renderCollapsibleMessageText(txt, msg.text_body, msg.msg_id);
+        renderCollapsibleMessageText(txt, msg.text_body, msg.msg_id, msg.mentions);
         bubble.appendChild(txt);
         if (msg.link_title || msg.link_url || msg.link_desc) {
           bubble.appendChild(renderLinkPreview(msg));
@@ -2021,7 +2069,7 @@
       if (msg.text_body && msg.media_type !== 'vcard') {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        cap.innerHTML = highlight(msg.text_body, '');
+        cap.innerHTML = highlight(msg.text_body, '', msg.mentions);
         bubble.appendChild(cap);
       }
     }
@@ -2707,7 +2755,7 @@
       if (!isDuplicate && cleanBody) {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        cap.innerHTML = highlight(cleanBody, '');
+        cap.innerHTML = highlight(cleanBody, '', msg.mentions);
         wrap.appendChild(cap);
       }
     }
@@ -4282,7 +4330,7 @@
     const snippet = r.text_body || (r.media_name ? '[📎 ' + r.media_name + ']' : '');
     el.innerHTML = `
       <div class="sr-chat">${esc(chatName)}</div>
-      <div class="sr-text">${highlight(snippet, q)}</div>
+      <div class="sr-text">${highlight(resolveMentionsPlainText(snippet, r.mentions), q)}</div>
       <div class="sr-time">${fmtTime(r.timestamp_ms)}</div>
     `;
     el.addEventListener('click', async () => {
@@ -4305,7 +4353,7 @@
               const txtEl = row.querySelector('.msg-text');
               if (jumpedMsg && txtEl) {
                 expandedMsgIds.add(jumpedId);
-                renderCollapsibleMessageText(txtEl, jumpedMsg.text_body, jumpedMsg.msg_id);
+                renderCollapsibleMessageText(txtEl, jumpedMsg.text_body, jumpedMsg.msg_id, jumpedMsg.mentions);
               }
             }
             const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
@@ -4455,7 +4503,7 @@
       const txtEl = existing.querySelector('.msg-text');
       const matchedMsg = msgList.find(m => String(m.msg_id) === String(result.msg_id));
       if (txtEl && matchedMsg) {
-        renderCollapsibleMessageText(txtEl, matchedMsg.text_body, matchedMsg.msg_id);
+        renderCollapsibleMessageText(txtEl, matchedMsg.text_body, matchedMsg.msg_id, matchedMsg.mentions);
       }
       highlightMessageRow(existing);
       return;
@@ -5150,7 +5198,7 @@
 
         const snippetEl = document.createElement('div');
         snippetEl.className = 'starred-card-snippet';
-        let previewText = m.text || m.text_body || '';
+        let previewText = resolveMentionsPlainText(m.text || m.text_body || '', m.mentions);
         if (m.media_type) {
           const icon = m.media_type === 'photo' ? '📷' : (m.media_type === 'video' ? '🎬' : (m.media_type === 'document' ? '📄' : (m.media_type === 'audio' ? '🎵' : '📎')));
           const label = MEDIA_LABELS[m.media_type] || 'Media';
@@ -5263,7 +5311,7 @@
       authorEl.textContent = pin.sender_name ? `Pinned • ${pin.sender_name}:` : 'Pinned:';
     }
     if (snippetEl) {
-      let snippet = pin.text || pin.text_body || '';
+      let snippet = resolveMentionsPlainText(pin.text || pin.text_body || '', pin.mentions);
       if (!snippet && pin.media_type) {
         snippet = MEDIA_LABELS[pin.media_type] || '📎 Media';
       }
@@ -5846,6 +5894,41 @@
     return allChats.find(c => String(c.id) === cid || c.jid === chatId) || null;
   }
 
+  async function navigateToMentionChat(chatId, chatType) {
+    if (!chatId) return;
+    let chat = _findChatInList(chatId, chatType || 'contact');
+    if (!chat) {
+      try {
+        await loadChats();
+        chat = _findChatInList(chatId, chatType || 'contact');
+      } catch (err) {
+        console.warn('Failed to reload chats for mention navigation:', err);
+      }
+    }
+    if (!chat) return;
+    if (chat.is_archived) {
+      if (currentNavTab !== 'archived') switchNavTab('archived');
+    } else {
+      if (currentNavTab !== 'chats') switchNavTab('chats');
+      if (currentFilter !== 'all' && currentFilter !== chat.type) {
+        resetFilterTo('all');
+      }
+    }
+    const itemEl = _findChatListItem(chat.id, chat.type);
+    await selectChat(chat, itemEl);
+  }
+
+  const _msgScrollForMentions = document.getElementById('message-scroll');
+  if (_msgScrollForMentions) {
+    _msgScrollForMentions.addEventListener('click', e => {
+      const link = e.target.closest('a.wa-mention-link');
+      if (!link) return;
+      e.preventDefault();
+      e.stopPropagation();
+      navigateToMentionChat(link.dataset.chatId, link.dataset.chatType);
+    });
+  }
+
   async function openChatAtMessage(chatId, messageId, chatType, chatName) {
     if (_jumpAbortController) {
       _jumpAbortController.abort();
@@ -6135,7 +6218,7 @@
     if (editInfo && (editInfo.original_text || editInfo.edited_ts)) {
       html += '<div class="msg-details-section msg-edit-history">';
       if (editInfo.original_text) {
-        html += `<div class="msg-details-row"><span class="msg-details-label">Original (Pre-edit)</span><span class="msg-details-value msg-pre-edit-text">${esc(editInfo.original_text)}</span></div>`;
+        html += `<div class="msg-details-row"><span class="msg-details-label">Original (Pre-edit)</span><span class="msg-details-value msg-pre-edit-text">${esc(resolveMentionsPlainText(editInfo.original_text, editInfo.mentions))}</span></div>`;
       }
       if (editInfo.edited_ts) {
         html += `<div class="msg-details-row"><span class="msg-details-label">Edited On</span><span class="msg-details-value">${fmtTime(editInfo.edited_ts)}</span></div>`;

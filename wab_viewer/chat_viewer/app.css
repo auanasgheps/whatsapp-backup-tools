@@ -868,6 +868,38 @@
     .msg-sender { font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 2px; }
     .msg-text { font-size: var(--font-size); line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
     .msg-text a, .msg-caption a { overflow: visible; color: var(--accent); }
+    .msg-text .wa-mention,
+    .msg-caption .wa-mention {
+      font-weight: 600;
+      color: var(--bubble-action);
+      cursor: default;
+    }
+    .msg-row.sent .msg-text .wa-mention,
+    .msg-row.sent .msg-caption .wa-mention {
+      color: var(--bubble-action-sent);
+    }
+    .msg-text a.wa-mention-link,
+    .msg-caption a.wa-mention-link {
+      color: var(--bubble-action);
+      text-decoration: none;
+      cursor: pointer;
+      border-radius: 3px;
+      padding: 0 1px;
+    }
+    .msg-row.sent .msg-text a.wa-mention-link,
+    .msg-row.sent .msg-caption a.wa-mention-link {
+      color: var(--bubble-action-sent);
+    }
+    .msg-text a.wa-mention-link:hover,
+    .msg-caption a.wa-mention-link:hover {
+      background: color-mix(in srgb, currentColor 14%, transparent);
+      text-decoration: underline;
+    }
+    .msg-text a.wa-mention-link:focus-visible,
+    .msg-caption a.wa-mention-link:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
     .msg-read-more-ellipsis { color: inherit; }
     .msg-read-more-ellipsis.is-block-tail { display: inline-block; margin-top: 4px; }
     .msg-text .msg-read-more {

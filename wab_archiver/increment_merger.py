@@ -462,7 +462,42 @@ def extract_context_info(payload_fields: dict) -> dict | None:
     ):
         q_thumb = ctx_fields[16][0][1]
 
-    if not stanza_id and not quoted_text and not participant and not q_thumb:
+    mentioned_jids: list[str] = []
+    for entry in ctx_fields.get(15, []):
+        if entry[0] == 2 and isinstance(entry[1], bytes) and entry[1]:
+            jid_s = entry[1].decode("utf-8", errors="replace").strip()
+            if jid_s and "@" in jid_s:
+                mentioned_jids.append(jid_s)
+    mentioned_jids = list(dict.fromkeys(mentioned_jids))
+
+    quoted_mentioned_jids: list[str] = []
+    if 3 in ctx_fields and isinstance(ctx_fields[3][0][1], bytes):
+        raw_q_fields_m = parse_wire_fields(ctx_fields[3][0][1])
+        q_fields_m, _ = unwrap_message_container(raw_q_fields_m, 4)
+        for q_sub_tag in (6, 3, 7, 8, 9, 20, 4, 5, 18, 42, 45, 49, 60, 64, 75, 93, 111):
+            if q_sub_tag in q_fields_m and isinstance(q_fields_m[q_sub_tag][0][1], bytes):
+                try:
+                    qs_f = parse_wire_fields(q_fields_m[q_sub_tag][0][1])
+                    for c_tag in (17, 14, 15):
+                        if c_tag in qs_f and isinstance(qs_f[c_tag][0][1], bytes):
+                            q_ctx = parse_wire_fields(qs_f[c_tag][0][1])
+                            for m_entry in q_ctx.get(15, []):
+                                if m_entry[0] == 2 and isinstance(m_entry[1], bytes) and m_entry[1]:
+                                    qj = m_entry[1].decode("utf-8", errors="replace").strip()
+                                    if qj and "@" in qj:
+                                        quoted_mentioned_jids.append(qj)
+                except (ValueError, Exception):
+                    pass
+    quoted_mentioned_jids = list(dict.fromkeys(quoted_mentioned_jids))
+
+    if (
+        not stanza_id
+        and not quoted_text
+        and not participant
+        and not q_thumb
+        and not mentioned_jids
+        and not quoted_mentioned_jids
+    ):
         return None
 
     return {
@@ -475,6 +510,8 @@ def extract_context_info(payload_fields: dict) -> dict | None:
         "media_info": q_media_info,
         "location_info": q_loc_info,
         "vcard": q_vcard,
+        "mentioned_jids": mentioned_jids,
+        "quoted_mentioned_jids": quoted_mentioned_jids,
     }
 
 
@@ -5310,9 +5347,15 @@ def apply_messages_bin(
 
             # Insert message_quoted record and rich auxiliary tables
             if msg.get("quoted_info") and msg_row_id:
+                qi = msg["quoted_info"]
+                has_quote_payload = bool(
+                    qi.get("stanza_id")
+                    or qi.get("quoted_text")
+                    or qi.get("participant")
+                    or qi.get("thumbnail")
+                )
                 quoted_cols = get_table_columns(conn, "message_quoted", schema_cache)
-                if quoted_cols:
-                    qi = msg["quoted_info"]
+                if has_quote_payload and quoted_cols:
                     q_part = qi.get("participant", "")
                     if is_group and q_part and qi.get("from_me") != 1:
                         try:
@@ -5476,6 +5519,34 @@ def apply_messages_bin(
                             f"INSERT OR REPLACE INTO message_quoted_media ({', '.join(valid_mqm)}) VALUES ({', '.join('?' for _ in valid_mqm)})",
                             [mqm_map[c] for c in valid_mqm],
                         )
+
+                for m_tbl, m_key in (
+                    ("message_mentions", "mentioned_jids"),
+                    ("message_quoted_mentions", "quoted_mentioned_jids"),
+                ):
+                    if m_tbl == "message_quoted_mentions" and not has_quote_payload:
+                        continue
+                    m_jids = qi.get(m_key) or []
+                    if not m_jids:
+                        continue
+                    m_cols = get_table_columns(conn, m_tbl, schema_cache)
+                    if {"message_row_id", "jid_row_id"}.issubset(m_cols):
+                        for mj in m_jids:
+                            if not is_valid_jid_string(mj):
+                                continue
+                            try:
+                                mj_id = resolve_or_create_jid(conn, mj, logger, jid_cache)
+                            except (ValueError, Exception):
+                                continue
+                            existing_m = cur.execute(
+                                f"SELECT 1 FROM {m_tbl} WHERE message_row_id = ? AND jid_row_id = ? LIMIT 1",
+                                (msg_row_id, mj_id),
+                            ).fetchone()
+                            if not existing_m:
+                                cur.execute(
+                                    f"INSERT INTO {m_tbl} (message_row_id, jid_row_id) VALUES (?, ?)",
+                                    (msg_row_id, mj_id),
+                                )
 
         # Insert user receipts if present
         if msg.get("user_receipts") and msg_row_id:
@@ -5688,6 +5759,8 @@ def apply_messages_bin(
                                 for tbl, col in [
                                     ("message_quoted_media", "message_row_id"),
                                     ("message_quoted_text", "message_row_id"),
+                                    ("message_mentions", "message_row_id"),
+                                    ("message_quoted_mentions", "message_row_id"),
                                     ("message_media", "message_row_id"),
                                     ("receipt_user", "message_row_id"),
                                     ("message_view_once_media", "message_row_id"),

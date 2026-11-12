@@ -526,8 +526,89 @@ class ViewerContext:
         if ext_db:
             try:
                 conn.execute("ATTACH DATABASE ? AS ext", (str(ext_db),))
+                self._enrich_ios_contacts_from_ext(conn)
             except sqlite3.OperationalError:
                 pass
+
+    def _enrich_ios_contacts_from_ext(self, conn: sqlite3.Connection) -> None:
+        """Merge LID/PN/push-name mappings from ExtChatDatabase.sqlite contact_metadata."""
+        has_cm = bool(
+            conn.execute(
+                "SELECT 1 FROM ext.sqlite_master WHERE type='table' AND name='contact_metadata'"
+            ).fetchone()
+        )
+        if not has_cm:
+            return
+        cm_cols = {
+            r[1] for r in conn.execute("PRAGMA ext.table_info(contact_metadata)").fetchall()
+        }
+        if not {"contact_lid", "contact_pn"}.issubset(cm_cols):
+            return
+        push_expr = "NULLIF(contact_push_name, '')" if "contact_push_name" in cm_cols else "NULL"
+        conn.execute(
+            f"""
+            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+            SELECT
+                CASE
+                    WHEN INSTR(contact_lid, '@') > 0 THEN contact_lid
+                    ELSE contact_lid || '@lid'
+                END,
+                {push_expr},
+                CASE
+                    WHEN contact_pn IS NOT NULL AND contact_pn != ''
+                    THEN CASE
+                        WHEN INSTR(contact_pn, '@') > 0
+                        THEN SUBSTR(contact_pn, 1, INSTR(contact_pn, '@') - 1)
+                        ELSE contact_pn
+                    END
+                END
+            FROM ext.contact_metadata
+            WHERE contact_lid IS NOT NULL AND contact_lid != ''
+            ON CONFLICT(jid) DO UPDATE SET
+                full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO _ios_contacts (jid, full_name, phone_number)
+            SELECT
+                CASE
+                    WHEN INSTR(contact_pn, '@') > 0 THEN contact_pn
+                    ELSE contact_pn || '@s.whatsapp.net'
+                END,
+                {push_expr},
+                CASE
+                    WHEN INSTR(contact_pn, '@') > 0
+                    THEN SUBSTR(contact_pn, 1, INSTR(contact_pn, '@') - 1)
+                    ELSE contact_pn
+                END
+            FROM ext.contact_metadata
+            WHERE contact_pn IS NOT NULL AND contact_pn != ''
+            ON CONFLICT(jid) DO UPDATE SET
+                full_name = COALESCE(NULLIF(_ios_contacts.full_name, ''), excluded.full_name),
+                phone_number = COALESCE(_ios_contacts.phone_number, excluded.phone_number)
+            """
+        )
+        # Propagate existing ContactsV2 full_name from PN row to newly linked LID row
+        conn.execute(
+            """
+            UPDATE _ios_contacts
+            SET full_name = (
+                SELECT p.full_name FROM _ios_contacts p
+                WHERE p.jid = (_ios_contacts.phone_number || '@s.whatsapp.net')
+                  AND p.full_name IS NOT NULL AND p.full_name != '' AND p.full_name NOT LIKE '+%'
+                LIMIT 1
+            )
+            WHERE (full_name IS NULL OR full_name = '' OR full_name LIKE '+%')
+              AND phone_number IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM _ios_contacts p
+                  WHERE p.jid = (_ios_contacts.phone_number || '@s.whatsapp.net')
+                    AND p.full_name IS NOT NULL AND p.full_name != '' AND p.full_name NOT LIKE '+%'
+              )
+            """
+        )
 
     def get_preserved(self) -> sqlite3.Connection | None:
         """Return thread-local read-only connection to preserved_messages.db, if present."""

@@ -14367,7 +14367,7 @@ class TestReviewFixRegressions:
         app.config["TESTING"] = True
         with sqlite3.connect(str(arch_path)) as ac:
             uv = ac.execute("PRAGMA user_version").fetchone()[0]
-            assert uv == 4
+            assert uv == 5
             cnt = ac.execute("SELECT COUNT(*) FROM recent_messages").fetchone()[0]
             assert cnt == 0
 

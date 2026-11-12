@@ -16,6 +16,7 @@ from ..hydration import (
     _format_service_rows,
     _hydrate_link_preview_rows,
     _hydrate_live_photos,
+    _hydrate_mentions,
     _hydrate_poll_rows,
     _hydrate_quoted_rows,
     _ios_reactions,
@@ -261,6 +262,7 @@ def api_messages():
                         )
                         if pres_rows:
                             rows = _merge_messages(rows, pres_rows, True, limit)
+                    _hydrate_mentions(rows, ctx.source_type, ctx.get_wa(), pres)
                     _resolve_quoted_msg_ids(rows, ctx.source_type, ctx.get_wa(), pres)
                     live_calls, pres_calls = _fetch_chat_calls_for_window(
                         ctx.source_type,
@@ -424,16 +426,18 @@ def api_messages():
         row.setdefault("is_starred", 0)
         row.setdefault("is_pinned", 0)
 
+    pres = ctx.get_preserved()
+    _hydrate_mentions(rows, ctx.source_type, conn, pres)
     _hydrate_poll_rows(rows, ctx.source_type, conn)
     _hydrate_quoted_rows(rows, ctx.source_type, conn)
     _hydrate_link_preview_rows(rows, ctx.source_type)
     _hydrate_live_photos(rows, ctx.source_type, conn)
-    pres = ctx.get_preserved()
     if pres is not None:
         pres_rows = _query_preserved_messages(
             pres, chat_id, chat_type, b_val, a_val, inclusive, inclusive, limit
         )
         if pres_rows:
+            _hydrate_mentions(pres_rows, ctx.source_type, conn, pres)
             descending = a_val is None
             rows = _merge_messages(rows, pres_rows, descending, limit)
     _resolve_quoted_msg_ids(rows, ctx.source_type, conn, pres)
@@ -691,11 +695,12 @@ def api_messages_at():
         row.pop("member_jid", None)
         row.setdefault("is_starred", 0)
         row.setdefault("is_pinned", 0)
+    pres = ctx.get_preserved()
+    _hydrate_mentions(combined, ctx.source_type, conn, pres)
     _hydrate_poll_rows(combined, ctx.source_type, conn)
     _hydrate_quoted_rows(combined, ctx.source_type, conn)
     _hydrate_link_preview_rows(combined, ctx.source_type)
     _hydrate_live_photos(combined, ctx.source_type, conn)
-    pres = ctx.get_preserved()
     live_before = [r for r in combined if r["timestamp_ms"] <= ts]
     live_after = [r for r in combined if r["timestamp_ms"] > ts]
     if pres is not None:
@@ -705,6 +710,10 @@ def api_messages_at():
         pres_after = _query_preserved_messages(
             pres, chat_id, chat_type, None, ts, False, False, half
         )
+        if pres_before:
+            _hydrate_mentions(pres_before, ctx.source_type, conn, pres)
+        if pres_after:
+            _hydrate_mentions(pres_after, ctx.source_type, conn, pres)
         merged_before = _merge_messages(live_before, pres_before, True, half)
         merged_after = _merge_messages(live_after, pres_after, False, half)
     else:

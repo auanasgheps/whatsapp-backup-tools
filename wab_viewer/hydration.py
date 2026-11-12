@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .protobuf import (
     _extract_ios_link_description,
+    _extract_ios_mentions,
     _extract_ios_quoted_info,
     _extract_ios_reactions,
     _parse_ios_poll_blob,
@@ -986,6 +987,560 @@ def _hydrate_quoted_rows(
                     row["quoted_sender"] = f"+{phone}" if phone.isdigit() else phone
 
 
+_MENTION_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])@(\d{7,15})(?!\d)")
+
+
+def _split_jid_parts(jid_str: str) -> tuple[str, str, str]:
+    """Return (clean_user, server, canonical_jid) with any :device suffix stripped."""
+    raw = (jid_str or "").strip()
+    user_part, _, server = raw.partition("@")
+    clean_user = user_part.split(":")[0]
+    canonical = f"{clean_user}@{server}" if server else clean_user
+    return clean_user, server, canonical
+
+
+def _is_masked_lid_name(name: str | None) -> bool:
+    """Return True if a lid_display_name value is privacy-masked with bullet chars."""
+    if not name:
+        return True
+    s = name.strip()
+    return not s or "\u2219" in s or "∙" in s or "•" in s
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str, schema: str) -> bool:
+    """Check whether a table exists in the given SQLite schema."""
+    try:
+        row = conn.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return bool(row)
+    except sqlite3.OperationalError:
+        return False
+
+
+def _load_android_contact_chats(
+    wa_conn: sqlite3.Connection, pres_conn: sqlite3.Connection | None
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Map Android user/phone/LID tokens to navigable 1-to-1 contact chat_id."""
+    token_to_chat: dict[str, str] = {}
+    if (
+        wa_conn is not None
+        and _table_exists(wa_conn, "chat", "main")
+        and _table_exists(wa_conn, "jid", "main")
+    ):
+        has_jmr = _table_exists(wa_conn, "_jid_map_resolved", "temp")
+        jmr_join = (
+            "LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = c.jid_row_id "
+            "LEFT JOIN jid j2 ON j2._id = jm.jid_row_id "
+            if has_jmr
+            else ""
+        )
+        j2_user_col = "j2.user" if has_jmr else "NULL"
+        chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+        hidden_cond = "COALESCE(c.hidden, 0) = 0" if "hidden" in chat_cols else "1=1"
+        jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+        server_cond = (
+            "COALESCE(j.server, '') NOT IN ('g.us', 'broadcast', 'newsletter', 'status_me')"
+            if "server" in jid_cols
+            else "1=1"
+        )
+        raw_cond = (
+            "COALESCE(j.raw_string, '') NOT LIKE '%@g.us' "
+            "AND COALESCE(j.raw_string, '') NOT LIKE '%@broadcast' "
+            "AND COALESCE(j.raw_string, '') NOT LIKE '%@newsletter'"
+            if "raw_string" in jid_cols
+            else "1=1"
+        )
+        sql = f"""
+            SELECT c._id, j.user AS j_user, {j2_user_col} AS j2_user
+            FROM chat c
+            JOIN jid j ON j._id = c.jid_row_id
+            {jmr_join}
+            WHERE c.subject IS NULL
+              AND {hidden_cond}
+              AND {server_cond}
+              AND {raw_cond}
+        """
+        for r in wa_conn.execute(sql).fetchall():
+            j_clean = (r[1] or "").split(":")[0]
+            j2_clean = (r[2] or "").split(":")[0]
+            cid = j2_clean or j_clean or str(r[0])
+            if j_clean:
+                token_to_chat.setdefault(j_clean, cid)
+            if j2_clean:
+                token_to_chat.setdefault(j2_clean, cid)
+    if pres_conn is not None and _table_exists(pres_conn, "preserved_chats", "main"):
+        for r in pres_conn.execute(
+            "SELECT chat_id FROM preserved_chats WHERE chat_type = 'contact'"
+        ).fetchall():
+            cid = str(r[0])
+            token_to_chat.setdefault(cid, cid)
+    return token_to_chat, {}
+
+
+def _load_ios_contact_chats(
+    wa_conn: sqlite3.Connection, pres_conn: sqlite3.Connection | None
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Map iOS JIDs and phone/LID tokens to navigable 1-to-1 ZWACHATSESSION Z_PK."""
+    jid_to_chat: dict[str, str] = {}
+    token_to_chat: dict[str, str] = {}
+    if wa_conn is not None and _table_exists(wa_conn, "ZWACHATSESSION", "main"):
+        cs_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        hidden_cond = "COALESCE(ZHIDDEN, 0) = 0" if "ZHIDDEN" in cs_cols else "1=1"
+        sess_cond = "COALESCE(ZSESSIONTYPE, 0) = 0" if "ZSESSIONTYPE" in cs_cols else "1=1"
+        ident_col = "ZCONTACTIDENTIFIER" if "ZCONTACTIDENTIFIER" in cs_cols else "NULL"
+        for r in wa_conn.execute(
+            f"""
+            SELECT Z_PK, ZCONTACTJID, {ident_col}
+            FROM ZWACHATSESSION
+            WHERE {hidden_cond}
+              AND {sess_cond}
+              AND ZCONTACTJID IS NOT NULL
+              AND ZCONTACTJID NOT LIKE '%@g.us'
+              AND ZCONTACTJID NOT LIKE '%@broadcast'
+              AND ZCONTACTJID NOT LIKE '%@newsletter'
+              AND ZCONTACTJID != '0@s.whatsapp.net'
+            """
+        ).fetchall():
+            cid = str(r[0])
+            for raw_val in (r[1], r[2]):
+                if not raw_val:
+                    continue
+                cu, _, canon = _split_jid_parts(str(raw_val))
+                if canon:
+                    jid_to_chat.setdefault(canon, cid)
+                if cu:
+                    token_to_chat.setdefault(cu, cid)
+    if pres_conn is not None and _table_exists(pres_conn, "preserved_chats", "main"):
+        for r in pres_conn.execute(
+            "SELECT chat_id FROM preserved_chats WHERE chat_type = 'contact'"
+        ).fetchall():
+            cid = str(r[0])
+            token_to_chat.setdefault(cid, cid)
+    return token_to_chat, jid_to_chat
+
+
+def _resolve_android_mention_tokens(
+    wa_conn: sqlite3.Connection,
+    msg_ids: list[int],
+    legacy_tokens: set[str],
+    token_to_chat: dict[str, str],
+) -> tuple[dict[int, dict[str, dict]], dict[str, dict]]:
+    """Resolve Android mention JIDs from message_mentions/message_quoted_mentions and legacy tokens."""
+    per_msg: dict[int, dict[str, dict]] = {}
+    legacy_resolved: dict[str, dict] = {}
+    if wa_conn is None or not _table_exists(wa_conn, "jid", "main"):
+        return per_msg, legacy_resolved
+
+    has_jmr = _table_exists(wa_conn, "_jid_map_resolved", "temp")
+    has_cr = _table_exists(wa_conn, "_contacts_resolved", "temp")
+    has_ldn = _table_exists(wa_conn, "lid_display_name", "main")
+    jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+    has_server = "server" in jid_cols
+    has_raw = "raw_string" in jid_cols
+
+    jmr_join = (
+        "LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = j._id "
+        "LEFT JOIN jid j2 ON j2._id = jm.jid_row_id "
+        if has_jmr
+        else ""
+    )
+    cr_join = (
+        "LEFT JOIN _contacts_resolved con ON con.clean_number = "
+        + (
+            "CASE WHEN INSTR(COALESCE(j2.user, j.user), ':') > 0 "
+            "THEN SUBSTR(COALESCE(j2.user, j.user), 1, INSTR(COALESCE(j2.user, j.user), ':') - 1) "
+            "ELSE COALESCE(j2.user, j.user) END "
+        )
+        if has_cr
+        else ""
+    )
+    ldn_join = "LEFT JOIN lid_display_name ldn ON ldn.lid_row_id = j._id " if has_ldn else ""
+
+    j_server_expr = "j.server" if has_server else "''"
+    j_raw_expr = "j.raw_string" if has_raw else "''"
+    j2_user_expr = "j2.user" if has_jmr else "NULL"
+    j2_raw_expr = ("j2.raw_string" if has_raw else "''") if has_jmr else "''"
+    con_name_expr = "con.display_name, con.folder" if has_cr else "NULL, NULL"
+    ldn_name_expr = "ldn.display_name" if has_ldn else "NULL"
+
+    def _build_entry(
+        j_user: str | None,
+        j_server: str | None,
+        j_raw: str | None,
+        j2_user: str | None,
+        j2_raw: str | None,
+        con_name: str | None,
+        con_folder: str | None,
+        ldn_name: str | None,
+    ) -> tuple[str, dict] | None:
+        cu = (j_user or "").split(":")[0]
+        if not cu:
+            return None
+        c2 = (j2_user or "").split(":")[0]
+        is_self = (j_raw == "lid_me") or (cu == "me") or (j2_raw == "lid_me") or (c2 == "me")
+        is_lid = (j_server == "lid") or (j_raw or "").endswith("@lid")
+        if is_self:
+            name = "You"
+        elif con_name:
+            name = con_name
+        elif con_folder:
+            name = con_folder
+        elif ldn_name and not _is_masked_lid_name(ldn_name):
+            name = ldn_name.strip()
+        elif c2:
+            name = f"+{c2}"
+        elif not is_lid and cu.isdigit():
+            name = f"+{cu}"
+        else:
+            name = f"{cu} (Unknown)"
+        chat_id = None
+        if not is_self:
+            chat_id = token_to_chat.get(cu) or (token_to_chat.get(c2) if c2 else None)
+        return cu, {
+            "name": name,
+            "chat_id": chat_id,
+            "chat_type": "contact" if chat_id else None,
+            "is_self": is_self,
+        }
+
+    if msg_ids:
+        for tbl in ("message_mentions", "message_quoted_mentions"):
+            if not _table_exists(wa_conn, tbl, "main"):
+                continue
+            for i in range(0, len(msg_ids), 400):
+                chunk = msg_ids[i : i + 400]
+                ph = ",".join("?" * len(chunk))
+                q_rows = wa_conn.execute(
+                    f"""
+                    SELECT mm.message_row_id, j.user, {j_server_expr}, {j_raw_expr},
+                           {j2_user_expr}, {j2_raw_expr}, {con_name_expr}, {ldn_name_expr}
+                    FROM {tbl} mm
+                    JOIN jid j ON j._id = mm.jid_row_id
+                    {jmr_join}
+                    {cr_join}
+                    {ldn_join}
+                    WHERE mm.message_row_id IN ({ph})
+                    """,
+                    chunk,
+                ).fetchall()
+                for r in q_rows:
+                    built = _build_entry(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8])
+                    if built is not None:
+                        tok, entry = built
+                        per_msg.setdefault(int(r[0]), {})[tok] = entry
+
+    if legacy_tokens:
+        tok_list = list(legacy_tokens)
+        for i in range(0, len(tok_list), 400):
+            chunk = tok_list[i : i + 400]
+            ph = ",".join("?" * len(chunk))
+            q_rows = wa_conn.execute(
+                f"""
+                SELECT j.user, {j_server_expr}, {j_raw_expr},
+                       {j2_user_expr}, {j2_raw_expr}, {con_name_expr}, {ldn_name_expr}
+                FROM jid j
+                {jmr_join}
+                {cr_join}
+                {ldn_join}
+                WHERE j.user IN ({ph})
+                """,
+                chunk,
+            ).fetchall()
+            for r in q_rows:
+                built = _build_entry(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7])
+                if built is not None:
+                    tok, entry = built
+                    # Conservative lookup: only accept if resolved to a real identity
+                    if not entry["name"].endswith("(Unknown)"):
+                        legacy_resolved[tok] = entry
+
+    return per_msg, legacy_resolved
+
+
+def _resolve_ios_mention_jids(
+    wa_conn: sqlite3.Connection,
+    jids: set[str],
+    legacy_tokens: set[str],
+    token_to_chat: dict[str, str],
+    jid_to_chat: dict[str, str],
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Resolve iOS mentioned JIDs and legacy tokens via _ios_contacts and push-name tables."""
+    jid_resolved: dict[str, dict] = {}
+    legacy_resolved: dict[str, dict] = {}
+    if wa_conn is None:
+        return jid_resolved, legacy_resolved
+
+    has_ic = _table_exists(wa_conn, "_ios_contacts", "temp")
+    has_pp = _table_exists(wa_conn, "ZWAPROFILEPUSHNAME", "main")
+    has_cs = _table_exists(wa_conn, "ZWACHATSESSION", "main")
+    has_ext_cm = _table_exists(wa_conn, "contact_metadata", "ext")
+    has_arch_contacts = _table_exists(wa_conn, "contacts", "arch")
+
+    ic_map: dict[str, tuple[str | None, str | None]] = {}
+    if has_ic:
+        for r in wa_conn.execute(
+            "SELECT jid, full_name, phone_number FROM _ios_contacts"
+        ).fetchall():
+            ic_map[str(r[0])] = (r[1], r[2])
+
+    arch_map: dict[str, str] = {}
+    if has_arch_contacts:
+        for r in wa_conn.execute(
+            "SELECT number, display_name FROM arch.contacts WHERE number IS NOT NULL AND display_name IS NOT NULL AND display_name != ''"
+        ).fetchall():
+            arch_map[str(r[0]).lstrip("+")] = str(r[1])
+
+    pp_map: dict[str, str] = {}
+    if has_pp:
+        for r in wa_conn.execute(
+            "SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZPUSHNAME IS NOT NULL AND ZPUSHNAME != ''"
+        ).fetchall():
+            pp_map[str(r[0])] = str(r[1])
+
+    cs_map: dict[str, str] = {}
+    if has_cs:
+        for r in wa_conn.execute(
+            "SELECT ZCONTACTJID, ZPARTNERNAME FROM ZWACHATSESSION WHERE ZCONTACTJID IS NOT NULL AND ZPARTNERNAME IS NOT NULL AND ZPARTNERNAME != ''"
+        ).fetchall():
+            cs_map[str(r[0])] = str(r[1])
+
+    ext_push_map: dict[str, str] = {}
+    ext_pn_map: dict[str, str] = {}
+    if has_ext_cm:
+        cm_cols = {
+            r[1] for r in wa_conn.execute("PRAGMA ext.table_info(contact_metadata)").fetchall()
+        }
+        if "contact_lid" in cm_cols:
+            p_col = "contact_push_name" if "contact_push_name" in cm_cols else "NULL"
+            pn_col = "contact_pn" if "contact_pn" in cm_cols else "NULL"
+            for r in wa_conn.execute(
+                f"SELECT contact_lid, {p_col}, {pn_col} FROM ext.contact_metadata WHERE contact_lid IS NOT NULL"
+            ).fetchall():
+                lid_cu, _, lid_canon = _split_jid_parts(str(r[0]))
+                if "@" not in str(r[0]):
+                    lid_canon = f"{lid_cu}@lid"
+                if r[1]:
+                    ext_push_map[lid_canon] = str(r[1])
+                if r[2]:
+                    pn_cu, _, _ = _split_jid_parts(str(r[2]))
+                    if pn_cu:
+                        ext_pn_map[lid_canon] = pn_cu
+
+    def _resolve_one(canon_jid: str) -> tuple[str, dict] | None:
+        cu, server, _ = _split_jid_parts(canon_jid)
+        if not cu:
+            return None
+        full_name, phone_num = ic_map.get(canon_jid, (None, None))
+        if not phone_num:
+            phone_num = ext_pn_map.get(canon_jid)
+        if not phone_num and server != "lid" and cu.isdigit():
+            phone_num = cu
+        pn_jid = f"{phone_num}@s.whatsapp.net" if phone_num else None
+        if (not full_name or full_name.startswith("+")) and pn_jid and pn_jid in ic_map:
+            pn_full, _ = ic_map[pn_jid]
+            if pn_full:
+                full_name = pn_full
+        saved_arch = (arch_map.get(phone_num) if phone_num else None) or arch_map.get(cu)
+        saved_cs = cs_map.get(canon_jid) or (cs_map.get(pn_jid) if pn_jid else None)
+        ext_push = ext_push_map.get(canon_jid)
+        if full_name and ext_push and full_name == ext_push:
+            full_name = saved_arch or saved_cs
+        elif not full_name or full_name.startswith("+"):
+            full_name = saved_arch or saved_cs or full_name
+
+        is_self = full_name == "You"
+        if is_self:
+            name = "You"
+        elif full_name and not full_name.startswith("+"):
+            name = full_name
+        else:
+            push = (
+                pp_map.get(canon_jid)
+                or (pp_map.get(pn_jid) if pn_jid else None)
+                or ext_push_map.get(canon_jid)
+            )
+            if push:
+                name = push
+            elif phone_num:
+                name = f"+{phone_num}"
+            else:
+                name = f"{cu} (Unknown)"
+
+        chat_id = None
+        if not is_self:
+            chat_id = (
+                jid_to_chat.get(canon_jid)
+                or (jid_to_chat.get(pn_jid) if pn_jid else None)
+                or token_to_chat.get(cu)
+                or (token_to_chat.get(phone_num) if phone_num else None)
+            )
+        return cu, {
+            "name": name,
+            "chat_id": chat_id,
+            "chat_type": "contact" if chat_id else None,
+            "is_self": is_self,
+        }
+
+    for jid_str in jids:
+        _, _, canon = _split_jid_parts(jid_str)
+        res = _resolve_one(canon)
+        if res is not None:
+            jid_resolved[canon] = res[1]
+
+    for tok in legacy_tokens:
+        for cand_jid in (f"{tok}@lid", f"{tok}@s.whatsapp.net"):
+            if (
+                cand_jid in ic_map
+                or cand_jid in pp_map
+                or cand_jid in ext_push_map
+                or cand_jid in cs_map
+            ):
+                res = _resolve_one(cand_jid)
+                if res is not None and not res[1]["name"].endswith("(Unknown)"):
+                    legacy_resolved[tok] = res[1]
+                    break
+
+    return jid_resolved, legacy_resolved
+
+
+def _hydrate_mentions(
+    rows: list[dict],
+    source_type: str | None,
+    wa_conn: sqlite3.Connection | None,
+    pres_conn: sqlite3.Connection | None,
+) -> None:
+    """Resolve @mention tokens on message rows and attach chat_id links when a 1-to-1 chat exists."""
+    if not rows or source_type not in ("android", "ios"):
+        return
+
+    if source_type == "android":
+        token_to_chat, jid_to_chat = _load_android_contact_chats(wa_conn, pres_conn)
+    else:
+        token_to_chat, jid_to_chat = _load_ios_contact_chats(wa_conn, pres_conn)
+
+    live_android_ids: list[int] = []
+    ios_raw_jids_by_idx: dict[int, list[str]] = {}
+    all_ios_jids: set[str] = set()
+    legacy_tokens: set[str] = set()
+
+    for idx, row in enumerate(rows):
+        raw_mentions = row.get("mentions")
+        if isinstance(raw_mentions, str) and raw_mentions.strip():
+            try:
+                parsed = json.loads(raw_mentions)
+                if isinstance(parsed, dict):
+                    row["mentions"] = parsed
+                else:
+                    row["mentions"] = None
+            except ValueError:
+                row["mentions"] = None
+        if isinstance(row.get("mentions"), dict):
+            # Refresh chat_id against current chats
+            for tok, info in row["mentions"].items():
+                if not isinstance(info, dict):
+                    continue
+                if info.get("is_self"):
+                    info["chat_id"] = None
+                    info["chat_type"] = None
+                    continue
+                cid = (
+                    token_to_chat.get(tok)
+                    or jid_to_chat.get(f"{tok}@lid")
+                    or jid_to_chat.get(f"{tok}@s.whatsapp.net")
+                )
+                info["chat_id"] = cid
+                info["chat_type"] = "contact" if cid else None
+            continue
+
+        if row.get("is_preserved"):
+            combined = " ".join(
+                str(row.get(k) or "")
+                for k in ("text_body", "text", "quoted_text", "original_text_body")
+            )
+            for tok in _MENTION_TOKEN_RE.findall(combined):
+                legacy_tokens.add(tok)
+            continue
+
+        if source_type == "android":
+            mid = row.get("msg_id") if row.get("msg_id") is not None else row.get("id")
+            if isinstance(mid, int) and mid > 0:
+                live_android_ids.append(mid)
+        else:
+            raw_meta = row.get("_raw_metadata")
+            if raw_meta:
+                extracted = _extract_ios_mentions(raw_meta)
+                if extracted:
+                    ios_raw_jids_by_idx[idx] = extracted
+                    for j in extracted:
+                        _, _, canon = _split_jid_parts(j)
+                        if canon:
+                            all_ios_jids.add(canon)
+
+    if source_type == "android":
+        per_msg, legacy_resolved = _resolve_android_mention_tokens(
+            wa_conn, live_android_ids, legacy_tokens, token_to_chat
+        )
+        for row in rows:
+            if isinstance(row.get("mentions"), dict):
+                continue
+            if row.get("is_preserved"):
+                combined = " ".join(
+                    str(row.get(k) or "")
+                    for k in ("text_body", "text", "quoted_text", "original_text_body")
+                )
+                found = {
+                    tok: dict(legacy_resolved[tok])
+                    for tok in _MENTION_TOKEN_RE.findall(combined)
+                    if tok in legacy_resolved
+                }
+                if found:
+                    row["mentions"] = found
+                else:
+                    row.pop("mentions", None)
+            else:
+                mid = row.get("msg_id") if row.get("msg_id") is not None else row.get("id")
+                m_map = per_msg.get(int(mid)) if isinstance(mid, int) else None
+                if m_map:
+                    row["mentions"] = m_map
+                else:
+                    row.pop("mentions", None)
+    else:
+        jid_resolved, legacy_resolved = _resolve_ios_mention_jids(
+            wa_conn, all_ios_jids, legacy_tokens, token_to_chat, jid_to_chat
+        )
+        for idx, row in enumerate(rows):
+            if isinstance(row.get("mentions"), dict):
+                continue
+            if row.get("is_preserved"):
+                combined = " ".join(
+                    str(row.get(k) or "")
+                    for k in ("text_body", "text", "quoted_text", "original_text_body")
+                )
+                found = {
+                    tok: dict(legacy_resolved[tok])
+                    for tok in _MENTION_TOKEN_RE.findall(combined)
+                    if tok in legacy_resolved
+                }
+                if found:
+                    row["mentions"] = found
+                else:
+                    row.pop("mentions", None)
+            elif idx in ios_raw_jids_by_idx:
+                m_map: dict[str, dict] = {}
+                for jid_str in ios_raw_jids_by_idx[idx]:
+                    cu, _, canon = _split_jid_parts(jid_str)
+                    if cu and canon in jid_resolved:
+                        m_map[cu] = dict(jid_resolved[canon])
+                if m_map:
+                    row["mentions"] = m_map
+                else:
+                    row.pop("mentions", None)
+            else:
+                row.pop("mentions", None)
+
+
 def _hydrate_link_preview_rows(rows: list[dict], source_type: str) -> None:
     """Hydrate link preview fields across Android and iOS rows."""
     if not rows:
@@ -1242,6 +1797,15 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
                     ("is_starred", lambda r: r["is_starred"] if "is_starred" in keys else 0),
                     ("is_pinned", lambda r: r["is_pinned"] if "is_pinned" in keys else 0),
                 ]
+            )
+        if "mentions" in cur_cols:
+            col_specs.append(
+                (
+                    "mentions",
+                    lambda r: (
+                        json.dumps(r["mentions"], ensure_ascii=False) if r.get("mentions") else None
+                    ),
+                )
             )
         insert_cols = [c for c, _ in col_specs]
         update_cols = [c for c in insert_cols if c not in ("chat_id", "chat_type", "msg_id")]
