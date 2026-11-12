@@ -1744,6 +1744,25 @@
     return starIcon;
   }
 
+  function getSenderColorClass(senderName) {
+    const key = (senderName || '').trim();
+    if (!key || key === 'You') return '';
+    let h = 2166136261;
+    for (let i = 0; i < key.length; i++) {
+      h ^= key.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return 'sender-color-' + ((h >>> 0) % 10);
+  }
+
+  function createSenderEl(senderName) {
+    const senderEl = document.createElement('div');
+    const colorCls = (currentChat && currentChat.type === 'group') ? getSenderColorClass(senderName) : '';
+    senderEl.className = colorCls ? ('msg-sender ' + colorCls) : 'msg-sender';
+    senderEl.textContent = senderName || '';
+    return senderEl;
+  }
+
   function renderBubble(unit) {
     if (unit.type === 'group') {
       const group = unit.members;
@@ -1758,10 +1777,7 @@
       bubble.className = 'msg-bubble has-media';
 
       if (!msg.from_me && msg.sender) {
-        const senderEl = document.createElement('div');
-        senderEl.className = 'msg-sender';
-        senderEl.textContent = msg.sender;
-        bubble.appendChild(senderEl);
+        bubble.appendChild(createSenderEl(msg.sender));
       }
 
       bubble.appendChild(renderMediaGrid(group));
@@ -1861,19 +1877,19 @@
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
 
-    const senderEl = document.createElement('div');
-    senderEl.className = 'msg-sender';
-    senderEl.textContent = msg.sender || '';
-    if (msg.sender && !msg.from_me && currentChat && currentChat.type === 'group') bubble.appendChild(senderEl);
+    if (msg.sender && !msg.from_me && currentChat && currentChat.type === 'group') {
+      bubble.appendChild(createSenderEl(msg.sender));
+    }
 
     if ((msg.quoted_text || msg.quoted_stanza_id || msg.quoted_msg_id) && msg.media_type !== 'deleted') {
       const quote = document.createElement('div');
-      quote.className = 'msg-quote';
+      const qs = msg.quoted_sender;
+      const qColorCls = (currentChat && currentChat.type === 'group') ? getSenderColorClass(qs) : '';
+      quote.className = qColorCls ? ('msg-quote ' + qColorCls) : 'msg-quote';
       const qContent = document.createElement('div');
       qContent.className = 'msg-quote-content';
       const qSender = document.createElement('div');
       qSender.className = 'msg-quote-sender';
-      const qs = msg.quoted_sender;
       qSender.textContent = qs || (currentChat && currentChat.type === 'contact' ? currentChat.display_name : '');
       const qText = document.createElement('div');
       qText.className = 'msg-quote-text';
