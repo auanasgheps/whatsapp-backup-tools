@@ -3248,3 +3248,146 @@ def test_group_sender_name_colors_and_theme_adaptation(
         browser.capture_screenshot(screenshot_dir / "group_sender_colors_light.png", 5.0)
     finally:
         browser.evaluate(f"document.documentElement.dataset.theme = {prev_theme!r}", 5.0)
+
+
+def test_round_video_note_player_and_exclusion_from_grouping(
+    browser: CDPSession, screenshot_dir: Path
+) -> None:
+    """Verify PTV video notes render as circular players with progress rings and are excluded from 2x2 grouping."""
+    open_group_chat_in_browser(browser, 15.0)
+
+    setup_mock = browser.evaluate(
+        """
+        (() => {
+            window._testOriginalFetch = window.fetch;
+            const baseTs = 1775000000000;
+            const fakeMsgs = [
+                {
+                    msg_id: 9001,
+                    timestamp_ms: baseTs,
+                    from_me: 0,
+                    sender: 'Alice Smith',
+                    media_type: 'video',
+                    raw_msg_type: 28,
+                    media_duration: 14,
+                    archive_path: 'Media/WhatsApp Video Notes/VID-1.mp4',
+                    text_body: '',
+                },
+                {
+                    msg_id: 9002,
+                    timestamp_ms: baseTs + 2000,
+                    from_me: 0,
+                    sender: 'Alice Smith',
+                    media_type: 'video',
+                    raw_msg_type: 28,
+                    media_duration: 7,
+                    archive_path: 'Media/WhatsApp Video Notes/VID-2.mp4',
+                    text_body: '',
+                },
+                {
+                    msg_id: 9003,
+                    timestamp_ms: baseTs + 4000,
+                    from_me: 0,
+                    sender: 'Alice Smith',
+                    media_type: 'video',
+                    raw_msg_type: 54,
+                    media_duration: 25,
+                    archive_path: 'Media/WhatsApp Video Notes/VID-3.mp4',
+                    text_body: '',
+                },
+                {
+                    msg_id: 9004,
+                    timestamp_ms: baseTs + 6000,
+                    from_me: 0,
+                    sender: 'Alice Smith',
+                    media_type: 'video',
+                    raw_msg_type: 28,
+                    media_duration: 62,
+                    archive_path: 'Media/WhatsApp Video Notes/VID-4.mp4',
+                    text_body: '',
+                },
+                {
+                    msg_id: 9005,
+                    timestamp_ms: baseTs + 8000,
+                    from_me: 1,
+                    sender: '',
+                    media_type: 'video',
+                    raw_msg_type: 54,
+                    media_duration: 9,
+                    media_size: 128000,
+                    archive_path: null,
+                    text_body: '',
+                },
+            ];
+            window.fetch = async (url, options) => {
+                const urlStr = String(url);
+                if (urlStr.includes('/api/messages?') && !urlStr.includes('before=') && !urlStr.includes('after=')) {
+                    return new Response(JSON.stringify(fakeMsgs), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                    });
+                }
+                return window._testOriginalFetch(url, options);
+            };
+            return true;
+        })()
+        """,
+        5.0,
+    )
+    assert setup_mock is True
+
+    try:
+        res = browser.evaluate(
+            """
+            (async () => {
+                const refreshBtn = document.getElementById('scroll-to-bottom');
+                const firstChat = document.querySelector('#chat-list .chat-item');
+                if (firstChat) firstChat.click();
+                for (let i = 0; i < 60; i++) {
+                    await new Promise(r => setTimeout(r, 50));
+                    if (document.querySelectorAll('.msg-video-note').length === 4) break;
+                }
+                const notes = Array.from(document.querySelectorAll('.msg-video-note'));
+                const missing = document.querySelector('.media-missing-card.is-video-note');
+                const grids = document.querySelectorAll('.media-grid');
+                const firstRect = notes[0] ? notes[0].getBoundingClientRect() : null;
+                const firstStyle = notes[0] ? getComputedStyle(notes[0]) : null;
+                return {
+                    noteCount: notes.length,
+                    gridCount: grids.length,
+                    durations: notes.map(n => n.querySelector('.video-note-duration')?.textContent?.trim()),
+                    hasRing: notes.every(n => !!n.querySelector('.video-note-ring-progress')),
+                    hasPlayBtn: notes.every(n => !!n.querySelector('.video-note-play-btn')),
+                    hasActions: notes.every(n => n.querySelectorAll('.video-note-action-btn').length === 2),
+                    isSquare: firstRect ? Math.abs(firstRect.width - firstRect.height) <= 2 : false,
+                    borderRadius: firstStyle ? firstStyle.borderRadius : '',
+                    missingLabel: missing ? missing.querySelector('.media-missing-label')?.textContent?.trim() : '',
+                    missingMeta: missing ? missing.querySelector('.media-missing-meta')?.textContent?.trim() : '',
+                };
+            })()
+            """,
+            10.0,
+        )
+        assert res["noteCount"] == 4
+        assert res["gridCount"] == 0
+        assert res["durations"] == ["0:14", "0:07", "0:25", "1:02"]
+        assert res["hasRing"] is True
+        assert res["hasPlayBtn"] is True
+        assert res["hasActions"] is True
+        assert res["isSquare"] is True
+        assert res["borderRadius"] == "50%"
+        assert res["missingLabel"] == "Video message"
+        assert res["missingMeta"] == "125.0 KB · 0:09"
+        browser.capture_screenshot(screenshot_dir / "round_video_notes.png", 5.0)
+    finally:
+        browser.evaluate(
+            """
+            (() => {
+                if (window._testOriginalFetch) {
+                    window.fetch = window._testOriginalFetch;
+                    delete window._testOriginalFetch;
+                }
+            })()
+            """,
+            5.0,
+        )
