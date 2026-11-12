@@ -31,6 +31,17 @@
       --media-w-port: 260px;
       --media-grid-size: var(--media-w-land);
       --media-stage-bg: rgba(0, 0, 0, 0.24);
+      /* Group participant name palette (WhatsApp Android high-contrast 10-color) */
+      --sender-color-0: #ff8fb4;
+      --sender-color-1: #73caf0;
+      --sender-color-2: #ffdb94;
+      --sender-color-3: #bcabff;
+      --sender-color-4: #6cd1c6;
+      --sender-color-5: #fdac91;
+      --sender-color-6: #76b8fe;
+      --sender-color-7: #e0b69c;
+      --sender-color-8: #fa99a4;
+      --sender-color-9: #4bdf76;
     }
 
     [data-font-size="small"] {
@@ -78,6 +89,16 @@
       --call-out-bg: rgba(17, 27, 33, 0.08);
       --call-pres-bg: #fef3c7;
       --media-stage-bg: rgba(17, 27, 33, 0.06);
+      --sender-color-0: #bc285d;
+      --sender-color-1: #0372a4;
+      --sender-color-2: #855d29;
+      --sender-color-3: #533fc7;
+      --sender-color-4: #03776d;
+      --sender-color-5: #af4c2b;
+      --sender-color-6: #025ab7;
+      --sender-color-7: #704931;
+      --sender-color-8: #b80531;
+      --sender-color-9: #18744a;
     }
 
     /* ---- Pico overrides: reset opinionated defaults that break our layout ---- */
@@ -865,7 +886,18 @@
       border-bottom-left-radius: 2px;
     }
 
-    .msg-sender { font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 2px; }
+    .sender-color-0 { --sender-color: var(--sender-color-0); }
+    .sender-color-1 { --sender-color: var(--sender-color-1); }
+    .sender-color-2 { --sender-color: var(--sender-color-2); }
+    .sender-color-3 { --sender-color: var(--sender-color-3); }
+    .sender-color-4 { --sender-color: var(--sender-color-4); }
+    .sender-color-5 { --sender-color: var(--sender-color-5); }
+    .sender-color-6 { --sender-color: var(--sender-color-6); }
+    .sender-color-7 { --sender-color: var(--sender-color-7); }
+    .sender-color-8 { --sender-color: var(--sender-color-8); }
+    .sender-color-9 { --sender-color: var(--sender-color-9); }
+
+    .msg-sender { font-size: 11px; font-weight: 600; color: var(--sender-color, var(--accent)); margin-bottom: 2px; }
     .msg-text { font-size: var(--font-size); line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
     .msg-text a, .msg-caption a { overflow: visible; color: var(--accent); }
     .msg-text .wa-mention,
@@ -2163,7 +2195,7 @@
       justify-content: space-between;
       gap: 8px;
       background: rgba(0,0,0,0.08);
-      border-left: 3px solid var(--accent);
+      border-left: 3px solid var(--sender-color, var(--accent));
       border-radius: 4px; padding: 4px 8px; margin-bottom: 4px;
       max-width: 100%; overflow: hidden;
     }
@@ -2173,7 +2205,7 @@
       min-width: 0;
       overflow: hidden;
     }
-    .msg-quote-sender { font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 1px; }
+    .msg-quote-sender { font-size: 11px; font-weight: 600; color: var(--sender-color, var(--accent)); margin-bottom: 1px; }
     .msg-quote-text { font-size: 12px; color: var(--bubble-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .msg-quote-thumb {
       width: 44px;

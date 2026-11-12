@@ -3180,3 +3180,71 @@ def test_group_mentions_rendering_and_navigation(tmp_path: Path, screenshot_dir:
     finally:
         session.close()
         server.shutdown()
+
+
+def test_group_sender_name_colors_and_theme_adaptation(
+    browser: CDPSession, screenshot_dir: Path
+) -> None:
+    """Verify group sender names receive deterministic palette classes and adapt to dark/light themes."""
+    open_group_chat_in_browser(browser, 15.0)
+
+    prev_theme = browser.evaluate("document.documentElement.dataset.theme || 'dark'", 5.0)
+    try:
+        browser.evaluate("document.documentElement.dataset.theme = 'dark'", 5.0)
+        dark_res = browser.evaluate(
+            """
+            (() => {
+                const senders = Array.from(document.querySelectorAll('.msg-sender'));
+                const items = senders.map(el => {
+                    const cls = Array.from(el.classList).find(c => /^sender-color-\\d$/.test(c)) || '';
+                    return { name: el.textContent.trim(), cls, color: getComputedStyle(el).color };
+                });
+                const quotes = Array.from(document.querySelectorAll('.msg-quote')).map(q => {
+                    const qSender = q.querySelector('.msg-quote-sender');
+                    const cls = Array.from(q.classList).find(c => /^sender-color-\\d$/.test(c)) || '';
+                    return {
+                        name: qSender ? qSender.textContent.trim() : '',
+                        cls,
+                        color: qSender ? getComputedStyle(qSender).color : '',
+                        borderColor: getComputedStyle(q).borderLeftColor,
+                    };
+                });
+                return { items, quotes };
+            })()
+            """,
+            5.0,
+        )
+        assert len(dark_res["items"]) > 0
+        by_name: dict[str, str] = {}
+        for item in dark_res["items"]:
+            assert item["cls"].startswith("sender-color-")
+            if item["name"] in by_name:
+                assert by_name[item["name"]] == item["cls"]
+            else:
+                by_name[item["name"]] = item["cls"]
+        for q in dark_res["quotes"]:
+            if q["name"] in by_name:
+                assert q["cls"] == by_name[q["name"]]
+                assert q["borderColor"] == q["color"]
+
+        browser.capture_screenshot(screenshot_dir / "group_sender_colors_dark.png", 5.0)
+
+        browser.evaluate("document.documentElement.dataset.theme = 'light'", 5.0)
+        light_res = browser.evaluate(
+            """
+            (() => {
+                return Array.from(document.querySelectorAll('.msg-sender')).map(el => ({
+                    name: el.textContent.trim(),
+                    color: getComputedStyle(el).color,
+                }));
+            })()
+            """,
+            5.0,
+        )
+        assert len(light_res) == len(dark_res["items"])
+        for d_item, l_item in zip(dark_res["items"], light_res):
+            assert d_item["color"] != l_item["color"]
+
+        browser.capture_screenshot(screenshot_dir / "group_sender_colors_light.png", 5.0)
+    finally:
+        browser.evaluate(f"document.documentElement.dataset.theme = {prev_theme!r}", 5.0)
