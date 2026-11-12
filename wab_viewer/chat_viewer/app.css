@@ -944,7 +944,7 @@
       background: none;
       border: none;
       border-radius: 3px;
-      padding: 0;
+      padding: 0 2px;
       margin: 0;
       width: auto;
       min-height: 0;
@@ -966,7 +966,7 @@
     }
     .msg-text .msg-read-more:focus { box-shadow: none; }
     .msg-text .msg-read-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: none; }
-    .msg-text .msg-read-more.is-block-tail { display: inline-block; margin-top: 4px; }
+    .msg-text .msg-read-more.is-block-tail { display: inline-block; margin-top: 4px; padding: 0; }
     .msg-unavailable { color: var(--text-muted); font-style: italic; }
     .msg-caption { font-size: var(--font-size); line-height: 1.4; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 
