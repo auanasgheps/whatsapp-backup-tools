@@ -2791,6 +2791,22 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
         "INSERT INTO message_media (_id, message_row_id, chat_row_id, file_path, media_name, mime_type) "
         "VALUES (1, 104, 10, 'Media/WhatsApp Images/photo.jpg', 'photo.jpg', 'image/jpeg')"
     )
+    zwj_boundary_msg = ("a" * 749) + "👨‍👩‍👧‍👦 " + ("b" * 120) + " ZWJ_TAIL"
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+        "VALUES (105, 10, 0, 1, ?, ?, 0, 'ZWJ_1')",
+        (base_ts + 74000, zwj_boundary_msg),
+    )
+    wa_conn.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+        "VALUES (106, 10, 1, 1, ?, 'Reply pointing to long message', 0, 'QUOTE_1')",
+        (base_ts + 75000,),
+    )
+    wa_conn.execute(
+        "INSERT INTO message_quoted (message_row_id, text_data, from_me, sender_jid_row_id, timestamp) "
+        "VALUES (106, 'Start *bold intro section*...', 0, 1, ?)",
+        (base_ts + 70000,),
+    )
     wa_conn.execute(
         "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
         "VALUES (201, 20, 0, 2, ?, 'Other chat msg', 0, 'OTHER_1')",
@@ -2953,6 +2969,22 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
                     await new Promise(r => setTimeout(r, 100));
                 }
 
+                // Collapse 101 again, then verify quoted-message jump auto-expands 101
+                const btnBeforeQuote = document.querySelector('.msg-row[data-msg-id="101"] .msg-read-more');
+                if (btnBeforeQuote && btnBeforeQuote.getAttribute('aria-expanded') === 'true') {
+                    btnBeforeQuote.click();
+                }
+                const quote106 = document.querySelector('.msg-row[data-msg-id="106"] .msg-quote');
+                if (quote106) quote106.click();
+                await new Promise(r => setTimeout(r, 150));
+                const autoExpandedOnQuote = Boolean(
+                    document.querySelector('.msg-row[data-msg-id="101"] .msg-read-more')?.getAttribute('aria-expanded') === 'true'
+                );
+
+                // ZWJ grapheme cluster at 750 boundary stays intact (not split mid-ZWJ)
+                const msg105Text = document.querySelector('.msg-row[data-msg-id="105"] .msg-text')?.textContent || '';
+                const zwjIntact = msg105Text.includes('👨‍👩‍👧‍👦') && !msg105Text.includes('ZWJ_TAIL');
+
                 // Collapse 101 again for dark screenshot showing "... Read More"
                 const btnAfterSearch = document.querySelector('.msg-row[data-msg-id="101"] .msg-read-more');
                 if (btnAfterSearch && btnAfterSearch.getAttribute('aria-expanded') === 'true') {
@@ -2971,6 +3003,8 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
                     recollapsed101,
                     resetOnSwitch,
                     autoExpandedOnSearch,
+                    autoExpandedOnQuote,
+                    zwjIntact,
                 };
             })()
             """,
@@ -3006,6 +3040,8 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
         assert res["recollapsed101"]["hidesTailNeedle"] is True
         assert res["resetOnSwitch"] is True
         assert res["autoExpandedOnSearch"] is True
+        assert res["autoExpandedOnQuote"] is True
+        assert res["zwjIntact"] is True
 
         session.capture_screenshot(screenshot_dir / "long_msg_collapse_dark.png", 5.0)
         session.evaluate(

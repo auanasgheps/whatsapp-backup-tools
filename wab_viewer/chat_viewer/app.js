@@ -512,6 +512,59 @@
   const COLLAPSE_LINE_BLOCK_TAGS = new Set(['PRE', 'LI', 'BLOCKQUOTE', 'H1', 'H2', 'H3']);
   const COLLAPSE_TAIL_BLOCK_TAGS = new Set(['PRE', 'UL', 'OL', 'BLOCKQUOTE', 'H1', 'H2', 'H3']);
   const expandedMsgIds = new Set();
+  const expandedFallbackContainers = new WeakSet();
+  const _graphemeSegmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter('en', { granularity: 'grapheme' })
+    : null;
+
+  function splitGraphemes(str) {
+    if (!str) return [];
+    if (_graphemeSegmenter) {
+      const out = [];
+      for (const part of _graphemeSegmenter.segment(str)) {
+        out.push(part.segment);
+      }
+      return out;
+    }
+    return Array.from(str);
+  }
+
+  function _isIgnoredListBr(parentNode, childEl) {
+    return childEl.tagName === 'BR' && (parentNode.tagName === 'UL' || parentNode.tagName === 'OL');
+  }
+
+  function _endsWithCollapseBlock(containerEl) {
+    const lastNode = containerEl.lastChild;
+    return Boolean(
+      lastNode && lastNode.nodeType === Node.ELEMENT_NODE && COLLAPSE_TAIL_BLOCK_TAGS.has(lastNode.tagName)
+    );
+  }
+
+  function _scrollRowIntoViewIfClipped(containerEl) {
+    const row = containerEl.closest('.msg-row');
+    const scroll = document.getElementById('message-scroll');
+    if (!row || !scroll) return;
+    const rowRect = row.getBoundingClientRect();
+    const scrollRect = scroll.getBoundingClientRect();
+    if (rowRect.top < scrollRect.top || rowRect.bottom > scrollRect.bottom) {
+      suppressScroll = true;
+      try {
+        row.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+      } finally {
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => { suppressScroll = false; });
+        } else {
+          suppressScroll = false;
+        }
+      }
+    }
+  }
+
+  function _focusToggleIfKeyboard(containerEl, clickEvent) {
+    if (clickEvent.detail !== 0) return;
+    const nextBtn = containerEl.querySelector('.msg-read-more');
+    if (nextBtn) nextBtn.focus();
+  }
 
   function measureRenderedContent(rootEl) {
     const state = { chars: 0, lineBreaks: 0, hasContent: false, justHadBreak: false };
@@ -520,10 +573,10 @@
         if (child.nodeType === Node.TEXT_NODE) {
           const val = child.nodeValue || '';
           if (!val) continue;
-          const cps = Array.from(val);
-          state.chars += cps.length;
-          for (const cp of cps) {
-            if (cp === '\n') {
+          const graphemes = splitGraphemes(val);
+          state.chars += graphemes.length;
+          for (const g of graphemes) {
+            if (g === '\n' || g === '\r\n') {
               state.lineBreaks++;
               state.justHadBreak = true;
             } else {
@@ -535,7 +588,7 @@
         }
         if (child.nodeType !== Node.ELEMENT_NODE) continue;
         if (child.tagName === 'BR') {
-          if (node.tagName === 'UL' || node.tagName === 'OL') continue;
+          if (_isIgnoredListBr(node, child)) continue;
           state.lineBreaks++;
           state.justHadBreak = true;
           state.hasContent = true;
@@ -598,12 +651,12 @@
         if (child.nodeType === Node.TEXT_NODE) {
           const val = child.nodeValue || '';
           if (!val) continue;
-          const cps = Array.from(val);
+          const graphemes = splitGraphemes(val);
           let take = 0;
           let hitCharLimit = false;
-          for (let i = 0; i < cps.length; i++) {
-            const cp = cps[i];
-            if (cp === '\n') {
+          for (let i = 0; i < graphemes.length; i++) {
+            const g = graphemes[i];
+            if (g === '\n' || g === '\r\n') {
               if (state.lineBreaks + 1 > maxBreaks) {
                 state.stopped = true;
                 break;
@@ -626,7 +679,7 @@
           if (hitCharLimit && take > 0) {
             const minSnap = Math.max(0, take - COLLAPSE_WORD_SNAP_WINDOW);
             for (let j = take - 1; j >= minSnap; j--) {
-              if (/\s/.test(cps[j])) {
+              if (/\s/.test(graphemes[j])) {
                 if (j > 0 || state.chars > take) {
                   take = j;
                 }
@@ -636,7 +689,7 @@
           }
 
           if (take > 0) {
-            destParent.appendChild(document.createTextNode(cps.slice(0, take).join('')));
+            destParent.appendChild(document.createTextNode(graphemes.slice(0, take).join('')));
           }
           continue;
         }
@@ -644,7 +697,7 @@
         if (child.nodeType !== Node.ELEMENT_NODE) continue;
 
         if (child.tagName === 'BR') {
-          if (srcNode.tagName === 'UL' || srcNode.tagName === 'OL') continue;
+          if (_isIgnoredListBr(srcNode, child)) continue;
           if (state.lineBreaks + 1 > maxBreaks) {
             state.stopped = true;
             return;
@@ -657,7 +710,7 @@
         }
 
         if (child.tagName === 'A' && state.chars > 0) {
-          const linkLen = Array.from(child.textContent || '').length;
+          const linkLen = splitGraphemes(child.textContent || '').length;
           if (state.chars + linkLen > charLimit) {
             state.stopped = true;
             return;
@@ -707,8 +760,9 @@
     const raw = text || '';
     const key = (msgId !== undefined && msgId !== null) ? String(msgId) : '';
     const canTrack = key !== '';
+    const hasMentions = Boolean(mentions && typeof mentions === 'object' && Object.keys(mentions).length > 0);
 
-    if (raw.length <= COLLAPSE_CHAR_LIMIT) {
+    if (!hasMentions && raw.length <= COLLAPSE_CHAR_LIMIT) {
       let nlCount = 0;
       for (let i = 0; i < raw.length; i++) {
         if (raw.charCodeAt(i) === 10) {
@@ -734,39 +788,20 @@
       return;
     }
 
-    const isExpanded = canTrack && expandedMsgIds.has(key);
+    const isExpanded = canTrack ? expandedMsgIds.has(key) : expandedFallbackContainers.has(containerEl);
     if (isExpanded) {
       containerEl.innerHTML = fullHtml;
-      const lastNode = containerEl.lastChild;
-      const endsWithBlock = Boolean(
-        lastNode && lastNode.nodeType === Node.ELEMENT_NODE && COLLAPSE_TAIL_BLOCK_TAGS.has(lastNode.tagName)
-      );
+      const endsWithBlock = _endsWithCollapseBlock(containerEl);
       if (!endsWithBlock) {
         containerEl.appendChild(document.createTextNode(' '));
       }
       const btn = createTextToggleButton(true, endsWithBlock, e => {
         e.stopPropagation();
-        const focusNext = e.detail === 0;
         if (canTrack) expandedMsgIds.delete(key);
+        else expandedFallbackContainers.delete(containerEl);
         renderCollapsibleMessageText(containerEl, raw, msgId, mentions);
-        const row = containerEl.closest('.msg-row');
-        const scroll = document.getElementById('message-scroll');
-        if (row && scroll) {
-          const rowRect = row.getBoundingClientRect();
-          const scrollRect = scroll.getBoundingClientRect();
-          if (rowRect.top < scrollRect.top || rowRect.bottom > scrollRect.bottom) {
-            suppressScroll = true;
-            try {
-              row.scrollIntoView({ behavior: 'instant', block: 'nearest' });
-            } finally {
-              suppressScroll = false;
-            }
-          }
-        }
-        if (focusNext) {
-          const nextBtn = containerEl.querySelector('.msg-read-more');
-          if (nextBtn) nextBtn.focus();
-        }
+        _scrollRowIntoViewIfClipped(containerEl);
+        _focusToggleIfKeyboard(containerEl, e);
       });
       containerEl.appendChild(btn);
       return;
@@ -775,25 +810,34 @@
     containerEl.innerHTML = '';
     const truncatedFrag = truncateFormattedTree(parsed, COLLAPSE_CHAR_LIMIT, COLLAPSE_LINE_LIMIT);
     containerEl.appendChild(truncatedFrag);
-    const lastNode = containerEl.lastChild;
-    const endsWithBlock = Boolean(
-      lastNode && lastNode.nodeType === Node.ELEMENT_NODE && COLLAPSE_TAIL_BLOCK_TAGS.has(lastNode.tagName)
-    );
+    const endsWithBlock = _endsWithCollapseBlock(containerEl);
     const ellipsis = document.createElement('span');
     ellipsis.className = endsWithBlock ? 'msg-read-more-ellipsis is-block-tail' : 'msg-read-more-ellipsis';
     ellipsis.textContent = '... ';
     const btn = createTextToggleButton(false, endsWithBlock, e => {
       e.stopPropagation();
-      const focusNext = e.detail === 0;
       if (canTrack) expandedMsgIds.add(key);
+      else expandedFallbackContainers.add(containerEl);
       renderCollapsibleMessageText(containerEl, raw, msgId, mentions);
-      if (focusNext) {
-        const nextBtn = containerEl.querySelector('.msg-read-more');
-        if (nextBtn) nextBtn.focus();
-      }
+      _focusToggleIfKeyboard(containerEl, e);
     });
     containerEl.appendChild(ellipsis);
     containerEl.appendChild(btn);
+  }
+
+  function expandMessageRowById(msgId, row) {
+    if (msgId !== undefined && msgId !== null) {
+      expandedMsgIds.add(String(msgId));
+    }
+    if (!row) return;
+    const targetId = row.dataset.msgId || (msgId !== undefined && msgId !== null ? String(msgId) : '');
+    if (!targetId) return;
+    expandedMsgIds.add(targetId);
+    const txtEl = row.querySelector('.msg-text');
+    const matchedMsg = msgList.find(m => String(m.msg_id) === targetId);
+    if (txtEl && matchedMsg) {
+      renderCollapsibleMessageText(txtEl, matchedMsg.text_body, matchedMsg.msg_id, matchedMsg.mentions);
+    }
   }
 
   function makeDateSeparator(ts) {
@@ -1947,12 +1991,16 @@
       if (msg.quoted_msg_id || msg.quoted_ts) {
         quote.style.cursor = 'pointer';
         quote.title = 'Jump to original message';
-        quote.addEventListener('click', (e) => {
+        quote.addEventListener('click', async (e) => {
           e.stopPropagation();
           if (msg.quoted_msg_id) {
-            jumpToMessage({ msg_id: msg.quoted_msg_id, timestamp_ms: msg.quoted_ts }, 'default');
+            expandMessageRowById(msg.quoted_msg_id, rowForMsgId(msg.quoted_msg_id));
+            await jumpToMessage({ msg_id: msg.quoted_msg_id, timestamp_ms: msg.quoted_ts }, 'default');
           } else {
-            jumpToTimestamp(msg.quoted_ts, null, true, 'default');
+            const row = await jumpToTimestamp(msg.quoted_ts, null, true, 'default');
+            if (row && row.dataset.msgId) {
+              expandMessageRowById(row.dataset.msgId, row);
+            }
           }
         });
       }
@@ -4612,20 +4660,10 @@
         const el2 = _findChatListItem(r.chat_id, r.chat_type);
         if (el2) {
           await selectChat(chat, el2);
-          if (r.msg_id !== undefined && r.msg_id !== null) {
-            expandedMsgIds.add(String(r.msg_id));
-          }
+          expandMessageRowById(r.msg_id, null);
           const row = await jumpToTimestamp(r.timestamp_ms, null, true, 'default');
           if (row) {
-            const jumpedId = row.dataset.msgId;
-            if (jumpedId && !expandedMsgIds.has(jumpedId)) {
-              const jumpedMsg = msgList.find(m => String(m.msg_id) === jumpedId);
-              const txtEl = row.querySelector('.msg-text');
-              if (jumpedMsg && txtEl) {
-                expandedMsgIds.add(jumpedId);
-                renderCollapsibleMessageText(txtEl, jumpedMsg.text_body, jumpedMsg.msg_id, jumpedMsg.mentions);
-              }
-            }
+            expandMessageRowById(row.dataset.msgId, row);
             const bubble = row.querySelector('.msg-bubble, .msg-service-bubble');
             if (bubble) {
               bubble.classList.add('search-jump-highlight');
@@ -4765,16 +4803,9 @@
     const result = chatSearchResults[idx];
     if (!result) return;
     document.querySelectorAll('.search-highlight').forEach(el => el.classList.remove('search-highlight'));
-    if (result.msg_id !== undefined && result.msg_id !== null) {
-      expandedMsgIds.add(String(result.msg_id));
-    }
     const existing = rowForMsgId(result.msg_id);
+    expandMessageRowById(result.msg_id, existing);
     if (existing) {
-      const txtEl = existing.querySelector('.msg-text');
-      const matchedMsg = msgList.find(m => String(m.msg_id) === String(result.msg_id));
-      if (txtEl && matchedMsg) {
-        renderCollapsibleMessageText(txtEl, matchedMsg.text_body, matchedMsg.msg_id, matchedMsg.mentions);
-      }
       highlightMessageRow(existing);
       return;
     }
