@@ -59,7 +59,8 @@ HTML_TEMPLATE = (
   <div id="body">
     <div id="sidebar">
       <div id="search-box">
-        <input id="search-input" type="search" placeholder="Search messages…" autocomplete="off">
+        <input id="search-input" type="search" placeholder="Search messages &amp; chats…" autocomplete="off">
+        <button id="search-clear" title="Clear search" aria-label="Clear search" style="display:none;">&#10005;</button>
       </div>
       <div id="sidebar-filters">
         <button class="filter-btn active" data-filter="all">All</button>

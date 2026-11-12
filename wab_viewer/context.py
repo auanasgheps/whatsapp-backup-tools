@@ -539,9 +539,7 @@ class ViewerContext:
         )
         if not has_cm:
             return
-        cm_cols = {
-            r[1] for r in conn.execute("PRAGMA ext.table_info(contact_metadata)").fetchall()
-        }
+        cm_cols = {r[1] for r in conn.execute("PRAGMA ext.table_info(contact_metadata)").fetchall()}
         if not {"contact_lid", "contact_pn"}.issubset(cm_cols):
             return
         push_expr = "NULLIF(contact_push_name, '')" if "contact_push_name" in cm_cols else "NULL"

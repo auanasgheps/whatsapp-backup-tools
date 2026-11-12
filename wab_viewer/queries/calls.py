@@ -324,6 +324,8 @@ def _query_android_calls(
                 "duration": duration_sec,
                 "timestamp": int(round(ts_ms / 1000)),
                 "timestamp_ms": ts_ms,
+                "is_group": is_group_call,
+                "is_preserved": False,
             }
         )
     return results
@@ -672,6 +674,8 @@ def _query_ios_calls(
                 "duration": duration_sec,
                 "timestamp": int(r["timestamp"]),
                 "timestamp_ms": ts_ms,
+                "is_group": is_group,
+                "is_preserved": False,
             }
         )
         if fetch_limit is not None and len(results) >= fetch_limit:
@@ -760,6 +764,9 @@ def _query_preserved_calls(
         chat_id_val = str(row_dict["chat_id"]) if row_dict["chat_id"] else "call"
 
         ts_ms = int(row_dict["timestamp_ms"])
+        is_group_call = bool(
+            row_dict.get("is_group_call") == 1 or ("@g.us" in (row_dict.get("chat_jid") or ""))
+        )
         results.append(
             {
                 "id": str(row_dict["call_id"]),
@@ -773,6 +780,8 @@ def _query_preserved_calls(
                 "duration": int(row_dict["duration_seconds"] or 0),
                 "timestamp": int(round(ts_ms / 1000)),
                 "timestamp_ms": ts_ms,
+                "is_group": is_group_call,
+                "is_preserved": True,
             }
         )
     return results
