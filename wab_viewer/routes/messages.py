@@ -48,6 +48,17 @@ from ..queries.sql_builder import (
 
 bp = Blueprint("messages", __name__)
 
+_APPLE_EPOCH_OFFSET = 978307200.0
+
+
+def _ios_apple_bound(ms_val: int, inclusive: bool, is_upper: bool) -> tuple[str, float]:
+    """Return (SQLite operator, Apple CoreData timestamp) for a Unix-ms boundary."""
+    if is_upper:
+        adj_ms = ms_val + 1 if inclusive else ms_val
+        return "<", (adj_ms / 1000.0) - _APPLE_EPOCH_OFFSET
+    adj_ms = ms_val if inclusive else ms_val + 1
+    return ">=", (adj_ms / 1000.0) - _APPLE_EPOCH_OFFSET
+
 
 @bp.route("/api/messages")
 def api_messages():
@@ -337,17 +348,23 @@ def api_messages():
         sort_phys_col = "m._id"
     else:
         chat_pred, chat_params = _ios_chat_filter(chat_id)
-        ts_col = ctx.queries.ios_ts
-        sort_phys_col = "COALESCE(m.ZSORT, m.Z_PK)" if ctx.caps.has_ios_sort else "m.Z_PK"
+        ts_col = "m.ZMESSAGEDATE"
+        sort_phys_col = "m.Z_PK"
 
     if b_val is not None:
-        b_op = "<=" if inclusive else "<"
+        if ctx.source_type == "ios":
+            b_op, b_param = _ios_apple_bound(b_val, inclusive, True)
+        else:
+            b_op, b_param = ("<=" if inclusive else "<"), b_val
         sql = f"{select} WHERE {chat_pred} AND {ts_col} {b_op} ? {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?"
-        rows = conn.execute(sql, chat_params + [b_val, limit]).fetchall()
+        rows = conn.execute(sql, chat_params + [b_param, limit]).fetchall()
     elif a_val is not None:
-        a_op = ">=" if inclusive else ">"
+        if ctx.source_type == "ios":
+            a_op, a_param = _ios_apple_bound(a_val, inclusive, False)
+        else:
+            a_op, a_param = (">=" if inclusive else ">"), a_val
         sql = f"{select} WHERE {chat_pred} AND {ts_col} {a_op} ? {extra} ORDER BY {ts_col} ASC, {sort_phys_col} ASC LIMIT ?"
-        rows = conn.execute(sql, chat_params + [a_val, limit]).fetchall()
+        rows = conn.execute(sql, chat_params + [a_param, limit]).fetchall()
     else:
         sql = f"{select} WHERE {chat_pred} {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?"
         rows = conn.execute(sql, chat_params + [limit]).fetchall()
@@ -637,18 +654,22 @@ def api_messages_at():
         )
         ts_col = ctx.queries.android_ts
         sort_phys_col = "m._id"
+        before_op, before_param = "<=", ts
+        after_op, after_param = ">", ts
     else:
         chat_pred, chat_params = _ios_chat_filter(chat_id)
-        ts_col = ctx.queries.ios_ts
-        sort_phys_col = "COALESCE(m.ZSORT, m.Z_PK)" if ctx.caps.has_ios_sort else "m.Z_PK"
+        ts_col = "m.ZMESSAGEDATE"
+        sort_phys_col = "m.Z_PK"
+        before_op, before_param = _ios_apple_bound(ts, True, True)
+        after_op, after_param = _ios_apple_bound(ts, False, False)
 
     before_rows = conn.execute(
-        f"{select} WHERE {chat_pred} AND {ts_col} <= ? {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?",
-        chat_params + [ts, half],
+        f"{select} WHERE {chat_pred} AND {ts_col} {before_op} ? {extra} ORDER BY {ts_col} DESC, {sort_phys_col} DESC LIMIT ?",
+        chat_params + [before_param, half],
     ).fetchall()
     after_rows = conn.execute(
-        f"{select} WHERE {chat_pred} AND {ts_col} > ? {extra} ORDER BY {ts_col} ASC, {sort_phys_col} ASC LIMIT ?",
-        chat_params + [ts, half],
+        f"{select} WHERE {chat_pred} AND {ts_col} {after_op} ? {extra} ORDER BY {ts_col} ASC, {sort_phys_col} ASC LIMIT ?",
+        chat_params + [after_param, half],
     ).fetchall()
 
     combined = [dict(r) for r in reversed(before_rows)] + [dict(r) for r in after_rows]

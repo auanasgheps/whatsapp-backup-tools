@@ -1766,11 +1766,11 @@
 
       bubble.appendChild(renderMediaGrid(group));
 
-      const lastMsg = group[group.length - 1];
-      if (lastMsg.text_body) {
+      const captionMsg = group.find(m => m.text_body && m.text_body.trim());
+      if (captionMsg) {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        cap.innerHTML = highlight(lastMsg.text_body, '', lastMsg.mentions);
+        cap.innerHTML = highlight(captionMsg.text_body, '', captionMsg.mentions);
         bubble.appendChild(cap);
       }
 

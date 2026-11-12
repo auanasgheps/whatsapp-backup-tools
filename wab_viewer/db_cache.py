@@ -150,6 +150,25 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                     "CREATE INDEX IF NOT EXISTS idx_zwamessage_chat_ts "
                     "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE)"
                 )
+        if "idx_zwamessage_pin_lookup" not in existing or "idx_zwamessage_stanza" not in existing:
+            has_ios = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
+            ).fetchone()
+            if has_ios:
+                zwa_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
+                if (
+                    "idx_zwamessage_pin_lookup" not in existing
+                    and {"ZCHATSESSION", "ZMESSAGETYPE", "ZPARENTMESSAGE"} <= zwa_cols
+                ):
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_zwamessage_pin_lookup "
+                        "ON ZWAMESSAGE(ZCHATSESSION, ZPARENTMESSAGE) "
+                        "WHERE ZMESSAGETYPE = 66"
+                    )
+                if "idx_zwamessage_stanza" not in existing and "ZSTANZAID" in zwa_cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_zwamessage_stanza ON ZWAMESSAGE(ZSTANZAID)"
+                    )
         if "idx_message_key_id" not in existing:
             has_android = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"

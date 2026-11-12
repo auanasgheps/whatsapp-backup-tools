@@ -14647,3 +14647,79 @@ class TestReviewFixRegressions:
         assert "COLLAPSE_MIN_REMAINDER = 60" in js
         assert "function renderCollapsibleMessageText(" in js
         assert "expandedMsgIds.clear()" in js
+
+    def test_grouped_media_caption_uses_first_non_empty_member(self, tmp_path):
+        """Grouped media bubbles must render captions stored on any album member (e.g. iOS group[0])."""
+        make_archive_db(tmp_path / ".wa_media_archiver.db").close()
+        make_android_db(tmp_path / "msgstore.db").close()
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+
+        with app.test_client() as client:
+            js = client.get("/static/app.js").get_data(as_text=True)
+
+        assert "const captionMsg = group.find(m => m.text_body && m.text_body.trim());" in js
+
+    def test_ios_large_group_query_plan_and_pagination(self, tmp_path):
+        """iOS /api/messages and /api/messages/at must use index scans without temp B-tree sort."""
+        make_archive_db(tmp_path / ".wa_media_archiver.db").close()
+        ios_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        ios_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZGROUPINFO, ZHIDDEN, ZARCHIVED, ZLASTMESSAGEDATE)
+            VALUES (1, '120363000000000001@g.us', 'Large Archived Group', 1, 0, 1, 720005000.0);
+        """)
+        rows = [(i, 1, 0, 720000000.0 + i, f"MSG_{i}", 0, f"Message {i}") for i in range(1, 2001)]
+        ios_conn.executemany(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZTEXT) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        ios_conn.commit()
+        ios_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        ctx = app.extensions["viewer"]
+        conn = ctx.get_wa()
+
+        indexes = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+        }
+        assert "idx_zwamessage_chat_ts" in indexes
+        assert "idx_zwamessage_pin_lookup" in indexes
+        assert "idx_zwamessage_stanza" in indexes
+
+        plan_rows = conn.execute(
+            f"{ctx.queries.ios_select} WHERE m.ZCHATSESSION = CAST(? AS INTEGER) "
+            f"{ctx.queries.ios_filter} ORDER BY m.ZMESSAGEDATE DESC, m.Z_PK DESC LIMIT ?",
+            ["1", 50],
+        ).fetchall()
+        assert len(plan_rows) == 50
+
+        eqp = conn.execute(
+            f"EXPLAIN QUERY PLAN {ctx.queries.ios_select} WHERE m.ZCHATSESSION = CAST(? AS INTEGER) "
+            f"{ctx.queries.ios_filter} ORDER BY m.ZMESSAGEDATE DESC, m.Z_PK DESC LIMIT ?",
+            ["1", 50],
+        ).fetchall()
+        plan_text = "\n".join(str(r[-1]) for r in eqp)
+        assert "idx_zwamessage_chat_ts" in plan_text
+        assert "USE TEMP B-TREE FOR ORDER BY" not in plan_text
+        assert "idx_zwamessage_pin_lookup" in plan_text
+
+        with app.test_client() as client:
+            latest = client.get("/api/messages?chat_id=1&chat_type=group&limit=50").get_json()
+            assert len(latest) == 50
+            assert latest[0]["text_body"] == "Message 2000"
+            assert latest[-1]["text_body"] == "Message 1951"
+
+            older = client.get(
+                f"/api/messages?chat_id=1&chat_type=group&limit=50&before={latest[-1]['timestamp_ms']}"
+            ).get_json()
+            assert len(older) == 50
+            assert older[0]["text_body"] == "Message 1950"
+
+            around = client.get(
+                f"/api/messages/at?chat_id=1&chat_type=group&ts={older[0]['timestamp_ms']}&limit=10"
+            ).get_json()
+            assert any(m["text_body"] == "Message 1950" for m in around)
