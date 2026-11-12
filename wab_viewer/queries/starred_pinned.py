@@ -358,6 +358,7 @@ def _query_android_starred(
                 "text": row_dict["text"],
                 "text_body": row_dict["text"],
                 "media_type": media_type,
+                "_raw_metadata": row_dict.get("_raw_metadata"),
             }
         )
     return results
@@ -386,8 +387,14 @@ def _query_ios_starred(
         ).fetchone()
     )
     mi_join = "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM" if has_mi else ""
+    mi_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
+        if has_mi
+        else set()
+    )
     mi_title = "mi.ZTITLE" if has_mi else "NULL"
     mi_path = "mi.ZMEDIALOCALPATH" if has_mi else "NULL"
+    mi_meta = "mi.ZMETADATA" if "ZMETADATA" in mi_cols else "NULL"
 
     has_cs = bool(
         conn.execute(
@@ -421,6 +428,7 @@ def _query_ios_starred(
             m.ZPUSHNAME AS push_name,
             m.ZFROMJID AS from_jid,
             {mi_path} AS media_path,
+            {mi_meta} AS _raw_metadata,
             {"cs.ZPARTNERNAME" if has_cs else "NULL"} AS partner_name,
             {"cs.ZCONTACTJID" if has_cs else "NULL"} AS contact_jid,
             {"cs.ZGROUPINFO" if has_cs_group else "NULL"} AS group_info
@@ -500,6 +508,7 @@ def _query_ios_starred(
                 "text": row_dict["text"],
                 "text_body": row_dict["text"],
                 "media_type": media_type,
+                "_raw_metadata": row_dict.get("_raw_metadata"),
             }
         )
     return results

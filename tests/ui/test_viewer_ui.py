@@ -3023,3 +3023,160 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
         session.capture_screenshot(screenshot_dir / "long_msg_collapse_light.png", 5.0)
     finally:
         session.close()
+
+
+def test_group_mentions_rendering_and_navigation(tmp_path: Path, screenshot_dir: Path) -> None:
+    """Verify group @mentions render resolved names, unlinked spans, (Unknown) fallback, and navigate on link click."""
+    import threading
+    import urllib.request
+
+    from tests.conftest import make_android_db, make_archive_db
+    from wab_viewer.main import create_app
+
+    from .cdp_driver import find_free_port, launch_browser_session
+
+    wa_path = tmp_path / "msgstore.db"
+    arch_path = tmp_path / ".wa_media_archiver.db"
+    wa_conn = make_android_db(wa_path)
+    arch_conn = make_archive_db(arch_path)
+
+    jid_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(jid)").fetchall()}
+    if "server" not in jid_cols:
+        wa_conn.execute("ALTER TABLE jid ADD COLUMN server TEXT")
+    chat_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(chat)").fetchall()}
+    if "hidden" not in chat_cols:
+        wa_conn.execute("ALTER TABLE chat ADD COLUMN hidden INTEGER DEFAULT 0")
+    if "archived" not in chat_cols:
+        wa_conn.execute("ALTER TABLE chat ADD COLUMN archived INTEGER DEFAULT 0")
+
+    wa_conn.executescript("""
+        CREATE TABLE IF NOT EXISTS jid_map (
+            lid_row_id INTEGER PRIMARY KEY,
+            jid_row_id INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS lid_display_name (
+            lid_row_id INTEGER PRIMARY KEY,
+            display_name TEXT,
+            username TEXT
+        );
+        CREATE TABLE IF NOT EXISTS message_mentions (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            jid_row_id INTEGER NOT NULL
+        );
+
+        INSERT INTO jid (_id, user, server, raw_string) VALUES
+            (1, '5550001001', 's.whatsapp.net', '5550001001@s.whatsapp.net'),
+            (2, '1111111111', 'lid', '1111111111@lid'),
+            (3, '2222222222', 'lid', '2222222222@lid'),
+            (4, '9999999999', 'lid', '9999999999@lid'),
+            (5, '120363000099', 'g.us', '120363000099@g.us');
+
+        INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (2, 1);
+        INSERT INTO lid_display_name (lid_row_id, display_name) VALUES (3, 'Bob Push');
+
+        INSERT INTO chat (_id, jid_row_id, subject, sort_timestamp, hidden, archived) VALUES
+            (10, 1, NULL, 1700000100000, 0, 0),
+            (20, 5, 'Project Alpha', 1700000200000, 0, 0);
+
+        INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) VALUES
+            (1, 10, 0, 1, 1700000100000, 'Direct chat hello', 0, 'DM_1'),
+            (2, 20, 0, 1, 1700000200000, 'Are you there @1111111111? Ping *@2222222222* and @9999999999, code `@1111111111`', 0, 'GRP_1');
+
+        INSERT INTO message_mentions (message_row_id, jid_row_id) VALUES
+            (2, 2), (2, 3), (2, 4);
+    """)
+    wa_conn.commit()
+    wa_conn.close()
+
+    arch_conn.execute(
+        "INSERT INTO contacts (number, folder, display_name) VALUES ('5550001001', 'Alice', 'Alice Smith')"
+    )
+    arch_conn.commit()
+    arch_conn.close()
+
+    app = create_app(tmp_path)
+    port = find_free_port()
+    from werkzeug.serving import make_server
+
+    server = make_server("127.0.0.1", port, app, threaded=True)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    base_url = f"http://127.0.0.1:{port}"
+    urllib.request.urlopen(f"{base_url}/api/chats", timeout=5).read()
+
+    session = launch_browser_session(
+        base_url, tmp_path / "browser_profile", find_free_port(), 10, 0.5
+    )
+    try:
+        res = session.evaluate(
+            """
+            (async () => {
+                const grpItem = [...document.querySelectorAll('.chat-item')].find(
+                    e => e.textContent.includes('Project Alpha')
+                );
+                grpItem.click();
+                await new Promise(r => setTimeout(r, 300));
+
+                const msgEl = document.querySelector('.msg-row .msg-text');
+                const linked = msgEl.querySelector('a.wa-mention-link');
+                const spans = [...msgEl.querySelectorAll('span.wa-mention')];
+                const codeEl = msgEl.querySelector('code');
+                const linkStyle = linked ? getComputedStyle(linked) : null;
+                const spanStyle = spans[0] ? getComputedStyle(spans[0]) : null;
+
+                const renderedText = msgEl.textContent;
+                const linkedInfo = linked ? {
+                    text: linked.textContent,
+                    chatId: linked.dataset.chatId,
+                    color: linkStyle.color,
+                    textDecorationLine: linkStyle.textDecorationLine,
+                } : null;
+                const spanInfos = spans.map(s => ({
+                    text: s.textContent,
+                    color: getComputedStyle(s).color,
+                    textDecorationLine: getComputedStyle(s).textDecorationLine,
+                    cursor: getComputedStyle(s).cursor,
+                }));
+
+                // Click linked mention and verify navigation to Alice Smith's 1-to-1 chat
+                linked.click();
+                await new Promise(r => setTimeout(r, 350));
+                const nextTitle = document.getElementById('chat-title').textContent;
+                const nextBubbleText = document.querySelector('.msg-row .msg-text')?.textContent || '';
+
+                return {
+                    renderedText,
+                    linkedInfo,
+                    spanInfos,
+                    codeText: codeEl ? codeEl.textContent : '',
+                    nextTitle,
+                    nextBubbleText,
+                };
+            })()
+            """,
+            15.0,
+        )
+
+        assert "@Alice Smith?" in res["renderedText"]
+        assert "@Bob Push" in res["renderedText"]
+        assert "@9999999999 (Unknown)" in res["renderedText"]
+        assert res["codeText"] == "@1111111111"
+
+        assert res["linkedInfo"] is not None
+        assert res["linkedInfo"]["text"] == "@Alice Smith"
+        assert res["linkedInfo"]["chatId"] == "5550001001"
+
+        assert len(res["spanInfos"]) == 2
+        assert res["spanInfos"][0]["text"] == "@Bob Push"
+        assert res["spanInfos"][0]["color"] == res["linkedInfo"]["color"]
+        assert res["spanInfos"][0]["textDecorationLine"] == "none"
+        assert res["spanInfos"][0]["cursor"] == "default"
+        assert res["spanInfos"][1]["text"] == "@9999999999 (Unknown)"
+
+        assert res["nextTitle"] == "Alice Smith"
+        assert "Direct chat hello" in res["nextBubbleText"]
+        session.capture_screenshot(screenshot_dir / "group_mentions_nav.png", 5.0)
+    finally:
+        session.close()
+        server.shutdown()

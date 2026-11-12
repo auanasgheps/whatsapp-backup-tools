@@ -664,3 +664,84 @@ def _extract_ios_link_description(metadata_bytes: bytes | None) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _iter_wire_fields(data: bytes) -> list[tuple[int, int, bytes | int]]:
+    """Decode top-level protobuf wire fields as (field_num, wire_type, value)."""
+    fields: list[tuple[int, int, bytes | int]] = []
+    offset = 0
+    n = len(data)
+    while offset < n:
+        try:
+            tag, offset = _read_varint(data, offset)
+        except ValueError:
+            break
+        field_num = tag >> 3
+        wire_type = tag & 0x07
+        if wire_type == 0:
+            try:
+                val, offset = _read_varint(data, offset)
+            except ValueError:
+                break
+            fields.append((field_num, wire_type, val))
+        elif wire_type == 2:
+            try:
+                length, offset = _read_varint(data, offset)
+            except ValueError:
+                break
+            if length < 0 or offset + length > n:
+                break
+            fields.append((field_num, wire_type, data[offset : offset + length]))
+            offset += length
+        elif wire_type == 1:
+            if offset + 8 > n:
+                break
+            fields.append((field_num, wire_type, data[offset : offset + 8]))
+            offset += 8
+        elif wire_type == 5:
+            if offset + 4 > n:
+                break
+            fields.append((field_num, wire_type, data[offset : offset + 4]))
+            offset += 4
+        else:
+            break
+    return fields
+
+
+def _extract_context_mentioned_jids(ctx_bytes: bytes) -> list[str]:
+    """Extract Tag 15 (mentionedJid) strings from a serialized ContextInfo blob."""
+    jids: list[str] = []
+    for field_num, wire_type, val in _iter_wire_fields(ctx_bytes):
+        if field_num == 15 and wire_type == 2 and isinstance(val, bytes) and val:
+            jid = val.decode("utf-8", errors="replace").strip()
+            if jid and "@" in jid:
+                jids.append(jid)
+    return jids
+
+
+def _extract_ios_mentions(metadata_bytes: bytes | None) -> list[str]:
+    """Extract mentioned JIDs (Tag 15) from an iOS ZWAMEDIAITEM.ZMETADATA blob."""
+    if not metadata_bytes or not isinstance(metadata_bytes, (bytes, bytearray)):
+        return []
+    raw = bytes(metadata_bytes)
+    jids: list[str] = []
+    for field_num, wire_type, val in _iter_wire_fields(raw):
+        if field_num == 15 and wire_type == 2 and isinstance(val, bytes) and val:
+            jid = val.decode("utf-8", errors="replace").strip()
+            if jid and "@" in jid:
+                jids.append(jid)
+        elif field_num == 19 and wire_type == 2 and isinstance(val, bytes) and val:
+            # Quoted WebMessageInfo may contain nested sub-messages with ContextInfo (tags 17, 14, 15)
+            for q_field, q_wire, q_val in _iter_wire_fields(val):
+                if q_wire != 2 or not isinstance(q_val, bytes) or not q_val:
+                    continue
+                if q_field in (3, 6, 7, 8, 9, 18, 20, 26, 42, 45, 49, 60, 62, 64, 66, 75, 93, 111):
+                    for sub_field, sub_wire, sub_val in _iter_wire_fields(q_val):
+                        if (
+                            sub_field in (14, 15, 17)
+                            and sub_wire == 2
+                            and isinstance(sub_val, bytes)
+                            and sub_val
+                        ):
+                            jids.extend(_extract_context_mentioned_jids(sub_val))
+    return list(dict.fromkeys(jids))

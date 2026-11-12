@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request
 
 from ..context import get_viewer_context
 from ..db_cache import _find_ios_call_history_db, _find_ios_db
-from ..hydration import _hydrate_link_preview_rows, _hydrate_live_photos
+from ..hydration import _hydrate_link_preview_rows, _hydrate_live_photos, _hydrate_mentions
 from ..queries.calls import (
     _query_android_calls,
     _query_ios_calls,
@@ -121,6 +121,9 @@ def api_starred():
     merged.sort(key=lambda x: x["timestamp"], reverse=True)
     has_more = len(merged) > offset + limit
     paged = merged[offset : offset + limit]
+    _hydrate_mentions(paged, ctx.source_type, conn, ctx.get_preserved())
+    for item in paged:
+        item.pop("_raw_metadata", None)
     return jsonify(
         {
             "messages": paged,
@@ -177,6 +180,9 @@ def api_chat_starred(chat_id: str):
         total_count = len(merged)
     has_more = total_count > offset + limit
     paged = merged[offset : offset + limit]
+    _hydrate_mentions(paged, ctx.source_type, conn, pres)
+    for item in paged:
+        item.pop("_raw_metadata", None)
     return jsonify(
         {
             "count": total_count,
@@ -224,6 +230,9 @@ def api_chat_pinned(chat_id: str):
             seen_ids.add(mid)
             merged.append(p)
 
+    _hydrate_mentions(merged, ctx.source_type, conn, ctx.get_preserved())
+    for item in merged:
+        item.pop("_raw_metadata", None)
     first_pin = merged[0] if merged else None
     return jsonify({"pinned_message": first_pin, "pinned_messages": merged})
 
@@ -303,6 +312,7 @@ def api_search():
                 live_rowids,
             ).fetchall()
         ]
+        _hydrate_mentions(rows, ctx.source_type, wa, ctx.get_preserved())
         _hydrate_link_preview_rows(rows, ctx.source_type)
         _hydrate_live_photos(rows, ctx.source_type, wa)
         results.extend(rows)
@@ -317,6 +327,7 @@ def api_search():
                 f"SELECT rowid, * FROM preserved_messages WHERE rowid IN ({p_placeholders})",
                 pres_rowids,
             ).fetchall()
+            pres_results = []
             for pr in p_rows:
                 d = dict(pr)
                 d["msg_id"] = -int(d["rowid"])
@@ -327,7 +338,9 @@ def api_search():
                 d.pop("action_type", None)
                 d.pop("participant_name", None)
                 d.pop("source_platform", None)
-                results.append(d)
+                pres_results.append(d)
+            _hydrate_mentions(pres_results, ctx.source_type, wa, pres)
+            results.extend(pres_results)
 
     results.sort(key=lambda r: (r.get("timestamp_ms", 0), r.get("msg_id", 0)))
     indexed_count = ctx.get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]

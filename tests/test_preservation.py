@@ -54,7 +54,7 @@ def test_open_preservation_db(tmp_path: Path) -> None:
     assert "preservation_runs" in tables
 
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 2
+    assert version == 3
 
     # Verify all v2 columns are present
     msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(preserved_messages)").fetchall()}
@@ -143,7 +143,7 @@ def test_preservation_db_v1_to_v2_migration(tmp_path: Path) -> None:
 
     # 2. Open with open_preservation_db to trigger automated migration
     migrated_conn = preservation.open_preservation_db(str(tmp_path))
-    assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
     # Check that existing data is intact
     msgs = migrated_conn.execute(
