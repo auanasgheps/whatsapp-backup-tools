@@ -34,13 +34,15 @@ def api_calls():
     filter_type = raw_filter.strip().lower() if raw_filter else "all"
     if filter_type not in ("all", "missed", "video"):
         filter_type = "all"
+    search_q = (request.args.get("q") or "").strip().lower()
     raw_offset = request.args.get("offset")
     raw_limit = request.args.get("limit")
     offset = int(raw_offset) if raw_offset and raw_offset.isdigit() else 0
     limit = min(int(raw_limit), 200) if raw_limit and raw_limit.isdigit() else 50
     offset = max(0, offset)
     limit = max(1, limit)
-    fetch_limit = offset + limit + 1
+    # When searching, we query without an early LIMIT so full history is searched
+    fetch_limit = None if search_q else (offset + limit + 1)
 
     live_calls: list[dict] = []
     conn = ctx.get_wa()
@@ -69,6 +71,15 @@ def api_calls():
             seen_ids.add(cid)
             merged.append(c)
 
+    if search_q:
+        merged = [
+            c
+            for c in merged
+            if search_q in (c.get("caller_name") or "").lower()
+            or search_q in (c.get("caller_phone") or "").lower()
+            or search_q in (c.get("chat_id") or "").lower()
+        ]
+
     merged.sort(key=lambda x: x.get("timestamp_ms") or (x["timestamp"] * 1000), reverse=True)
     has_more = len(merged) > offset + limit
     paged = merged[offset : offset + limit]
@@ -85,13 +96,14 @@ def api_calls():
 @bp.route("/api/starred")
 def api_starred():
     ctx = get_viewer_context()
+    search_q = (request.args.get("q") or "").strip().lower()
     raw_offset = request.args.get("offset")
     raw_limit = request.args.get("limit")
     offset = int(raw_offset) if raw_offset and raw_offset.isdigit() else 0
     limit = min(int(raw_limit), 200) if raw_limit and raw_limit.isdigit() else 50
     offset = max(0, offset)
     limit = max(1, limit)
-    fetch_limit = offset + limit + 1
+    fetch_limit = None if search_q else (offset + limit + 1)
 
     live_starred: list[dict] = []
     conn = ctx.get_wa()
@@ -117,6 +129,17 @@ def api_starred():
         if mid not in seen_ids:
             seen_ids.add(mid)
             merged.append(m)
+
+    if search_q:
+        merged = [
+            m
+            for m in merged
+            if search_q in (m.get("chat_name") or "").lower()
+            or search_q in (m.get("sender_name") or "").lower()
+            or search_q in (m.get("text") or m.get("text_body") or "").lower()
+            or search_q in (m.get("file_name") or "").lower()
+            or search_q in (m.get("place_name") or "").lower()
+        ]
 
     merged.sort(key=lambda x: x["timestamp"], reverse=True)
     has_more = len(merged) > offset + limit

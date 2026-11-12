@@ -14723,3 +14723,121 @@ class TestReviewFixRegressions:
                 f"/api/messages/at?chat_id=1&chat_type=group&ts={older[0]['timestamp_ms']}&limit=10"
             ).get_json()
             assert any(m["text_body"] == "Message 1950" for m in around)
+
+    def test_collections_server_search_and_preview_richness(self, tmp_path):
+        """Verify /api/calls and /api/starred server search (?q=) and preview metadata."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        pres_path = tmp_path / "preserved_messages.db"
+
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute("""
+            CREATE TABLE IF NOT EXISTS call_log (
+                _id INTEGER PRIMARY KEY,
+                call_id TEXT,
+                jid_row_id INTEGER,
+                from_me INTEGER,
+                timestamp INTEGER,
+                video_call INTEGER,
+                duration INTEGER,
+                call_result INTEGER,
+                group_jid_row_id INTEGER
+            )
+        """)
+        wa_conn.execute("ALTER TABLE message ADD COLUMN starred INTEGER")
+        wa_conn.execute("ALTER TABLE message_media ADD COLUMN media_duration INTEGER")
+
+        # Insert live call and live starred message with rich preview columns
+        wa_conn.execute(
+            "INSERT INTO call_log (_id, call_id, jid_row_id, from_me, timestamp, video_call, duration, call_result) "
+            "VALUES (10, 'call_abc_1', 1, 0, 1700000000000, 1, 120, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, starred) "
+            "VALUES (201, 10, 0, 1, 1700000000000, 'Project Roadmap', 9, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name, media_duration) "
+            "VALUES (201, 'Media/WhatsApp Documents/Roadmap.pdf', 'Roadmap.pdf', 0)"
+        )
+        wa_conn.commit()
+
+        # Insert preserved call and preserved starred message
+        with sqlite3.connect(str(pres_path)) as pres_conn:
+            pres_conn.executescript("""
+                CREATE TABLE preserved_calls (
+                    call_id TEXT PRIMARY KEY,
+                    chat_id TEXT,
+                    caller_jid TEXT,
+                    caller_name TEXT,
+                    timestamp_ms INTEGER,
+                    duration_seconds INTEGER,
+                    is_video INTEGER,
+                    from_me INTEGER,
+                    call_result INTEGER
+                );
+                CREATE TABLE preserved_messages (
+                    stanza_id TEXT,
+                    chat_id TEXT,
+                    chat_type TEXT,
+                    sender_jid TEXT,
+                    sender_name TEXT,
+                    timestamp_ms INTEGER,
+                    text_body TEXT,
+                    media_type TEXT,
+                    from_me INTEGER,
+                    is_starred INTEGER,
+                    media_duration INTEGER,
+                    original_path TEXT
+                );
+            """)
+            pres_conn.execute(
+                "INSERT INTO preserved_calls (call_id, chat_id, caller_jid, caller_name, from_me, timestamp_ms, duration_seconds, is_video, call_result) "
+                "VALUES ('pres_call_1', '15551234567', '15551234567@s.whatsapp.net', 'Bob Architect', 0, 1700000050000, 45, 0, 1)"
+            )
+            pres_conn.execute(
+                "INSERT INTO preserved_messages (stanza_id, chat_id, chat_type, sender_jid, sender_name, timestamp_ms, text_body, media_type, from_me, is_starred, media_duration, original_path) "
+                "VALUES ('pres_msg_1', '15551234567', 'contact', '15551234567@s.whatsapp.net', 'Bob Architect', 1700000050000, 'Audio note', 'audio', 0, 1, 65, 'Media/WhatsApp Voice/voice.opus')"
+            )
+            pres_conn.commit()
+
+        app = viewer.create_app(tmp_path)
+        client = app.test_client()
+
+        # 1. Test /api/calls server search (?q=)
+        res_calls_all = client.get("/api/calls")
+        assert res_calls_all.status_code == 200
+        calls_data = res_calls_all.get_json()
+        assert len(calls_data["calls"]) == 2
+        # Check preserved and group flags
+        pres_call_item = next(c for c in calls_data["calls"] if c["id"] == "pres_call_1")
+        assert pres_call_item["is_preserved"] is True
+
+        res_calls_q = client.get("/api/calls?q=Architect")
+        assert res_calls_q.status_code == 200
+        q_calls = res_calls_q.get_json()["calls"]
+        assert len(q_calls) == 1
+        assert q_calls[0]["id"] == "pres_call_1"
+
+        # 2. Test /api/starred server search (?q=) and preview metadata
+        res_starred_all = client.get("/api/starred")
+        assert res_starred_all.status_code == 200
+        starred_data = res_starred_all.get_json()
+        assert len(starred_data["messages"]) == 2
+
+        doc_msg = next(m for m in starred_data["messages"] if m["id"] == 201)
+        assert doc_msg["media_type"] == "document"
+        assert doc_msg["file_name"] == "Roadmap.pdf"
+
+        audio_msg = next(m for m in starred_data["messages"] if m["id"] < 0)
+        assert audio_msg["media_type"] == "audio"
+        assert audio_msg["duration"] == 65
+
+        res_starred_q = client.get("/api/starred?q=Roadmap")
+        assert res_starred_q.status_code == 200
+        q_starred = res_starred_q.get_json()["messages"]
+        assert len(q_starred) == 1
+        assert q_starred[0]["id"] == 201

@@ -217,7 +217,13 @@
     .filter-btn:hover:not(.active) { background: var(--border); color: var(--text); }
     .filter-btn { transition: background 0.15s, color 0.15s; }
 
-    #search-box { padding: 10px; display: flex; align-items: center; flex-shrink: 0; }
+    #search-box {
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      position: relative;
+      flex-shrink: 0;
+    }
     #search-input {
       width: 100%;
       flex: 1;
@@ -225,13 +231,42 @@
       background: var(--surface2);
       border: none;
       border-radius: 8px;
-      padding: 8px 12px;
+      padding: 8px 32px 8px 12px;
       color: var(--text);
       font-size: 14px;
       outline: none;
       margin: 0;
     }
+    #search-input::-webkit-search-cancel-button,
+    #search-input::-webkit-search-decoration {
+      -webkit-appearance: none;
+      appearance: none;
+      display: none;
+    }
     #search-input:focus { box-shadow: 0 0 0 2px var(--accent); }
+    #search-clear {
+      position: absolute;
+      right: 18px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      padding: 4px;
+      margin: 0;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      min-height: 0;
+      z-index: 2;
+    }
+    #search-clear:hover { color: var(--text); background: var(--surface); }
 
     /* ---- sidebar docked bottom navbar ---- */
     #sidebar-bottom-bar {
@@ -3557,6 +3592,24 @@
   flex: 1;
   min-width: 0;
   line-height: 1.3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.call-item-group-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.call-item-pres-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--preserved-border, #eab308);
+  color: #000;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  flex-shrink: 0;
 }
 .call-item-sub {
   display: flex;

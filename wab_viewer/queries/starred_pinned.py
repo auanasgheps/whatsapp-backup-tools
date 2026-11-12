@@ -46,9 +46,35 @@ def _query_android_starred(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_media'"
         ).fetchone()
     )
+    mm_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(message_media)").fetchall()}
+        if has_mm
+        else set()
+    )
     mm_join = "LEFT JOIN message_media mm ON mm.message_row_id = m._id" if has_mm else ""
     mm_file = "mm.file_path" if has_mm else "NULL"
     mm_mime = "mm.mime_type" if has_mm else "NULL"
+    mm_duration = "COALESCE(mm.media_duration, 0)" if "media_duration" in mm_cols else "0"
+    mm_name = "COALESCE(mm.media_name, '')" if "media_name" in mm_cols else "''"
+
+    has_ml = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_location'"
+        ).fetchone()
+    )
+    ml_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(message_location)").fetchall()}
+        if has_ml
+        else set()
+    )
+    ml_join = "LEFT JOIN message_location ml ON ml.message_row_id = m._id" if has_ml else ""
+    ml_lat = "ml.latitude" if "latitude" in ml_cols else "NULL"
+    ml_lng = "ml.longitude" if "longitude" in ml_cols else "NULL"
+    ml_place = (
+        "COALESCE(ml.place_name, ml.place_address, '')"
+        if ("place_name" in ml_cols or "place_address" in ml_cols)
+        else "''"
+    )
 
     has_chat = bool(
         conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat'").fetchone()
@@ -222,6 +248,11 @@ def _query_android_starred(
             COALESCE(m.message_type, 0) AS message_type,
             {mm_file} AS file_path,
             {mm_mime} AS mime_type,
+            {mm_duration} AS media_duration,
+            {mm_name} AS media_name,
+            {ml_lat} AS latitude,
+            {ml_lng} AS longitude,
+            {ml_place} AS place_name,
             {"c.subject" if has_chat else "NULL"} AS chat_subject,
             {chat_user_expr} AS chat_user,
             {chat_is_unmapped_lid_expr} AS chat_is_unmapped_lid,
@@ -240,6 +271,7 @@ def _query_android_starred(
         {con_s_join}
         {ldn_s_join}
         {mm_join}
+        {ml_join}
         WHERE {where_sql}
         ORDER BY m.timestamp DESC
         {limit_sql}
@@ -347,6 +379,14 @@ def _query_android_starred(
             else (c_user or row_dict["chat_row_id"] or "0")
         )
 
+        file_name = row_dict.get("media_name") or ""
+        if not file_name and row_dict.get("file_path"):
+            file_name = Path(row_dict["file_path"]).name
+        dur_sec = int(row_dict.get("media_duration") or 0)
+        lat = row_dict.get("latitude")
+        lng = row_dict.get("longitude")
+        place = row_dict.get("place_name") or ""
+
         results.append(
             {
                 "id": int(row_dict["id"]),
@@ -358,6 +398,11 @@ def _query_android_starred(
                 "text": row_dict["text"],
                 "text_body": row_dict["text"],
                 "media_type": media_type,
+                "duration": dur_sec,
+                "file_name": file_name,
+                "latitude": lat,
+                "longitude": lng,
+                "place_name": place,
                 "_raw_metadata": row_dict.get("_raw_metadata"),
             }
         )
@@ -395,6 +440,9 @@ def _query_ios_starred(
     mi_title = "mi.ZTITLE" if has_mi else "NULL"
     mi_path = "mi.ZMEDIALOCALPATH" if has_mi else "NULL"
     mi_meta = "mi.ZMETADATA" if "ZMETADATA" in mi_cols else "NULL"
+    mi_duration = "COALESCE(mi.ZMOVIEDURATION, 0)" if "ZMOVIEDURATION" in mi_cols else "0"
+    mi_lat = "mi.ZLATITUDE" if "ZLATITUDE" in mi_cols else "NULL"
+    mi_lng = "mi.ZLONGITUDE" if "ZLONGITUDE" in mi_cols else "NULL"
 
     has_cs = bool(
         conn.execute(
@@ -429,6 +477,9 @@ def _query_ios_starred(
             m.ZFROMJID AS from_jid,
             {mi_path} AS media_path,
             {mi_meta} AS _raw_metadata,
+            {mi_duration} AS media_duration,
+            {mi_lat} AS latitude,
+            {mi_lng} AS longitude,
             {"cs.ZPARTNERNAME" if has_cs else "NULL"} AS partner_name,
             {"cs.ZCONTACTJID" if has_cs else "NULL"} AS contact_jid,
             {"cs.ZGROUPINFO" if has_cs_group else "NULL"} AS group_info
@@ -497,6 +548,15 @@ def _query_ios_starred(
             )
 
         is_group = bool(row_dict.get("group_info") is not None or contact_jid.endswith("@g.us"))
+        file_name = ""
+        if media_type == "document":
+            file_name = row_dict["text"] or ""
+        elif row_dict.get("media_path"):
+            file_name = Path(row_dict["media_path"]).name
+        dur_sec = int(row_dict.get("media_duration") or 0)
+        lat = row_dict.get("latitude")
+        lng = row_dict.get("longitude")
+
         results.append(
             {
                 "id": int(row_dict["id"]),
@@ -508,6 +568,11 @@ def _query_ios_starred(
                 "text": row_dict["text"],
                 "text_body": row_dict["text"],
                 "media_type": media_type,
+                "duration": dur_sec,
+                "file_name": file_name,
+                "latitude": lat,
+                "longitude": lng,
+                "place_name": "",
                 "_raw_metadata": row_dict.get("_raw_metadata"),
             }
         )
@@ -552,16 +617,27 @@ def _query_preserved_starred(
             )
         )
         chat_type_col = "chat_type" if "chat_type" in cols else "'contact'"
+        msg_id_col = "msg_id" if "msg_id" in cols else "rowid"
+        dur_col = "media_duration" if "media_duration" in cols else "0"
+        name_col = "original_path" if "original_path" in cols else "NULL"
+        lat_col = "latitude" if "latitude" in cols else "NULL"
+        lng_col = "longitude" if "longitude" in cols else "NULL"
+        place_col = "location_name" if "location_name" in cols else "''"
         sql = f"""
             SELECT
                 rowid,
-                msg_id,
+                {msg_id_col} AS msg_id,
                 chat_id,
                 {chat_type_col} AS chat_type,
                 timestamp_ms,
                 text_body,
                 media_type,
                 from_me,
+                {dur_col} AS media_duration,
+                {name_col} AS original_path,
+                {lat_col} AS latitude,
+                {lng_col} AS longitude,
+                {place_col} AS place_name,
                 {sender_col} AS sender_display
             FROM preserved_messages
             WHERE {where_sql}
@@ -586,6 +662,12 @@ def _query_preserved_starred(
         from_me = int(row_dict["from_me"])
         sender_name = "You" if from_me == 1 else (row_dict["sender_display"] or "Unknown")
 
+        file_name = Path(row_dict["original_path"]).name if row_dict.get("original_path") else ""
+        dur_sec = int(row_dict.get("media_duration") or 0)
+        lat = row_dict.get("latitude")
+        lng = row_dict.get("longitude")
+        place = row_dict.get("place_name") or ""
+
         results.append(
             {
                 "id": -int(row_dict["rowid"]),
@@ -597,6 +679,11 @@ def _query_preserved_starred(
                 "text": row_dict["text_body"] or "",
                 "text_body": row_dict["text_body"] or "",
                 "media_type": media_type,
+                "duration": dur_sec,
+                "file_name": file_name,
+                "latitude": lat,
+                "longitude": lng,
+                "place_name": place,
             }
         )
     return results

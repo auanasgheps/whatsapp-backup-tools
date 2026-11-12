@@ -1057,6 +1057,7 @@
     if (searchInput) {
       searchInput.value = '';
     }
+    updateSidebarSearchClearBtn();
 
     if (tabName === 'chats') {
       if (searchInput) searchInput.placeholder = 'Search messages & chats…';
@@ -4327,16 +4328,6 @@
         return;
       }
     }
-    if (e.key === 'Escape') {
-      const starredDrawer = document.getElementById('chat-starred-drawer');
-      if (starredDrawer && starredDrawer.classList.contains('open')) {
-        closeChatStarred(); return;
-      }
-      if (document.getElementById('chat-info-panel').classList.contains('open')) {
-        closeChatInfo(); return;
-      }
-      closeMediaGallery();
-    }
   });
 
   function _nextLightboxIndex(from, dir) {
@@ -4562,39 +4553,66 @@
   // ---- sidebar search -------------------------------------------------------
 
   let searchTimer = null;
+  const searchInputEl = document.getElementById('search-input');
+  const searchClearBtn = document.getElementById('search-clear');
 
-  document.getElementById('search-input').addEventListener('input', function () {
-    clearTimeout(searchTimer);
-    const q = this.value.trim();
+  function updateSidebarSearchClearBtn() {
+    if (searchClearBtn && searchInputEl) {
+      searchClearBtn.style.display = searchInputEl.value ? 'flex' : 'none';
+    }
+  }
 
+  function clearActiveSidebarSearch() {
+    if (searchInputEl) {
+      searchInputEl.value = '';
+    }
+    updateSidebarSearchClearBtn();
     if (currentNavTab === 'chats') {
-      if (!q) {
-        clearSearchResults();
-        return;
-      }
-      searchTimer = setTimeout(() => doSearch(q), 300);
+      clearSearchResults();
     } else if (currentNavTab === 'calls') {
-      filterCallsList(q);
+      loadCallsList(true);
     } else if (currentNavTab === 'starred') {
-      filterStarredList(q);
+      loadStarredList(true);
     } else if (currentNavTab === 'archived') {
-      renderArchivedList(q);
+      renderArchivedList('');
     }
-  });
+    if (searchInputEl) {
+      searchInputEl.focus();
+    }
+  }
 
-  document.getElementById('search-input').addEventListener('search', function () {
-    if (!this.value.trim()) {
+  if (searchClearBtn) {
+    searchClearBtn.addEventListener('click', clearActiveSidebarSearch);
+  }
+
+  if (searchInputEl) {
+    searchInputEl.addEventListener('input', function () {
+      clearTimeout(searchTimer);
+      updateSidebarSearchClearBtn();
+      const q = this.value.trim();
+
       if (currentNavTab === 'chats') {
-        clearSearchResults();
+        if (!q) {
+          clearSearchResults();
+          return;
+        }
+        searchTimer = setTimeout(() => doSearch(q), 300);
       } else if (currentNavTab === 'calls') {
-        filterCallsList('');
+        searchTimer = setTimeout(() => loadCallsList(true), 250);
       } else if (currentNavTab === 'starred') {
-        filterStarredList('');
+        searchTimer = setTimeout(() => loadStarredList(true), 250);
       } else if (currentNavTab === 'archived') {
-        renderArchivedList('');
+        renderArchivedList(q);
       }
-    }
-  });
+    });
+
+    searchInputEl.addEventListener('search', function () {
+      updateSidebarSearchClearBtn();
+      if (!this.value.trim()) {
+        clearActiveSidebarSearch();
+      }
+    });
+  }
 
   async function doSearch(q) {
     // Contact name matches — client-side, instant
@@ -5393,8 +5411,28 @@
     });
   }
   document.getElementById('chat-info-close').addEventListener('click', closeChatInfo);
-  document.getElementById('chat-info-panel').addEventListener('click', e => {
-    if (e.target === document.getElementById('chat-info-panel')) closeChatInfo();
+
+  // Dismiss open drawers when clicking into the conversation or chat pane outside the drawer
+  document.addEventListener('pointerdown', e => {
+    const infoDrawer = document.getElementById('chat-info-panel');
+    const starredDrawer = document.getElementById('chat-starred-drawer');
+
+    if (infoDrawer && infoDrawer.classList.contains('open')) {
+      const infoBtn = document.getElementById('chat-info-btn');
+      const headerInfo = document.getElementById('chat-header-info');
+      const isTrigger = (infoBtn && infoBtn.contains(e.target)) || (headerInfo && headerInfo.contains(e.target));
+      if (!infoDrawer.contains(e.target) && !isTrigger) {
+        closeChatInfo();
+      }
+    }
+
+    if (starredDrawer && starredDrawer.classList.contains('open')) {
+      const starredBtn = document.getElementById('chat-starred-btn');
+      const isTrigger = starredBtn && starredBtn.contains(e.target);
+      if (!starredDrawer.contains(e.target) && !isTrigger) {
+        closeChatStarred();
+      }
+    }
   });
 
   // ---- chat starred flyout & count badge -----------------------------------
@@ -5499,13 +5537,8 @@
 
         const snippetEl = document.createElement('div');
         snippetEl.className = 'starred-card-snippet';
-        let previewText = resolveMentionsPlainText(m.text || m.text_body || '', m.mentions);
-        if (m.media_type) {
-          const icon = m.media_type === 'photo' ? '📷' : (m.media_type === 'video' ? '🎬' : (m.media_type === 'document' ? '📄' : (m.media_type === 'audio' ? '🎵' : '📎')));
-          const label = MEDIA_LABELS[m.media_type] || 'Media';
-          previewText = previewText ? `${icon} ${previewText}` : `${icon} ${label}`;
-        }
-        snippetEl.textContent = previewText ? `"${previewText}"` : '…';
+        const formattedPreview = _formatStarredPreview(m);
+        snippetEl.textContent = formattedPreview ? `"${formattedPreview}"` : '…';
 
         card.appendChild(topRow);
         card.appendChild(snippetEl);
@@ -5546,9 +5579,6 @@
   }
   const starredDrawer = document.getElementById('chat-starred-drawer');
   if (starredDrawer) {
-    starredDrawer.addEventListener('click', e => {
-      if (e.target === starredDrawer) closeChatStarred();
-    });
     starredDrawer.addEventListener('keydown', e => {
       if (e.key === 'Tab') {
         const focusable = Array.from(starredDrawer.querySelectorAll('button, [tabindex="0"]')).filter(
@@ -5609,7 +5639,10 @@
     const authorEl = document.getElementById('pinned-banner-author');
     const snippetEl = document.getElementById('pinned-banner-snippet');
     if (authorEl) {
-      authorEl.textContent = pin.sender_name ? `Pinned • ${pin.sender_name}:` : 'Pinned:';
+      const pinLabel = _chatPins.length > 1
+        ? `Pinned Message (${_currentPinIndex + 1} of ${_chatPins.length})`
+        : 'Pinned';
+      authorEl.textContent = pin.sender_name ? `${pinLabel} • ${pin.sender_name}:` : `${pinLabel}:`;
     }
     if (snippetEl) {
       let snippet = resolveMentionsPlainText(pin.text || pin.text_body || '', pin.mentions);
@@ -5691,8 +5724,43 @@
   // ---- starred messages sidebar list ---------------------------------------
 
   let _starredList = [];
+  let _starredOffset = 0;
+  let _starredHasMore = false;
   let _starredLoading = false;
   let _activeStarredMsgId = null;
+
+  function _formatStarredPreview(m) {
+    let preview = m.text || m.text_body || '';
+    if (m.media_type) {
+      if (m.media_type === 'photo') {
+        return preview ? `📷 Photo • ${preview}` : '📷 Photo';
+      }
+      if (m.media_type === 'video') {
+        const durStr = m.duration > 0 ? ` (${fmtDuration(m.duration)})` : '';
+        const cap = preview ? ` • ${preview}` : '';
+        return `📹 Video${durStr}${cap}`;
+      }
+      if (m.media_type === 'audio') {
+        const durStr = m.duration > 0 ? ` (${fmtDuration(m.duration)})` : '';
+        return `🎤 Voice message${durStr}`;
+      }
+      if (m.media_type === 'document') {
+        const fname = m.file_name || preview || 'Document';
+        return `📄 ${fname}`;
+      }
+      if (m.media_type === 'location') {
+        const loc = m.place_name || preview;
+        return loc ? `📍 Location • ${loc}` : '📍 Location';
+      }
+      if (m.media_type === 'link') {
+        return preview ? `🔗 ${preview}` : '🔗 Link';
+      }
+      const mediaKey = m.media_type;
+      const label = MEDIA_LABELS[mediaKey] || '📎 Media';
+      return preview ? `${label} • ${preview}` : label;
+    }
+    return preview;
+  }
 
   async function loadStarredList(reset) {
     if (_starredLoading) return;
@@ -5703,13 +5771,23 @@
       return;
     }
 
+    const searchInput = document.getElementById('search-input');
+    const q = (currentNavTab === 'starred' && searchInput) ? searchInput.value.trim() : '';
+
     if (reset) {
+      _starredOffset = 0;
       _starredList = [];
       chatListEl.innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading starred messages…</div>';
     }
 
     try {
-      const res = await fetch('/api/starred?limit=100');
+      const params = new URLSearchParams({
+        offset: String(_starredOffset),
+        limit: '50'
+      });
+      if (q) params.set('q', q);
+
+      const res = await fetch(`/api/starred?${params}`);
       if (!res.ok) {
         throw new Error(`Server returned HTTP ${res.status} when fetching starred messages`);
       }
@@ -5717,11 +5795,30 @@
       if (currentNavTab !== 'starred') return;
 
       const msgs = data.messages || [];
-      _starredList = msgs;
-      filterStarredList('');
+      _starredHasMore = Boolean(data.has_more);
+      _starredOffset += msgs.length;
+
+      if (reset) {
+        chatListEl.innerHTML = '';
+        if (msgs.length === 0) {
+          if (q) {
+            chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No starred bookmarks matching "${esc(q)}"</span></div>`;
+          } else {
+            chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>No starred bookmarks found</span></div>';
+          }
+          return;
+        }
+      }
+
+      _starredList.push(...msgs);
+      msgs.forEach(m => {
+        chatListEl.appendChild(renderStarredItem(m));
+      });
     } catch (err) {
       if (currentNavTab !== 'starred') return;
-      chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>Failed to load bookmarks</span></div>';
+      if (reset) {
+        chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>Failed to load bookmarks</span></div>';
+      }
       console.error('Failed to load starred bookmarks:', err);
     } finally {
       _starredLoading = false;
@@ -5735,12 +5832,7 @@
     el.dataset.msgId = String(m.id);
     el.dataset.chatId = String(m.chat_id);
     if (m.chat_type) el.dataset.chatType = m.chat_type;
-    let preview = m.text || m.text_body || '';
-    if (m.media_type) {
-      const mediaKey = m.media_type === 'photo' ? 'image' : m.media_type;
-      const label = MEDIA_LABELS[mediaKey] || '📎 Media';
-      preview = preview ? `${label} • ${preview}` : label;
-    }
+    const preview = _formatStarredPreview(m);
     const authorPrefix = m.sender_name ? `${m.sender_name}: ` : '';
     el.innerHTML = `<div class="chat-name">${esc(m.chat_name || 'Chat')}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
     el.addEventListener('click', () => {
@@ -5815,6 +5907,9 @@
       return;
     }
 
+    const searchInput = document.getElementById('search-input');
+    const q = (currentNavTab === 'calls' && searchInput) ? searchInput.value.trim() : '';
+
     if (reset) {
       _callsOffset = 0;
       _callsList = [];
@@ -5822,7 +5917,13 @@
     }
 
     try {
-      const res = await fetch(`/api/calls?offset=${_callsOffset}&limit=50`);
+      const params = new URLSearchParams({
+        offset: String(_callsOffset),
+        limit: '50'
+      });
+      if (q) params.set('q', q);
+
+      const res = await fetch(`/api/calls?${params}`);
       if (!res.ok) {
         throw new Error(`Server returned HTTP ${res.status} when fetching calls`);
       }
@@ -5836,21 +5937,19 @@
       if (reset) {
         chatListEl.innerHTML = '';
         if (calls.length === 0) {
-          chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>No Call History</strong><span>No calls found in this backup</span></div>';
+          if (q) {
+            chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No calls matching "${esc(q)}"</span></div>`;
+          } else {
+            chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>No Call History</strong><span>No calls found in this backup</span></div>';
+          }
           return;
         }
       }
 
       _callsList.push(...calls);
-      const searchInput = document.getElementById('search-input');
-      const activeQ = (currentNavTab === 'calls' && searchInput) ? searchInput.value.trim() : '';
-      if (activeQ) {
-        filterCallsList(activeQ);
-      } else {
-        calls.forEach(c => {
-          chatListEl.appendChild(renderCallItem(c));
-        });
-      }
+      calls.forEach(c => {
+        chatListEl.appendChild(renderCallItem(c));
+      });
     } catch (err) {
       if (currentNavTab !== 'calls') return;
       if (reset) {
@@ -5968,6 +6067,19 @@
     const nameEl = document.createElement('div');
     nameEl.className = 'call-item-name';
     nameEl.textContent = callerName;
+    if (call.is_group) {
+      const grpIcon = document.createElement('span');
+      grpIcon.className = 'call-item-group-icon';
+      grpIcon.title = 'Group call';
+      grpIcon.innerHTML = ' 👥';
+      nameEl.appendChild(grpIcon);
+    }
+    if (call.is_preserved) {
+      const presBadge = document.createElement('span');
+      presBadge.className = 'call-item-pres-badge';
+      presBadge.textContent = 'Preserved';
+      nameEl.appendChild(presBadge);
+    }
     row1.appendChild(nameEl);
 
     const mediaIcon = document.createElement('span');
@@ -6058,12 +6170,16 @@
     const badgeIcon = document.getElementById('call-inspect-badge-icon');
     const badgeLabel = document.getElementById('call-inspect-badge-label');
     if (badgeIcon && badgeLabel) {
+      const typeStr = call.is_group ? 'Group ' : '';
       if (call.is_video) {
         badgeIcon.textContent = '📹';
-        badgeLabel.textContent = 'Video Call';
+        badgeLabel.textContent = `${typeStr}Video Call`;
       } else {
-        badgeIcon.textContent = '📞';
-        badgeLabel.textContent = 'Voice Call';
+        badgeIcon.textContent = call.is_group ? '👥' : '📞';
+        badgeLabel.textContent = `${typeStr}Voice Call`;
+      }
+      if (call.is_preserved) {
+        badgeLabel.textContent += ' • Preserved';
       }
     }
 
@@ -6165,6 +6281,10 @@
       if (currentNavTab === 'calls' && _callsHasMore && !_callsLoading) {
         if (chatListScroll.scrollTop + chatListScroll.clientHeight >= chatListScroll.scrollHeight - 80) {
           loadCallsList(false);
+        }
+      } else if (currentNavTab === 'starred' && _starredHasMore && !_starredLoading) {
+        if (chatListScroll.scrollTop + chatListScroll.clientHeight >= chatListScroll.scrollHeight - 80) {
+          loadStarredList(false);
         }
       }
     });
@@ -6922,27 +7042,72 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      hideMsgDetails();
-      closeChatInfo();
-      closeChatStarred();
-      closeMapChooser();
+      // 1. Lightbox takes highest priority
+      const lb = document.getElementById('img-lightbox');
+      if (lb) {
+        _closeLb();
+        e.preventDefault();
+        return;
+      }
+
+      // 2. Message details popup
+      const detailsPopup = document.getElementById('msg-details-popup');
+      if (detailsPopup && detailsPopup.classList.contains('visible')) {
+        hideMsgDetails();
+        e.preventDefault();
+        return;
+      }
+
+      // 3. Slide-over drawers (close one active drawer at a time)
+      const starredDrawer = document.getElementById('chat-starred-drawer');
+      if (starredDrawer && starredDrawer.classList.contains('open')) {
+        closeChatStarred();
+        e.preventDefault();
+        return;
+      }
+      const infoPanel = document.getElementById('chat-info-panel');
+      if (infoPanel && infoPanel.classList.contains('open')) {
+        closeChatInfo();
+        e.preventDefault();
+        return;
+      }
+      const mediaGallery = document.getElementById('media-gallery');
+      if (mediaGallery && mediaGallery.classList.contains('open')) {
+        closeMediaGallery();
+        e.preventDefault();
+        return;
+      }
+
+      // 4. Modals (Map chooser, Settings)
+      const mapModal = document.getElementById('map-chooser-modal');
+      if (mapModal && mapModal.classList.contains('open')) {
+        closeMapChooser();
+        e.preventDefault();
+        return;
+      }
+      const settingsModal = document.getElementById('settings-modal');
+      if (settingsModal && settingsModal.style.display !== 'none' && settingsModal.style.display !== '') {
+        closeSettings();
+        e.preventDefault();
+        return;
+      }
+
+      // 5. In-chat search input or bar
+      const chatSearchInput = document.getElementById('chat-search-input');
+      if (chatSearchInput && document.activeElement === chatSearchInput) {
+        chatSearchInput.value = '';
+        chatSearchInput.blur();
+        e.preventDefault();
+        return;
+      }
+
+      // 6. Global sidebar search input
       const searchInput = document.getElementById('search-input');
       if (searchInput && (document.activeElement === searchInput || searchInput.value)) {
-        if (searchInput.value) {
-          searchInput.value = '';
-          if (currentNavTab === 'chats') {
-            clearSearchResults();
-          } else if (currentNavTab === 'calls') {
-            filterCallsList('');
-          } else if (currentNavTab === 'starred') {
-            filterStarredList('');
-          } else if (currentNavTab === 'archived') {
-            renderArchivedList('');
-          }
-        }
-        if (document.activeElement === searchInput) {
-          searchInput.blur();
-        }
+        clearActiveSidebarSearch();
+        searchInput.blur();
+        e.preventDefault();
+        return;
       }
       return;
     }
