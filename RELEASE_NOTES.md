@@ -4,7 +4,6 @@ Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, introducing l
 
 This update unlocks comprehensive Call History logs with a dedicated Call Inspector, Starred bookmarks, Pinned message banners, an Archived chats view, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, and theme-adaptive group sender colors.
 
-Your feedback and feature suggestions continue to shape the direction of the project!
 
 #### **Release highlights:**
 
