@@ -14841,3 +14841,255 @@ class TestReviewFixRegressions:
         q_starred = res_starred_q.get_json()["messages"]
         assert len(q_starred) == 1
         assert q_starred[0]["id"] == 201
+
+
+class TestPinnedMessagesRichPreviews:
+    """Tests for pinned message resolution, anti-stanza-ID protection, and preview richness."""
+
+    def test_ios_pinned_resolves_type_66_stanza_id_when_parent_is_null(self, tmp_path):
+        """iOS ZMESSAGETYPE=66 with ZPARENTMESSAGE=NULL resolves to target message via ZSTANZAID."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '12345678@s.whatsapp.net', 'Alice', 0);
+
+            -- Target message: text
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID)
+            VALUES (10, 1, 0, 720000000, 'Important meeting agenda', 0, '3EB0TARGETSTANZAPIN1');
+
+            -- Announcement message (type 66): ZTEXT contains target stanza ID, ZPARENTMESSAGE is NULL
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID, ZPARENTMESSAGE)
+            VALUES (11, 1, 0, 720000050, '3EB0TARGETSTANZAPIN1', 66, '3EB0ANNOUNCESTANZAPIN1', NULL);
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/1/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            pin = pins[0]
+            # Must resolve to target message PK 10, NOT the announcement PK 11
+            assert pin["id"] == 10
+            # Must show target text, NOT the raw stanza ID
+            assert pin["text_body"] == "Important meeting agenda"
+            assert pin["is_pinned"] is True
+
+    def test_ios_pinned_media_richness(self, tmp_path):
+        """iOS pinned media message projects media_type, caption, and filename via ZWAMEDIAITEM."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_cols = {r[1] for r in cs_conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
+        if "ZMOVIEDURATION" not in cs_cols:
+            cs_conn.execute("ALTER TABLE ZWAMEDIAITEM ADD COLUMN ZMOVIEDURATION INTEGER")
+        cs_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '12345678@s.whatsapp.net', 'Alice', 0);
+
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZTITLE, ZMEDIALOCALPATH, ZMOVIEDURATION)
+            VALUES (101, 'Sunset at the lake', 'Media/Photos/sunset.jpg', 0),
+                   (102, 'Sprint Demo Recording', 'Media/Videos/demo.mp4', 125);
+
+            -- Photo message with caption in media item
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID, ZMEDIAITEM)
+            VALUES (20, 1, 0, 720000100, NULL, 1, '3EB0PHOTOSUNSET1', 101);
+
+            -- Video message with caption and duration
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID, ZMEDIAITEM)
+            VALUES (21, 1, 0, 720000200, NULL, 2, '3EB0VIDEODEMO1', 102);
+
+            -- Pin announcements pointing to the media messages
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID, ZPARENTMESSAGE)
+            VALUES (22, 1, 0, 720000150, '3EB0PHOTOSUNSET1', 66, '3EB0PINANNOUNCE1', NULL),
+                   (23, 1, 0, 720000250, '3EB0VIDEODEMO1', 66, '3EB0PINANNOUNCE2', NULL);
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/1/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 2
+
+            video_pin = next(p for p in pins if p["id"] == 21)
+            assert video_pin["media_type"] == "video"
+            assert video_pin["text_body"] == "Sprint Demo Recording"
+            assert video_pin["duration"] == 125
+            assert video_pin["file_name"] == "demo.mp4"
+
+            photo_pin = next(p for p in pins if p["id"] == 20)
+            assert photo_pin["media_type"] == "photo"
+            assert photo_pin["text_body"] == "Sunset at the lake"
+            assert photo_pin["file_name"] == "sunset.jpg"
+
+    def test_ios_pinned_unresolved_never_exposes_stanza_id(self, tmp_path):
+        """When an iOS type 66 pin targets a missing message, raw stanza ID is suppressed."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        cs_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '12345678@s.whatsapp.net', 'Alice', 0);
+
+            -- Announcement pointing to a purged message
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID, ZPARENTMESSAGE)
+            VALUES (30, 1, 0, 720000050, '3EB0DELETEDSTANZAPIN999', 66, '3EB0ANNOUNCE30', NULL);
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/1/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            pin = pins[0]
+            # Raw stanza ID must NOT be leaked
+            assert "3EB0" not in pin["text_body"]
+            assert pin["text_body"] == "Pinned message"
+
+    def test_android_pinned_media_richness(self, tmp_path):
+        """Android pinned messages project media_type, duration, file_name, and place_name."""
+        wa_path = tmp_path / "msgstore.db"
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT
+                );
+                CREATE TABLE message_add_on (
+                    _id INTEGER PRIMARY KEY,
+                    parent_message_row_id INTEGER,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    key_id TEXT,
+                    timestamp INTEGER,
+                    message_add_on_type INTEGER,
+                    status INTEGER,
+                    expiry_timestamp INTEGER
+                );
+                CREATE TABLE message_add_on_pin_in_chat (
+                    message_add_on_row_id INTEGER PRIMARY KEY,
+                    pin_in_chat_state INTEGER,
+                    sender_timestamp INTEGER
+                );
+                CREATE TABLE message_media (
+                    message_row_id INTEGER PRIMARY KEY,
+                    file_path TEXT,
+                    mime_type TEXT,
+                    media_duration INTEGER,
+                    media_name TEXT
+                );
+                CREATE TABLE message_location (
+                    message_row_id INTEGER PRIMARY KEY,
+                    latitude REAL,
+                    longitude REAL,
+                    place_name TEXT,
+                    place_address TEXT
+                );
+
+                INSERT INTO jid VALUES (1, '15551111', '15551111@s.whatsapp.net');
+                INSERT INTO chat VALUES (10, 1, 'Pinned Chat');
+
+                -- Message 50: Photo with file_path and text caption
+                INSERT INTO message VALUES (50, 10, 0, 1, 1793970000000, 'Mountain peak', 1, 'KEY_PHOTO_50');
+                INSERT INTO message_media VALUES (50, '/storage/emulated/0/WhatsApp/Media/peak.jpg', 'image/jpeg', 0, 'peak.jpg');
+                INSERT INTO message_add_on VALUES (1, 50, 10, 0, 1, 'ADDON_PIN_50', 1793970500000, 79, 0, 9999999999000);
+                INSERT INTO message_add_on_pin_in_chat VALUES (1, 1, 1793970500000);
+
+                -- Message 51: Audio with media_duration
+                INSERT INTO message VALUES (51, 10, 0, 1, 1793970100000, '', 3, 'KEY_AUDIO_51');
+                INSERT INTO message_media VALUES (51, '/storage/emulated/0/WhatsApp/Media/voice.opus', 'audio/ogg', 82, 'voice.opus');
+                INSERT INTO message_add_on VALUES (2, 51, 10, 0, 1, 'ADDON_PIN_51', 1793970600000, 79, 0, 9999999999000);
+                INSERT INTO message_add_on_pin_in_chat VALUES (2, 1, 1793970600000);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/10/pinned")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 2
+
+            photo_pin = next(p for p in pins if p["id"] == 50)
+            assert photo_pin["media_type"] == "photo"
+            assert photo_pin["text_body"] == "Mountain peak"
+            assert photo_pin["file_name"] == "peak.jpg"
+
+            audio_pin = next(p for p in pins if p["id"] == 51)
+            assert audio_pin["media_type"] == "audio"
+            assert audio_pin["duration"] == 82
+
+    def test_preserved_pinned_media_richness(self, tmp_path):
+        """Preserved pinned messages project media_type, duration, file_name, and place_name."""
+        make_ios_db(tmp_path / "ChatStorage.sqlite")
+        pres_db = tmp_path / "preserved_messages.db"
+        with sqlite3.connect(str(pres_db)) as conn:
+            conn.executescript("""
+                CREATE TABLE preserved_messages (
+                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_id INTEGER,
+                    chat_id TEXT,
+                    chat_type TEXT,
+                    from_me INTEGER,
+                    sender_name TEXT,
+                    timestamp_ms INTEGER,
+                    text_body TEXT,
+                    media_type TEXT,
+                    media_duration INTEGER,
+                    original_path TEXT,
+                    place_name TEXT,
+                    is_pinned INTEGER DEFAULT 0,
+                    pin_expiry_ts INTEGER
+                );
+                INSERT INTO preserved_messages (
+                    msg_id, chat_id, chat_type, from_me, sender_name, timestamp_ms,
+                    text_body, media_type, media_duration, original_path, place_name, is_pinned, pin_expiry_ts
+                ) VALUES (
+                    88, '1001', 'contact', 0, 'Alice', 1700000000000,
+                    'Check out this document', 'document', 0, 'Media/Documents/Specs.pdf', '', 1, 9999999999000
+                );
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/1001/pinned")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            doc_pin = pins[0]
+            assert doc_pin["media_type"] == "document"
+            assert doc_pin["file_name"] == "Specs.pdf"
+            assert doc_pin["text_body"] == "Check out this document"
+            assert doc_pin["is_pinned"] is True
+
+    def test_frontend_message_preview_contracts(self, tmp_path):
+        """app.js contains _formatMessagePreview, stanza ID sanitization, and shared formatting."""
+        make_ios_db(tmp_path / "ChatStorage.sqlite")
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/static/app.js")
+            assert resp.status_code == 200
+            js = resp.get_data(as_text=True)
+            assert "function _formatMessagePreview(m)" in js
+            assert "_isRawStanzaId" in js
+            assert "snippetEl.textContent = _formatMessagePreview(pin);" in js

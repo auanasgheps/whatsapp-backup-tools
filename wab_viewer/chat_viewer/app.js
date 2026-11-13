@@ -5600,6 +5600,74 @@
 
   // ---- pinned message banner -----------------------------------------------
 
+  const _RAW_STANZA_ID_RE = /^(?:3EB0[0-9A-Fa-f]{8,60}|[0-9A-Fa-f]{16,64})$/;
+  function _isRawStanzaId(str) {
+    if (!str || typeof str !== 'string') return false;
+    return _RAW_STANZA_ID_RE.test(str.trim());
+  }
+
+  function _formatMessagePreview(m) {
+    let preview = m.text || m.text_body || '';
+    if (m.mentions && typeof resolveMentionsPlainText === 'function') {
+      preview = resolveMentionsPlainText(preview, m.mentions);
+    }
+    if (_isRawStanzaId(preview)) {
+      preview = '';
+    }
+    const mt = (m.media_type || '').toLowerCase();
+    if (mt) {
+      if (mt === 'photo' || mt === 'image') {
+        return preview ? `📷 Photo • ${preview}` : '📷 Photo';
+      }
+      if (mt === 'video') {
+        const durStr = m.duration > 0 ? ` (${fmtDuration(m.duration)})` : '';
+        const cap = preview ? ` • ${preview}` : '';
+        return `📹 Video${durStr}${cap}`;
+      }
+      if (mt === 'audio') {
+        const durStr = m.duration > 0 ? ` (${fmtDuration(m.duration)})` : '';
+        return `🎤 Voice message${durStr}`;
+      }
+      if (mt === 'document') {
+        const fname = m.file_name || preview || 'Document';
+        return `📄 ${fname}`;
+      }
+      if (mt === 'location') {
+        const loc = m.place_name || preview;
+        return loc ? `📍 Location • ${loc}` : '📍 Location';
+      }
+      if (mt === 'live_location') {
+        return '📍 Live location';
+      }
+      if (mt === 'vcard') {
+        const contact = preview || 'Contact';
+        return `👤 ${contact}`;
+      }
+      if (mt === 'sticker') {
+        return '🎭 Sticker';
+      }
+      if (mt === 'poll') {
+        return preview ? `📊 Poll • ${preview}` : '📊 Poll';
+      }
+      if (mt === 'gif') {
+        return preview ? `🎞 GIF • ${preview}` : '🎞 GIF';
+      }
+      if (mt === 'deleted') {
+        return '🚫 This message was deleted';
+      }
+      if (mt === 'link') {
+        return preview ? `🔗 ${preview}` : '🔗 Link';
+      }
+      const label = MEDIA_LABELS[mt] || '📎 Media';
+      return preview ? `${label} • ${preview}` : label;
+    }
+    return preview || (m.is_pinned ? 'Pinned message' : 'Message');
+  }
+
+  function _formatStarredPreview(m) {
+    return _formatMessagePreview(m);
+  }
+
   const _dismissedPins = new Set();
   let _chatPins = [];
   let _currentPinIndex = 0;
@@ -5645,11 +5713,7 @@
       authorEl.textContent = pin.sender_name ? `${pinLabel} • ${pin.sender_name}:` : `${pinLabel}:`;
     }
     if (snippetEl) {
-      let snippet = resolveMentionsPlainText(pin.text || pin.text_body || '', pin.mentions);
-      if (!snippet && pin.media_type) {
-        snippet = MEDIA_LABELS[pin.media_type] || '📎 Media';
-      }
-      snippetEl.textContent = snippet || 'Message';
+      snippetEl.textContent = _formatMessagePreview(pin);
     }
 
     const navEl = document.getElementById('pinned-banner-nav');
@@ -5728,39 +5792,6 @@
   let _starredHasMore = false;
   let _starredLoading = false;
   let _activeStarredMsgId = null;
-
-  function _formatStarredPreview(m) {
-    let preview = m.text || m.text_body || '';
-    if (m.media_type) {
-      if (m.media_type === 'photo') {
-        return preview ? `📷 Photo • ${preview}` : '📷 Photo';
-      }
-      if (m.media_type === 'video') {
-        const durStr = m.duration > 0 ? ` (${fmtDuration(m.duration)})` : '';
-        const cap = preview ? ` • ${preview}` : '';
-        return `📹 Video${durStr}${cap}`;
-      }
-      if (m.media_type === 'audio') {
-        const durStr = m.duration > 0 ? ` (${fmtDuration(m.duration)})` : '';
-        return `🎤 Voice message${durStr}`;
-      }
-      if (m.media_type === 'document') {
-        const fname = m.file_name || preview || 'Document';
-        return `📄 ${fname}`;
-      }
-      if (m.media_type === 'location') {
-        const loc = m.place_name || preview;
-        return loc ? `📍 Location • ${loc}` : '📍 Location';
-      }
-      if (m.media_type === 'link') {
-        return preview ? `🔗 ${preview}` : '🔗 Link';
-      }
-      const mediaKey = m.media_type;
-      const label = MEDIA_LABELS[mediaKey] || '📎 Media';
-      return preview ? `${label} • ${preview}` : label;
-    }
-    return preview;
-  }
 
   async function loadStarredList(reset) {
     if (_starredLoading) return;

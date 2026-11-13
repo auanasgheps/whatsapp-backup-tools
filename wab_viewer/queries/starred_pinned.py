@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 import sqlite3
 from pathlib import Path
 
@@ -13,6 +14,15 @@ from .sql_builder import (
     _resolve_android_chat_filter,
     _resolve_android_chat_row_ids,
 )
+
+_STANZA_ID_RE = re.compile(r"^(?:3EB0[0-9A-Fa-f]{8,60}|[0-9A-Fa-f]{16,64})$")
+
+
+def _is_stanza_id(val: str | None) -> bool:
+    """Return True if the text matches a raw WhatsApp stanza / message key ID."""
+    if not val:
+        return False
+    return bool(_STANZA_ID_RE.match(val.strip()))
 
 
 def _query_android_starred(
@@ -724,6 +734,40 @@ def _query_android_pinned(
 
     chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type, row_ids_cache)
 
+    has_mm = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_media'"
+        ).fetchone()
+    )
+    mm_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(message_media)").fetchall()}
+        if has_mm
+        else set()
+    )
+    mm_join = "LEFT JOIN message_media mm ON mm.message_row_id = m._id" if has_mm else ""
+    mm_file = "mm.file_path" if "file_path" in mm_cols else "NULL"
+    mm_duration = "COALESCE(mm.media_duration, 0)" if "media_duration" in mm_cols else "0"
+    mm_name = "COALESCE(mm.media_name, '')" if "media_name" in mm_cols else "''"
+
+    has_ml = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_location'"
+        ).fetchone()
+    )
+    ml_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(message_location)").fetchall()}
+        if has_ml
+        else set()
+    )
+    ml_join = "LEFT JOIN message_location ml ON ml.message_row_id = m._id" if has_ml else ""
+    ml_lat = "ml.latitude" if "latitude" in ml_cols else "NULL"
+    ml_lng = "ml.longitude" if "longitude" in ml_cols else "NULL"
+    ml_place = (
+        "COALESCE(ml.place_name, ml.place_address, '')"
+        if ("place_name" in ml_cols or "place_address" in ml_cols)
+        else "''"
+    )
+
     sql = f"""
         SELECT
             m._id AS id,
@@ -732,11 +776,19 @@ def _query_android_pinned(
             COALESCE(m.text_data, '') AS text,
             m.message_type AS message_type,
             j_s.user AS sender_user,
-            ao.expiry_timestamp AS expiry_ts
+            ao.expiry_timestamp AS expiry_ts,
+            {mm_file} AS file_path,
+            {mm_duration} AS media_duration,
+            {mm_name} AS media_name,
+            {ml_lat} AS latitude,
+            {ml_lng} AS longitude,
+            {ml_place} AS place_name
         FROM message_add_on ao
         {pin_join}
         JOIN message m ON m._id = ao.parent_message_row_id
         LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
+        {mm_join}
+        {ml_join}
         WHERE ao.message_add_on_type = 79
           {pin_cond}
           AND {chat_pred}
@@ -769,28 +821,72 @@ def _query_android_pinned(
                     f"+{s_user}" if (s_user and s_user.isdigit()) else (s_user or "Unknown")
                 )
 
-        text = row_dict["text"]
-        if not text:
-            mt = int(row_dict["message_type"] or 0)
-            if mt in (1, 42):
-                text = "📷 Photo"
-            elif mt in (2, 43, 28):
-                text = "📹 Video"
-            elif mt in (3, 82):
-                text = "🎤 Voice message"
-            elif mt in (8, 9):
-                text = "📄 Document"
-            elif mt == 5:
-                text = "📍 Location"
-            elif mt == 66:
-                text = "📊 Poll"
+        mt = int(row_dict["message_type"] or 0)
+        fp = (row_dict["file_path"] or "").lower()
+        if mt in (1, 42) or any(fp.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp")):
+            media_type = "photo"
+        elif mt in (2, 43, 28) or any(fp.endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".3gp")):
+            media_type = "video"
+        elif mt in (3, 82) or any(
+            fp.endswith(ext) for ext in (".mp3", ".ogg", ".opus", ".m4a", ".aac")
+        ):
+            media_type = "audio"
+        elif mt in (8, 9) or any(
+            fp.endswith(ext) for ext in (".pdf", ".doc", ".docx", ".zip", ".xlsx")
+        ):
+            media_type = "document"
+        elif mt == 13:
+            media_type = "gif"
+        elif mt == 20:
+            media_type = "sticker"
+        elif mt == 4:
+            media_type = "vcard"
+        elif mt == 5:
+            media_type = "location"
+        elif mt == 16:
+            media_type = "live_location"
+        elif mt == 66:
+            media_type = "poll"
+        elif mt == 15:
+            media_type = "deleted"
+        elif (
+            mt == 7
+            or "http://" in (row_dict["text"] or "").lower()
+            or "https://" in (row_dict["text"] or "").lower()
+        ):
+            media_type = "link"
+        else:
+            media_type = None
+
+        text = row_dict["text"] or ""
+        if _is_stanza_id(text):
+            text = ""
+
+        if media_type == "deleted":
+            text = "You deleted this message" if from_me == 1 else "This message was deleted"
+
+        file_name = row_dict.get("media_name") or ""
+        if not file_name and row_dict.get("file_path"):
+            file_name = Path(row_dict["file_path"]).name
+        dur_sec = int(row_dict.get("media_duration") or 0)
+        lat = row_dict.get("latitude")
+        lng = row_dict.get("longitude")
+        place = row_dict.get("place_name") or ""
+
+        fallback_text = text or ("Pinned message" if not media_type else "")
 
         pins.append(
             {
                 "id": mid,
                 "sender_name": sender_name,
-                "text": text,
-                "text_body": text,
+                "text": fallback_text,
+                "text_body": fallback_text,
+                "media_type": media_type,
+                "duration": dur_sec,
+                "file_name": file_name,
+                "latitude": lat,
+                "longitude": lng,
+                "place_name": place,
                 "is_pinned": True,
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
             }
@@ -836,6 +932,183 @@ def _query_ios_pinned(
         ).fetchall():
             session_pks.add(int(csr[0]))
 
+    has_mi = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMEDIAITEM'"
+        ).fetchone()
+    )
+    mi_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(ZWAMEDIAITEM)").fetchall()}
+        if has_mi
+        else set()
+    )
+    mi_join = "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM" if has_mi else ""
+    mi_title = "mi.ZTITLE" if "ZTITLE" in mi_cols else "NULL"
+    mi_path = "mi.ZMEDIALOCALPATH" if "ZMEDIALOCALPATH" in mi_cols else "NULL"
+    mi_duration = "COALESCE(mi.ZMOVIEDURATION, 0)" if "ZMOVIEDURATION" in mi_cols else "0"
+    mi_lat = "mi.ZLATITUDE" if "ZLATITUDE" in mi_cols else "NULL"
+    mi_lng = "mi.ZLONGITUDE" if "ZLONGITUDE" in mi_cols else "NULL"
+    mi_vcard = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
+
+    def _query_ios_msg_rows(where_sql: str, params: list | tuple) -> list[dict]:
+        sql = f"""
+            SELECT
+                m.Z_PK AS id,
+                m.ZCHATSESSION AS chat_session,
+                COALESCE(m.ZISFROMME, 0) AS is_from_me,
+                COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
+                COALESCE(NULLIF(m.ZTEXT, ''), '') AS raw_text,
+                COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
+                m.ZPUSHNAME AS push_name,
+                m.ZFROMJID AS from_jid,
+                {"m.ZPARENTMESSAGE" if "ZPARENTMESSAGE" in zwa_cols else "NULL"} AS parent_msg_pk,
+                {"m.ZSTANZAID" if "ZSTANZAID" in zwa_cols else "NULL"} AS stanza_id,
+                {mi_title} AS media_title,
+                {mi_path} AS media_path,
+                {mi_duration} AS media_duration,
+                {mi_lat} AS latitude,
+                {mi_lng} AS longitude,
+                {mi_vcard} AS vcard_name
+            FROM ZWAMESSAGE m
+            {mi_join}
+            WHERE {where_sql}
+        """
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    sess_list = sorted(session_pks)
+
+    def _resolve_candidate(cand_row: dict) -> dict:
+        if int(cand_row["message_type"]) != 66:
+            return cand_row
+
+        parent_pk = cand_row["parent_msg_pk"]
+        if parent_pk:
+            p_rows = _query_ios_msg_rows("m.Z_PK = ?", (parent_pk,))
+            if p_rows:
+                return p_rows[0]
+
+        target_stanza = (cand_row["raw_text"] or "").strip()
+        if target_stanza and sess_list:
+            s_ph = ",".join("?" * len(sess_list))
+            p_rows = _query_ios_msg_rows(
+                f"m.ZSTANZAID = ? AND m.ZCHATSESSION IN ({s_ph})",
+                [target_stanza] + sess_list,
+            )
+            if p_rows:
+                return p_rows[0]
+        elif target_stanza and not sess_list:
+            p_rows = _query_ios_msg_rows("m.ZSTANZAID = ?", (target_stanza,))
+            if p_rows:
+                return p_rows[0]
+
+        unresolved = dict(cand_row)
+        unresolved["raw_text"] = ""
+        return unresolved
+
+    def _build_ios_pin(target_row: dict) -> dict:
+        is_from_me = int(target_row["is_from_me"])
+        from_jid = target_row["from_jid"] or ""
+        from_phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
+        sender_name = (
+            "You"
+            if is_from_me == 1
+            else (
+                target_row["push_name"]
+                or contacts_map.get(from_phone, "")
+                or from_phone
+                or "Unknown"
+            )
+        )
+
+        m_type = int(target_row["message_type"])
+        fp = (target_row["media_path"] or "").lower()
+
+        if m_type in (1, 38) or any(fp.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".heic")):
+            media_type = "photo"
+        elif m_type in (2, 39, 54) or any(fp.endswith(ext) for ext in (".mp4", ".mov")):
+            media_type = "video"
+        elif m_type in (3, 53) or any(
+            fp.endswith(ext) for ext in (".mp3", ".opus", ".m4a", ".aac")
+        ):
+            media_type = "audio"
+        elif m_type == 8 or any(
+            fp.endswith(ext) for ext in (".pdf", ".doc", ".docx", ".zip", ".xlsx")
+        ):
+            media_type = "document"
+        elif m_type == 5:
+            media_type = "location"
+        elif m_type == 16:
+            media_type = "live_location"
+        elif m_type == 15:
+            media_type = "sticker"
+        elif m_type == 4:
+            media_type = "vcard"
+        elif m_type == 11:
+            media_type = "gif"
+        elif m_type == 46:
+            media_type = "poll"
+        elif m_type == 14:
+            media_type = "deleted"
+        elif (
+            m_type == 7
+            or "http://" in (target_row["raw_text"] or "").lower()
+            or "https://" in (target_row["raw_text"] or "").lower()
+        ):
+            media_type = "link"
+        else:
+            media_type = None
+
+        raw_text = target_row["raw_text"] or ""
+        if _is_stanza_id(raw_text):
+            raw_text = ""
+
+        if media_type == "deleted":
+            text = "You deleted this message" if is_from_me == 1 else "This message was deleted"
+        elif media_type in ("photo", "video", "gif"):
+            text = target_row["media_title"] or raw_text
+        elif media_type == "document":
+            text = raw_text or target_row["media_title"] or ""
+        elif media_type == "vcard":
+            text = target_row["vcard_name"] or raw_text
+        elif media_type in ("location", "live_location"):
+            text = target_row["media_title"] or target_row["vcard_name"] or raw_text
+        elif media_type == "poll":
+            text = raw_text
+        else:
+            text = raw_text
+
+        file_name = ""
+        if media_type == "document":
+            file_name = (
+                target_row["media_title"]
+                or (Path(target_row["media_path"]).name if target_row["media_path"] else "")
+                or raw_text
+            )
+        elif target_row["media_path"]:
+            file_name = Path(target_row["media_path"]).name
+
+        dur_sec = int(target_row["media_duration"] or 0)
+        place_name = ""
+        if media_type in ("location", "live_location"):
+            place_name = target_row["media_title"] or target_row["vcard_name"] or raw_text
+
+        fallback_text = text or ("Pinned message" if not media_type else "")
+
+        return {
+            "id": int(target_row["id"]),
+            "sender_name": sender_name,
+            "text": fallback_text,
+            "text_body": fallback_text,
+            "media_type": media_type,
+            "duration": dur_sec,
+            "file_name": file_name,
+            "latitude": target_row["latitude"],
+            "longitude": target_row["longitude"],
+            "place_name": place_name,
+            "is_pinned": True,
+            "timestamp": int(round(float(target_row["msg_date"]) + 978307200)),
+        }
+
     # 1. Check ExtChatDatabase if available
     ext_pins: list[dict] = []
     if (
@@ -875,124 +1148,30 @@ def _query_ios_pinned(
                     stanzas = [r[0] for r in tm_rows if r[0]]
                     if stanzas:
                         s_ph = ",".join("?" * len(stanzas))
-                        sess_list = sorted(session_pks)
                         sess_ph = ",".join("?" * len(sess_list))
-                        m_rows = conn.execute(
-                            f"""
-                            SELECT
-                                m.Z_PK AS id,
-                                COALESCE(m.ZISFROMME, 0) AS is_from_me,
-                                COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
-                                COALESCE(NULLIF(m.ZTEXT, ''), '') AS text,
-                                COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
-                                m.ZPUSHNAME AS push_name,
-                                m.ZFROMJID AS from_jid
-                            FROM ZWAMESSAGE m
-                            WHERE m.ZSTANZAID IN ({s_ph})
-                              AND m.ZCHATSESSION IN ({sess_ph})
-                            ORDER BY m.ZMESSAGEDATE DESC
-                            LIMIT 3
-                        """,
+                        m_rows = _query_ios_msg_rows(
+                            f"m.ZSTANZAID IN ({s_ph}) AND m.ZCHATSESSION IN ({sess_ph}) ORDER BY m.ZMESSAGEDATE DESC LIMIT 3",
                             stanzas + sess_list,
-                        ).fetchall()
-                        if m_rows:
-                            for mr in m_rows:
-                                r_dict = dict(mr)
-                                is_from_me = int(r_dict["is_from_me"])
-                                from_jid = r_dict["from_jid"] or ""
-                                from_phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
-                                sender_name = (
-                                    "You"
-                                    if is_from_me == 1
-                                    else (
-                                        r_dict["push_name"]
-                                        or contacts_map.get(from_phone, "")
-                                        or from_phone
-                                        or "Unknown"
-                                    )
-                                )
-                                ext_pins.append(
-                                    {
-                                        "id": int(r_dict["id"]),
-                                        "sender_name": sender_name,
-                                        "text": r_dict["text"] or "Pinned message",
-                                        "text_body": r_dict["text"] or "Pinned message",
-                                        "is_pinned": True,
-                                        "timestamp": int(
-                                            round(float(r_dict["msg_date"]) + 978307200)
-                                        ),
-                                    }
-                                )
+                        )
+                        for mr in m_rows:
+                            resolved_mr = _resolve_candidate(mr)
+                            ext_pins.append(_build_ios_pin(resolved_mr))
 
-    if "ZPARENTMESSAGE" not in zwa_cols or "ZMESSAGETYPE" not in zwa_cols or not session_pks:
+    if "ZMESSAGETYPE" not in zwa_cols or not session_pks:
         return sorted(ext_pins, key=lambda p: p["timestamp"], reverse=True)[:3]
 
     # 2. Check ZMESSAGETYPE = 66 in ZWAMESSAGE
-    sess_list = sorted(session_pks)
     sess_ph = ",".join("?" * len(sess_list))
-    sql = f"""
-        SELECT
-            m.Z_PK AS id,
-            COALESCE(m.ZISFROMME, 0) AS is_from_me,
-            COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
-            COALESCE(NULLIF(m.ZTEXT, ''), '') AS text,
-            COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
-            m.ZPUSHNAME AS push_name,
-            m.ZFROMJID AS from_jid,
-            m.ZPARENTMESSAGE AS parent_msg_pk
-        FROM ZWAMESSAGE m
-        WHERE m.ZCHATSESSION IN ({sess_ph})
-          AND m.ZMESSAGETYPE = 66
-        ORDER BY m.ZMESSAGEDATE DESC
-        LIMIT 3
-    """
-    rows = conn.execute(sql, sess_list).fetchall()
+    rows = _query_ios_msg_rows(
+        f"m.ZCHATSESSION IN ({sess_ph}) AND m.ZMESSAGETYPE = 66 ORDER BY m.ZMESSAGEDATE DESC LIMIT 3",
+        sess_list,
+    )
 
     pins = []
     for r in rows:
-        r_dict = dict(r)
-        parent_pk = r_dict["parent_msg_pk"]
-        target = r_dict
-        if parent_pk:
-            p_row = conn.execute(
-                """
-                SELECT
-                    m.Z_PK AS id,
-                    COALESCE(m.ZISFROMME, 0) AS is_from_me,
-                    COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
-                    COALESCE(NULLIF(m.ZTEXT, ''), '') AS text,
-                    COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
-                    m.ZPUSHNAME AS push_name,
-                    m.ZFROMJID AS from_jid
-                FROM ZWAMESSAGE m
-                WHERE m.Z_PK = ?
-            """,
-                (parent_pk,),
-            ).fetchone()
-            if p_row:
-                target = dict(p_row)
+        resolved_r = _resolve_candidate(r)
+        pins.append(_build_ios_pin(resolved_r))
 
-        is_from_me = int(target["is_from_me"])
-        from_jid = target["from_jid"] or ""
-        from_phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
-        sender_name = (
-            "You"
-            if is_from_me == 1
-            else (
-                target["push_name"] or contacts_map.get(from_phone, "") or from_phone or "Unknown"
-            )
-        )
-
-        pins.append(
-            {
-                "id": int(target["id"]),
-                "sender_name": sender_name,
-                "text": target["text"] or "Pinned message",
-                "text_body": target["text"] or "Pinned message",
-                "is_pinned": True,
-                "timestamp": int(round(float(target["msg_date"]) + 978307200)),
-            }
-        )
     merged: dict[int, dict] = {}
     for pin in pins + ext_pins:
         merged[int(pin["id"])] = pin
@@ -1018,8 +1197,24 @@ def _query_preserved_pinned(
         if "is_pinned" not in cols:
             return []
 
+        dur_col = "media_duration" if "media_duration" in cols else "0"
+        name_col = "original_path" if "original_path" in cols else "NULL"
+        lat_col = "latitude" if "latitude" in cols else "NULL"
+        lng_col = "longitude" if "longitude" in cols else "NULL"
+        place_col = "location_name" if "location_name" in cols else "''"
+        mt_col = "media_type" if "media_type" in cols else "NULL"
+        sender_col = (
+            "sender"
+            if "sender" in cols
+            else (
+                "sender_name"
+                if "sender_name" in cols
+                else ("participant_name" if "participant_name" in cols else "NULL")
+            )
+        )
+
         rows = pres_conn.execute(
-            """
+            f"""
             SELECT
                 rowid,
                 msg_id,
@@ -1027,8 +1222,14 @@ def _query_preserved_pinned(
                 timestamp_ms,
                 text_body,
                 from_me,
-                participant_name,
-                pin_expiry_ts
+                {sender_col} AS sender_display,
+                pin_expiry_ts,
+                {mt_col} AS media_type,
+                {dur_col} AS media_duration,
+                {name_col} AS original_path,
+                {lat_col} AS latitude,
+                {lng_col} AS longitude,
+                {place_col} AS place_name
             FROM preserved_messages
             WHERE chat_id = ?
               AND is_pinned = 1
@@ -1044,14 +1245,52 @@ def _query_preserved_pinned(
     pins = []
     for r in rows:
         row_dict = dict(r)
+        mt = (row_dict.get("media_type") or "").lower()
+        if mt in ("image", "photo"):
+            media_type = "photo"
+        elif mt in (
+            "video",
+            "audio",
+            "document",
+            "link",
+            "location",
+            "live_location",
+            "poll",
+            "vcard",
+            "sticker",
+            "gif",
+            "deleted",
+        ):
+            media_type = mt
+        else:
+            media_type = None
+
+        text = row_dict["text_body"] or ""
+        if _is_stanza_id(text):
+            text = ""
+
         from_me = int(row_dict["from_me"])
-        sender_name = "You" if from_me == 1 else (row_dict["participant_name"] or "Unknown")
+        sender_name = "You" if from_me == 1 else (row_dict["sender_display"] or "Unknown")
+        file_name = Path(row_dict["original_path"]).name if row_dict.get("original_path") else ""
+        dur_sec = int(row_dict.get("media_duration") or 0)
+        lat = row_dict.get("latitude")
+        lng = row_dict.get("longitude")
+        place = row_dict.get("place_name") or ""
+
+        fallback_text = text or ("Pinned message" if not media_type else "")
+
         pins.append(
             {
                 "id": -int(row_dict["rowid"]),
                 "sender_name": sender_name,
-                "text": row_dict["text_body"] or "Pinned message",
-                "text_body": row_dict["text_body"] or "Pinned message",
+                "text": fallback_text,
+                "text_body": fallback_text,
+                "media_type": media_type,
+                "duration": dur_sec,
+                "file_name": file_name,
+                "latitude": lat,
+                "longitude": lng,
+                "place_name": place,
                 "is_pinned": True,
                 "timestamp": int(round(int(row_dict["timestamp_ms"]) / 1000)),
             }
