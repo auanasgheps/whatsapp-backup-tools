@@ -31,6 +31,7 @@
       --media-w-port: 260px;
       --media-grid-size: var(--media-w-land);
       --video-note-size: 216px;
+      --video-note-size-enlarged: 360px;
       --media-stage-bg: rgba(0, 0, 0, 0.24);
       /* Group participant name palette (WhatsApp Android high-contrast 10-color) */
       --sender-color-0: #ff8fb4;
@@ -51,6 +52,7 @@
       --media-w-port: 230px;
       --media-grid-size: 280px;
       --video-note-size: 192px;
+      --video-note-size-enlarged: 320px;
     }
     [data-font-size="medium"] {
       --sidebar-scale: 1.00;
@@ -58,6 +60,7 @@
       --media-w-port: 260px;
       --media-grid-size: 320px;
       --video-note-size: 216px;
+      --video-note-size-enlarged: 360px;
     }
     [data-font-size="large"] {
       --sidebar-scale: 1.15;
@@ -65,6 +68,7 @@
       --media-w-port: 295px;
       --media-grid-size: 360px;
       --video-note-size: 244px;
+      --video-note-size-enlarged: 400px;
     }
 
     [data-theme="light"] {
@@ -1289,7 +1293,8 @@
     }
     @media (prefers-reduced-motion: reduce) {
       .msg-gif-badge-wrap,
-      .msg-gif-badge {
+      .msg-gif-badge,
+      .msg-media.msg-video-note {
         transition: none !important;
       }
     }
@@ -1309,6 +1314,17 @@
       -webkit-user-select: none;
       align-self: center;
       margin: 2px 0 4px;
+      transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1), height 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .msg-media.msg-video-note.is-enlarged {
+      width: var(--video-note-size-enlarged);
+      height: var(--video-note-size-enlarged);
+      max-width: min(var(--video-note-size-enlarged), 86vw);
+      max-height: min(var(--video-note-size-enlarged), 86vw);
+    }
+    .msg-bubble:has(.msg-video-note.is-enlarged),
+    .msg-bubble.has-video-note-enlarged {
+      max-width: min(calc(var(--video-note-size-enlarged) + 24px), 90%);
     }
     .msg-media.msg-video-note:focus-visible {
       outline: 2px solid var(--accent);

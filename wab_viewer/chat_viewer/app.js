@@ -2592,20 +2592,44 @@
       syncMuteIcon();
     });
 
-    const expandBtn = document.createElement('button');
-    expandBtn.type = 'button';
-    expandBtn.className = 'video-note-action-btn';
-    expandBtn.title = 'Open in fullscreen';
-    expandBtn.setAttribute('aria-label', 'Open video message in fullscreen');
-    expandBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
-    expandBtn.addEventListener('click', (e) => {
+    const enlargeBtn = document.createElement('button');
+    enlargeBtn.type = 'button';
+    enlargeBtn.className = 'video-note-action-btn';
+
+    function syncEnlargeIcon() {
+      const isEnlarged = wrap.classList.contains('is-enlarged');
+      if (isEnlarged) {
+        enlargeBtn.title = 'Shrink';
+        enlargeBtn.setAttribute('aria-label', 'Shrink video message');
+        enlargeBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+      } else {
+        enlargeBtn.title = 'Enlarge';
+        enlargeBtn.setAttribute('aria-label', 'Enlarge video message');
+        enlargeBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+      }
+    }
+    syncEnlargeIcon();
+
+    enlargeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      pauseVideoNote();
-      showLightbox(msg);
+      const isEnlarged = wrap.classList.toggle('is-enlarged');
+      const bubble = wrap.closest('.msg-bubble');
+      if (bubble) {
+        bubble.classList.toggle('has-video-note-enlarged', isEnlarged);
+      }
+      syncEnlargeIcon();
+      const scroll = document.getElementById('message-scroll');
+      if (scroll && isUserAtBottom) {
+        requestAnimationFrame(() => {
+          suppressScroll = true;
+          scroll.scrollTop = scroll.scrollHeight;
+          suppressScroll = false;
+        });
+      }
     });
 
     actions.appendChild(muteBtn);
-    actions.appendChild(expandBtn);
+    actions.appendChild(enlargeBtn);
 
     let rafId = null;
 
