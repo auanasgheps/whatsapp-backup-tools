@@ -145,8 +145,20 @@ def _query_preserved_messages(
             if (
                 d.get("media_type") == "video"
                 and (
-                    (d.get("original_path") and "video notes" in str(d["original_path"]).lower())
-                    or (d.get("archive_path") and "video notes" in str(d["archive_path"]).lower())
+                    (
+                        d.get("original_path")
+                        and (
+                            "video notes" in str(d["original_path"]).lower()
+                            or "ptv-" in str(d["original_path"]).lower()
+                        )
+                    )
+                    or (
+                        d.get("archive_path")
+                        and (
+                            "video notes" in str(d["archive_path"]).lower()
+                            or "ptv-" in str(d["archive_path"]).lower()
+                        )
+                    )
                 )
             )
             else 0,

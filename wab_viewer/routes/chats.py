@@ -683,7 +683,7 @@ def api_chats():
                 path = media_path if ctx.source_type == "android" else f"Message/{media_path}"
                 d["last_msg_type"] = _media_type_from_path(path)
             else:
-                if (ctx.source_type == "android" and raw_type in (3, 28)) or (
+                if (ctx.source_type == "android" and raw_type in (3, 28, 81)) or (
                     ctx.source_type == "ios" and raw_type in (2, 54)
                 ):
                     d["last_msg_type"] = "video"

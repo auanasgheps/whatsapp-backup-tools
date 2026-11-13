@@ -172,6 +172,7 @@ def make_ios_db(path: Path | str) -> sqlite3.Connection:
             ZCONTACTJID      TEXT,
             ZPARTNERNAME     TEXT,
             ZHIDDEN          INTEGER DEFAULT 0,
+            ZARCHIVED        INTEGER DEFAULT 0,
             ZCONTACTABID     INTEGER,
             ZLASTMESSAGEDATE REAL
         );
