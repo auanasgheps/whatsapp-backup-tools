@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import io
 import re
 import sqlite3
 from pathlib import Path
@@ -15,7 +17,9 @@ from .sql_builder import (
     _resolve_android_chat_row_ids,
 )
 
-_STANZA_ID_RE = re.compile(r"^(?:3EB0[0-9A-Fa-f]{8,60}|[0-9A-Fa-f]{16,64})$")
+_STANZA_ID_RE = re.compile(r"^(?:3EB0[0-9A-Za-z_-]{4,60}|[0-9A-Fa-f]{16,64})$")
+_BASE64_TOKEN_RE = re.compile(r"^[A-Za-z0-9+/]{16,}={0,2}$")
+_LID_RE = re.compile(r"^[0-9]+@lid$")
 
 
 def _is_stanza_id(val: str | None) -> bool:
@@ -23,6 +27,143 @@ def _is_stanza_id(val: str | None) -> bool:
     if not val:
         return False
     return bool(_STANZA_ID_RE.match(val.strip()))
+
+
+def _is_unreadable_token(val: str | None) -> bool:
+    """Return True if the text is a raw stanza ID, base64 payload, or internal LID."""
+    if not val or not isinstance(val, str):
+        return False
+    v = val.strip()
+    return bool(_STANZA_ID_RE.match(v) or _BASE64_TOKEN_RE.match(v) or _LID_RE.match(v))
+
+
+def _parse_proto_fields(data: bytes) -> list[tuple[int, int, int | bytes]]:
+    """Parse raw protobuf wire bytes into a list of (tag, wire_type, value) tuples."""
+    stream = io.BytesIO(data)
+    fields: list[tuple[int, int, int | bytes]] = []
+    while True:
+        key = 0
+        shift = 0
+        while True:
+            b = stream.read(1)
+            if not b:
+                return fields
+            byte = b[0]
+            key |= (byte & 0x7F) << shift
+            if not (byte & 0x80):
+                break
+            shift += 7
+        tag = key >> 3
+        wire = key & 7
+        if wire == 0:  # varint
+            val = 0
+            shift = 0
+            while True:
+                b = stream.read(1)
+                if not b:
+                    break
+                byte = b[0]
+                val |= (byte & 0x7F) << shift
+                if not (byte & 0x80):
+                    break
+                shift += 7
+            fields.append((tag, wire, val))
+        elif wire == 1:  # 64-bit
+            val = stream.read(8)
+            fields.append((tag, wire, val))
+        elif wire == 2:  # length-delimited
+            length = 0
+            shift = 0
+            while True:
+                b = stream.read(1)
+                if not b:
+                    break
+                byte = b[0]
+                length |= (byte & 0x7F) << shift
+                if not (byte & 0x80):
+                    break
+                shift += 7
+            val = stream.read(length)
+            fields.append((tag, wire, val))
+        elif wire == 5:  # 32-bit
+            val = stream.read(4)
+            fields.append((tag, wire, val))
+        else:
+            break
+    return fields
+
+
+def _parse_ios_chat_session_pins(b64_text: str | None) -> list[dict]:
+    """Parse ZLASTMESSAGETEXT base64 protobuf from ZWACHATSESSION for active pinned messages.
+
+    In modern WhatsApp iOS (v24+), chat session sync state is stored as a base64-encoded
+    protobuf in ZWACHATSESSION.ZLASTMESSAGETEXT.
+    Pinned messages are represented by tag 31 and tag 34:
+      - tag 1 (string): Pin action stanza ID
+      - tag 2 (string): Target message composite key (<chat_jid>_<stanza_id>_<from_me>_<sender_jid>)
+      - tag 3 (string): Pinner LID / JID
+      - tag 4 (embedded message):
+          - tag 1 (varint): Pin duration in seconds (e.g. 86400, 604800, 2592000)
+          - tag 2 (varint): Pin status (1 = active pin, 2 = unpinned)
+      - tag 5 (varint): Pin timestamp in ms
+    """
+    if not b64_text or not isinstance(b64_text, str):
+        return []
+    try:
+        data = base64.b64decode(b64_text.strip())
+    except Exception:
+        return []
+
+    root_fields = _parse_proto_fields(data)
+    pin_blobs = [
+        val
+        for tag, wire, val in root_fields
+        if tag in (31, 34) and isinstance(val, (bytes, bytearray))
+    ]
+    pins: list[dict] = []
+    seen_stanzas: set[str] = set()
+
+    for blob in pin_blobs:
+        sub_fields = _parse_proto_fields(blob)
+        target_key: str | None = None
+        duration = 0
+        status = 1
+        timestamp_ms = 0
+
+        for stag, swire, sval in sub_fields:
+            if stag == 2 and isinstance(sval, (bytes, bytearray)):
+                target_key = sval.decode("utf-8", errors="ignore")
+            elif stag == 4 and isinstance(sval, (bytes, bytearray)):
+                meta_fields = _parse_proto_fields(sval)
+                for mtag, mwire, mval in meta_fields:
+                    if mtag == 1 and mwire == 0:
+                        duration = int(mval)
+                    elif mtag == 2 and mwire == 0:
+                        status = int(mval)
+            elif stag == 5 and swire == 0:
+                timestamp_ms = int(sval)
+
+        # Status 1 = active pin, Status 2 = unpinned / expired
+        if status != 1 or not target_key:
+            continue
+
+        parts = target_key.split("_")
+        stanza_id = parts[1] if len(parts) >= 2 else target_key
+
+        if not stanza_id or stanza_id in seen_stanzas:
+            continue
+        seen_stanzas.add(stanza_id)
+
+        pins.append(
+            {
+                "stanza_id": stanza_id,
+                "duration": duration,
+                "status": status,
+                "pin_ts_sec": timestamp_ms / 1000 if timestamp_ms > 0 else 0,
+                "target_key": target_key,
+            }
+        )
+    return pins
 
 
 def _query_android_starred(
@@ -820,6 +961,8 @@ def _query_android_pinned(
                 sender_name = (
                     f"+{s_user}" if (s_user and s_user.isdigit()) else (s_user or "Unknown")
                 )
+        if _is_unreadable_token(sender_name):
+            sender_name = "Unknown"
 
         mt = int(row_dict["message_type"] or 0)
         fp = (row_dict["file_path"] or "").lower()
@@ -861,7 +1004,7 @@ def _query_android_pinned(
             media_type = None
 
         text = row_dict["text"] or ""
-        if _is_stanza_id(text):
+        if _is_unreadable_token(text):
             text = ""
 
         if media_type == "deleted":
@@ -952,6 +1095,39 @@ def _query_ios_pinned(
     mi_lng = "mi.ZLONGITUDE" if "ZLONGITUDE" in mi_cols else "NULL"
     mi_vcard = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
 
+    wa_tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    has_gm = "ZWAGROUPMEMBER" in wa_tables
+    has_pp = "ZWAPROFILEPUSHNAME" in wa_tables
+
+    gm_join = (
+        "LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK\n"
+        if (has_gm and "ZGROUPMEMBER" in zwa_cols)
+        else ""
+    )
+    pp_member_join = (
+        "LEFT JOIN ZWAPROFILEPUSHNAME pp_member ON pp_member.ZJID = gm.ZMEMBERJID\n"
+        if (has_gm and has_pp and "ZGROUPMEMBER" in zwa_cols)
+        else ""
+    )
+    pp_from_join = (
+        "LEFT JOIN ZWAPROFILEPUSHNAME pp_from ON pp_from.ZJID = m.ZFROMJID\n"
+        if (has_pp and "ZFROMJID" in zwa_cols)
+        else ""
+    )
+
+    member_jid_col = (
+        "gm.ZMEMBERJID AS member_jid"
+        if (has_gm and "ZGROUPMEMBER" in zwa_cols)
+        else "NULL AS member_jid"
+    )
+    resolved_push_col = (
+        "COALESCE(pp_member.ZPUSHNAME, pp_from.ZPUSHNAME) AS resolved_push_name"
+        if has_pp
+        else "NULL AS resolved_push_name"
+    )
+
     def _query_ios_msg_rows(where_sql: str, params: list | tuple) -> list[dict]:
         sql = f"""
             SELECT
@@ -963,8 +1139,11 @@ def _query_ios_pinned(
                 COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
                 m.ZPUSHNAME AS push_name,
                 m.ZFROMJID AS from_jid,
+                {member_jid_col},
+                {resolved_push_col},
                 {"m.ZPARENTMESSAGE" if "ZPARENTMESSAGE" in zwa_cols else "NULL"} AS parent_msg_pk,
                 {"m.ZSTANZAID" if "ZSTANZAID" in zwa_cols else "NULL"} AS stanza_id,
+                {"m.ZMEDIAITEM" if "ZMEDIAITEM" in zwa_cols else "NULL"} AS media_item_pk,
                 {mi_title} AS media_title,
                 {mi_path} AS media_path,
                 {mi_duration} AS media_duration,
@@ -973,15 +1152,22 @@ def _query_ios_pinned(
                 {mi_vcard} AS vcard_name
             FROM ZWAMESSAGE m
             {mi_join}
+            {gm_join}
+            {pp_member_join}
+            {pp_from_join}
             WHERE {where_sql}
         """
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
     sess_list = sorted(session_pks)
 
-    def _resolve_candidate(cand_row: dict) -> dict:
+    def _resolve_candidate(cand_row: dict) -> dict | None:
         if int(cand_row["message_type"]) != 66:
             return cand_row
+
+        # In WhatsApp iOS, type 66 with ZMEDIAITEM attached is an album container, not a pin.
+        if cand_row.get("media_item_pk") is not None:
+            return None
 
         parent_pk = cand_row["parent_msg_pk"]
         if parent_pk:
@@ -990,6 +1176,10 @@ def _query_ios_pinned(
                 return p_rows[0]
 
         target_stanza = (cand_row["raw_text"] or "").strip()
+        # If raw_text is empty or not a valid stanza ID, it is not a pin announcement
+        if not target_stanza or not _is_stanza_id(target_stanza):
+            return None
+
         if target_stanza and sess_list:
             s_ph = ",".join("?" * len(sess_list))
             p_rows = _query_ios_msg_rows(
@@ -1003,24 +1193,41 @@ def _query_ios_pinned(
             if p_rows:
                 return p_rows[0]
 
+        # Target message was purged from local chat history; suppress raw stanza ID
         unresolved = dict(cand_row)
         unresolved["raw_text"] = ""
         return unresolved
 
     def _build_ios_pin(target_row: dict) -> dict:
         is_from_me = int(target_row["is_from_me"])
-        from_jid = target_row["from_jid"] or ""
+        from_jid = target_row.get("member_jid") or target_row.get("from_jid") or ""
+        if from_jid.endswith("@g.us"):
+            from_jid = ""
         from_phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
-        sender_name = (
-            "You"
-            if is_from_me == 1
-            else (
-                target_row["push_name"]
-                or contacts_map.get(from_phone, "")
-                or from_phone
-                or "Unknown"
-            )
-        )
+
+        resolved_push = target_row.get("resolved_push_name") or ""
+        clean_resolved_push = "" if _is_unreadable_token(resolved_push) else resolved_push
+
+        raw_push = target_row.get("push_name") or ""
+        clean_push = "" if _is_unreadable_token(raw_push) else raw_push
+
+        if is_from_me == 1:
+            sender_name = "You"
+        elif clean_resolved_push:
+            sender_name = clean_resolved_push
+        elif contacts_map.get(from_phone):
+            sender_name = contacts_map[from_phone]
+        elif clean_push:
+            sender_name = clean_push
+        elif (
+            from_phone
+            and from_phone.isdigit()
+            and len(from_phone) < 16
+            and not from_jid.endswith("@lid")
+        ):
+            sender_name = f"+{from_phone}"
+        else:
+            sender_name = "Unknown"
 
         m_type = int(target_row["message_type"])
         fp = (target_row["media_path"] or "").lower()
@@ -1061,19 +1268,26 @@ def _query_ios_pinned(
             media_type = None
 
         raw_text = target_row["raw_text"] or ""
-        if _is_stanza_id(raw_text):
+        if _is_unreadable_token(raw_text):
             raw_text = ""
+
+        media_title = target_row.get("media_title") or ""
+        if _is_unreadable_token(media_title):
+            media_title = ""
+        vcard_name = target_row.get("vcard_name") or ""
+        if _is_unreadable_token(vcard_name):
+            vcard_name = ""
 
         if media_type == "deleted":
             text = "You deleted this message" if is_from_me == 1 else "This message was deleted"
         elif media_type in ("photo", "video", "gif"):
-            text = target_row["media_title"] or raw_text
+            text = media_title or raw_text
         elif media_type == "document":
-            text = raw_text or target_row["media_title"] or ""
+            text = raw_text or media_title or ""
         elif media_type == "vcard":
-            text = target_row["vcard_name"] or raw_text
+            text = vcard_name or raw_text
         elif media_type in ("location", "live_location"):
-            text = target_row["media_title"] or target_row["vcard_name"] or raw_text
+            text = media_title or vcard_name or raw_text
         elif media_type == "poll":
             text = raw_text
         else:
@@ -1082,17 +1296,21 @@ def _query_ios_pinned(
         file_name = ""
         if media_type == "document":
             file_name = (
-                target_row["media_title"]
+                media_title
                 or (Path(target_row["media_path"]).name if target_row["media_path"] else "")
                 or raw_text
             )
         elif target_row["media_path"]:
             file_name = Path(target_row["media_path"]).name
+        if _is_unreadable_token(file_name):
+            file_name = ""
 
         dur_sec = int(target_row["media_duration"] or 0)
         place_name = ""
         if media_type in ("location", "live_location"):
-            place_name = target_row["media_title"] or target_row["vcard_name"] or raw_text
+            place_name = media_title or vcard_name or raw_text
+        if _is_unreadable_token(place_name):
+            place_name = ""
 
         fallback_text = text or ("Pinned message" if not media_type else "")
 
@@ -1134,16 +1352,36 @@ def _query_ios_pinned(
                     else ("stanza_id" if "stanza_id" in tm_cols else None)
                 )
                 if key_col:
+                    has_ti = bool(
+                        ext_conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_id'"
+                        ).fetchone()
+                    )
+                    ti_cols = (
+                        {r[1] for r in ext_conn.execute("PRAGMA table_info(thread_id)").fetchall()}
+                        if has_ti
+                        else set()
+                    )
+                    del_clause = "AND COALESCE(ti.deleted, 0) = 0" if "deleted" in ti_cols else ""
+                    ti_join = (
+                        "LEFT JOIN thread_id ti ON ti.key_id = tm.thread_key_id"
+                        if (has_ti and "thread_key_id" in tm_cols)
+                        else ""
+                    )
+
                     if "chat_jid" in tm_cols and cand_jids:
                         j_ph = ",".join("?" * len(cand_jids))
                         tm_rows = ext_conn.execute(
-                            f"SELECT {key_col} FROM thread_messages WHERE chat_jid IN ({j_ph}) "
-                            "ORDER BY rowid DESC LIMIT 3",
+                            f"SELECT tm.{key_col} FROM thread_messages tm {ti_join} "
+                            f"WHERE tm.chat_jid IN ({j_ph}) {del_clause} "
+                            "ORDER BY tm.rowid DESC LIMIT 3",
                             cand_jids,
                         ).fetchall()
                     elif "chat_jid" not in tm_cols:
                         tm_rows = ext_conn.execute(
-                            f"SELECT {key_col} FROM thread_messages ORDER BY rowid DESC"
+                            f"SELECT tm.{key_col} FROM thread_messages tm {ti_join} "
+                            f"WHERE 1=1 {del_clause} "
+                            "ORDER BY tm.rowid DESC LIMIT 3"
                         ).fetchall()
                     else:
                         tm_rows = []
@@ -1157,22 +1395,40 @@ def _query_ios_pinned(
                         )
                         for mr in m_rows:
                             resolved_mr = _resolve_candidate(mr)
-                            ext_pins.append(_build_ios_pin(resolved_mr))
+                            if resolved_mr is not None:
+                                ext_pins.append(_build_ios_pin(resolved_mr))
 
-    if "ZMESSAGETYPE" not in zwa_cols or not session_pks:
-        return sorted(ext_pins, key=lambda p: p["timestamp"], reverse=True)[:3]
+    pins: list[dict] = []
+    # 2. Check ZWACHATSESSION.ZLASTMESSAGETEXT (Modern iOS active pins protobuf in ChatStorage.sqlite)
+    if has_cs and session_pks and "ZLASTMESSAGETEXT" in cs_cols:
+        sess_ph = ",".join("?" * len(sess_list))
+        cs_rows = conn.execute(
+            f"SELECT Z_PK, ZLASTMESSAGETEXT FROM ZWACHATSESSION WHERE Z_PK IN ({sess_ph})",
+            sess_list,
+        ).fetchall()
+        for csr in cs_rows:
+            parsed_pins = _parse_ios_chat_session_pins(csr[1])
+            for p in parsed_pins:
+                target_stanza = p.get("stanza_id")
+                if target_stanza:
+                    t_rows = _query_ios_msg_rows(
+                        f"m.ZSTANZAID = ? AND m.ZCHATSESSION IN ({sess_ph})",
+                        [target_stanza] + sess_list,
+                    )
+                    if t_rows:
+                        pins.append(_build_ios_pin(t_rows[0]))
 
-    # 2. Check ZMESSAGETYPE = 66 in ZWAMESSAGE
-    sess_ph = ",".join("?" * len(sess_list))
-    rows = _query_ios_msg_rows(
-        f"m.ZCHATSESSION IN ({sess_ph}) AND m.ZMESSAGETYPE = 66 ORDER BY m.ZMESSAGEDATE DESC LIMIT 3",
-        sess_list,
-    )
-
-    pins = []
-    for r in rows:
-        resolved_r = _resolve_candidate(r)
-        pins.append(_build_ios_pin(resolved_r))
+    # 3. Check ZMESSAGETYPE = 66 in ZWAMESSAGE (Legacy / synthetic test pin announcements)
+    if not pins and "ZMESSAGETYPE" in zwa_cols and session_pks:
+        sess_ph = ",".join("?" * len(sess_list))
+        rows = _query_ios_msg_rows(
+            f"m.ZCHATSESSION IN ({sess_ph}) AND m.ZMESSAGETYPE = 66 ORDER BY m.ZMESSAGEDATE DESC LIMIT 3",
+            sess_list,
+        )
+        for r in rows:
+            resolved_r = _resolve_candidate(r)
+            if resolved_r is not None:
+                pins.append(_build_ios_pin(resolved_r))
 
     merged: dict[int, dict] = {}
     for pin in pins + ext_pins:
@@ -1268,11 +1524,13 @@ def _query_preserved_pinned(
             media_type = None
 
         text = row_dict["text_body"] or ""
-        if _is_stanza_id(text):
+        if _is_unreadable_token(text):
             text = ""
 
         from_me = int(row_dict["from_me"])
         sender_name = "You" if from_me == 1 else (row_dict["sender_display"] or "Unknown")
+        if _is_unreadable_token(sender_name):
+            sender_name = "Unknown"
         file_name = Path(row_dict["original_path"]).name if row_dict.get("original_path") else ""
         dur_sec = int(row_dict.get("media_duration") or 0)
         lat = row_dict.get("latitude")

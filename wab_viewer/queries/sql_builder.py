@@ -501,6 +501,7 @@ def detect_schema_capabilities(
     has_ios_hd = False
     has_ios_ext_pinned = False
     ext_pin_key_col = "key_id"
+    has_ext_thread_id_deleted = False
     if source_type == "android" and wa_db_path is not None:
         try:
             tmp_chk = sqlite3.connect(wa_db_path)
@@ -532,8 +533,19 @@ def detect_schema_capabilities(
                             if "key_id" in tm_cols
                             else ("stanza_id" if "stanza_id" in tm_cols else "key_id")
                         )
+                        has_ti = _ec.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_id'"
+                        ).fetchone()
+                        if has_ti:
+                            ti_cols = {
+                                r[1] for r in _ec.execute("PRAGMA table_info(thread_id)").fetchall()
+                            }
+                            has_ext_thread_id_deleted = (
+                                "deleted" in ti_cols and "thread_key_id" in tm_cols
+                            )
             except Exception:
                 has_ios_ext_pinned = False
+                has_ext_thread_id_deleted = False
 
     has_reactions = False
     has_ios_reactions = False
@@ -766,6 +778,7 @@ def detect_schema_capabilities(
         has_ios_hd=has_ios_hd,
         has_ios_ext_pinned=has_ios_ext_pinned,
         ext_pin_key_col=ext_pin_key_col,
+        has_ext_thread_id_deleted=has_ext_thread_id_deleted,
         has_reactions=has_reactions,
         has_ios_reactions=has_ios_reactions,
         has_message_poll=has_message_poll if wa_db_path is not None else False,
@@ -1018,16 +1031,28 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
             "SELECT 1 FROM ZWAMESSAGE pin_m "
             "WHERE pin_m.ZCHATSESSION = m.ZCHATSESSION "
             "AND pin_m.ZMESSAGETYPE = 66 "
-            "AND pin_m.ZPARENTMESSAGE = m.Z_PK"
+            "AND pin_m.ZPARENTMESSAGE = m.Z_PK "
+            "AND pin_m.ZMEDIAITEM IS NULL"
             ")"
             if caps.has_wa_zwamessage_parent
             else "0=1"
         )
-        ext_pin_arm = (
-            f" OR (m.ZSTANZAID IS NOT NULL AND EXISTS (SELECT 1 FROM ext.thread_messages tm WHERE tm.{caps.ext_pin_key_col} = m.ZSTANZAID))"
-            if caps.has_ios_ext_pinned
-            else ""
-        )
+        if caps.has_ios_ext_pinned:
+            if caps.has_ext_thread_id_deleted:
+                ext_pin_arm = (
+                    f" OR (m.ZSTANZAID IS NOT NULL AND EXISTS ("
+                    f"SELECT 1 FROM ext.thread_messages tm "
+                    f"LEFT JOIN ext.thread_id ti ON ti.key_id = tm.thread_key_id "
+                    f"WHERE tm.{caps.ext_pin_key_col} = m.ZSTANZAID AND COALESCE(ti.deleted, 0) = 0))"
+                )
+            else:
+                ext_pin_arm = (
+                    f" OR (m.ZSTANZAID IS NOT NULL AND EXISTS ("
+                    f"SELECT 1 FROM ext.thread_messages tm "
+                    f"WHERE tm.{caps.ext_pin_key_col} = m.ZSTANZAID))"
+                )
+        else:
+            ext_pin_arm = ""
         ios_pinned_expr = f"CASE WHEN ({ios_type66_cond}{ext_pin_arm}) THEN 1 ELSE 0 END"
 
         mdi_join = (

@@ -2,6 +2,7 @@
 Tests for wab_viewer
 """
 
+import base64
 import os
 import re
 import sqlite3
@@ -13956,6 +13957,10 @@ class TestReviewFixRegressions:
     def test_ios_pinned_cross_chat_scoping(self, tmp_path):
         """iOS /api/chat/<id>/pinned scopes ExtChatDatabase thread_messages and ZWAMESSAGE pins to the target chat."""
         cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        try:
+            cs_conn.execute("ALTER TABLE ZWAMESSAGE ADD COLUMN ZMESSAGEERRORSTATUS INTEGER")
+        except sqlite3.OperationalError:
+            pass
         cs_conn.executescript("""
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
             VALUES (1, '1110001@s.whatsapp.net', 'Alice', 0),
@@ -14850,6 +14855,10 @@ class TestPinnedMessagesRichPreviews:
     def test_ios_pinned_resolves_type_66_stanza_id_when_parent_is_null(self, tmp_path):
         """iOS ZMESSAGETYPE=66 with ZPARENTMESSAGE=NULL resolves to target message via ZSTANZAID."""
         cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        try:
+            cs_conn.execute("ALTER TABLE ZWAMESSAGE ADD COLUMN ZMESSAGEERRORSTATUS INTEGER")
+        except sqlite3.OperationalError:
+            pass
         cs_conn.executescript("""
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
             VALUES (1, '12345678@s.whatsapp.net', 'Alice', 0);
@@ -14931,6 +14940,10 @@ class TestPinnedMessagesRichPreviews:
     def test_ios_pinned_unresolved_never_exposes_stanza_id(self, tmp_path):
         """When an iOS type 66 pin targets a missing message, raw stanza ID is suppressed."""
         cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        try:
+            cs_conn.execute("ALTER TABLE ZWAMESSAGE ADD COLUMN ZMESSAGEERRORSTATUS INTEGER")
+        except sqlite3.OperationalError:
+            pass
         cs_conn.executescript("""
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
             VALUES (1, '12345678@s.whatsapp.net', 'Alice', 0);
@@ -15093,7 +15106,251 @@ class TestPinnedMessagesRichPreviews:
             js = resp.get_data(as_text=True)
             assert "function _formatMessagePreview(m)" in js
             assert "_isRawStanzaId" in js
+            assert "_isUnreadableToken" in js
             assert "snippetEl.textContent = _formatMessagePreview(pin);" in js
+
+    def test_ios_pinned_album_container_never_treated_as_pin(self, tmp_path):
+        """iOS type 66 media album containers with ZMEDIAITEM must NEVER be treated as pins."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        try:
+            cs_conn.execute("ALTER TABLE ZWAMESSAGE ADD COLUMN ZMESSAGEERRORSTATUS INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        cs_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '12345678@s.whatsapp.net', 'Alice', 0);
+
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZTITLE, ZMEDIALOCALPATH)
+            VALUES (101, NULL, NULL);
+
+            -- Media album container (type 66 with media item and base64 push name)
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID, ZMEDIAITEM, ZPUSHNAME)
+            VALUES (50, 1, 0, 720000000, NULL, 66, '3A86D5BC08A513A4AEE7', 101, 'CKji9NUGIABIAZABAPABAtgCu5PzutWWlwM=');
+
+            -- Normal message in same chat
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID)
+            VALUES (51, 1, 0, 720000010, 'Hello there', 0, '3EB0NORMALMSG51');
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/1/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 0
+            assert resp.get_json()["pinned_message"] is None
+
+            # Verify GET /api/messages does not mark messages as is_pinned = 1
+            resp_m = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp_m.status_code == 200
+            for m in resp_m.get_json():
+                assert m.get("is_pinned", 0) == 0
+
+    def test_ios_pinned_deleted_in_extchat_thread_id_excluded(self, tmp_path):
+        """In ExtChatDatabase.sqlite, thread_id with deleted = 1 is excluded from pins."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        try:
+            cs_conn.execute("ALTER TABLE ZWAMESSAGE ADD COLUMN ZMESSAGEERRORSTATUS INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        cs_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '12345678@s.whatsapp.net', 'Alice', 0);
+
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID)
+            VALUES (60, 1, 0, 720000000, 'Unpinned message', 0, '3EB0UNPINNED60');
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        ext_db = tmp_path / "ExtChatDatabase.sqlite"
+        ext_conn = sqlite3.connect(str(ext_db))
+        ext_conn.executescript("""
+            CREATE TABLE thread_id (
+                id INTEGER PRIMARY KEY,
+                chat_jid TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                pin_timestamp INTEGER,
+                deleted INTEGER DEFAULT 0
+            );
+            CREATE TABLE thread_messages (
+                id INTEGER PRIMARY KEY,
+                stanza_id TEXT NOT NULL,
+                thread_key_id TEXT NOT NULL,
+                chat_jid TEXT NOT NULL
+            );
+            -- An unpinned message (deleted = 1)
+            INSERT INTO thread_id (id, chat_jid, key_id, pin_timestamp, deleted)
+            VALUES (1, '12345678@s.whatsapp.net', '3EB0UNPINNED60', 1700000000, 1);
+            INSERT INTO thread_messages (id, stanza_id, thread_key_id, chat_jid)
+            VALUES (1, '3EB0UNPINNED60', '3EB0UNPINNED60', '12345678@s.whatsapp.net');
+        """)
+        ext_conn.commit()
+        ext_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/1/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 0
+
+            resp_m = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp_m.status_code == 200
+            msgs = resp_m.get_json()
+            assert len(msgs) == 1
+            assert msgs[0]["is_pinned"] == 0
+
+    def test_ios_pinned_unreadable_token_push_name_sanitized(self, tmp_path):
+        """Base64 push name or LID token is sanitized and not returned as sender_name."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        try:
+            cs_conn.execute("ALTER TABLE ZWAMESSAGE ADD COLUMN ZMESSAGEERRORSTATUS INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        cs_conn.executescript("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '12345678@s.whatsapp.net', 'Alice', 0);
+
+            -- Target message with base64 binary push name
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID, ZPUSHNAME, ZFROMJID)
+            VALUES (70, 1, 0, 720000000, 'Important pinned note', 0, '3EB0VALIDPIN70', 'CKji9NUGIABIAZABAPABAtgCu5PzutWWlwM=', '393481234567@s.whatsapp.net');
+
+            -- Valid pin announcement targeting message 70
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID)
+            VALUES (71, 1, 0, 720000050, '3EB0VALIDPIN70', 66, '3EB0PINANNOUNCE71');
+        """)
+        cs_conn.commit()
+        cs_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/1/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            pin = pins[0]
+            # Must NOT expose base64 token
+            assert "CKji9NUG" not in pin["sender_name"]
+            # Must resolve to phone number or Unknown
+            assert pin["sender_name"] in ("+393481234567", "393481234567", "Unknown")
+
+    def test_ios_pinned_chat_session_metadata_resolution(self, tmp_path):
+        """Modern iOS pin resolution via ZWACHATSESSION.ZLASTMESSAGETEXT protobuf."""
+
+        def encode_varint(v: int) -> bytes:
+            b = bytearray()
+            while True:
+                part = v & 0x7F
+                v >>= 7
+                if v:
+                    b.append(part | 0x80)
+                else:
+                    b.append(part)
+                    break
+            return bytes(b)
+
+        # Build submessage tag 4 (duration and status)
+        sub4 = bytearray()
+        sub4.extend(encode_varint((1 << 3) | 0))  # tag 1: duration
+        sub4.extend(encode_varint(2592000))
+        sub4.extend(encode_varint((2 << 3) | 0))  # tag 2: status (1 = active)
+        sub4.extend(encode_varint(1))
+
+        # Build tag 31 submessage
+        target_key = b"120363000000000005@g.us_3EB0TARGETPIN10_0_145500000000005@lid"
+        sub31 = bytearray()
+        sub31.extend(encode_varint((1 << 3) | 2))  # tag 1: action stanza ID
+        sub31.extend(encode_varint(len(b"3EB0PINACT10")))
+        sub31.extend(b"3EB0PINACT10")
+        sub31.extend(encode_varint((2 << 3) | 2))  # tag 2: target key
+        sub31.extend(encode_varint(len(target_key)))
+        sub31.extend(target_key)
+        sub31.extend(encode_varint((3 << 3) | 2))  # tag 3: pinner LID
+        sub31.extend(encode_varint(len(b"145500000000005@lid")))
+        sub31.extend(b"145500000000005@lid")
+        sub31.extend(encode_varint((4 << 3) | 2))  # tag 4: meta
+        sub31.extend(encode_varint(len(sub4)))
+        sub31.extend(sub4)
+        sub31.extend(encode_varint((5 << 3) | 0))  # tag 5: pin ts
+        sub31.extend(encode_varint(1728307200000))
+
+        # Root message
+        root = bytearray()
+        root.extend(encode_varint((31 << 3) | 2))
+        root.extend(encode_varint(len(sub31)))
+        root.extend(sub31)
+        b64_payload = base64.b64encode(bytes(root)).decode("ascii")
+
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        try:
+            cs_conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZLASTMESSAGETEXT TEXT")
+        except sqlite3.OperationalError:
+            pass
+        cs_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                Z_ENT INTEGER,
+                Z_OPT INTEGER,
+                ZCONTACTABID INTEGER,
+                ZISACTIVE INTEGER,
+                ZISADMIN INTEGER,
+                ZSENDERKEYSENT INTEGER,
+                ZCHATSESSION INTEGER,
+                ZRECENTGROUPCHAT INTEGER,
+                ZCONTACTIDENTIFIER TEXT,
+                ZCONTACTNAME TEXT,
+                ZFIRSTNAME TEXT,
+                ZMEMBERJID TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS ZWAPROFILEPUSHNAME (
+                Z_PK INTEGER PRIMARY KEY,
+                Z_ENT INTEGER,
+                Z_OPT INTEGER,
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (1, '120363000000000005@g.us', 'Project Team', 0);
+
+            INSERT INTO ZWAGROUPMEMBER (Z_PK, ZCHATSESSION, ZMEMBERJID)
+            VALUES (100, 1, '145500000000005@lid');
+
+            INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME)
+            VALUES (200, '145500000000005@lid', 'Alice Smith');
+
+            -- Target message
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTANZAID, ZGROUPMEMBER, ZFROMJID)
+            VALUES (10, 1, 0, 750000000, 'Meeting notes and roadmap', 0, '3EB0TARGETPIN10', 100, '120363000000000005@g.us');
+        """)
+        cs_conn.execute(
+            "UPDATE ZWACHATSESSION SET ZLASTMESSAGETEXT = ? WHERE Z_PK = 1",
+            (b64_payload,),
+        )
+        cs_conn.commit()
+        cs_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/1/pinned?chat_type=group")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            pin = pins[0]
+            assert pin["id"] == 10
+            assert pin["sender_name"] == "Alice Smith"
+            assert pin["text"] == "Meeting notes and roadmap"
+            assert pin["is_pinned"] is True
+            assert pin["text"] == "Meeting notes and roadmap"
+            assert pin["is_pinned"] is True
 
     def test_android_and_ios_video_note_contracts(self, tmp_path):
         """Android (message_type=28) and iOS (ZMESSAGETYPE=54) video notes expose is_video_note and raw_msg_type."""
@@ -15253,3 +15510,25 @@ class TestChatJumpHudPlacement:
         assert "topOffset + 12" in js
         # Ensure wired into showJumpHud, showJumpHudError, renderPinnedBanner, and showContextJumpBanner
         assert "updateJumpHudPosition();" in js
+
+    def test_jump_to_message_and_pinned_banner_resilience(self, app_client):
+        """Verify jumpToMessage and jumpToTimestamp anchor messages and prevent bottom-snap."""
+        js_resp = app_client.get("/static/app.js")
+        assert js_resp.status_code == 200
+        js = js_resp.get_data(as_text=True)
+
+        # jumpToMessage must invalidate _loadGen, cancel bottom-anchor, and call _pinToMsg
+        assert "async function jumpToMessage(msg, highlightType)" in js
+        assert "await _pinToMsg(inWin, gen);" in js
+        assert "isUserAtBottom = false;" in js
+
+        # jumpToTimestamp must ensure isUserAtBottom is false and chat-loading is hidden
+        assert "async function jumpToTimestamp(ts, exactMsgId, isExactTarget, highlightType)" in js
+        assert "await _pinToMsg(existing, gen);" in js
+
+        # pinned banner must have z-index: 12 so it remains interactive and unblocked
+        css_resp = app_client.get("/static/app.css")
+        assert css_resp.status_code == 200
+        css = css_resp.get_data(as_text=True)
+        assert "#pinned-banner" in css
+        assert "z-index: 12;" in css

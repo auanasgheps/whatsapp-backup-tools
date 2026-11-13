@@ -35,6 +35,7 @@ class SchemaCapabilities:
     has_ios_hd: bool
     has_ios_ext_pinned: bool
     ext_pin_key_col: str
+    has_ext_thread_id_deleted: bool
     has_reactions: bool
     has_ios_reactions: bool
     has_message_poll: bool
