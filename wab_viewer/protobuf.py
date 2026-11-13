@@ -709,10 +709,10 @@ def _iter_wire_fields(data: bytes) -> list[tuple[int, int, bytes | int]]:
 
 
 def _extract_context_mentioned_jids(ctx_bytes: bytes) -> list[str]:
-    """Extract Tag 15 (mentionedJid) strings from a serialized ContextInfo blob."""
+    """Extract Tag 15 / Tag 8 (mentionedJid) strings from a serialized ContextInfo blob."""
     jids: list[str] = []
     for field_num, wire_type, val in _iter_wire_fields(ctx_bytes):
-        if field_num == 15 and wire_type == 2 and isinstance(val, bytes) and val:
+        if field_num in (8, 15) and wire_type == 2 and isinstance(val, bytes) and val:
             jid = val.decode("utf-8", errors="replace").strip()
             if jid and "@" in jid:
                 jids.append(jid)
@@ -720,13 +720,13 @@ def _extract_context_mentioned_jids(ctx_bytes: bytes) -> list[str]:
 
 
 def _extract_ios_mentions(metadata_bytes: bytes | None) -> list[str]:
-    """Extract mentioned JIDs (Tag 15) from an iOS ZWAMEDIAITEM.ZMETADATA blob."""
+    """Extract mentioned JIDs (Tag 8 root, Tag 15 fallback/ContextInfo) from an iOS ZWAMEDIAITEM.ZMETADATA blob."""
     if not metadata_bytes or not isinstance(metadata_bytes, (bytes, bytearray)):
         return []
     raw = bytes(metadata_bytes)
     jids: list[str] = []
     for field_num, wire_type, val in _iter_wire_fields(raw):
-        if field_num == 15 and wire_type == 2 and isinstance(val, bytes) and val:
+        if field_num in (8, 15) and wire_type == 2 and isinstance(val, bytes) and val:
             jid = val.decode("utf-8", errors="replace").strip()
             if jid and "@" in jid:
                 jids.append(jid)
