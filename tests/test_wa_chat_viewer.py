@@ -4945,16 +4945,15 @@ class TestServiceMessages:
             INSERT INTO ZWAGROUPMEMBER VALUES (1, 20, '15550002222@s.whatsapp.net', 1);
             INSERT INTO ZWAGROUPMEMBER VALUES (2, 20, '15550003333@s.whatsapp.net', 1);
 
-            -- 1. Group created (ZSORT = 2, PK = 101, TS = 700000000.0)
+            -- 1. Group created (ZSORT = 2, PK = 100, TS = 700000000.0)
             INSERT INTO ZWAMESSAGE VALUES (
-                101, 20, 0, 700000000.0, 6, 12, NULL, NULL, NULL, NULL,
+                100, 20, 0, 700000000.0, 6, 12, NULL, NULL, NULL, NULL,
                 '{"subject": "Awesome Group", "author": "15550001111@s.whatsapp.net"}',
                 'awesomegroup@g.us', '15550009999@s.whatsapp.net', 2
             );
-            -- 2. Participant added: Alice added Bob (ZSORT = 3, PK = 100, TS = 700000000.0)
-            -- Note: PK is lower than group created to test sort ordering by ZSORT
+            -- 2. Participant added: Alice added Bob (ZSORT = 3, PK = 101, TS = 700000000.0)
             INSERT INTO ZWAMESSAGE VALUES (
-                100, 20, 0, 700000000.0, 6, 2, NULL, 1, NULL, NULL,
+                101, 20, 0, 700000000.0, 6, 2, NULL, 1, NULL, NULL,
                 '15550001111@s.whatsapp.net', 'awesomegroup@g.us', '15550009999@s.whatsapp.net', 3
             );
             -- 3. Participant added: Alice added you (member_jid is NULL -> target is you)
@@ -5025,13 +5024,13 @@ class TestServiceMessages:
             by_id = {m["msg_id"]: m for m in msgs}
 
             # 1. Group created
-            assert by_id[101]["media_type"] == "service"
-            assert by_id[101]["text_body"] == 'Alice Smith created group "Awesome Group"'
+            assert by_id[100]["media_type"] == "service"
+            assert by_id[100]["text_body"] == 'Alice Smith created group "Awesome Group"'
 
             # 2. Alice added Bob Jones (actor in ZTEXT, target in member_jid)
-            assert by_id[100]["media_type"] == "service"
-            assert by_id[100]["text_body"] == "Alice Smith added Bob Jones"
-            assert "Awesome Group" not in by_id[100]["sender"]
+            assert by_id[101]["media_type"] == "service"
+            assert by_id[101]["text_body"] == "Alice Smith added Bob Jones"
+            assert "Awesome Group" not in by_id[101]["sender"]
 
             # 3. Alice added you (target is you when member_jid is NULL)
             assert by_id[102]["media_type"] == "service"
@@ -5055,16 +5054,15 @@ class TestServiceMessages:
 
             # Verify ordering at same timestamp:
             # In descending order (newest first): msgs returned by /api/messages
-            # For same timestamp (700000000.0), sort_id 3 (Bob added) comes before sort_id 2 (Group created)
-            # When reversed (chronological order), Group Created (sort_id 2) comes BEFORE Participant Added (sort_id 3)
+            # When reversed (chronological order), Group Created (PK 100) comes BEFORE Participant Added (PK 101)
             same_ts_msgs = [
                 m
                 for m in reversed(msgs)
                 if m["timestamp_ms"] == int((700000000.0 + 978307200) * 1000)
             ]
             assert len(same_ts_msgs) == 2
-            assert same_ts_msgs[0]["msg_id"] == 101  # Group created (ZSORT = 2)
-            assert same_ts_msgs[1]["msg_id"] == 100  # Bob added (ZSORT = 3, despite PK 100 < 101)
+            assert same_ts_msgs[0]["msg_id"] == 100  # Group created (PK = 100)
+            assert same_ts_msgs[1]["msg_id"] == 101  # Bob added (PK = 101)
 
     def test_android_service_events_formatting_and_preview(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
@@ -13132,7 +13130,9 @@ class TestPhase2ArchivedAndSearch:
     def test_ios_archived_chats_api(self, tmp_path):
         """GET /api/chats returns is_archived = 1 from ZWACHATSESSION.ZARCHIVED on iOS."""
         conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
-        conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZARCHIVED INTEGER DEFAULT 0")
+        cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if "ZARCHIVED" not in cs_cols:
+            conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZARCHIVED INTEGER DEFAULT 0")
         conn.execute("""
             INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZARCHIVED)
             VALUES (1, '123456789@s.whatsapp.net', 'Archived User', 0, 1)
@@ -15103,14 +15103,22 @@ class TestPinnedMessagesRichPreviews:
         arc_conn = make_archive_db(android_dir / ".wa_media_archiver.db")
 
         wa_conn.execute("INSERT INTO jid VALUES (1, '15551234567', '15551234567@s.whatsapp.net')")
-        wa_conn.execute("INSERT INTO chat VALUES (10, 1, 'Alice Chat', 0, 1700000000000, 101)")
+        wa_conn.execute("INSERT INTO chat VALUES (10, 1, 'Alice Chat', 0, 1700000000000, 102)")
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
             "VALUES (101, 10, 0, 1, 1700000000000, '', 28, 'STANZA_VN_ANDROID')"
         )
         wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+            "VALUES (102, 10, 0, 1, 1700000001000, '', 81, 'STANZA_VN_ANDROID_81')"
+        )
+        wa_conn.execute(
             "INSERT INTO message_media (_id, message_row_id, chat_row_id, file_path, media_name, mime_type, message_url) "
             "VALUES (101, 101, 10, 'Media/WhatsApp Video Notes/202601/VID-101.mp4', 'VID-101.mp4', 'video/mp4', '')"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (_id, message_row_id, chat_row_id, file_path, media_name, mime_type, message_url) "
+            "VALUES (102, 102, 10, 'Media/WhatsApp Video Notes/202501/PTV-20250101-WA0010.mp4', 'PTV-20250101-WA0010.mp4', 'video/mp4', '')"
         )
         wa_conn.commit()
 
@@ -15118,8 +15126,15 @@ class TestPinnedMessagesRichPreviews:
             "INSERT INTO files (original_path, md5) VALUES ('Media/WhatsApp Video Notes/202601/VID-101.mp4', x'01020304')"
         )
         arc_conn.execute(
+            "INSERT INTO files (original_path, md5) VALUES ('Media/WhatsApp Video Notes/202501/PTV-20250101-WA0010.mp4', x'05060708')"
+        )
+        arc_conn.execute(
             "INSERT INTO archive_copies (original_path, archive_path) VALUES "
             "('Media/WhatsApp Video Notes/202601/VID-101.mp4', 'Contacts/Alice/2026/Received/VID-101.mp4')"
+        )
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES "
+            "('Media/WhatsApp Video Notes/202501/PTV-20250101-WA0010.mp4', 'Contacts/Alice/2025/Received/PTV-20250101-WA0010.mp4')"
         )
         arc_conn.commit()
 
@@ -15129,11 +15144,18 @@ class TestPinnedMessagesRichPreviews:
             resp = client.get("/api/messages?chat_id=15551234567&chat_type=contact")
             assert resp.status_code == 200
             data = resp.get_json()
-            assert len(data) == 1
-            msg = data[0]
-            assert msg["is_video_note"] == 1
-            assert msg["media_type"] == "video"
-            assert msg["archive_path"] == "Contacts/Alice/2026/Received/VID-101.mp4"
+            assert len(data) == 2
+            by_id = {m["msg_id"]: m for m in data}
+            assert 101 in by_id
+            assert 102 in by_id
+            assert by_id[101]["is_video_note"] == 1
+            assert by_id[101]["media_type"] == "video"
+            assert by_id[101]["archive_path"] == "Contacts/Alice/2026/Received/VID-101.mp4"
+            assert by_id[102]["is_video_note"] == 1
+            assert by_id[102]["media_type"] == "video"
+            assert (
+                by_id[102]["archive_path"] == "Contacts/Alice/2025/Received/PTV-20250101-WA0010.mp4"
+            )
 
             # Check chat snippet
             chat_resp = client.get("/api/chats")

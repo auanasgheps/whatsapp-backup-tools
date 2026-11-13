@@ -1439,9 +1439,9 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
             quoted_thumb_conds.append(
                 "(mqt_orig.message_row_id IS NOT NULL AND mqt_orig.thumbnail IS NOT NULL)"
             )
-        quoted_thumb_conds.append("(m_orig.message_type IN (1, 3, 9, 13, 20, 26, 42, 43))")
+        quoted_thumb_conds.append("(m_orig.message_type IN (1, 3, 9, 13, 20, 26, 28, 42, 43, 81))")
     if caps.has_mq_msg_type:
-        quoted_thumb_conds.append("(mq.message_type IN (1, 3, 9, 13, 20, 26, 42, 43))")
+        quoted_thumb_conds.append("(mq.message_type IN (1, 3, 9, 13, 20, 26, 28, 42, 43, 81))")
 
     android_quoted_has_thumb_expr = (
         f"CASE WHEN {' OR '.join(quoted_thumb_conds)} THEN 1 ELSE 0 END"
@@ -1598,7 +1598,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
             WHEN m.message_type = 20 THEN 'sticker'
             WHEN {android_gif_cond} THEN 'gif'
             WHEN m.message_type = 42 THEN 'image'
-            WHEN m.message_type IN (28, 43) THEN 'video'
+            WHEN m.message_type IN (28, 43, 81) THEN 'video'
             WHEN m.message_type = 82 THEN 'audio'
             WHEN m.message_type = 66{extra_poll_select} THEN 'poll'
             {android_live_type_cond}
@@ -1610,7 +1610,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
                      THEN 'link' ELSE 'text' END
             WHEN {android_file_path} IS NULL AND m.message_type = 1 THEN 'image'
             WHEN {android_file_path} IS NULL AND m.message_type = 2 THEN 'audio'
-            WHEN {android_file_path} IS NULL AND m.message_type IN (3, 28) THEN 'video'
+            WHEN {android_file_path} IS NULL AND m.message_type IN (3, 28, 81) THEN 'video'
             WHEN {android_file_path} IS NULL AND m.message_type = 9 THEN 'document'
             ELSE {_MEDIA_TYPE_EXPR.format(col=f"COALESCE({android_file_path}, mm.media_name)")}
         END                                                          AS media_type,
@@ -1649,7 +1649,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         {edit_is_edited_col}                                         AS is_edited,
         {edit_ts_col}                                                AS edited_ts,
         CASE WHEN m.message_type IN (42, 43, 82){mvom_or} THEN 1 ELSE 0 END   AS is_view_once,
-        CASE WHEN m.message_type = 28 THEN 1 ELSE 0 END              AS is_video_note,
+        CASE WHEN m.message_type IN (28, 81) THEN 1 ELSE 0 END        AS is_video_note,
         {android_starred_expr}                                       AS is_starred,
         {android_pinned_expr}                                        AS is_pinned,
         m.message_type                                               AS raw_msg_type,

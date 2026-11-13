@@ -309,7 +309,7 @@ def _query_android_starred(
             fp.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".heic", ".webp")
         ):
             media_type = "photo"
-        elif m_type in (2, 43, 28) or any(
+        elif m_type in (2, 43, 28, 81) or any(
             fp.endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".3gp")
         ):
             media_type = "video"
@@ -825,7 +825,9 @@ def _query_android_pinned(
         fp = (row_dict["file_path"] or "").lower()
         if mt in (1, 42) or any(fp.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp")):
             media_type = "photo"
-        elif mt in (2, 43, 28) or any(fp.endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".3gp")):
+        elif mt in (2, 43, 28, 81) or any(
+            fp.endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".3gp")
+        ):
             media_type = "video"
         elif mt in (3, 82) or any(
             fp.endswith(ext) for ext in (".mp3", ".ogg", ".opus", ".m4a", ".aac")

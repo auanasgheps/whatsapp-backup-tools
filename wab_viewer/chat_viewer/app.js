@@ -1420,9 +1420,9 @@
 
   function isVideoNote(msg) {
     if (!msg) return false;
-    if (Boolean(msg.is_video_note) || msg.raw_msg_type === 28 || msg.raw_msg_type === 54) return true;
-    const p = (msg.archive_path || '').toLowerCase().replace(/\\/g, '/');
-    return p.includes('/whatsapp video notes/') || p.startsWith('whatsapp video notes/');
+    if (Boolean(msg.is_video_note) || msg.raw_msg_type === 28 || msg.raw_msg_type === 81 || msg.raw_msg_type === 54) return true;
+    const p = (msg.archive_path || msg.original_path || '').toLowerCase().replace(/\\/g, '/');
+    return p.includes('/whatsapp video notes/') || p.startsWith('whatsapp video notes/') || /(^|\/)ptv-\d+/i.test(p);
   }
 
   function isGrouableMedia(msg) {
