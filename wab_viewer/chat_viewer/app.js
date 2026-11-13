@@ -6011,10 +6011,10 @@
   }
 
   function _formatCallOutcomeText(callType, outcome, durationSec) {
-    if (callType === 'missed') {
+    if (callType === 'missed' && (!durationSec || durationSec <= 0)) {
       return outcome === 'declined' ? 'Declined' : 'Missed';
     }
-    const dirLabel = callType === 'incoming' ? 'Incoming' : 'Outgoing';
+    const dirLabel = callType === 'outgoing' ? 'Outgoing' : 'Incoming';
     if (durationSec > 0) {
       return `${dirLabel} · ${fmtDuration(durationSec)}`;
     }
@@ -6026,7 +6026,10 @@
 
   function renderCallCard(msg) {
     const c = msg.call || {};
-    const callType = c.call_type || (msg.from_me ? 'outgoing' : 'incoming');
+    let callType = c.call_type || (msg.from_me ? 'outgoing' : 'incoming');
+    if ((c.duration_sec && c.duration_sec > 0) && callType === 'missed') {
+      callType = c.from_me ? 'outgoing' : 'incoming';
+    }
     const isMissed = callType === 'missed';
 
     const card = document.createElement('div');
@@ -6074,9 +6077,14 @@
     const tsMs = call.timestamp_ms ?? (call.timestamp * 1000);
     const timeLabel = fmtTime(tsMs);
     const durSec = call.duration || 0;
-    const outcomeText = call.call_type === 'missed'
-      ? 'Missed'
-      : _formatCallOutcomeText(call.call_type, durSec > 0 ? 'answered' : 'unanswered', durSec);
+    let callType = call.call_type;
+    if (durSec > 0 && callType === 'missed') {
+      callType = call.from_me ? 'outgoing' : 'incoming';
+    }
+    const isMissed = callType === 'missed';
+    const outcomeText = isMissed
+      ? (call.outcome === 'declined' ? 'Declined' : 'Missed')
+      : _formatCallOutcomeText(callType, durSec > 0 ? 'answered' : (call.outcome || 'unanswered'), durSec);
     el.setAttribute(
       'aria-label',
       `${callerName}, ${call.is_video ? 'Video call' : 'Voice call'}, ${outcomeText}, ${timeLabel}`
@@ -6125,8 +6133,8 @@
 
     const sub = document.createElement('div');
     sub.className = 'call-item-sub';
-    const subClass = call.call_type === 'missed' ? ' call-icon-missed' : '';
-    sub.innerHTML = _getCallDirectionSvg(call.call_type) +
+    const subClass = isMissed ? ' call-icon-missed' : '';
+    sub.innerHTML = _getCallDirectionSvg(callType) +
       `<span class="call-item-sub-text${subClass}">${esc(outcomeText)}</span>`;
     row2.appendChild(sub);
 
@@ -6214,11 +6222,16 @@
       }
     }
 
+    let inspectCallType = call.call_type;
+    if (call.duration > 0 && inspectCallType === 'missed') {
+      inspectCallType = call.from_me ? 'outgoing' : 'incoming';
+    }
+
     const dirEl = document.getElementById('call-inspect-dir');
     if (dirEl) {
-      if (call.call_type === 'missed') {
+      if (inspectCallType === 'missed') {
         dirEl.innerHTML = '<span class="call-icon-missed call-dir-label">Missed</span>';
-      } else if (call.call_type === 'incoming') {
+      } else if (inspectCallType === 'incoming') {
         dirEl.innerHTML = '<svg class="call-item-arrow call-icon-incoming" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg> <span class="call-icon-incoming call-dir-label">Incoming</span>';
       } else {
         dirEl.innerHTML = '<svg class="call-item-arrow call-icon-outgoing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg> <span class="call-icon-outgoing call-dir-label">Outgoing</span>';
@@ -6241,12 +6254,14 @@
 
     const durEl = document.getElementById('call-inspect-duration');
     if (durEl) {
-      if (call.call_type === 'missed') {
-        durEl.textContent = '0s (Missed)';
-      } else if (call.call_type === 'outgoing' && call.duration === 0) {
-        durEl.textContent = '0s (No answer)';
-      } else {
+      if (call.duration > 0) {
         durEl.textContent = fmtDurationLong(call.duration);
+      } else if (inspectCallType === 'missed') {
+        durEl.textContent = call.outcome === 'declined' ? '0s (Declined)' : '0s (Missed)';
+      } else if (inspectCallType === 'outgoing') {
+        durEl.textContent = call.outcome === 'canceled' ? '0s (Canceled)' : '0s (No answer)';
+      } else {
+        durEl.textContent = '0s';
       }
     }
 

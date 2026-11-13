@@ -12072,7 +12072,7 @@ class TestTrack1Endpoints:
                 );
                 INSERT INTO preserved_calls VALUES (
                     'pres-call-1', '99', '15557777@s.whatsapp.net', 'Ghost Caller',
-                    1793979999000, 45, 0, 0, 2
+                    1793979999000, 0, 0, 0, 2
                 );
             """)
             conn.commit()
