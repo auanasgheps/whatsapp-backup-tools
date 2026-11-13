@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.80]
+
+### 📁 WhatsApp Backup Archiver (`wab-archiver`)
+
+- **Group Mention Preservation**: Added support for extracting and preserving group `@mentions` across incremental backups and differential archival passes in `preserved_messages.db` (schema v3), retaining mention metadata and participant associations even when messages are removed from the device.
+- **iOS Call History Discovery & Verification**: Added discovery, staging, and SQLite integrity validation (`PRAGMA quick_check`) for WhatsApp call logs (`CallHistory.sqlite` / `CallHistory.storedata`) from iOS backups across standard and AppDomain paths.
+- **Android Incremental Mention Ingestion**: Extended the delta replay engine to extract Tag 15 `mentionedJid` from Android incremental delta streams and insert participant records into `message_mentions` and `message_quoted_mentions`.
+
+### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
+
+- **Call History & Call Inspector**: Added a dedicated "Calls" tab in the bottom navigation bar powered by `/api/calls`, featuring infinite-scroll list browsing, call type filtering (All, Missed, Video), two-line call cards, and a right-pane Call Inspector with caller metadata and participant breakdown. Includes a contextual "Jump to this Moment in Chat" button with time gap indicators navigating directly to the call timestamp in chat context.
+- **Chronological In-Chat Call Bubbles**: Integrated voice and video call records directly into chat timelines across Android, iOS, and preserved databases as borderless call bubbles showing outcome, duration, and metadata popovers.
+- **Starred Messages & Slide-Over Drawer**: Added global starred message browsing in the sidebar and a per-chat slide-over drawer with real-time toolbar count badges. Clicking any starred card smoothly jumps to the message with a pulsing gold halo animation.
+- **Pinned Messages Banner & De-Referencing**: Added a docked pinned message banner strip beneath the chat header supporting multi-pin cycling (`1 of N`), session-scoped dismissal, and 1-click jumping with a pulsing emerald highlight. De-references target messages to suppress raw stanza IDs and renders rich previews across all media types.
+- **Archived Chats Tab & Navigation**: Added a dedicated "Archived" tab isolating archived conversations from the active chat list, with empty-state messaging and full chat selection support.
+- **Tab-Aware Real-Time Search & Global Shortcuts**: Dynamically routes the search box to server-side full-text search on Chats, instant client-side filtering on Calls and Starred, or archived chat filtering on Archived. Added `/` and `Ctrl+K` / `Cmd+K` global focus shortcuts and `Escape` dismissal chains.
+- **Cross-Platform Group `@mentions` & 1-to-1 Chat Linking**: Parsed and hydrated group `@mentions` across Android (`message_mentions`) and iOS (Protobuf wire Tag 15 in `ZWAMEDIAITEM.ZMETADATA` and quoted `ContextInfo`). Formatted mentions display as styled badges that link directly to active, archived, or preserved 1-to-1 chats with that contact.
+- **Collapsible Long Messages ("Read More" ↔ "Show Less")**: Long text messages exceeding 750 characters or 15 lines are truncated with an accessible two-way toggle, preserving emoji grapheme clusters (ZWJ sequences), formatting, and scroll stability, with automatic expansion on search or quote jumps.
+- **Theme-Adaptive Group Participant Colors**: Assigned consistent 10-color participant palettes (based on WhatsApp's native high-contrast scheme) to group sender headers and quoted reply borders, dynamically adapting across dark and light themes.
+- **Circular Video Note Player (Push-To-Video / PTV)**: Rendered video notes as circular video bubbles with centered play/pause controls, SVG countdown progress rings, remaining time pills, fullscreen lightbox viewing, and automatic viewport pausing.
+- **In-Bubble Metadata Indicators**: Added compact 12px inline SVG icons for starred (`⭐`) and pinned (`📌`) messages within the `.msg-meta` timestamp cluster, maintaining a clean bubble layout without top headers.
+- **Captioned Media Containment & Orientation Sizing**: Enforced fixed orientation-clamped media dimensions (landscape vs portrait) with flexible caption containment, preventing wide captions from stretching bubbles or leaving empty space.
+- **Modernized UI Shell & Responsive Layout**: Restructured header with top-right branding, platform badge, and settings button; implemented responsive sidebar scaling bound to viewport and display scale; and elevated chat bubbles with subtle drop shadows.
+- **Modular Backend Architecture & Performance Optimization**: Refactored `wab_viewer/main.py` into modular Blueprints, query builders, and per-instance `ViewerContext` state isolation. Accelerated iOS message pagination to scan physical `ZMESSAGEDATE` and `Z_PK` columns directly, eliminating temporary sorting tables on large chats.
+- **Android Calls & Starred Privacy LID Resolution**: Automatically resolved privacy Linked Identities (`@lid`) to canonical phone numbers and contact names in Android call logs, starred messages, and chat lists.
+- **iOS Call History CoreData Joins & Parity**: Mapped CoreData relationships (`Z1CALLEVENTS`, `Z1PARTICIPANTS`) in `CallHistory.sqlite` with privacy LID resolution and archived chat retention.
+
+---
+
 ## [0.70]
 
 ### 📁 WhatsApp Backup Archiver (`wab-archiver`)
@@ -21,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Exact ADB Status Diagnosis**: Replaced generic connectivity checklist with targeted diagnoses distinguishing between 0 devices detected, multiple attached devices, host permission issues (`no permissions`), offline devices, and unauthorized devices.
 - **Interactive Authorization Recovery Flow**: When an Android device is detected as `unauthorized`, prompts interactive users to optionally restart the ADB server (`adb kill-server`) to re-trigger the on-device "Allow USB debugging?" dialog, re-verifying device readiness automatically.
 - **Precise Database Pull Error Messages**: Replaced generic fallback text on `pull_msgstore` failures with exact guidance based on command output (e.g., reminding users to enable End-to-End Encrypted Backup in WhatsApp settings when backups are missing on the phone).
+- **Android Reverse Restore Argument Guard**: Fixed an issue where running reverse restore could fail when network path warnings were evaluated.
+- **Sticker Categorization in Duplicate Reports**: Categorized `.webp` and `.was` stickers under the dedicated Stickers section at the end of duplicate reports across iOS and Android.
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
@@ -29,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Revoked & View-Once Message Support**: Rendered native WhatsApp tombstones (`⃠ This message was deleted`) for revoked messages, status pills (`① Photo · Opened`) for purged view-once media, and overlay badges for preserved media, with database schema v3 migration (`recent_messages.is_view_once`).
 - **Preserved Message & Chat Browsing**: Integrated with `preserved_messages.db` to display preserved chat badges, tooltip metadata, and preserved messages merged into chat timelines and full-text search.
 - **Responsive Settings Modal Adaptability**: Added dynamic height constraints and internal scrolling (`#settings-body`) with a pinned header, ensuring the Settings modal adapts smoothly to small screens, split windows, and low-height viewports without overflowing.
+- **Android Video Notes in Web Viewer**: Android Push-to-Video messages (`message_type = 28`) now reliably render with the authentic circular video note player and preview properly in the recent chat list, matching iOS video notes.
+- **Background Event & System Message Chat List Isolation**: Contacts with zero exchanged messages no longer appear in your recent chat list due to internal WhatsApp events, and system notices no longer displace conversation previews or re-order recent chats.
+- **Clarified Preserved Message & Chat Tooltip Attribution**: Refactored `.msg-preserved` tooltip formatting from ambiguous trailing timestamps to explicit source-first attribution (`Preserved from backup (<date>) • <reason>`), avoiding confusion with device deletion timestamps.
+- **Quoted Message Navigation & Jump Stabilization**: Clicking a quoted reply reliably scrolls and jumps directly to the original quoted message with a highlight pulse, smoothly locking onto older photos or offloaded media without drifting from asynchronous image loading.
 
 ---
 
