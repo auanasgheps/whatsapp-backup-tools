@@ -139,6 +139,19 @@ def _query_preserved_messages(
         d.pop("rowid", None)
         d.pop("action_type", None)
         d.pop("participant_name", None)
+        d.setdefault(
+            "is_video_note",
+            1
+            if (
+                d.get("media_type") == "video"
+                and (
+                    (d.get("original_path") and "video notes" in str(d["original_path"]).lower())
+                    or (d.get("archive_path") and "video notes" in str(d["archive_path"]).lower())
+                )
+            )
+            else 0,
+        )
+        d.setdefault("raw_msg_type", 28 if d.get("is_video_note") else None)
         result.append(d)
     return result
 

@@ -785,7 +785,9 @@ def hydrate_android_mentions_for_preservation(
         if has_jid_map
         else ""
     )
-    ldn_join = f"LEFT JOIN {db_prefix}lid_display_name ldn ON ldn.lid_row_id = j._id " if has_ldn else ""
+    ldn_join = (
+        f"LEFT JOIN {db_prefix}lid_display_name ldn ON ldn.lid_row_id = j._id " if has_ldn else ""
+    )
     j_srv = "j.server" if has_server else "''"
     j_raw = "j.raw_string" if has_raw else "''"
     j2_usr = "j2.user" if has_jid_map else "NULL"
@@ -817,10 +819,7 @@ def hydrate_android_mentions_for_preservation(
                         continue
                     c2 = (row[4] or "").split(":")[0]
                     is_self = (
-                        (row[3] == "lid_me")
-                        or (cu == "me")
-                        or (row[5] == "lid_me")
-                        or (c2 == "me")
+                        (row[3] == "lid_me") or (cu == "me") or (row[5] == "lid_me") or (c2 == "me")
                     )
                     is_lid = (row[2] == "lid") or (row[3] or "").endswith("@lid")
                     c_name = contacts_map.get(c2 or cu) or contacts_map.get(cu)
