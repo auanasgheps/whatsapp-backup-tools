@@ -31,47 +31,52 @@ def _get_contacts_lookup(arch_conn: sqlite3.Connection | None) -> dict[str, str]
 
 def _map_android_call_outcome(from_me: int, result_code: int, duration_sec: int) -> tuple[str, str]:
     """Return (call_type, outcome) for an Android call_log entry."""
+    if duration_sec > 0:
+        call_type = "outgoing" if from_me == 1 else "incoming"
+        outcome = "answered"
+        return call_type, outcome
+
     if from_me == 1:
         call_type = "outgoing"
-    elif result_code in (2, 3, 5):
-        call_type = "missed"
-    else:
-        call_type = "incoming"
+        outcome = "declined" if result_code == 3 else "unanswered"
+        return call_type, outcome
 
-    if duration_sec > 0:
-        outcome = "answered"
-    elif from_me == 1:
-        outcome = "unanswered"
-    elif result_code == 3:
+    call_type = "missed"
+    if result_code == 3:
         outcome = "declined"
     elif result_code in (2, 5):
         outcome = "missed"
     else:
-        outcome = "unanswered"
+        outcome = "missed"
     return call_type, outcome
 
 
 def _map_ios_call_outcome(from_me: int, outcome_code: int, duration_sec: int) -> tuple[str, str]:
     """Return (call_type, outcome) for an iOS ZWACDCALLEVENT entry."""
+    if duration_sec > 0:
+        call_type = "outgoing" if from_me == 1 else "incoming"
+        outcome = "answered"
+        return call_type, outcome
+
     if from_me == 1:
         call_type = "outgoing"
-    elif outcome_code in (2, 3) or (outcome_code == 4 and duration_sec == 0):
-        call_type = "missed"
-    else:
-        call_type = "incoming"
+        if outcome_code == 1:
+            outcome = "canceled"
+        elif outcome_code == 3:
+            outcome = "declined"
+        else:
+            outcome = "unanswered"
+        return call_type, outcome
 
-    if duration_sec > 0:
-        outcome = "answered"
-    elif from_me == 1:
-        outcome = "unanswered"
-    elif outcome_code == 3:
+    call_type = "missed"
+    if outcome_code == 3:
         outcome = "declined"
-    elif outcome_code in (2, 4):
-        outcome = "missed"
     elif outcome_code == 1:
         outcome = "canceled"
+    elif outcome_code in (2, 4):
+        outcome = "missed"
     else:
-        outcome = "unanswered"
+        outcome = "missed"
     return call_type, outcome
 
 
@@ -239,7 +244,15 @@ def _query_android_calls(
     if filter_type == "video" and has_video:
         where_parts.append(f"{video_expr} = 1")
     elif filter_type == "missed" and (has_from_me or has_result):
-        where_parts.append(f"{from_me_expr} = 0 AND {result_expr} IN (2, 3, 5)")
+        missed_conds: list[str] = []
+        if has_from_me:
+            missed_conds.append(f"{from_me_expr} = 0")
+        if has_duration:
+            missed_conds.append(f"{dur_expr} = 0")
+        if has_result:
+            missed_conds.append(f"{result_expr} IN (2, 3, 5)")
+        if missed_conds:
+            where_parts.append(" AND ".join(missed_conds))
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
     limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
@@ -346,6 +359,16 @@ def _resolve_ios_call_schema(call_conn: sqlite3.Connection) -> dict | None:
         if "Z1CALLEVENTS" in cl_cols
         else ("ZAGGREGATECALLEVENT" if "ZAGGREGATECALLEVENT" in cl_cols else None)
     )
+    has_aggregate = agg_fk_col is not None and "ZWAAGGREGATECALLEVENT" in tables
+    agg_cols = (
+        {r[1] for r in call_conn.execute("PRAGMA table_info(ZWAAGGREGATECALLEVENT)").fetchall()}
+        if has_aggregate
+        else set()
+    )
+    has_missed_col = "ZMISSED" in agg_cols
+    has_incoming_col = "ZINCOMING" in agg_cols
+    has_video_col = "ZVIDEO" in agg_cols
+
     has_participants = "ZWACDCALLEVENTPARTICIPANT" in tables
     part_fk = None
     part_jid_col = None
@@ -373,7 +396,10 @@ def _resolve_ios_call_schema(call_conn: sqlite3.Connection) -> dict | None:
         "has_date": "ZDATE" in cl_cols,
         "has_creator": "ZGROUPCALLCREATORUSERJIDSTRING" in cl_cols,
         "agg_fk_col": agg_fk_col,
-        "has_aggregate": agg_fk_col is not None and "ZWAAGGREGATECALLEVENT" in tables,
+        "has_aggregate": has_aggregate,
+        "has_missed_col": has_missed_col,
+        "has_incoming_col": has_incoming_col,
+        "has_video_col": has_video_col,
         "has_participants": has_participants,
         "part_fk": part_fk,
         "part_jid_col": part_jid_col,
@@ -432,6 +458,9 @@ def _query_ios_calls(
         has_creator = schema["has_creator"]
         agg_fk_col = schema["agg_fk_col"]
         has_aggregate = schema["has_aggregate"]
+        has_missed_col = schema.get("has_missed_col", False)
+        has_incoming_col = schema.get("has_incoming_col", False)
+        has_video_col = schema.get("has_video_col", False)
         part_fk = schema["part_fk"]
         part_jid_col = schema["part_jid_col"]
 
@@ -451,27 +480,33 @@ def _query_ios_calls(
             else ""
         )
         agg_pk_expr = f"cl.{agg_fk_col}" if has_aggregate else "NULL"
-        video_expr = "COALESCE(agg.ZVIDEO, 0)" if has_aggregate else "0"
-        from_me_expr = "CASE WHEN agg.ZINCOMING = 0 THEN 1 ELSE 0 END" if has_aggregate else "0"
+        video_expr = "COALESCE(agg.ZVIDEO, 0)" if (has_aggregate and has_video_col) else "0"
+        from_me_expr = (
+            "CASE WHEN agg.ZINCOMING = 0 THEN 1 ELSE 0 END"
+            if (has_aggregate and has_incoming_col)
+            else "0"
+        )
 
         where_parts: list[str] = []
         apply_sql_limit = fetch_limit is not None
         if filter_type == "video":
-            if has_aggregate:
+            if has_aggregate and has_video_col:
                 where_parts.append("agg.ZVIDEO = 1")
             else:
                 apply_sql_limit = False
         elif filter_type == "missed":
             missed_conds: list[str] = []
-            if has_aggregate:
+            if has_aggregate and has_incoming_col:
                 missed_conds.append("agg.ZINCOMING = 1")
-            if has_outcome:
-                missed_outcome_expr = (
-                    "(cl.ZOUTCOME IN (2, 3) OR (cl.ZOUTCOME = 4 AND COALESCE(cl.ZDURATION, 0) = 0))"
-                    if has_duration
-                    else "cl.ZOUTCOME IN (2, 3)"
-                )
-                missed_conds.append(missed_outcome_expr)
+            if has_duration:
+                missed_conds.append("COALESCE(cl.ZDURATION, 0) = 0")
+            if has_aggregate and has_missed_col:
+                if has_outcome:
+                    missed_conds.append("(agg.ZMISSED = 1 OR cl.ZOUTCOME IN (2, 3, 4))")
+                else:
+                    missed_conds.append("agg.ZMISSED = 1")
+            elif has_outcome:
+                missed_conds.append("cl.ZOUTCOME IN (2, 3, 4)")
             else:
                 apply_sql_limit = False
             if missed_conds:
@@ -715,7 +750,12 @@ def _query_preserved_calls(
         if filter_type == "video":
             where_parts.append(f"{video_expr} = 1")
         elif filter_type == "missed":
-            where_parts.append("from_me = 0 AND call_result IN (2, 3, 5)")
+            missed_pres_conds: list[str] = ["from_me = 0"]
+            if "duration_seconds" in cols or "duration_sec" in cols:
+                missed_pres_conds.append(f"{dur_expr} = 0")
+            if "call_result" in cols:
+                missed_pres_conds.append("call_result IN (2, 3, 5)")
+            where_parts.append(" AND ".join(missed_pres_conds))
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
 
@@ -743,15 +783,15 @@ def _query_preserved_calls(
     for r in rows:
         row_dict = dict(r)
         from_me = int(row_dict["from_me"])
-        result_code = int(row_dict["call_result"])
         is_video = bool(row_dict["is_video"] == 1)
+        duration_sec = max(0, int(row_dict["duration_seconds"] or 0))
 
-        if from_me == 1:
+        if duration_sec > 0:
+            call_type = "outgoing" if from_me == 1 else "incoming"
+        elif from_me == 1:
             call_type = "outgoing"
-        elif result_code in (2, 3, 5):
-            call_type = "missed"
         else:
-            call_type = "incoming"
+            call_type = "missed"
 
         if filter_type == "missed" and call_type != "missed":
             continue
@@ -1307,8 +1347,16 @@ def _query_ios_chat_calls(
             else ""
         )
         agg_pk_expr = f"cl.{agg_fk_col}" if has_aggregate else "NULL"
-        video_expr = "COALESCE(agg.ZVIDEO, 0)" if has_aggregate else "0"
-        from_me_expr = "CASE WHEN agg.ZINCOMING = 0 THEN 1 ELSE 0 END" if has_aggregate else "0"
+        video_expr = (
+            "COALESCE(agg.ZVIDEO, 0)"
+            if (has_aggregate and schema.get("has_video_col", False))
+            else "0"
+        )
+        from_me_expr = (
+            "CASE WHEN agg.ZINCOMING = 0 THEN 1 ELSE 0 END"
+            if (has_aggregate and schema.get("has_incoming_col", False))
+            else "0"
+        )
 
         sql = f"""
             SELECT
