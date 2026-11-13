@@ -1760,9 +1760,29 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
     LEFT JOIN _contacts_resolved con_s  ON con_s.clean_number  = {_clean_user_sql("COALESCE(j2.user, j.user)")}
     """
 
+    android_stat_aggregate_select = f"""
+    SELECT
+        m._id                                                        AS msg_id,
+        COALESCE(m.timestamp, 0)                                     AS timestamp_ms,
+        ''                                                           AS sender,
+        m.from_me,
+        CASE
+            WHEN m.message_type = 7 AND NOT (({ms_col} = 1 OR {ms_col} IS NULL) AND NOT ({is_group_chat_select})) THEN 'service'
+            ELSE 'other'
+        END                                                          AS media_type
+    FROM message m
+    LEFT JOIN message_media mm ON mm.message_row_id = m._id
+    {mvom_join}
+    LEFT JOIN chat c ON c._id = m.chat_row_id
+    LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
+    {ms_join}
+    {mrev_join}
+    """
+
     return QuerySet(
         android_select=android_select,
         android_stat_select=android_stat_select,
+        android_stat_aggregate_select=android_stat_aggregate_select,
         android_filter=android_filter,
         android_filter_ts=android_filter_ts,
         android_ts=_ANDROID_TS,

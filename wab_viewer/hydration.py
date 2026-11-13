@@ -611,17 +611,39 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
         return
 
     if source_type == "android":
-        tables = {
-            r[0]
-            for r in wa_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }
+        ctx = None
+        try:
+            from .context import get_viewer_context
+
+            ctx = get_viewer_context()
+        except Exception:
+            ctx = None
+
+        if ctx is not None:
+            has_poll = ctx.caps.has_message_poll
+            has_add_on = ctx.caps.has_message_add_on
+        else:
+            tables = {
+                r[0]
+                for r in wa_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            has_poll = "message_poll" in tables
+            has_add_on = False
+            if "message_add_on" in tables:
+                mao_cols = {
+                    r[1] for r in wa_conn.execute("PRAGMA table_info(message_add_on)").fetchall()
+                }
+                has_add_on = "message_add_on_type" in mao_cols
+
         candidate_mids = [
             r["msg_id"] for r in rows if r.get("media_type") != "poll" and r.get("msg_id")
         ]
         if candidate_mids:
             c_ph = ",".join("?" * len(candidate_mids))
             db_poll_mids = set()
-            if "message_poll" in tables:
+            if has_poll:
                 try:
                     db_poll_mids.update(
                         r[0]
@@ -632,21 +654,17 @@ def _hydrate_poll_rows(rows: list, source_type: str, wa_conn: sqlite3.Connection
                     )
                 except sqlite3.OperationalError:
                     pass
-            if "message_add_on" in tables:
-                mao_cols = {
-                    r[1] for r in wa_conn.execute("PRAGMA table_info(message_add_on)").fetchall()
-                }
-                if "message_add_on_type" in mao_cols:
-                    try:
-                        db_poll_mids.update(
-                            r[0]
-                            for r in wa_conn.execute(
-                                f"SELECT parent_message_row_id FROM message_add_on WHERE parent_message_row_id IN ({c_ph}) AND message_add_on_type = 67",
-                                candidate_mids,
-                            ).fetchall()
-                        )
-                    except sqlite3.OperationalError:
-                        pass
+            if has_add_on:
+                try:
+                    db_poll_mids.update(
+                        r[0]
+                        for r in wa_conn.execute(
+                            f"SELECT parent_message_row_id FROM message_add_on WHERE parent_message_row_id IN ({c_ph}) AND message_add_on_type = 67",
+                            candidate_mids,
+                        ).fetchall()
+                    )
+                except sqlite3.OperationalError:
+                    pass
             for r in rows:
                 if r.get("msg_id") in db_poll_mids:
                     r["media_type"] = "poll"
@@ -1415,10 +1433,28 @@ def _hydrate_mentions(
     if not rows or source_type not in ("android", "ios"):
         return
 
+    ctx = None
+    try:
+        from .context import get_viewer_context
+
+        ctx = get_viewer_context()
+    except Exception:
+        ctx = None
+
     if source_type == "android":
-        token_to_chat, jid_to_chat = _load_android_contact_chats(wa_conn, pres_conn)
+        if ctx is not None and ctx.android_contact_chats_cache is not None:
+            token_to_chat, jid_to_chat = ctx.android_contact_chats_cache
+        else:
+            token_to_chat, jid_to_chat = _load_android_contact_chats(wa_conn, pres_conn)
+            if ctx is not None:
+                ctx.android_contact_chats_cache = (token_to_chat, jid_to_chat)
     else:
-        token_to_chat, jid_to_chat = _load_ios_contact_chats(wa_conn, pres_conn)
+        if ctx is not None and ctx.ios_contact_chats_cache is not None:
+            token_to_chat, jid_to_chat = ctx.ios_contact_chats_cache
+        else:
+            token_to_chat, jid_to_chat = _load_ios_contact_chats(wa_conn, pres_conn)
+            if ctx is not None:
+                ctx.ios_contact_chats_cache = (token_to_chat, jid_to_chat)
 
     live_android_ids: list[int] = []
     ios_raw_jids_by_idx: dict[int, list[str]] = {}

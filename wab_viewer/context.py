@@ -116,6 +116,7 @@ class QuerySet:
 
     android_select: str | None
     android_stat_select: str | None
+    android_stat_aggregate_select: str | None
     android_filter: str
     android_filter_ts: str
     android_ts: str
@@ -166,6 +167,8 @@ class ViewerContext:
         self.caps = caps
         self.queries = queries
         self.android_chat_row_ids_cache: dict[tuple[str, str], list[int]] = {}
+        self.android_contact_chats_cache: tuple[dict[str, str], dict[str, str]] | None = None
+        self.ios_contact_chats_cache: tuple[dict[str, str], dict[str, str]] | None = None
 
     def get_wa(self) -> sqlite3.Connection | None:
         """Return thread-local SQLite connection to the WhatsApp source DB with ancillary attaches."""

@@ -90,11 +90,6 @@ def api_chats():
             if ctx.caps.has_message_revoked
             else ""
         )
-        mrev_exist_filter = (
-            "OR EXISTS (SELECT 1 FROM message_revoked mrev_ex WHERE mrev_ex.message_row_id = m._id)"
-            if ctx.caps.has_message_revoked
-            else ""
-        )
         ldn_s_join = (
             """
             LEFT JOIN _lid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id
@@ -218,19 +213,9 @@ def api_chats():
             WHERE (
                 ({chat_archived_col} = 1)
                 OR
-                ({is_group_chat} AND (c.hidden = 0 OR c.hidden IS NULL OR EXISTS (SELECT 1 FROM message m WHERE m.chat_row_id = c._id AND m.message_type NOT IN (7, 90))))
+                ({is_group_chat} AND (c.hidden = 0 OR c.hidden IS NULL OR m._id IS NOT NULL))
                 OR
-                (NOT ({is_group_chat}) AND (
-                    EXISTS (
-                        SELECT 1 FROM message m
-                        WHERE m.chat_row_id = c._id
-                          AND m.message_type NOT IN (25, 67, 74, 79, 90)
-                          AND (
-                              (m.text_data IS NOT NULL AND m.text_data != '' AND (m.message_type IS NULL OR m.message_type = 0 OR m.message_type IN (5, 16)))
-                              OR (m.message_type IN (1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 42, 43, 64, 66, 82) {mrev_exist_filter})
-                          )
-                    )
-                ))
+                (NOT ({is_group_chat}) AND m._id IS NOT NULL)
             )
             ORDER BY newest_ts DESC
         """).fetchall()
@@ -499,35 +484,29 @@ def api_chats():
                     ctx.caps.has_jid_raw_string,
                 )
         android_vom_mids = set()
-        if ctx.caps.has_message_view_once_media:
-            candidate_mids = [r["last_msg_id"] for r in rows if r["last_msg_id"]]
-            if candidate_mids:
-                c_ph = ",".join("?" * len(candidate_mids))
-                try:
-                    android_vom_mids = {
-                        r[0]
-                        for r in conn.execute(
-                            f"SELECT message_row_id FROM message_view_once_media WHERE message_row_id IN ({c_ph})",
-                            candidate_mids,
-                        ).fetchall()
-                    }
-                except sqlite3.OperationalError:
-                    pass
+        if ctx.caps.has_message_view_once_media and candidate_last_mids:
+            try:
+                android_vom_mids = {
+                    r[0]
+                    for r in conn.execute(
+                        f"SELECT message_row_id FROM message_view_once_media WHERE message_row_id IN ({c_ph})",
+                        candidate_last_mids,
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                pass
         android_revoked_mids = set()
-        if ctx.caps.has_message_revoked:
-            candidate_mids = [r["last_msg_id"] for r in rows if r["last_msg_id"]]
-            if candidate_mids:
-                c_ph = ",".join("?" * len(candidate_mids))
-                try:
-                    android_revoked_mids = {
-                        r[0]
-                        for r in conn.execute(
-                            f"SELECT message_row_id FROM message_revoked WHERE message_row_id IN ({c_ph})",
-                            candidate_mids,
-                        ).fetchall()
-                    }
-                except sqlite3.OperationalError:
-                    pass
+        if ctx.caps.has_message_revoked and candidate_last_mids:
+            try:
+                android_revoked_mids = {
+                    r[0]
+                    for r in conn.execute(
+                        f"SELECT message_row_id FROM message_revoked WHERE message_row_id IN ({c_ph})",
+                        candidate_last_mids,
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                pass
 
     for r in rows:
         d = dict(r)
@@ -753,12 +732,17 @@ def api_chat_info():
                 conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
             )
             extra = ctx.queries.android_filter
+            stat_select = (
+                ctx.queries.android_stat_aggregate_select
+                if ctx.queries.android_stat_aggregate_select is not None
+                else ctx.queries.android_stat_select
+            )
             stat_row = conn.execute(
                 f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts,"
                 f" COUNT(CASE WHEN media_type != 'service' THEN 1 END) AS total,"
                 f" SUM(CASE WHEN media_type != 'service' AND from_me=1 THEN 1 ELSE 0 END) AS sent,"
                 f" SUM(CASE WHEN media_type != 'service' AND from_me=0 THEN 1 ELSE 0 END) AS received"
-                f" FROM ({ctx.queries.android_stat_select} WHERE {chat_pred} {extra})",
+                f" FROM ({stat_select} WHERE {chat_pred} {extra})",
                 chat_params,
             ).fetchone()
             if stat_row:
@@ -899,47 +883,30 @@ def api_chat_info():
                         else "j.user"
                     )
 
-                    has_jid_map = "jid_map" in tables
                     has_lid_dn = "lid_display_name" in tables
 
-                    jm_join = (
-                        """
-                        LEFT JOIN (
-                            SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                            FROM jid_map GROUP BY lid_row_id
-                        ) jm ON jm.lid_row_id = m.sender_jid_row_id
+                    jm_join = """
+                        LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = m.sender_jid_row_id
                         LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
                     """
-                        if has_jid_map
-                        else ""
-                    )
-                    creator_expr = (
-                        f"COALESCE(j_real.user, {j_fallback})" if has_jid_map else j_fallback
-                    )
+                    creator_expr = f"COALESCE(j_real.user, {j_fallback})"
 
                     ldn_creator_join = (
                         """
-                        LEFT JOIN (
-                            SELECT jid_row_id, MIN(lid_row_id) AS lid_row_id
-                            FROM jid_map GROUP BY jid_row_id
-                        ) jm_lid ON jm_lid.jid_row_id = m.sender_jid_row_id
+                        LEFT JOIN _lid_map_resolved jm_lid ON jm_lid.jid_row_id = m.sender_jid_row_id
                         LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id
                         LEFT JOIN lid_display_name ldn_mapped ON ldn_mapped.lid_row_id = jm_lid.lid_row_id
                     """
-                        if has_lid_dn and has_jid_map
-                        else (
-                            "LEFT JOIN lid_display_name ldn_direct ON ldn_direct.lid_row_id = m.sender_jid_row_id"
-                            if has_lid_dn
-                            else ""
-                        )
+                        if has_lid_dn
+                        else ""
                     )
                     ldn_creator_arm = (
                         """
                         NULLIF(ldn_direct.display_name, ''),
                         NULLIF(ldn_mapped.display_name, ''),
                     """
-                        if has_lid_dn and has_jid_map
-                        else ("NULLIF(ldn_direct.display_name, '')," if has_lid_dn else "")
+                        if has_lid_dn
+                        else ""
                     )
 
                     cre_row = conn.execute(
@@ -1475,7 +1442,13 @@ def api_chat_info_media_size():
         if prefix is None:
             return jsonify({"bytes": 0})
 
-        safe_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        norm_prefix_fwd = prefix.replace("\\", "/")
+        upper_fwd = norm_prefix_fwd[:-1] + chr(ord(norm_prefix_fwd[-1]) + 1)
+        norm_prefix_back = norm_prefix_fwd.replace("/", "\\")
+        upper_back = norm_prefix_back[:-1] + chr(ord(norm_prefix_back[-1]) + 1)
+        range_pred = "(ac.archive_path >= ? AND ac.archive_path < ?) OR (ac.archive_path >= ? AND ac.archive_path < ?)"
+        range_params = (norm_prefix_fwd, upper_fwd, norm_prefix_back, upper_back)
+
         has_files_table = (
             archive_conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'"
@@ -1493,16 +1466,16 @@ def api_chat_info_media_size():
 
         if has_size_col:
             stat_row = archive_conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS total_count,
                     COUNT(f.size) AS known_count,
                     COALESCE(SUM(f.size), 0) AS known_bytes
                 FROM archive_copies ac
                 LEFT JOIN files f ON f.original_path = ac.original_path
-                WHERE ac.archive_path LIKE ? ESCAPE '\\'
+                WHERE {range_pred}
                 """,
-                (safe_prefix + "%",),
+                range_params,
             ).fetchone()
             if stat_row:
                 total_bytes = stat_row["known_bytes"]
@@ -1510,21 +1483,21 @@ def api_chat_info_media_size():
                     paths_missing = [
                         r["archive_path"]
                         for r in archive_conn.execute(
-                            """
+                            f"""
                             SELECT ac.archive_path
                             FROM archive_copies ac
                             LEFT JOIN files f ON f.original_path = ac.original_path
-                            WHERE ac.archive_path LIKE ? ESCAPE '\\' AND f.size IS NULL
+                            WHERE ({range_pred}) AND f.size IS NULL
                             """,
-                            (safe_prefix + "%",),
+                            range_params,
                         ).fetchall()
                     ]
         else:
             paths_missing = [
                 r["archive_path"]
                 for r in archive_conn.execute(
-                    "SELECT archive_path FROM archive_copies WHERE archive_path LIKE ? ESCAPE '\\'",
-                    (safe_prefix + "%",),
+                    f"SELECT archive_path FROM archive_copies ac WHERE {range_pred}",
+                    range_params,
                 ).fetchall()
             ]
     finally:
