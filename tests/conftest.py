@@ -174,7 +174,8 @@ def make_ios_db(path: Path | str) -> sqlite3.Connection:
             ZHIDDEN          INTEGER DEFAULT 0,
             ZARCHIVED        INTEGER DEFAULT 0,
             ZCONTACTABID     INTEGER,
-            ZLASTMESSAGEDATE REAL
+            ZLASTMESSAGEDATE REAL,
+            ZLASTMESSAGETEXT TEXT
         );
         CREATE TABLE IF NOT EXISTS ZWAMEDIAITEM (
             Z_PK            INTEGER PRIMARY KEY,

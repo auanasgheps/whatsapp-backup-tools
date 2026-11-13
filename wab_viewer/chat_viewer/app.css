@@ -715,7 +715,7 @@
       justify-content: space-between;
       padding: 0 16px;
       gap: 12px;
-      z-index: 10;
+      z-index: 12;
       flex-shrink: 0;
     }
     .pinned-banner-content,

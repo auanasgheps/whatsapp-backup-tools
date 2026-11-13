@@ -1630,9 +1630,13 @@
   async function jumpToMessage(msg, highlightType) {
     const inWin = rowForMsgId(msg.msg_id);
     if (inWin) {
-      suppressScroll = true;
-      inWin.scrollIntoView({ behavior: 'instant', block: 'center' });
-      suppressScroll = false;
+      const gen = ++_loadGen;
+      isUserAtBottom = false;
+      const loadingEl = document.getElementById('chat-loading');
+      if (loadingEl) loadingEl.style.display = 'none';
+      const btn = document.getElementById('scroll-to-bottom');
+      if (btn) btn.classList.add('visible');
+      await _pinToMsg(inWin, gen);
       flashHighlightRow(inWin, highlightType);
       return inWin;
     }
@@ -5125,9 +5129,13 @@
       const threshold = isExactTarget ? 1500 : 86400000;
       const existing = near && Math.abs(near.timestamp_ms - ts) <= threshold && rowForMsgId(near.msg_id);
       if (existing) {
-        suppressScroll = true;
-        existing.scrollIntoView({ behavior: 'instant', block: 'center' });
-        suppressScroll = false;
+        const gen = ++_loadGen;
+        isUserAtBottom = false;
+        const loadingEl = document.getElementById('chat-loading');
+        if (loadingEl) loadingEl.style.display = 'none';
+        const btn = document.getElementById('scroll-to-bottom');
+        if (btn) btn.classList.add('visible');
+        await _pinToMsg(existing, gen);
         if (isExactTarget) flashHighlightRow(existing, highlightType);
         return existing;
       }
@@ -5141,6 +5149,7 @@
 
     const gen = ++_loadGen;
     loading = true;
+    isUserAtBottom = false;
     const scroll = document.getElementById('message-scroll');
     if (scroll) scroll.classList.add('is-navigating');
 
@@ -5175,6 +5184,10 @@
       noMoreNewer = false;
       mergePage(msgs);
       renderWindow();
+      const loadingEl = document.getElementById('chat-loading');
+      if (loadingEl) loadingEl.style.display = 'none';
+      const btn = document.getElementById('scroll-to-bottom');
+      if (btn) btn.classList.add('visible');
 
       let targetEl = exactMsgId != null ? rowForMsgId(exactMsgId) : null;
       if (!targetEl) {
@@ -5198,7 +5211,11 @@
       throw err;
     } finally {
       if (scroll) scroll.classList.remove('is-navigating');
-      if (gen === _loadGen) loading = false;
+      if (gen === _loadGen) {
+        loading = false;
+        const loadingEl = document.getElementById('chat-loading');
+        if (loadingEl) loadingEl.style.display = 'none';
+      }
     }
   }
 
@@ -5663,10 +5680,19 @@
 
   // ---- pinned message banner -----------------------------------------------
 
-  const _RAW_STANZA_ID_RE = /^(?:3EB0[0-9A-Fa-f]{8,60}|[0-9A-Fa-f]{16,64})$/;
+  const _RAW_STANZA_ID_RE = /^(?:3EB0[0-9A-Za-z_-]{4,60}|[0-9A-Fa-f]{16,64})$/;
+  const _BASE64_TOKEN_RE = /^[A-Za-z0-9+/]{16,}={0,2}$/;
+  const _LID_RE = /^[0-9]+@lid$/;
+
   function _isRawStanzaId(str) {
     if (!str || typeof str !== 'string') return false;
     return _RAW_STANZA_ID_RE.test(str.trim());
+  }
+
+  function _isUnreadableToken(str) {
+    if (!str || typeof str !== 'string') return false;
+    const s = str.trim();
+    return _RAW_STANZA_ID_RE.test(s) || _BASE64_TOKEN_RE.test(s) || _LID_RE.test(s);
   }
 
   function _formatMessagePreview(m) {
@@ -5674,7 +5700,7 @@
     if (m.mentions && typeof resolveMentionsPlainText === 'function') {
       preview = resolveMentionsPlainText(preview, m.mentions);
     }
-    if (_isRawStanzaId(preview)) {
+    if (_isUnreadableToken(preview)) {
       preview = '';
     }
     const mt = (m.media_type || '').toLowerCase();
@@ -5692,18 +5718,21 @@
         return `🎤 Voice message${durStr}`;
       }
       if (mt === 'document') {
-        const fname = m.file_name || preview || 'Document';
+        const rawFname = m.file_name || preview || 'Document';
+        const fname = _isUnreadableToken(rawFname) ? 'Document' : rawFname;
         return `📄 ${fname}`;
       }
       if (mt === 'location') {
-        const loc = m.place_name || preview;
+        const rawLoc = m.place_name || preview;
+        const loc = _isUnreadableToken(rawLoc) ? '' : rawLoc;
         return loc ? `📍 Location • ${loc}` : '📍 Location';
       }
       if (mt === 'live_location') {
         return '📍 Live location';
       }
       if (mt === 'vcard') {
-        const contact = preview || 'Contact';
+        const rawContact = preview || 'Contact';
+        const contact = _isUnreadableToken(rawContact) ? 'Contact' : rawContact;
         return `👤 ${contact}`;
       }
       if (mt === 'sticker') {
@@ -5756,12 +5785,39 @@
       _chatPins = rawPins.filter(p => !_dismissedPins.has(p.id));
       _currentPinIndex = 0;
       renderPinnedBanner();
+      _syncRenderedMessagePins();
     } catch {
       if (gen === _pinnedBannerPollGen) {
         _chatPinsCache.set(String(chatId), []);
         banner.style.display = 'none';
+        _syncRenderedMessagePins();
       }
     }
+  }
+
+  function _syncRenderedMessagePins() {
+    const activePinIds = new Set((_chatPins || []).map(p => String(p.id)));
+    document.querySelectorAll('.msg-row .msg-pinned-icon').forEach(icon => {
+      const row = icon.closest('.msg-row');
+      if (row && !activePinIds.has(String(row.dataset.msgId))) {
+        icon.remove();
+      }
+    });
+    activePinIds.forEach(id => {
+      const escId = (window.CSS && CSS.escape) ? CSS.escape(id) : id;
+      const row = document.querySelector(`.msg-row[data-msg-id="${escId}"]`);
+      if (row && !row.querySelector('.msg-pinned-icon')) {
+        const meta = row.querySelector('.msg-meta');
+        if (meta) {
+          const pinIcon = document.createElement('span');
+          pinIcon.className = 'msg-meta-icon msg-pinned-icon';
+          pinIcon.title = 'Pinned message';
+          pinIcon.setAttribute('aria-label', 'Pinned message');
+          pinIcon.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M4.5 1.5A.5.5 0 0 1 5 1h6a.5.5 0 0 1 .5.5v2.879a2.5 2.5 0 0 0 .732 1.768l1.06 1.06A1.5 1.5 0 0 1 13 8.268V9a.5.5 0 0 1-.5.5H9v5.5a.5.5 0 0 1-1 0V9.5H3.5A.5.5 0 0 1 3 9v-.732a1.5 1.5 0 0 1 .707-1.27l1.061-1.06A2.5 2.5 0 0 0 5.5 4.379V1.5z"/></svg>';
+          meta.insertBefore(pinIcon, meta.firstChild);
+        }
+      }
+    });
   }
 
   function renderPinnedBanner() {
@@ -5780,7 +5836,8 @@
       const pinLabel = _chatPins.length > 1
         ? `Pinned Message (${_currentPinIndex + 1} of ${_chatPins.length})`
         : 'Pinned';
-      authorEl.textContent = pin.sender_name ? `${pinLabel} • ${pin.sender_name}:` : `${pinLabel}:`;
+      const cleanAuthor = _isUnreadableToken(pin.sender_name) ? '' : (pin.sender_name || '');
+      authorEl.textContent = cleanAuthor ? `${pinLabel} • ${cleanAuthor}:` : `${pinLabel}:`;
     }
     if (snippetEl) {
       snippetEl.textContent = _formatMessagePreview(pin);
@@ -5803,10 +5860,10 @@
   if (pinnedBanner) {
     const contentEl = pinnedBanner.querySelector('.pinned-banner-content');
     if (contentEl) {
-      contentEl.addEventListener('click', () => {
+      contentEl.addEventListener('click', async () => {
         if (_chatPins && _chatPins.length > 0 && _currentPinIndex < _chatPins.length) {
           const pin = _chatPins[_currentPinIndex];
-          jumpToMessage({ msg_id: pin.id, timestamp_ms: pin.timestamp * 1000 }, 'emerald');
+          await jumpToMessage({ msg_id: pin.id, timestamp_ms: pin.timestamp * 1000 }, 'emerald');
         }
       });
       contentEl.addEventListener('keydown', e => {
