@@ -63,6 +63,7 @@ The source WhatsApp database (`msgstore.db` or `ChatStorage.sqlite`) is strictly
 - **Revoked & view-once badges** — "This message was deleted" tombstones and View-Once badges for ephemeral media
 - **Full-text search** — search across all messages; scoped to the current chat or across all chats
 - **Media & animated GIF playback** — images, videos, looping animated GIFs, and audio stream directly in the browser with HTTP Range support, interactive click-to-play GIF badges, and video/audio seeking
+- **Circular video notes (Push-to-Video)** — round video messages render in authentic circular bubbles with duration rings, play/pause controls, and standalone positioning (Android & iOS)
 - **Image lightbox** — click any image to open it full-screen with smooth zoom and pan
 - **Media gallery & stickers** — browse chat media by thumbnail grid or folder tree, with dedicated stickers section and contact cards (.vcf)
 - **Fast, lightweight scrolling** — chats and massive media collections load smoothly on demand without slowing down your browser

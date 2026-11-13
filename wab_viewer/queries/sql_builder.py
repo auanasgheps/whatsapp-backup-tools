@@ -404,6 +404,7 @@ _DEFAULT_IOS_SELECT = f"""
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
         CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
+        CASE WHEN m.ZMESSAGETYPE = 54 THEN 1 ELSE 0 END               AS is_video_note,
         {ios_starred_expr}                                           AS is_starred,
         {ios_pinned_expr}                                            AS is_pinned,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
@@ -1135,6 +1136,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         0                                                            AS is_edited,
         NULL                                                          AS edited_ts,
         CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
+        CASE WHEN m.ZMESSAGETYPE = 54 THEN 1 ELSE 0 END               AS is_video_note,
         {ios_starred_expr}                                           AS is_starred,
         {ios_pinned_expr}                                            AS is_pinned,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
@@ -1596,7 +1598,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
             WHEN m.message_type = 20 THEN 'sticker'
             WHEN {android_gif_cond} THEN 'gif'
             WHEN m.message_type = 42 THEN 'image'
-            WHEN m.message_type = 43 THEN 'video'
+            WHEN m.message_type IN (28, 43) THEN 'video'
             WHEN m.message_type = 82 THEN 'audio'
             WHEN m.message_type = 66{extra_poll_select} THEN 'poll'
             {android_live_type_cond}
@@ -1647,8 +1649,10 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         {edit_is_edited_col}                                         AS is_edited,
         {edit_ts_col}                                                AS edited_ts,
         CASE WHEN m.message_type IN (42, 43, 82){mvom_or} THEN 1 ELSE 0 END   AS is_view_once,
+        CASE WHEN m.message_type = 28 THEN 1 ELSE 0 END              AS is_video_note,
         {android_starred_expr}                                       AS is_starred,
         {android_pinned_expr}                                        AS is_pinned,
+        m.message_type                                               AS raw_msg_type,
         {ms_col}                                                     AS action_type,
         ''                                                           AS participant_name,
         {mm_width_col}                                               AS media_width,

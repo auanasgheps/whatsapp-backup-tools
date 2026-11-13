@@ -3001,6 +3001,7 @@ class TestRecentMessagesRouting:
             "live_location_share_duration",
             "is_starred",
             "is_pinned",
+            "is_video_note",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -15093,3 +15094,90 @@ class TestPinnedMessagesRichPreviews:
             assert "function _formatMessagePreview(m)" in js
             assert "_isRawStanzaId" in js
             assert "snippetEl.textContent = _formatMessagePreview(pin);" in js
+
+    def test_android_and_ios_video_note_contracts(self, tmp_path):
+        """Android (message_type=28) and iOS (ZMESSAGETYPE=54) video notes expose is_video_note and raw_msg_type."""
+        android_dir = tmp_path / "android"
+        android_dir.mkdir()
+        wa_conn = make_android_db(android_dir / "msgstore.db")
+        arc_conn = make_archive_db(android_dir / ".wa_media_archiver.db")
+
+        wa_conn.execute("INSERT INTO jid VALUES (1, '15551234567', '15551234567@s.whatsapp.net')")
+        wa_conn.execute("INSERT INTO chat VALUES (10, 1, 'Alice Chat', 0, 1700000000000, 101)")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
+            "VALUES (101, 10, 0, 1, 1700000000000, '', 28, 'STANZA_VN_ANDROID')"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (_id, message_row_id, chat_row_id, file_path, media_name, mime_type, message_url) "
+            "VALUES (101, 101, 10, 'Media/WhatsApp Video Notes/202601/VID-101.mp4', 'VID-101.mp4', 'video/mp4', '')"
+        )
+        wa_conn.commit()
+
+        arc_conn.execute(
+            "INSERT INTO files (original_path, md5) VALUES ('Media/WhatsApp Video Notes/202601/VID-101.mp4', x'01020304')"
+        )
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES "
+            "('Media/WhatsApp Video Notes/202601/VID-101.mp4', 'Contacts/Alice/2026/Received/VID-101.mp4')"
+        )
+        arc_conn.commit()
+
+        app_android = viewer.create_app(android_dir, rescan=False)
+        app_android.config["TESTING"] = True
+        with app_android.test_client() as client:
+            resp = client.get("/api/messages?chat_id=15551234567&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            msg = data[0]
+            assert msg["is_video_note"] == 1
+            assert msg["media_type"] == "video"
+            assert msg["archive_path"] == "Contacts/Alice/2026/Received/VID-101.mp4"
+
+            # Check chat snippet
+            chat_resp = client.get("/api/chats")
+            assert chat_resp.status_code == 200
+            chats = chat_resp.get_json()
+            assert len(chats) >= 1
+            c = next(x for x in chats if str(x["id"]) in ("15551234567", "10"))
+            assert c["last_msg_type"] == "video"
+
+        # Now verify iOS ZMESSAGETYPE = 54
+        ios_dir = tmp_path / "ios"
+        ios_dir.mkdir()
+        ios_conn = make_ios_db(ios_dir / "ChatStorage.sqlite")
+        ios_arc = make_archive_db(ios_dir / ".wa_media_archiver.db")
+
+        ios_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME) VALUES (1, '15559876543@s.whatsapp.net', 'Bob')"
+        )
+        ios_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH) VALUES (501, 'Media/VideoNotes/vn_501.mp4')"
+        )
+        ios_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZFROMJID, ZTOJID, ZMESSAGEDATE, ZMESSAGETYPE, ZMEDIAITEM, ZISFROMME, ZSTANZAID) "
+            "VALUES (501, 1, '15559876543@s.whatsapp.net', 'me@s.whatsapp.net', 700000000, 54, 501, 0, 'STANZA_VN_IOS')"
+        )
+        ios_conn.commit()
+
+        ios_arc.execute(
+            "INSERT INTO files (original_path, md5) VALUES ('Message/Media/VideoNotes/vn_501.mp4', x'05060708')"
+        )
+        ios_arc.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES "
+            "('Message/Media/VideoNotes/vn_501.mp4', 'Contacts/Bob/2026/Received/vn_501.mp4')"
+        )
+        ios_arc.commit()
+
+        app_ios = viewer.create_app(ios_dir, rescan=False)
+        app_ios.config["TESTING"] = True
+        with app_ios.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            msg = data[0]
+            assert msg["is_video_note"] == 1
+            assert msg["media_type"] == "video"
+            assert msg["archive_path"] == "Contacts/Bob/2026/Received/vn_501.mp4"

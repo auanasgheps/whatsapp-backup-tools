@@ -442,6 +442,7 @@ def api_messages():
         row.pop("member_jid", None)
         row.setdefault("is_starred", 0)
         row.setdefault("is_pinned", 0)
+        row.setdefault("is_video_note", 0)
 
     pres = ctx.get_preserved()
     _hydrate_mentions(rows, ctx.source_type, conn, pres)
@@ -716,6 +717,7 @@ def api_messages_at():
         row.pop("member_jid", None)
         row.setdefault("is_starred", 0)
         row.setdefault("is_pinned", 0)
+        row.setdefault("is_video_note", 0)
     pres = ctx.get_preserved()
     _hydrate_mentions(combined, ctx.source_type, conn, pres)
     _hydrate_poll_rows(combined, ctx.source_type, conn)

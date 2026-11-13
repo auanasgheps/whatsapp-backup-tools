@@ -82,6 +82,7 @@ Preserved records are browsable in the web viewer as normal, labeled with the _P
 #### 🐛 Bug Fixes
 - **Background Event & System Message Chat List Isolation**: Contacts with zero exchanged messages no longer appear in your recent chat list due to internal WhatsApp events, and system notices no longer displace conversation previews or re-order recent chats.
 - **Quoted Message Navigation & Jump Stabilization**: Clicking a quoted reply reliably scrolls and jumps directly to the original quoted message with a highlight pulse, smoothly locking onto older photos or offloaded media without drifting from asynchronous image loading.
+- **Android Video Notes in Web Viewer**: Android Push-to-Video messages (`message_type = 28`) now reliably render with the authentic circular video note player and preview properly in the recent chat list, matching iOS video notes.
 - Minor UI polish and rendering fixes.
 
 ---
