@@ -15203,3 +15203,53 @@ class TestPinnedMessagesRichPreviews:
             assert msg["is_video_note"] == 1
             assert msg["media_type"] == "video"
             assert msg["archive_path"] == "Contacts/Bob/2026/Received/vn_501.mp4"
+
+
+class TestChatJumpHudPlacement:
+    """Tests for chat jump HUD positioning aware of header height and pinned banners."""
+
+    @pytest.fixture
+    def app_client(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def test_jump_hud_css_rules_and_transition(self, app_client):
+        """CSS must define variable-backed top offset and smooth vertical transition."""
+        resp = app_client.get("/static/app.css")
+        assert resp.status_code == 200
+        css = resp.get_data(as_text=True)
+
+        assert ".chat-jump-hud" in css
+        assert "top: var(--jump-hud-top, 72px);" in css
+        assert "transition: opacity 0.2s ease, transform 0.2s ease;" in css
+        assert "z-index: 25;" in css
+
+    def test_jump_hud_dom_and_js_engine(self, app_client):
+        """DOM and app.js must wire dynamic chat space offset calculation."""
+        resp = app_client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+
+        assert 'id="chat-jump-hud"' in html
+        assert 'id="pinned-banner"' in html
+        assert 'id="message-scroll"' in html
+
+        js_resp = app_client.get("/static/app.js")
+        assert js_resp.status_code == 200
+        js = js_resp.get_data(as_text=True)
+
+        assert "function updateJumpHudPosition()" in js
+        assert "scroll.offsetTop" in js
+        assert "topOffset + 12" in js
+        # Ensure wired into showJumpHud, showJumpHudError, renderPinnedBanner, and showContextJumpBanner
+        assert "updateJumpHudPosition();" in js
