@@ -3393,6 +3393,19 @@ def test_round_video_note_player_and_exclusion_from_grouping(
                 const grids = document.querySelectorAll('.media-grid');
                 const firstRect = notes[0] ? notes[0].getBoundingClientRect() : null;
                 const firstStyle = notes[0] ? getComputedStyle(notes[0]) : null;
+                const firstEnlargeBtn = notes[0] ? notes[0].querySelectorAll('.video-note-action-btn')[1] : null;
+                let enlargedWidth = 0;
+                let enlargedSquare = false;
+                let shrunkWidth = 0;
+                if (firstEnlargeBtn) {
+                    firstEnlargeBtn.click();
+                    const enRect = notes[0].getBoundingClientRect();
+                    enlargedWidth = enRect.width;
+                    enlargedSquare = Math.abs(enRect.width - enRect.height) <= 2;
+                    firstEnlargeBtn.click();
+                    const shRect = notes[0].getBoundingClientRect();
+                    shrunkWidth = shRect.width;
+                }
                 return {
                     noteCount: notes.length,
                     gridCount: grids.length,
@@ -3404,6 +3417,10 @@ def test_round_video_note_player_and_exclusion_from_grouping(
                     borderRadius: firstStyle ? firstStyle.borderRadius : '',
                     missingLabel: missing ? missing.querySelector('.media-missing-label')?.textContent?.trim() : '',
                     missingMeta: missing ? missing.querySelector('.media-missing-meta')?.textContent?.trim() : '',
+                    firstWidth: firstRect ? firstRect.width : 0,
+                    enlargedWidth,
+                    enlargedSquare,
+                    shrunkWidth,
                 };
             })()
             """,
@@ -3419,6 +3436,9 @@ def test_round_video_note_player_and_exclusion_from_grouping(
         assert res["borderRadius"] == "50%"
         assert res["missingLabel"] == "Video message"
         assert res["missingMeta"] == "125.0 KB · 0:09"
+        assert res["enlargedWidth"] > res["firstWidth"]
+        assert res["enlargedSquare"] is True
+        assert abs(res["shrunkWidth"] - res["firstWidth"]) <= 2
         browser.capture_screenshot(screenshot_dir / "round_video_notes.png", 5.0)
     finally:
         browser.evaluate(
