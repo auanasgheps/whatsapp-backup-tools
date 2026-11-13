@@ -42,7 +42,7 @@ def _pb_str(field_num: int, text: str) -> bytes:
 
 
 def test_extract_ios_mentions_from_zmetadata_and_nested_quote() -> None:
-    """_extract_ios_mentions extracts Tag 15 JIDs on non-reply and reply messages."""
+    """_extract_ios_mentions extracts Tag 8 and Tag 15 JIDs on non-reply and reply messages."""
     inner_ctx = _pb_str(15, "3333333333@lid")
     inner_ext = _pb_str(1, "Quoted @3333333333") + _pb_bytes(17, inner_ctx)
     quoted_wmi = _pb_bytes(6, inner_ext)
@@ -56,7 +56,18 @@ def test_extract_ios_mentions_from_zmetadata_and_nested_quote() -> None:
     jids = _extract_ios_mentions(zmetadata)
     assert jids == ["1111111111@lid", "5550001001@s.whatsapp.net", "3333333333@lid"]
 
-    non_reply_meta = _pb_str(15, "1111111111@lid")
+    # Native iOS WhatsApp root Tag 8 mentions
+    zmetadata_tag8 = (
+        _pb_str(5, "STANZA_QUOTED")
+        + _pb_str(6, "2222222222@lid")
+        + _pb_str(8, "1111111111@lid")
+        + _pb_str(8, "5550001001@s.whatsapp.net")
+        + _pb_bytes(19, quoted_wmi)
+    )
+    jids_tag8 = _extract_ios_mentions(zmetadata_tag8)
+    assert jids_tag8 == ["1111111111@lid", "5550001001@s.whatsapp.net", "3333333333@lid"]
+
+    non_reply_meta = _pb_str(8, "1111111111@lid")
     assert _extract_ios_mentions(non_reply_meta) == ["1111111111@lid"]
 
 
@@ -137,12 +148,18 @@ def test_ios_mentions_hydration_and_chat_linking(tmp_path: Path) -> None:
         + _pb_str(15, "2222222222@lid")
         + _pb_str(15, "9999999999@lid")
     )
+    meta_tag8 = _pb_str(8, "1111111111@lid") + _pb_str(8, "2222222222@lid")
     rows = [
         {
             "msg_id": 1,
             "text_body": "Hi @1111111111 @2222222222 @9999999999?",
             "_raw_metadata": meta,
-        }
+        },
+        {
+            "msg_id": 2,
+            "text_body": "Tag 8 native iOS @1111111111 @2222222222",
+            "_raw_metadata": meta_tag8,
+        },
     ]
     _hydrate_mentions(rows, "ios", conn, None)
     mentions = rows[0]["mentions"]
@@ -160,6 +177,20 @@ def test_ios_mentions_hydration_and_chat_linking(tmp_path: Path) -> None:
     }
     assert mentions["9999999999"] == {
         "name": "9999999999 (Unknown)",
+        "chat_id": None,
+        "chat_type": None,
+        "is_self": False,
+    }
+
+    mentions_tag8 = rows[1]["mentions"]
+    assert mentions_tag8["1111111111"] == {
+        "name": "Alice Smith",
+        "chat_id": "10",
+        "chat_type": "contact",
+        "is_self": False,
+    }
+    assert mentions_tag8["2222222222"] == {
+        "name": "Bob Push",
         "chat_id": None,
         "chat_type": None,
         "is_self": False,
@@ -290,7 +321,7 @@ def test_db_cache_migration_to_v5_adds_mentions(tmp_path: Path) -> None:
     migrated, cleared = open_and_migrate_archive_db(arch_path, False, False, False)
     try:
         assert cleared is True
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 6
         cols = {r[1] for r in migrated.execute("PRAGMA table_info(recent_messages)").fetchall()}
         assert "mentions" in cols
         assert migrated.execute("SELECT COUNT(*) FROM recent_messages").fetchone()[0] == 0
@@ -553,6 +584,11 @@ def test_preservation_v3_migration_and_legacy_conservative_lookup(tmp_path: Path
         (_pb_str(15, "5550001001@s.whatsapp.net"),),
     )
     i_conn.execute("INSERT INTO ZWAMESSAGE VALUES (9, 1)")
+    i_conn.execute(
+        "INSERT INTO ZWAMEDIAITEM VALUES (2, ?)",
+        (_pb_str(8, "5550001001@s.whatsapp.net"),),
+    )
+    i_conn.execute("INSERT INTO ZWAMESSAGE VALUES (10, 2)")
     i_conn.execute("ATTACH DATABASE ':memory:' AS old_db")
     i_conn.executescript("""
         CREATE TABLE old_db.ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMETADATA BLOB);
@@ -563,7 +599,15 @@ def test_preservation_v3_migration_and_legacy_conservative_lookup(tmp_path: Path
         (_pb_str(15, "5550001001@s.whatsapp.net"),),
     )
     i_conn.execute("INSERT INTO old_db.ZWAMESSAGE VALUES (9, 1)")
-    i_rows = [{"msg_id": 9, "text_body": "Hey @5550001001"}]
+    i_conn.execute(
+        "INSERT INTO old_db.ZWAMEDIAITEM VALUES (2, ?)",
+        (_pb_str(8, "5550001001@s.whatsapp.net"),),
+    )
+    i_conn.execute("INSERT INTO old_db.ZWAMESSAGE VALUES (10, 2)")
+    i_rows = [
+        {"msg_id": 9, "text_body": "Hey @5550001001"},
+        {"msg_id": 10, "text_body": "Tag 8 hey @5550001001"},
+    ]
     hydrate_ios_mentions_for_preservation(
         i_conn,
         i_rows,
@@ -573,3 +617,4 @@ def test_preservation_v3_migration_and_legacy_conservative_lookup(tmp_path: Path
     )
     i_conn.close()
     assert json.loads(i_rows[0]["mentions"])["5550001001"]["name"] == "Alice Smith"
+    assert json.loads(i_rows[1]["mentions"])["5550001001"]["name"] == "Alice Smith"

@@ -849,7 +849,7 @@ def hydrate_android_mentions_for_preservation(
 
 
 def _extract_zmetadata_mentions(raw_meta: bytes | None) -> list[str]:
-    """Extract Tag 15 (mentionedJid) strings from an iOS ZWAMEDIAITEM.ZMETADATA blob."""
+    """Extract Tag 8 root / Tag 15 (mentionedJid) strings from an iOS ZWAMEDIAITEM.ZMETADATA blob."""
     if not raw_meta or not isinstance(raw_meta, (bytes, bytearray)):
         return []
     data = bytes(raw_meta)
@@ -877,7 +877,7 @@ def _extract_zmetadata_mentions(raw_meta: bytes | None) -> list[str]:
                 break
             val = data[offset : offset + length]
             offset += length
-            if field_num == 15 and val:
+            if field_num in (8, 15) and val:
                 j = val.decode("utf-8", errors="replace").strip()
                 if j and "@" in j:
                     jids.append(j)

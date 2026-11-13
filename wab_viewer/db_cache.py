@@ -838,7 +838,7 @@ def open_and_migrate_archive_db(
             archive_conn.execute(f"ALTER TABLE recent_messages ADD COLUMN {col_name} {col_def}")
 
     cleared_cache = False
-    if arch_user_ver < 5 or rescan or (source_is_changed and has_prior_stamp):
+    if arch_user_ver < 6 or rescan or (source_is_changed and has_prior_stamp):
         archive_conn.execute("DELETE FROM recent_messages")
         cleared_cache = True
         has_rx_cache = bool(
@@ -848,8 +848,8 @@ def open_and_migrate_archive_db(
         )
         if has_rx_cache and (rescan or (source_is_changed and has_prior_stamp)):
             archive_conn.execute("DELETE FROM reactions_cache")
-    if arch_user_ver < 5:
-        archive_conn.execute("PRAGMA user_version = 5")
+    if arch_user_ver < 6:
+        archive_conn.execute("PRAGMA user_version = 6")
     try:
         archive_conn.execute(
             """UPDATE recent_messages
