@@ -216,6 +216,25 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                         "CREATE INDEX IF NOT EXISTS idx_message_quoted_text_row_id "
                         "ON message_quoted_text(message_row_id)"
                     )
+        if "idx_call_log_jid_ts" not in existing or "idx_call_log_group_ts" not in existing:
+            has_call_log = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_log'"
+            ).fetchone()
+            if has_call_log:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(call_log)").fetchall()}
+                if "idx_call_log_jid_ts" not in existing and {"jid_row_id", "timestamp"} <= cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_call_log_jid_ts "
+                        "ON call_log(jid_row_id, timestamp)"
+                    )
+                if (
+                    "idx_call_log_group_ts" not in existing
+                    and {"group_jid_row_id", "timestamp"} <= cols
+                ):
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_call_log_group_ts "
+                        "ON call_log(group_jid_row_id, timestamp)"
+                    )
 
         # Database self-healing for Android: sanitize empty phantom messages and re-hide empty shadow chats
         has_android_msg = conn.execute(

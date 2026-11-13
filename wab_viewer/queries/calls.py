@@ -1123,17 +1123,33 @@ def _query_android_chat_calls(
     order_dir = "ASC" if (after_ms is not None and before_ms is None) else "DESC"
     params.append(limit)
 
-    has_ldn = bool(
-        conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'"
-        ).fetchone()
-    )
-    jid_cols = {r[1] for r in conn.execute("PRAGMA table_info(jid)").fetchall()}
-    non_lid_cond = (
-        "j_caller.server != 'lid'"
-        if "server" in jid_cols
-        else "COALESCE(j_caller.raw_string, '') NOT LIKE '%@lid'"
-    )
+    ctx = None
+    try:
+        from ..context import get_viewer_context
+
+        ctx = get_viewer_context()
+    except Exception:
+        ctx = None
+
+    if ctx is not None:
+        has_ldn = ctx.caps.has_lid_dn
+        non_lid_cond = (
+            "j_caller.server != 'lid'"
+            if ctx.caps.has_jid_server
+            else "COALESCE(j_caller.raw_string, '') NOT LIKE '%@lid'"
+        )
+    else:
+        has_ldn = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'"
+            ).fetchone()
+        )
+        jid_cols = {r[1] for r in conn.execute("PRAGMA table_info(jid)").fetchall()}
+        non_lid_cond = (
+            "j_caller.server != 'lid'"
+            if "server" in jid_cols
+            else "COALESCE(j_caller.raw_string, '') NOT LIKE '%@lid'"
+        )
     id_expr = (
         "COALESCE(NULLIF(cl.call_id, ''), 'call_' || cl._id)"
         if has_call_id
