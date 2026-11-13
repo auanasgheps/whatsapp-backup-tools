@@ -1843,7 +1843,7 @@
     #chat-loading-count { font-size: 12px; color: var(--text-muted); }
     .chat-jump-hud {
       position: absolute;
-      top: 58px;
+      top: var(--jump-hud-top, 72px);
       left: 50%;
       transform: translateX(-50%) translateY(-10px);
       background: var(--surface2);

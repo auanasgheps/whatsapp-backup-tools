@@ -1265,6 +1265,16 @@
     }
 
     updateChatStarredBadge(chat.id);
+    const banner = document.getElementById('pinned-banner');
+    const cachedPins = _chatPinsCache.get(String(chat.id));
+    if (cachedPins && cachedPins.length > 0) {
+      _chatPins = cachedPins.filter(p => !_dismissedPins.has(p.id));
+      _currentPinIndex = 0;
+      renderPinnedBanner();
+    } else if (banner) {
+      _chatPins = [];
+      banner.style.display = 'none';
+    }
     loadChatPinnedBanner(chat.id, chat.type);
     return scroll;
   }
@@ -5038,6 +5048,33 @@
   let _jumpHudTimeout = null;
   let _jumpAbortController = null;
 
+  function updateJumpHudPosition() {
+    const hud = document.getElementById('chat-jump-hud');
+    const scroll = document.getElementById('message-scroll');
+    if (!hud) return;
+
+    let topOffset = scroll ? scroll.offsetTop : 0;
+    if (topOffset <= 0) {
+      const header = document.getElementById('chat-header');
+      const pinned = document.getElementById('pinned-banner');
+      const context = document.getElementById('context-jump-banner');
+      topOffset = 0;
+      if (header && header.style.display !== 'none') topOffset += header.offsetHeight;
+      if (pinned && pinned.style.display !== 'none') topOffset += pinned.offsetHeight;
+      if (context && context.style.display !== 'none') topOffset += context.offsetHeight;
+    }
+
+    const finalTop = topOffset > 0 ? (topOffset + 12) : 72;
+    hud.style.top = `${finalTop}px`;
+  }
+
+  window.addEventListener('resize', () => {
+    const hud = document.getElementById('chat-jump-hud');
+    if (hud && hud.classList.contains('visible')) {
+      updateJumpHudPosition();
+    }
+  });
+
   function showJumpHud(text) {
     const hud = document.getElementById('chat-jump-hud');
     const label = document.getElementById('chat-jump-hud-text');
@@ -5046,6 +5083,7 @@
       clearTimeout(_jumpHudTimeout);
       _jumpHudTimeout = null;
     }
+    updateJumpHudPosition();
     hud.classList.remove('error');
     label.textContent = text;
     hud.classList.add('visible');
@@ -5068,6 +5106,7 @@
     if (_jumpHudTimeout) {
       clearTimeout(_jumpHudTimeout);
     }
+    updateJumpHudPosition();
     hud.classList.add('error', 'visible');
     label.textContent = errorText;
     _jumpHudTimeout = setTimeout(() => {
@@ -5693,6 +5732,7 @@
   }
 
   const _dismissedPins = new Set();
+  const _chatPinsCache = new Map();
   let _chatPins = [];
   let _currentPinIndex = 0;
   let _pinnedBannerPollGen = 0;
@@ -5706,16 +5746,21 @@
       const res = await fetch(`/api/chat/${encodeURIComponent(chatId)}/pinned?` + params);
       if (gen !== _pinnedBannerPollGen || !currentChat || String(currentChat.id) !== String(chatId)) return;
       if (!res.ok) {
+        _chatPinsCache.set(String(chatId), []);
         banner.style.display = 'none';
         return;
       }
       const data = await res.json();
       const rawPins = data.pinned_messages || (data.pinned_message ? [data.pinned_message] : []);
+      _chatPinsCache.set(String(chatId), rawPins);
       _chatPins = rawPins.filter(p => !_dismissedPins.has(p.id));
       _currentPinIndex = 0;
       renderPinnedBanner();
     } catch {
-      if (gen === _pinnedBannerPollGen) banner.style.display = 'none';
+      if (gen === _pinnedBannerPollGen) {
+        _chatPinsCache.set(String(chatId), []);
+        banner.style.display = 'none';
+      }
     }
   }
 
@@ -5724,6 +5769,7 @@
     if (!banner) return;
     if (!_chatPins || _chatPins.length === 0 || _currentPinIndex >= _chatPins.length) {
       banner.style.display = 'none';
+      updateJumpHudPosition();
       return;
     }
     banner.style.display = 'flex';
@@ -5750,6 +5796,7 @@
         navEl.style.display = 'none';
       }
     }
+    updateJumpHudPosition();
   }
 
   const pinnedBanner = document.getElementById('pinned-banner');
@@ -6374,6 +6421,7 @@
     if (switchBtn) {
       switchBtn.onclick = onSwitch;
     }
+    updateJumpHudPosition();
   }
 
   function _findChatInList(chatId, chatType) {
@@ -6472,6 +6520,9 @@
     }
 
     const scroll = _prepareChatPane(chat, true);
+    if (!_chatPinsCache.has(String(chat.id))) {
+      await loadChatPinnedBanner(chat.id, chat.type);
+    }
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
@@ -6558,6 +6609,9 @@
     });
 
     const scroll = _prepareChatPane(chat, true);
+    if (!_chatPinsCache.has(String(chat.id))) {
+      await loadChatPinnedBanner(chat.id, chat.type);
+    }
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
