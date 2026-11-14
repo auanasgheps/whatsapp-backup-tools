@@ -3817,7 +3817,7 @@
       const r = cell.getBoundingClientRect();
       const isVisibleOnScreen = (r.bottom >= cRect.top - 100) && (r.top <= cRect.bottom + 100);
       if (isVisibleOnScreen) {
-        enqueueVideoThumbnail(cell, img, cell.dataset.src, archivePath);
+        enqueueVideoThumbnail(cell, img, cell.dataset.src, archivePath, cell._msg);
       }
     }
   }
@@ -3833,7 +3833,7 @@
     }
   }
 
-  function enqueueVideoThumbnail(cell, img, src, archivePath) {
+  function enqueueVideoThumbnail(cell, img, src, archivePath, msg) {
     if (videoThumbCache.has(archivePath)) {
       img.src = videoThumbCache.get(archivePath);
       return;
@@ -3841,7 +3841,7 @@
     if (videoProbeQueue.some(item => item.cell === cell)) {
       return;
     }
-    videoProbeQueue.push({ cell, img, src, archivePath });
+    videoProbeQueue.push({ cell, img, src, archivePath, msg: msg || cell._msg });
     drainVideoProbeQueue();
   }
 
@@ -3922,6 +3922,7 @@
       try {
         if (task.cell.isConnected) {
           task.img.classList.add('gallery-video-thumb--err');
+          buildMissingGalleryCard(task.cell, task.msg || task.cell._msg);
         }
       } finally {
         finish();
@@ -3943,6 +3944,9 @@
 
     if (mt === 'image' || mt === 'sticker') {
       img.src = src;
+      img.addEventListener('error', () => {
+        buildMissingGalleryCard(cell, cell._msg);
+      }, { once: true });
     } else if (mt === 'video' || mt === 'gif') {
       const archivePath = cell.dataset.archivePath;
       if (videoThumbCache.has(archivePath)) {
@@ -4000,24 +4004,97 @@
     galleryIsScrolling = false;
   }
 
+  function _sanitizeMediaName(name) {
+    if (!name) return '';
+    const clean = String(name).replace(/\\/g, '/');
+    const base = clean.split('/').pop() || '';
+    return base;
+  }
+
+  function buildMissingGalleryCard(cell, msg) {
+    cell.classList.add('is-missing');
+    cell.innerHTML = '';
+    delete cell.dataset.src;
+    delete cell.dataset.archivePath;
+    cell.dataset.hydrated = 'true';
+
+    if (msg && msg.has_thumbnail && msg.msg_id) {
+      const blurImg = document.createElement('img');
+      blurImg.className = 'gallery-missing-blur';
+      blurImg.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+      blurImg.alt = '';
+      blurImg.loading = 'lazy';
+      blurImg.onerror = () => { blurImg.style.display = 'none'; };
+      cell.appendChild(blurImg);
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'gallery-missing-overlay';
+
+    const badge = document.createElement('div');
+    badge.className = 'gallery-missing-badge';
+    badge.innerHTML = '<svg class="gallery-missing-icon-warn" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+    overlay.appendChild(badge);
+
+    const label = document.createElement('div');
+    label.className = 'gallery-missing-label';
+    if (msg && msg.is_view_once) {
+      label.textContent = (msg.media_type === 'video') ? 'Video · View Once' : 'Photo · View Once';
+    } else {
+      const typeStr = (msg && msg.media_type === 'video') ? 'Video' :
+                      ((msg && msg.media_type === 'audio') ? 'Audio' :
+                      ((msg && msg.media_type === 'document') ? 'Document' : 'Photo'));
+      label.textContent = typeStr + ' unavailable';
+    }
+    overlay.appendChild(label);
+    cell.appendChild(overlay);
+
+    if (msg) {
+      const btn = document.createElement('button');
+      btn.className = 'gallery-goto';
+      btn.title = 'Go to message';
+      btn.textContent = '→ in chat';
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (btn.disabled) return;
+        btn.disabled = true;
+        btn.textContent = '⏳ in chat';
+        closeMediaGallery();
+        jumpToMessage(msg, 'default');
+      });
+      cell.appendChild(btn);
+    }
+  }
+
   function renderGalleryItem(msg) {
     const cell = document.createElement('div');
     cell.className = 'gallery-item';
-    const src = '/media/' + msg.archive_path;
+    cell._msg = msg;
     const mt = msg.media_type;
     cell.dataset.type = mt;
     cell.dataset.ts = String(msg.timestamp_ms || 0);
+
+    if (!msg.archive_path && mt !== 'link') {
+      buildMissingGalleryCard(cell, msg);
+      return cell;
+    }
+
+    const src = '/media/' + msg.archive_path;
+    const cleanName = _sanitizeMediaName(msg.media_name);
 
     if (mt === 'image' || mt === 'sticker') {
       cell.dataset.src = src;
       cell.dataset.hydrated = 'false';
       const img = document.createElement('img');
       img.src = EMPTY_GALLERY_PIX;
-      img.alt = msg.media_name || '';
+      img.alt = cleanName || 'Photo';
       img.className = 'gallery-thumb';
       const idx = lightboxItems.length;
       lightboxItems.push(msg);
       img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx); });
+      img.addEventListener('error', () => {
+        buildMissingGalleryCard(cell, msg);
+      }, { once: true });
       cell.appendChild(img);
     } else if (mt === 'video' || mt === 'gif') {
       cell.dataset.src = src;
@@ -4025,16 +4102,19 @@
       cell.dataset.hydrated = 'false';
       const img = document.createElement('img');
       img.src = EMPTY_GALLERY_PIX;
-      img.alt = msg.media_name || '';
+      img.alt = cleanName || (mt === 'gif' ? 'GIF' : 'Video');
       img.className = 'gallery-thumb gallery-video-thumb';
       const idx = lightboxItems.length;
       lightboxItems.push(msg);
       img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx); });
+      img.addEventListener('error', () => {
+        buildMissingGalleryCard(cell, msg);
+      }, { once: true });
       cell.appendChild(img);
     } else if (mt === 'audio') {
       const d = document.createElement('div');
       d.className = 'gallery-doc';
-      d.innerHTML = '<span style="font-size:28px">🎵</span><span>' + esc(msg.media_name || 'audio') + '</span>';
+      d.innerHTML = '<span style="font-size:28px">🎵</span><span>' + esc(cleanName || 'audio') + '</span>';
       d.addEventListener('click', () => window.open(src, '_blank'));
       cell.appendChild(d);
     } else if (mt === 'link') {
@@ -4113,7 +4193,7 @@
       cell.classList.add('gallery-link-card');
       const name = document.createElement('div');
       name.className = 'gallery-link-url';
-      name.textContent = '📄 ' + (msg.media_name || 'file');
+      name.textContent = '📄 ' + (cleanName || 'file');
       const meta = document.createElement('div');
       meta.className = 'gallery-link-meta';
       meta.textContent = (msg.sender || 'You') + ' · ' + new Date(msg.timestamp_ms).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
@@ -4123,13 +4203,13 @@
     } else if (mt === 'vcard') {
       const d = document.createElement('div');
       d.className = 'gallery-doc';
-      d.innerHTML = '<span style="font-size:28px">📇</span><span>' + esc(msg.media_name || msg.text_body || 'Contact') + '</span>';
+      d.innerHTML = '<span style="font-size:28px">📇</span><span>' + esc(cleanName || msg.text_body || 'Contact') + '</span>';
       d.addEventListener('click', () => window.open(src, '_blank'));
       cell.appendChild(d);
     } else {
       const d = document.createElement('div');
       d.className = 'gallery-doc';
-      d.innerHTML = '<span style="font-size:28px">📄</span><span>' + esc(msg.media_name || 'file') + '</span>';
+      d.innerHTML = '<span style="font-size:28px">📄</span><span>' + esc(cleanName || 'file') + '</span>';
       d.addEventListener('click', () => window.open(src, '_blank'));
       cell.appendChild(d);
     }

@@ -265,7 +265,7 @@ _ANDROID_IS_LINK = (
 
 
 _ANDROID_IS_DOCUMENT_UNDOWNLOADED = (
-    "NOT (m.message_type IS NULL OR m.message_type = 0)"
+    "NOT (m.message_type IS NULL OR m.message_type IN (0, 1, 2, 3, 4, 5, 7, 14, 15, 16, 20, 28, 42, 43, 64, 66, 81, 82))"
     " AND mm.file_path IS NULL"
     " AND mm.media_name IS NOT NULL AND mm.media_name != ''"
 )
