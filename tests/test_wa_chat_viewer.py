@@ -12257,6 +12257,89 @@ class TestTrack1Endpoints:
                 ctx_msgs = ctx_resp.get_json()
                 assert any(cm["msg_id"] == item["id"] for cm in ctx_msgs)
 
+    def test_api_starred_ios_document_caption_and_sanitization(self, tmp_path):
+        """iOS /api/starred projects captions over filenames, sanitizes tokens, and handles scoped chat resolution."""
+        arch_path = tmp_path / ".wa_media_archiver.db"
+        with sqlite3.connect(str(arch_path)) as arch_conn:
+            arch_conn.execute(
+                "CREATE TABLE contacts (number TEXT PRIMARY KEY, display_name TEXT, folder TEXT)"
+            )
+            arch_conn.execute(
+                "INSERT INTO contacts VALUES ('15551234', 'Alice Smith', 'Alice Smith (15551234)')"
+            )
+            arch_conn.commit()
+
+        cs_path = tmp_path / "ChatStorage.sqlite"
+        with make_ios_db(cs_path) as conn:
+            conn.execute("ALTER TABLE ZWAMESSAGE ADD COLUMN ZSTARRED INTEGER DEFAULT 0")
+            conn.execute("""
+                INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+                VALUES (1, '15551234@s.whatsapp.net', 'Alice Smith', 0)
+            """)
+            conn.execute("""
+                INSERT INTO ZWAMEDIAITEM (Z_PK, ZTITLE, ZMEDIALOCALPATH, ZVCARDNAME)
+                VALUES (10, 'Q3 Financial Report', 'Media/15551234@s.whatsapp.net/bef9135a.pdf', NULL)
+            """)
+            conn.execute("""
+                INSERT INTO ZWAMEDIAITEM (Z_PK, ZTITLE, ZMEDIALOCALPATH, ZVCARDNAME)
+                VALUES (11, NULL, NULL, 'Central Park\nNew York, NY')
+            """)
+            # Doc 1: Document with filename in ZTEXT and caption in ZTITLE
+            conn.execute("""
+                INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTARRED, ZMEDIAITEM, ZPUSHNAME, ZFROMJID)
+                VALUES (100, 1, 0, 720000000, 'bef9135a-843b-4519-9d49-9634f9da21bb.pdf', 8, 1, 10, 'CNDj+ZsG', '15551234@s.whatsapp.net')
+            """)
+            # Msg 2: Location with place name in ZVCARDNAME and base64 token in ZPUSHNAME
+            conn.execute("""
+                INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE, ZSTARRED, ZMEDIAITEM, ZPUSHNAME, ZFROMJID)
+                VALUES (101, 1, 0, 720000010, NULL, 5, 1, 11, 'CKji9NUGIABIAZABAPABAtgCu5PzutWWlwM=', '15551234@s.whatsapp.net')
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        try:
+            with app.test_client() as client:
+                resp = client.get("/api/starred")
+                assert resp.status_code == 200
+                data = resp.get_json()
+                items = data["messages"] if isinstance(data, dict) and "messages" in data else data
+                assert len(items) == 2
+
+                by_id = {m["id"]: m for m in items}
+                doc_m = by_id[100]
+                assert doc_m["media_type"] == "document"
+                assert doc_m["text_body"] == "Q3 Financial Report"
+                assert doc_m["file_name"] == "bef9135a-843b-4519-9d49-9634f9da21bb.pdf"
+                # Sender name must be sanitized from CNDj+ZsG to contacts map name
+                assert doc_m["sender_name"] == "Alice Smith"
+
+                loc_m = by_id[101]
+                assert loc_m["media_type"] == "location"
+                assert loc_m["place_name"] == "Central Park\nNew York, NY"
+                assert loc_m["sender_name"] == "Alice Smith"
+
+                # Scoped chat query using phone number chat_id
+                resp_scoped = client.get("/api/chat/15551234/starred")
+                assert resp_scoped.status_code == 200
+                scoped_data = resp_scoped.get_json()
+                scoped_items = (
+                    scoped_data["messages"]
+                    if isinstance(scoped_data, dict) and "messages" in scoped_data
+                    else scoped_data
+                )
+                assert len(scoped_items) == 2
+                assert scoped_data.get("count") == 2
+
+                # Scoped query using CoreData PK chat_id
+                resp_pk = client.get("/api/chat/1/starred")
+                assert resp_pk.status_code == 200
+                assert len(resp_pk.get_json()["messages"]) == 2
+        finally:
+            ctx = app.config.get("VIEWER_CONTEXT")
+            if ctx and hasattr(ctx, "close"):
+                ctx.close()
+
     def test_api_pinned_android(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
         with sqlite3.connect(str(wa_path)) as conn:
