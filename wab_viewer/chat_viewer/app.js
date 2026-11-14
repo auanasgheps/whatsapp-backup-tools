@@ -830,11 +830,20 @@
       expandedMsgIds.add(String(msgId));
     }
     if (!row) return;
-    const targetId = row.dataset.msgId || (msgId !== undefined && msgId !== null ? String(msgId) : '');
+    const targetId = (msgId !== undefined && msgId !== null) ? String(msgId) : (row.dataset.msgId || '');
     if (!targetId) return;
     expandedMsgIds.add(targetId);
-    const txtEl = row.querySelector('.msg-text');
-    const matchedMsg = msgList.find(m => String(m.msg_id) === targetId);
+    if (row.dataset.msgId) expandedMsgIds.add(row.dataset.msgId);
+    const txtEl = row.querySelector('.msg-text, .msg-caption');
+    let matchedMsg = msgList.find(m => String(m.msg_id) === targetId);
+    if (txtEl && txtEl.classList.contains('msg-caption') && (!matchedMsg || !matchedMsg.text_body) && row.dataset.groupIds) {
+      const gIds = row.dataset.groupIds.split(' ');
+      const capMsg = msgList.find(m => gIds.includes(String(m.msg_id)) && m.text_body && m.text_body.trim());
+      if (capMsg) {
+        matchedMsg = capMsg;
+        expandedMsgIds.add(String(capMsg.msg_id));
+      }
+    }
     if (txtEl && matchedMsg) {
       renderCollapsibleMessageText(txtEl, matchedMsg.text_body, matchedMsg.msg_id, matchedMsg.mentions);
     }
@@ -1872,7 +1881,7 @@
       if (captionMsg) {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        cap.innerHTML = highlight(captionMsg.text_body, '', captionMsg.mentions);
+        renderCollapsibleMessageText(cap, captionMsg.text_body, captionMsg.msg_id, captionMsg.mentions);
         bubble.appendChild(cap);
       }
 
@@ -2012,6 +2021,10 @@
             expandMessageRowById(msg.quoted_msg_id, rowForMsgId(msg.quoted_msg_id));
             await jumpToMessage({ msg_id: msg.quoted_msg_id, timestamp_ms: msg.quoted_ts }, 'default');
           } else {
+            const targetNear = nearestMsgToTs(msg.quoted_ts);
+            if (targetNear) {
+              expandMessageRowById(targetNear.msg_id, rowForMsgId(targetNear.msg_id));
+            }
             const row = await jumpToTimestamp(msg.quoted_ts, null, true, 'default');
             if (row && row.dataset.msgId) {
               expandMessageRowById(row.dataset.msgId, row);
@@ -2156,7 +2169,7 @@
         if (msg.text_body && msg.media_type !== 'vcard') {
           const cap = document.createElement('div');
           cap.className = 'msg-caption';
-          cap.innerHTML = highlight(msg.text_body, '', msg.mentions);
+          renderCollapsibleMessageText(cap, msg.text_body, msg.msg_id, msg.mentions);
           bubble.appendChild(cap);
         }
       } else {
@@ -2175,7 +2188,7 @@
       if (msg.text_body && msg.media_type !== 'vcard') {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        cap.innerHTML = highlight(msg.text_body, '', msg.mentions);
+        renderCollapsibleMessageText(cap, msg.text_body, msg.msg_id, msg.mentions);
         bubble.appendChild(cap);
       }
     }
@@ -3112,7 +3125,7 @@
       if (!isDuplicate && cleanBody) {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        cap.innerHTML = highlight(cleanBody, '', msg.mentions);
+        renderCollapsibleMessageText(cap, cleanBody, msg.msg_id, msg.mentions);
         wrap.appendChild(cap);
       }
     }

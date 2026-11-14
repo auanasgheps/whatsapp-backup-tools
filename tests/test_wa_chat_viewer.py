@@ -14778,6 +14778,7 @@ class TestReviewFixRegressions:
         assert "--bubble-action:" in css
         assert "--bubble-action-sent:" in css
         assert ".msg-text .msg-read-more" in css
+        assert ".msg-caption .msg-read-more" in css
         assert "COLLAPSE_CHAR_LIMIT = 750" in js
         assert "COLLAPSE_LINE_LIMIT = 15" in js
         assert "COLLAPSE_MIN_REMAINDER = 60" in js
@@ -14795,6 +14796,10 @@ class TestReviewFixRegressions:
             js = client.get("/static/app.js").get_data(as_text=True)
 
         assert "const captionMsg = group.find(m => m.text_body && m.text_body.trim());" in js
+        assert (
+            "renderCollapsibleMessageText(cap, captionMsg.text_body, captionMsg.msg_id, captionMsg.mentions);"
+            in js
+        )
 
     def test_ios_large_group_query_plan_and_pagination(self, tmp_path):
         """iOS /api/messages and /api/messages/at must use index scans without temp B-tree sort."""

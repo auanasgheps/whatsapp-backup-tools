@@ -2765,7 +2765,7 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
     )
     tall_list_msg = "\n".join(f"- Checklist item number {n}" for n in range(1, 23))
     hysteresis_msg = "Boundary check " + ("word " * 150) + "end."  # ~769 chars -> under 750+60
-    long_caption_msg = "Caption stays uncollapsed: " + ("caption text " * 70) + "CAP_END"
+    long_caption_msg = "Long media caption: " + ("caption text " * 70) + "CAP_END"
 
     wa_conn.execute(
         "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type, key_id) "
@@ -2904,17 +2904,38 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
                     liCountCollapsed: r102.querySelectorAll('.msg-text li').length,
                 };
                 const hysteresisSkipped = !btn103 && r103.querySelector('.msg-text').textContent.includes('end.');
-                const captionSkipped = !btn104 && r104.querySelector('.msg-caption').textContent.includes('CAP_END');
+                const collapsed104 = {
+                    hasBtn: Boolean(btn104),
+                    btnText: btn104 ? btn104.textContent : '',
+                    ariaExpanded: btn104 ? btn104.getAttribute('aria-expanded') : '',
+                    endsWithEllipsisBtn: r104.querySelector('.msg-caption').textContent.endsWith('... Read More'),
+                    hidesCapEnd: !r104.querySelector('.msg-caption').textContent.includes('CAP_END'),
+                };
 
-                // Expand 101 & 102
+                // Expand 101, 102 & 104
                 btn101.click();
                 btn102.click();
+                if (btn104) btn104.click();
                 const expanded101 = {
                     btnText: r101.querySelector('.msg-read-more').textContent,
                     ariaExpanded: r101.querySelector('.msg-read-more').getAttribute('aria-expanded'),
                     showsTailNeedle: r101.querySelector('.msg-text').textContent.includes('UNIQUETAILSEARCHNEEDLE'),
                 };
+                const expanded104 = {
+                    btnText: r104.querySelector('.msg-read-more') ? r104.querySelector('.msg-read-more').textContent : '',
+                    ariaExpanded: r104.querySelector('.msg-read-more') ? r104.querySelector('.msg-read-more').getAttribute('aria-expanded') : '',
+                    showsCapEnd: r104.querySelector('.msg-caption').textContent.includes('CAP_END'),
+                };
                 const listExpandedCount = r102.querySelectorAll('.msg-text li').length;
+
+                // Toggle 104 back to collapsed ("Show Less")
+                const btn104Expanded = r104.querySelector('.msg-read-more');
+                if (btn104Expanded) btn104Expanded.click();
+                const recollapsed104 = {
+                    btnText: r104.querySelector('.msg-read-more') ? r104.querySelector('.msg-read-more').textContent : '',
+                    ariaExpanded: r104.querySelector('.msg-read-more') ? r104.querySelector('.msg-read-more').getAttribute('aria-expanded') : '',
+                    hidesCapEnd: !r104.querySelector('.msg-caption').textContent.includes('CAP_END'),
+                };
 
                 // Trigger older pagination and verify 101 stays expanded across renderWindow()
                 const scroll = document.getElementById('message-scroll');
@@ -2976,10 +2997,14 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
                 }
                 const quote106 = document.querySelector('.msg-row[data-msg-id="106"] .msg-quote');
                 if (quote106) quote106.click();
-                await new Promise(r => setTimeout(r, 150));
-                const autoExpandedOnQuote = Boolean(
-                    document.querySelector('.msg-row[data-msg-id="101"] .msg-read-more')?.getAttribute('aria-expanded') === 'true'
-                );
+                let autoExpandedOnQuote = false;
+                for (let i = 0; i < 40; i++) {
+                    if (document.querySelector('.msg-row[data-msg-id="101"] .msg-read-more')?.getAttribute('aria-expanded') === 'true') {
+                        autoExpandedOnQuote = true;
+                        break;
+                    }
+                    await new Promise(r => setTimeout(r, 50));
+                }
 
                 // ZWJ grapheme cluster at 750 boundary stays intact (not split mid-ZWJ)
                 const msg105Text = document.querySelector('.msg-row[data-msg-id="105"] .msg-text')?.textContent || '';
@@ -2996,7 +3021,9 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
                     collapsed101,
                     listCollapsed,
                     hysteresisSkipped,
-                    captionSkipped,
+                    collapsed104,
+                    expanded104,
+                    recollapsed104,
                     expanded101,
                     listExpandedCount,
                     stayedExpandedAfterPage,
@@ -3027,7 +3054,19 @@ def test_long_message_collapse_and_toggle(tmp_path: Path, screenshot_dir: Path) 
         assert res["listCollapsed"]["liCountCollapsed"] == 15
 
         assert res["hysteresisSkipped"] is True
-        assert res["captionSkipped"] is True
+        assert res["collapsed104"]["hasBtn"] is True
+        assert res["collapsed104"]["btnText"] == "Read More"
+        assert res["collapsed104"]["ariaExpanded"] == "false"
+        assert res["collapsed104"]["endsWithEllipsisBtn"] is True
+        assert res["collapsed104"]["hidesCapEnd"] is True
+
+        assert res["expanded104"]["btnText"] == "Show Less"
+        assert res["expanded104"]["ariaExpanded"] == "true"
+        assert res["expanded104"]["showsCapEnd"] is True
+
+        assert res["recollapsed104"]["btnText"] == "Read More"
+        assert res["recollapsed104"]["ariaExpanded"] == "false"
+        assert res["recollapsed104"]["hidesCapEnd"] is True
 
         assert res["expanded101"]["btnText"] == "Show Less"
         assert res["expanded101"]["ariaExpanded"] == "true"
