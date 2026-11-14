@@ -1062,6 +1062,14 @@ def _query_android_pinned(
     if not has_msg:
         return []
 
+    has_jm_resolved = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_jid_map_resolved'"
+        ).fetchone()
+    )
+    if not has_jm_resolved:
+        _ensure_jid_map_resolved(conn, arch_conn)
+
     has_pin_table = bool(
         conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_add_on_pin_in_chat'"
@@ -1076,6 +1084,122 @@ def _query_android_pinned(
     pin_cond = "AND pic.pin_in_chat_state = 1" if has_pin_table else ""
 
     chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type, row_ids_cache)
+
+    has_chat = bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat'").fetchone()
+    )
+    chat_join = "LEFT JOIN chat c ON c._id = m.chat_row_id" if has_chat else ""
+
+    has_jid = bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid'").fetchone()
+    )
+    jid_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(jid)").fetchall()} if has_jid else set()
+    )
+    has_jid_server = "server" in jid_cols
+    has_jid_raw_string = "raw_string" in jid_cols
+    has_ldn = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lid_display_name'"
+        ).fetchone()
+    )
+
+    if has_chat and has_jid:
+        chat_jid_joins = """
+            LEFT JOIN jid j_c ON j_c._id = c.jid_row_id
+            LEFT JOIN _jid_map_resolved jm_c ON jm_c.lid_row_id = c.jid_row_id
+            LEFT JOIN jid j_c_real ON j_c_real._id = jm_c.jid_row_id
+        """
+        con_c_join = (
+            f"LEFT JOIN _contacts_resolved con_c ON con_c.clean_number = "
+            f"{_clean_user_sql('COALESCE(j_c_real.user, j_c.user)')}"
+        )
+    else:
+        chat_jid_joins = ""
+        con_c_join = ""
+
+    if has_jid:
+        sender_jid_joins = """
+            LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
+            LEFT JOIN _jid_map_resolved jm_s ON jm_s.lid_row_id = m.sender_jid_row_id
+            LEFT JOIN jid j_s_real ON j_s_real._id = jm_s.jid_row_id
+        """
+        con_s_join = (
+            f"LEFT JOIN _contacts_resolved con_s ON con_s.clean_number = "
+            f"{_clean_user_sql('COALESCE(j_s_real.user, j_s.user)')}"
+        )
+    else:
+        sender_jid_joins = ""
+        con_s_join = ""
+
+    ldn_c_join = (
+        "LEFT JOIN lid_display_name ldn_c ON ldn_c.lid_row_id = c.jid_row_id"
+        if (has_chat and has_ldn)
+        else ""
+    )
+    ldn_s_join = (
+        """
+            LEFT JOIN _lid_map_resolved jm_lid_s ON jm_lid_s.jid_row_id = m.sender_jid_row_id
+            LEFT JOIN lid_display_name ldn_s_direct ON ldn_s_direct.lid_row_id = m.sender_jid_row_id
+            LEFT JOIN lid_display_name ldn_s_mapped ON ldn_s_mapped.lid_row_id = jm_lid_s.lid_row_id
+        """
+        if (has_jid and has_ldn)
+        else ""
+    )
+
+    lid_c_parts = []
+    if has_jid_server:
+        lid_c_parts.append("(j_c.server IS NOT NULL AND j_c.server = 'lid')")
+    if has_jid_raw_string:
+        lid_c_parts.append("(j_c.raw_string IS NOT NULL AND j_c.raw_string LIKE '%@lid')")
+    j_c_is_lid = " OR ".join(lid_c_parts) if (has_chat and has_jid and lid_c_parts) else "0"
+
+    lid_s_parts = []
+    if has_jid_server:
+        lid_s_parts.append("(j_s.server IS NOT NULL AND j_s.server = 'lid')")
+    if has_jid_raw_string:
+        lid_s_parts.append("(j_s.raw_string IS NOT NULL AND j_s.raw_string LIKE '%@lid')")
+    j_s_is_lid = " OR ".join(lid_s_parts) if (has_jid and lid_s_parts) else "0"
+
+    if has_chat and has_jid:
+        chat_user_expr = (
+            f"COALESCE({_clean_user_sql('j_c_real.user')}, {_clean_user_sql('j_c.user')})"
+        )
+        chat_is_unmapped_lid_expr = (
+            f"CASE WHEN ({j_c_is_lid}) AND j_c_real.user IS NULL THEN 1 ELSE 0 END"
+        )
+        con_c_name_expr = "COALESCE(NULLIF(con_c.display_name, ''), NULLIF(con_c.folder, ''))"
+    else:
+        chat_user_expr = "NULL"
+        chat_is_unmapped_lid_expr = "0"
+        con_c_name_expr = "NULL"
+
+    if has_jid:
+        sender_user_expr = (
+            f"COALESCE({_clean_user_sql('j_s_real.user')}, {_clean_user_sql('j_s.user')})"
+        )
+        sender_is_unmapped_lid_expr = (
+            f"CASE WHEN ({j_s_is_lid}) AND j_s_real.user IS NULL THEN 1 ELSE 0 END"
+        )
+        con_s_name_expr = "COALESCE(NULLIF(con_s.display_name, ''), NULLIF(con_s.folder, ''))"
+    else:
+        sender_user_expr = "NULL"
+        sender_is_unmapped_lid_expr = "0"
+        con_s_name_expr = "NULL"
+
+    ldn_c_name_expr = (
+        "COALESCE("
+        "CASE WHEN ldn_c.display_name NOT LIKE '%∙%' AND ldn_c.display_name NOT LIKE '%\u2219%' "
+        "THEN NULLIF(ldn_c.display_name, '') END, "
+        "NULLIF(ldn_c.username, ''))"
+        if (has_chat and has_ldn)
+        else "NULL"
+    )
+    ldn_s_name_expr = (
+        "COALESCE(NULLIF(ldn_s_direct.display_name, ''), NULLIF(ldn_s_mapped.display_name, ''))"
+        if (has_jid and has_ldn)
+        else "NULL"
+    )
 
     has_mm = bool(
         conn.execute(
@@ -1118,8 +1242,15 @@ def _query_android_pinned(
             COALESCE(m.timestamp, 0) AS timestamp_ms,
             COALESCE(m.text_data, '') AS text,
             m.message_type AS message_type,
-            j_s.user AS sender_user,
-            ao.expiry_timestamp AS expiry_ts,
+            {sender_user_expr} AS sender_user,
+            {sender_is_unmapped_lid_expr} AS sender_is_unmapped_lid,
+            {con_s_name_expr} AS sender_contact_name,
+            {ldn_s_name_expr} AS sender_ldn_name,
+            {chat_user_expr} AS chat_user,
+            {chat_is_unmapped_lid_expr} AS chat_is_unmapped_lid,
+            {con_c_name_expr} AS chat_contact_name,
+            {ldn_c_name_expr} AS chat_ldn_name,
+            {"c.subject" if has_chat else "NULL"} AS chat_subject,
             {mm_file} AS file_path,
             {mm_duration} AS media_duration,
             {mm_name} AS media_name,
@@ -1129,12 +1260,23 @@ def _query_android_pinned(
         FROM message_add_on ao
         {pin_join}
         JOIN message m ON m._id = ao.parent_message_row_id
-        LEFT JOIN jid j_s ON j_s._id = m.sender_jid_row_id
+        {chat_join}
+        {chat_jid_joins}
+        {con_c_join}
+        {ldn_c_join}
+        {sender_jid_joins}
+        {con_s_join}
+        {ldn_s_join}
         {mm_join}
         {ml_join}
         WHERE ao.message_add_on_type = 79
           {pin_cond}
           AND {chat_pred}
+          AND ao._id = (
+              SELECT MAX(ao_sub._id) FROM message_add_on ao_sub
+              WHERE ao_sub.parent_message_row_id = m._id
+                AND ao_sub.message_add_on_type = 79
+          )
         ORDER BY ao._id DESC
         LIMIT 3
     """
@@ -1146,6 +1288,7 @@ def _query_android_pinned(
     pins = []
     seen_ids = set()
     contacts_map = _get_contacts_lookup(arch_conn)
+    is_grp = chat_type == "group"
     for r in rows:
         row_dict = dict(r)
         mid = int(row_dict["id"])
@@ -1155,14 +1298,28 @@ def _query_android_pinned(
 
         from_me = int(row_dict["from_me"])
         s_user = row_dict["sender_user"] or ""
+        s_unmapped_lid = bool(row_dict["sender_is_unmapped_lid"])
+        c_user = row_dict["chat_user"] or ""
+        c_unmapped_lid = bool(row_dict["chat_is_unmapped_lid"])
         if from_me == 1:
             sender_name = "You"
+        elif is_grp:
+            sender_name = (
+                row_dict["sender_contact_name"]
+                or contacts_map.get(s_user, "")
+                or row_dict["sender_ldn_name"]
+                or (f"+{s_user}" if (s_user and s_user.isdigit() and not s_unmapped_lid) else "")
+                or "Unknown"
+            )
         else:
-            sender_name = contacts_map.get(s_user, "")
-            if not sender_name:
-                sender_name = (
-                    f"+{s_user}" if (s_user and s_user.isdigit()) else (s_user or "Unknown")
-                )
+            sender_name = (
+                row_dict["chat_contact_name"]
+                or contacts_map.get(c_user, "")
+                or row_dict["chat_ldn_name"]
+                or (f"+{c_user}" if (c_user and c_user.isdigit() and not c_unmapped_lid) else "")
+                or row_dict["chat_subject"]
+                or "Unknown"
+            )
         if _is_unreadable_token(sender_name):
             sender_name = "Unknown"
 
@@ -1686,7 +1843,6 @@ def _query_preserved_pinned(
             FROM preserved_messages
             WHERE chat_id = ?
               AND is_pinned = 1
-              AND (pin_expiry_ts IS NULL OR pin_expiry_ts = 0 OR pin_expiry_ts > (CAST(strftime('%s', 'now') AS INTEGER) * 1000))
             ORDER BY timestamp_ms DESC
             LIMIT 3
         """,

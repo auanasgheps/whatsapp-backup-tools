@@ -5783,7 +5783,6 @@
       const res = await fetch(`/api/chat/${encodeURIComponent(chatId)}/pinned?` + params);
       if (gen !== _pinnedBannerPollGen || !currentChat || String(currentChat.id) !== String(chatId)) return;
       if (!res.ok) {
-        _chatPinsCache.set(String(chatId), []);
         banner.style.display = 'none';
         return;
       }
@@ -5796,9 +5795,7 @@
       _syncRenderedMessagePins();
     } catch {
       if (gen === _pinnedBannerPollGen) {
-        _chatPinsCache.set(String(chatId), []);
         banner.style.display = 'none';
-        _syncRenderedMessagePins();
       }
     }
   }

@@ -1585,6 +1585,13 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         if caps.has_pin_in_chat_table
         else ""
     )
+    pin_latest_cond = (
+        "AND mao_pin._id = ("
+        "SELECT MAX(mao_sub._id) FROM message_add_on mao_sub "
+        "WHERE mao_sub.parent_message_row_id = m._id AND mao_sub.message_add_on_type = 79) "
+        if caps.has_pin_in_chat_table
+        else ""
+    )
     android_pinned_expr = (
         "CASE WHEN EXISTS ("
         "SELECT 1 FROM message_add_on mao_pin "
@@ -1592,6 +1599,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         "WHERE mao_pin.parent_message_row_id = m._id "
         "AND mao_pin.message_add_on_type = 79 "
         f"{pin_table_cond}"
+        f"{pin_latest_cond}"
         ") THEN 1 ELSE 0 END"
         if caps.has_android_add_on
         else "0"
