@@ -1373,6 +1373,46 @@ class TestApiMedia:
             docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact").get_json()
         assert len(docs) == 0
 
+    def test_media_documents_excludes_undownloaded_images_and_view_once(self, tmp_path):
+        """Undownloaded images (type 1) and view-once media (type 42) must not appear in /api/media/documents."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type) "
+            "VALUES (10, 10, 0, 1700000010000, 1), (11, 10, 0, 1700000011000, 42)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (10, NULL, 'photo.jpg'), (11, NULL, 'vo_photo.jpg')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact").get_json()
+        assert len(docs) == 0
+
+    def test_gallery_missing_media_card_css_and_warning_badge(self):
+        """Gallery missing media cards must use the warning badge, yellow icon, and blurred DB thumbnail."""
+        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        js = app_js_path.read_text(encoding="utf-8")
+
+        assert ".gallery-item.is-missing" in css
+        assert ".gallery-missing-badge" in css
+        assert ".gallery-missing-icon-warn" in css
+        assert "#f59e0b" in css, "Warning yellow color token must be present in app.css"
+        assert "buildMissingGalleryCard" in js
+        assert "_sanitizeMediaName" in js
+        assert "View Once" in js
+
 
 class TestChatFilter:
     """Tests for _android_chat_filter and _ios_chat_filter."""
