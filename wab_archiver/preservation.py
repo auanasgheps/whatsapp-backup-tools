@@ -1713,12 +1713,17 @@ def diff_and_extract_android(
 
             # 5. Hydrate pinned status and expiry
             if has_pin and has_add_on and extracted_rows:
+                old_ao_cols = {
+                    r[1]
+                    for r in conn.execute("PRAGMA old_db.table_info(message_add_on)").fetchall()
+                }
+                exp_col = "ao.expiry_timestamp" if "expiry_timestamp" in old_ao_cols else "NULL"
                 msg_ids = [r["msg_id"] for r in extracted_rows]
                 for i in range(0, len(msg_ids), 900):
                     chunk = msg_ids[i : i + 900]
                     ph = ",".join("?" * len(chunk))
                     pin_sql = f"""
-                        SELECT ao.parent_message_row_id, pic.pin_in_chat_state, ao.expiry_timestamp
+                        SELECT ao.parent_message_row_id, pic.pin_in_chat_state, {exp_col}
                         FROM old_db.message_add_on ao
                         JOIN old_db.message_add_on_pin_in_chat pic ON pic.message_add_on_row_id = ao._id
                         WHERE ao.parent_message_row_id IN ({ph})

@@ -12373,6 +12373,13 @@ class TestTrack1Endpoints:
                     pin_in_chat_state INTEGER,
                     sender_timestamp INTEGER
                 );
+                CREATE TABLE message_media (
+                    message_row_id INTEGER PRIMARY KEY,
+                    file_path TEXT,
+                    mime_type TEXT,
+                    media_duration INTEGER,
+                    media_name TEXT
+                );
 
                 INSERT INTO jid VALUES (1, '15551111', '15551111@s.whatsapp.net');
                 INSERT INTO chat VALUES (10, 1, 'Pinned Chat');
@@ -15615,3 +15622,308 @@ class TestChatJumpHudPlacement:
         css = css_resp.get_data(as_text=True)
         assert "#pinned-banner" in css
         assert "z-index: 12;" in css
+
+    def test_android_pinned_without_expiry_timestamp_column(self, tmp_path):
+        """Android pinned query succeeds on schemas lacking message_add_on.expiry_timestamp."""
+        wa_path = tmp_path / "msgstore.db"
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT
+                );
+                CREATE TABLE message_add_on (
+                    _id INTEGER PRIMARY KEY,
+                    parent_message_row_id INTEGER,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    key_id TEXT,
+                    timestamp INTEGER,
+                    message_add_on_type INTEGER,
+                    status INTEGER
+                );
+                CREATE TABLE message_add_on_pin_in_chat (
+                    message_add_on_row_id INTEGER PRIMARY KEY,
+                    pin_in_chat_state INTEGER,
+                    sender_timestamp INTEGER
+                );
+                CREATE TABLE message_media (
+                    message_row_id INTEGER PRIMARY KEY,
+                    file_path TEXT,
+                    mime_type TEXT,
+                    media_duration INTEGER,
+                    media_name TEXT
+                );
+
+                INSERT INTO jid VALUES (1, '1203630000000001', 'g.us', '1203630000000001@g.us');
+                INSERT INTO chat VALUES (10, 1, 'Group Without Expiry Col');
+                INSERT INTO message VALUES (50, 10, 0, NULL, 1793970000000, 'Legacy schema pin', 0, 'PIN_1');
+                INSERT INTO message_add_on VALUES (1, 50, 10, 0, NULL, 'ADDON_1', 1793970500000, 79, 0);
+                INSERT INTO message_add_on_pin_in_chat VALUES (1, 1, 1793970500000);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/10/pinned?chat_type=group")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            assert pins[0]["id"] == 50
+            assert pins[0]["text_body"] == "Legacy schema pin"
+
+    def test_android_pinned_privacy_lid_contact_resolution(self, tmp_path):
+        """1-to-1 Privacy LID contact chats resolve pinned messages queried by phone number."""
+        wa_path = tmp_path / "msgstore.db"
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+                CREATE TABLE jid_map (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT
+                );
+                CREATE TABLE message_add_on (
+                    _id INTEGER PRIMARY KEY,
+                    parent_message_row_id INTEGER,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    key_id TEXT,
+                    timestamp INTEGER,
+                    message_add_on_type INTEGER,
+                    status INTEGER
+                );
+
+                -- Phone JID 1, LID JID 2
+                INSERT INTO jid VALUES (1, '15551234', 's.whatsapp.net', '15551234@s.whatsapp.net');
+                INSERT INTO jid VALUES (2, '999888777', 'lid', '999888777@lid');
+                INSERT INTO jid_map VALUES (2, 1);
+                -- Chat uses Privacy LID JID 2
+                INSERT INTO chat VALUES (5, 2, NULL);
+                INSERT INTO message VALUES (60, 5, 0, NULL, 1793970000000, 'Pinned in LID chat', 0, 'PIN_LID');
+                INSERT INTO message_add_on VALUES (1, 60, 5, 0, NULL, 'ADDON_LID', 1793970500000, 79, 0);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/15551234/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            assert pins[0]["id"] == 60
+            assert pins[0]["text_body"] == "Pinned in LID chat"
+
+    def test_android_pinned_1to1_sender_name_resolved(self, tmp_path):
+        """Incoming pinned messages in 1-to-1 chats resolve sender name from chat contact."""
+        wa_path = tmp_path / "msgstore.db"
+        arch_path = tmp_path / ".wa_media_archiver.db"
+
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT
+                );
+                CREATE TABLE message_add_on (
+                    _id INTEGER PRIMARY KEY,
+                    parent_message_row_id INTEGER,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    key_id TEXT,
+                    timestamp INTEGER,
+                    message_add_on_type INTEGER,
+                    status INTEGER
+                );
+
+                INSERT INTO jid VALUES (1, '15559876', 's.whatsapp.net', '15559876@s.whatsapp.net');
+                INSERT INTO chat VALUES (3, 1, NULL);
+                -- Incoming message (from_me = 0, sender_jid_row_id = NULL)
+                INSERT INTO message VALUES (70, 3, 0, NULL, 1793970000000, '1-to-1 note', 0, 'PIN_1TO1');
+                INSERT INTO message_add_on VALUES (1, 70, 3, 0, NULL, 'ADDON_70', 1793970500000, 79, 0);
+            """)
+            conn.commit()
+
+        with sqlite3.connect(str(arch_path)) as arch_conn:
+            arch_conn.executescript("""
+                CREATE TABLE contacts (
+                    number TEXT PRIMARY KEY,
+                    folder TEXT,
+                    display_name TEXT
+                );
+                INSERT INTO contacts VALUES ('15559876', 'Dr. Vance', 'Dr. Vance');
+            """)
+            arch_conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/15559876/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            assert pins[0]["sender_name"] == "Dr. Vance"
+
+    def test_android_pinned_group_lid_sender_name_resolved(self, tmp_path):
+        """Group chat pinned messages from Privacy LID senders resolve via lid_display_name."""
+        wa_path = tmp_path / "msgstore.db"
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE lid_display_name (lid_row_id INTEGER PRIMARY KEY, display_name TEXT, username TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT
+                );
+                CREATE TABLE message_add_on (
+                    _id INTEGER PRIMARY KEY,
+                    parent_message_row_id INTEGER,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    key_id TEXT,
+                    timestamp INTEGER,
+                    message_add_on_type INTEGER,
+                    status INTEGER
+                );
+
+                INSERT INTO jid VALUES (1, '1203630000000001', 'g.us', '1203630000000001@g.us');
+                INSERT INTO jid VALUES (2, '999111222', 'lid', '999111222@lid');
+                INSERT INTO chat VALUES (10, 1, 'Alpine Trail');
+                INSERT INTO lid_display_name VALUES (2, 'Maya Lin', 'mayalin');
+                INSERT INTO message VALUES (80, 10, 0, 2, 1793970000000, 'Group pin from LID', 0, 'PIN_GRP_LID');
+                INSERT INTO message_add_on VALUES (1, 80, 10, 0, 2, 'ADDON_80', 1793970500000, 79, 0);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/10/pinned?chat_type=group")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            assert pins[0]["sender_name"] == "Maya Lin"
+
+    def test_android_pinned_unpinned_by_subsequent_addon_excluded(self, tmp_path):
+        """A message pinned and subsequently unpinned in a later add-on row is excluded."""
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS message_add_on (
+                _id INTEGER PRIMARY KEY,
+                parent_message_row_id INTEGER,
+                chat_row_id INTEGER,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                key_id TEXT,
+                timestamp INTEGER,
+                message_add_on_type INTEGER,
+                status INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS message_add_on_pin_in_chat (
+                message_add_on_row_id INTEGER PRIMARY KEY,
+                pin_in_chat_state INTEGER,
+                sender_timestamp INTEGER
+            );
+
+            INSERT INTO jid (_id, user, raw_string) VALUES (10, '1203630000000001', '1203630000000001@g.us');
+            INSERT INTO chat (_id, jid_row_id, subject) VALUES (10, 10, 'Lifecycle Chat');
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type, key_id)
+            VALUES (90, 10, 0, 1793970000000, 'Unpinned message', 0, 'PIN_90');
+
+            -- Event 1: Pinned (state = 1)
+            INSERT INTO message_add_on (_id, parent_message_row_id, chat_row_id, from_me, message_add_on_type, timestamp)
+            VALUES (1, 90, 10, 0, 79, 1793970500000);
+            INSERT INTO message_add_on_pin_in_chat VALUES (1, 1, 1793970500000);
+
+            -- Event 2: Unpinned (state = 2, higher _id)
+            INSERT INTO message_add_on (_id, parent_message_row_id, chat_row_id, from_me, message_add_on_type, timestamp)
+            VALUES (2, 90, 10, 0, 79, 1793970600000);
+            INSERT INTO message_add_on_pin_in_chat VALUES (2, 2, 1793970600000);
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/10/pinned?chat_type=group")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 0
+
+            # Also verify /api/messages projection
+            m_resp = client.get("/api/messages?chat_id=10&chat_type=group")
+            assert m_resp.status_code == 200
+            msgs = m_resp.get_json()
+            assert msgs[0]["is_pinned"] == 0
+
+    def test_preserved_pinned_historical_backup_not_wallclock_expired(self, tmp_path):
+        """Preserved pinned messages older than 30 days are retained without wall-clock expiry."""
+        make_ios_db(tmp_path / "ChatStorage.sqlite")
+        pres_db = tmp_path / "preserved_messages.db"
+        with sqlite3.connect(str(pres_db)) as conn:
+            conn.executescript("""
+                CREATE TABLE preserved_messages (
+                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_id INTEGER,
+                    chat_id TEXT,
+                    chat_type TEXT,
+                    from_me INTEGER,
+                    sender_name TEXT,
+                    timestamp_ms INTEGER,
+                    text_body TEXT,
+                    is_pinned INTEGER DEFAULT 1,
+                    pin_expiry_ts INTEGER,
+                    media_type TEXT
+                );
+
+                -- Preserved pin with pin_expiry_ts from the past (2020)
+                INSERT INTO preserved_messages (msg_id, chat_id, chat_type, from_me, sender_name, timestamp_ms, text_body, is_pinned, pin_expiry_ts, media_type)
+                VALUES (99, '10', 'group', 0, 'Alice', 1580000000000, 'Old preserved pin', 1, 1582592000000, 'text');
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/10/pinned?chat_type=group")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            assert pins[0]["text_body"] == "Old preserved pin"
