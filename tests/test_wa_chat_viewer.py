@@ -3348,7 +3348,7 @@ class TestReactionDetailsEndpoint:
         wa_path = tmp_path / "ChatStorage.sqlite"
         conn = sqlite3.connect(str(wa_path))
         conn.execute(
-            "INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES (1, ?, 'Elena')",
+            "INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES (1, ?, 'Eve Reactor')",
             (f"{lid}@lid",),
         )
         conn.commit()
@@ -3360,7 +3360,7 @@ class TestReactionDetailsEndpoint:
         with app.test_client() as client:
             data = client.get("/api/reaction_details/2").get_json()
         assert data["available"] is True
-        assert data["reactors"][0]["name"] == "Elena"
+        assert data["reactors"][0]["name"] == "Eve Reactor"
         assert data["reactors"][0]["emoji"] == "❤️"
         assert data["reactors"][0]["from_me"] == 0
 
@@ -10008,7 +10008,7 @@ class TestAndroidHdAndMediaMatching:
 
             INSERT INTO jid VALUES (1, '390000000011', 's.whatsapp.net', '390000000011@s.whatsapp.net');
             INSERT INTO chat VALUES (1, 1, NULL, 0, 1700000000000, 1);
-            INSERT INTO message VALUES (1, 1, 0, 1, 1700000000000, 'Ciao', 0);
+            INSERT INTO message VALUES (1, 1, 0, 1, 1700000000000, 'Hello', 0);
         """)
         conn.commit()
         conn.close()
