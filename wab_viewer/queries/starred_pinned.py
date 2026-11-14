@@ -10,15 +10,22 @@ import sqlite3
 from pathlib import Path
 
 from ..db_cache import _ensure_jid_map_resolved
-from .calls import _get_contacts_lookup, _resolve_ios_chat_jids
+from ..protobuf import _parse_ios_poll_blob
+from .calls import (
+    _fetch_ios_contacts_map,
+    _get_contacts_lookup,
+    _resolve_ios_chat_jids,
+)
 from .sql_builder import (
     _clean_user_sql,
     _resolve_android_chat_filter,
     _resolve_android_chat_row_ids,
 )
 
-_STANZA_ID_RE = re.compile(r"^(?:3EB0[0-9A-Za-z_-]{4,60}|[0-9A-Fa-f]{16,64})$")
-_BASE64_TOKEN_RE = re.compile(r"^[A-Za-z0-9+/]{16,}={0,2}$")
+_STANZA_ID_RE = re.compile(r"^(?:3EB0[0-9A-Za-z_-]{4,60}|[0-9A-Fa-f]{16,64}|[0-9]{15,20}-[0-9]+)$")
+_BASE64_TOKEN_RE = re.compile(
+    r"^(?:[A-Za-z0-9+/]{6,}={1,2}|[A-Za-z0-9+/]{16,}={0,2}|C[A-Za-z0-9+/]{6,}={0,2})$"
+)
 _LID_RE = re.compile(r"^[0-9]+@lid$")
 
 
@@ -560,6 +567,46 @@ def _query_android_starred(
     return results
 
 
+def _resolve_ios_chat_session_pks(
+    conn: sqlite3.Connection,
+    chat_id: str,
+) -> set[int]:
+    """Resolve a target chat_id (PK, phone, JID, or LID) to ZWACHATSESSION Z_PK values."""
+    session_pks: set[int] = set()
+    has_cs = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACHATSESSION'"
+        ).fetchone()
+    )
+    if not has_cs:
+        if str(chat_id).isdigit():
+            session_pks.add(int(chat_id))
+        return session_pks
+
+    cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+    if str(chat_id).isdigit():
+        row = conn.execute(
+            "SELECT 1 FROM ZWACHATSESSION WHERE Z_PK = ?",
+            (int(chat_id),),
+        ).fetchone()
+        if row:
+            session_pks.add(int(chat_id))
+
+    cand_jids = _resolve_ios_chat_jids(conn, chat_id)
+    if cand_jids:
+        j_ph = ",".join("?" * len(cand_jids))
+        ident_cond = (
+            f" OR ZCONTACTIDENTIFIER IN ({j_ph})" if "ZCONTACTIDENTIFIER" in cs_cols else ""
+        )
+        cs_params = cand_jids * (2 if ident_cond else 1)
+        for csr in conn.execute(
+            f"SELECT Z_PK FROM ZWACHATSESSION WHERE ZCONTACTJID IN ({j_ph}){ident_cond}",
+            cs_params,
+        ).fetchall():
+            session_pks.add(int(csr[0]))
+    return session_pks
+
+
 def _query_ios_starred(
     conn: sqlite3.Connection,
     target_chat_id: str | None,
@@ -588,12 +635,13 @@ def _query_ios_starred(
         if has_mi
         else set()
     )
-    mi_title = "mi.ZTITLE" if has_mi else "NULL"
-    mi_path = "mi.ZMEDIALOCALPATH" if has_mi else "NULL"
+    mi_title = "mi.ZTITLE" if "ZTITLE" in mi_cols else "NULL"
+    mi_path = "mi.ZMEDIALOCALPATH" if "ZMEDIALOCALPATH" in mi_cols else "NULL"
     mi_meta = "mi.ZMETADATA" if "ZMETADATA" in mi_cols else "NULL"
     mi_duration = "COALESCE(mi.ZMOVIEDURATION, 0)" if "ZMOVIEDURATION" in mi_cols else "0"
     mi_lat = "mi.ZLATITUDE" if "ZLATITUDE" in mi_cols else "NULL"
     mi_lng = "mi.ZLONGITUDE" if "ZLONGITUDE" in mi_cols else "NULL"
+    mi_vcard = "mi.ZVCARDNAME" if "ZVCARDNAME" in mi_cols else "NULL"
 
     has_cs = bool(
         conn.execute(
@@ -606,13 +654,52 @@ def _query_ios_starred(
         else set()
     )
     has_cs_group = "ZGROUPINFO" in cs_cols
+    has_cs_ident = "ZCONTACTIDENTIFIER" in cs_cols
     cs_join = "LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION" if has_cs else ""
+
+    wa_tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    has_gm = "ZWAGROUPMEMBER" in wa_tables
+    has_pp = "ZWAPROFILEPUSHNAME" in wa_tables
+
+    gm_join = (
+        "LEFT JOIN ZWAGROUPMEMBER gm ON m.ZGROUPMEMBER = gm.Z_PK"
+        if (has_gm and "ZGROUPMEMBER" in msg_cols)
+        else ""
+    )
+    pp_member_join = (
+        "LEFT JOIN ZWAPROFILEPUSHNAME pp_member ON pp_member.ZJID = gm.ZMEMBERJID"
+        if (has_gm and has_pp and "ZGROUPMEMBER" in msg_cols)
+        else ""
+    )
+    pp_from_join = (
+        "LEFT JOIN ZWAPROFILEPUSHNAME pp_from ON pp_from.ZJID = m.ZFROMJID"
+        if (has_pp and "ZFROMJID" in msg_cols)
+        else ""
+    )
+    member_jid_col = (
+        "gm.ZMEMBERJID AS member_jid"
+        if (has_gm and "ZGROUPMEMBER" in msg_cols)
+        else "NULL AS member_jid"
+    )
+    resolved_push_col = (
+        "COALESCE(pp_member.ZPUSHNAME, pp_from.ZPUSHNAME) AS resolved_push_name"
+        if has_pp
+        else "NULL AS resolved_push_name"
+    )
 
     where_clauses = ["m.ZSTARRED = 1"]
     params: list = []
     if target_chat_id is not None:
-        where_clauses.append("m.ZCHATSESSION = ?")
-        params.append(target_chat_id)
+        sess_pks = _resolve_ios_chat_session_pks(conn, target_chat_id)
+        if sess_pks:
+            s_ph = ",".join("?" * len(sess_pks))
+            where_clauses.append(f"m.ZCHATSESSION IN ({s_ph})")
+            params.extend(sess_pks)
+        else:
+            where_clauses.append("m.ZCHATSESSION = ?")
+            params.append(target_chat_id)
 
     where_sql = " AND ".join(where_clauses)
     limit_sql = f"LIMIT {int(fetch_limit)}" if fetch_limit is not None else ""
@@ -622,26 +709,48 @@ def _query_ios_starred(
             m.ZCHATSESSION AS chat_session,
             COALESCE(m.ZISFROMME, 0) AS is_from_me,
             COALESCE(m.ZMESSAGEDATE, 0) AS msg_date,
-            COALESCE(NULLIF(m.ZTEXT, ''), NULLIF({mi_title}, ''), '') AS text,
+            COALESCE(NULLIF(m.ZTEXT, ''), '') AS raw_text,
             COALESCE(m.ZMESSAGETYPE, 0) AS message_type,
             m.ZPUSHNAME AS push_name,
             m.ZFROMJID AS from_jid,
+            {member_jid_col},
+            {resolved_push_col},
+            {mi_title} AS media_title,
             {mi_path} AS media_path,
             {mi_meta} AS _raw_metadata,
             {mi_duration} AS media_duration,
             {mi_lat} AS latitude,
             {mi_lng} AS longitude,
+            {mi_vcard} AS vcard_name,
             {"cs.ZPARTNERNAME" if has_cs else "NULL"} AS partner_name,
             {"cs.ZCONTACTJID" if has_cs else "NULL"} AS contact_jid,
+            {"cs.ZCONTACTIDENTIFIER" if has_cs_ident else "NULL"} AS contact_ident,
             {"cs.ZGROUPINFO" if has_cs_group else "NULL"} AS group_info
         FROM ZWAMESSAGE m
         {cs_join}
         {mi_join}
+        {gm_join}
+        {pp_member_join}
+        {pp_from_join}
         WHERE {where_sql}
         ORDER BY m.ZMESSAGEDATE DESC
         {limit_sql}
     """
     rows = conn.execute(sql, params).fetchall()
+
+    all_jids: set[str] = set()
+    for r in rows:
+        fj = r["member_jid"] or r["from_jid"]
+        if fj:
+            all_jids.add(fj)
+        cj = r["contact_jid"]
+        if cj:
+            all_jids.add(cj)
+        ci = r["contact_ident"]
+        if ci:
+            all_jids.add(ci)
+
+    temp_contacts = _fetch_ios_contacts_map(conn, all_jids)
     contacts_map = _get_contacts_lookup(arch_conn)
     results = []
     for r in rows:
@@ -653,57 +762,150 @@ def _query_ios_starred(
             media_type = "photo"
         elif m_type in (2, 39, 54) or any(fp.endswith(ext) for ext in (".mp4", ".mov")):
             media_type = "video"
-        elif m_type == 3 or any(fp.endswith(ext) for ext in (".mp3", ".opus", ".m4a", ".aac")):
-            media_type = "audio"
-        elif m_type == 8 or any(fp.endswith(ext) for ext in (".pdf", ".doc", ".docx", ".zip")):
-            media_type = "document"
-        elif (
-            m_type == 7
-            or "http://" in row_dict["text"].lower()
-            or "https://" in row_dict["text"].lower()
+        elif m_type in (3, 53) or any(
+            fp.endswith(ext) for ext in (".mp3", ".opus", ".m4a", ".aac")
         ):
-            media_type = "link"
+            media_type = "audio"
+        elif m_type == 8 or any(
+            fp.endswith(ext) for ext in (".pdf", ".doc", ".docx", ".zip", ".xlsx")
+        ):
+            media_type = "document"
         elif m_type == 5:
             media_type = "location"
+        elif m_type == 16:
+            media_type = "live_location"
+        elif m_type == 15:
+            media_type = "sticker"
+        elif m_type == 4:
+            media_type = "vcard"
+        elif m_type == 11:
+            media_type = "gif"
         elif m_type == 46:
             media_type = "poll"
+        elif m_type == 14:
+            media_type = "deleted"
+        elif (
+            m_type == 7
+            or "http://" in (row_dict["raw_text"] or "").lower()
+            or "https://" in (row_dict["raw_text"] or "").lower()
+        ):
+            media_type = "link"
         else:
             media_type = None
 
         is_from_me = int(row_dict["is_from_me"])
-        from_jid = row_dict["from_jid"] or ""
+        from_jid = row_dict.get("member_jid") or row_dict.get("from_jid") or ""
+        if from_jid.endswith("@g.us"):
+            from_jid = ""
         from_phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
+
+        resolved_push = row_dict.get("resolved_push_name") or ""
+        clean_resolved_push = "" if _is_unreadable_token(resolved_push) else resolved_push
+
+        raw_push = row_dict.get("push_name") or ""
+        clean_push = "" if _is_unreadable_token(raw_push) else raw_push
+
+        temp_name = temp_contacts.get(from_jid, ("", ""))[0] if from_jid else ""
+        if _is_unreadable_token(temp_name):
+            temp_name = ""
+
         if is_from_me == 1:
             sender_name = "You"
+        elif clean_resolved_push:
+            sender_name = clean_resolved_push
+        elif temp_name:
+            sender_name = temp_name
+        elif contacts_map.get(from_phone):
+            sender_name = contacts_map[from_phone]
+        elif clean_push:
+            sender_name = clean_push
+        elif (
+            from_phone
+            and from_phone.isdigit()
+            and len(from_phone) < 16
+            and not from_jid.endswith("@lid")
+        ):
+            sender_name = f"+{from_phone}"
         else:
-            sender_name = row_dict["push_name"] or ""
-            if not sender_name and from_phone:
-                sender_name = contacts_map.get(from_phone, "")
-            if not sender_name:
-                sender_name = (
-                    f"+{from_phone}"
-                    if (from_phone and from_phone.isdigit())
-                    else (from_phone or "Unknown")
-                )
+            sender_name = "Unknown"
 
-        contact_jid = row_dict["contact_jid"] or ""
+        contact_jid = row_dict.get("contact_jid") or ""
         c_phone = contact_jid.split("@")[0] if "@" in contact_jid else contact_jid
-        chat_name = row_dict["partner_name"] or ""
-        if not chat_name and c_phone:
-            chat_name = contacts_map.get(c_phone, "")
-        if not chat_name:
-            chat_name = (
-                f"+{c_phone}"
-                if (c_phone and c_phone.isdigit())
-                else (c_phone or f"Chat {row_dict['chat_session']}")
-            )
+        raw_chat_name = row_dict.get("partner_name") or ""
+        clean_chat_name = "" if _is_unreadable_token(raw_chat_name) else raw_chat_name
+
+        chat_temp_name = temp_contacts.get(contact_jid, ("", ""))[0] if contact_jid else ""
+        if _is_unreadable_token(chat_temp_name):
+            chat_temp_name = ""
+
+        if clean_chat_name:
+            chat_name = clean_chat_name
+        elif chat_temp_name:
+            chat_name = chat_temp_name
+        elif contacts_map.get(c_phone):
+            chat_name = contacts_map[c_phone]
+        elif (
+            c_phone and c_phone.isdigit() and len(c_phone) < 16 and not contact_jid.endswith("@lid")
+        ):
+            chat_name = f"+{c_phone}"
+        else:
+            chat_name = f"Chat {row_dict['chat_session']}"
 
         is_group = bool(row_dict.get("group_info") is not None or contact_jid.endswith("@g.us"))
+
+        raw_text = row_dict["raw_text"] or ""
+        if _is_unreadable_token(raw_text):
+            raw_text = ""
+
+        media_title = row_dict.get("media_title") or ""
+        if _is_unreadable_token(media_title):
+            media_title = ""
+
+        vcard_name = row_dict.get("vcard_name") or ""
+        if _is_unreadable_token(vcard_name):
+            vcard_name = ""
+
+        if media_type == "deleted":
+            text = "You deleted this message" if is_from_me == 1 else "This message was deleted"
+        elif media_type in ("photo", "video", "gif"):
+            text = media_title or raw_text
+        elif media_type == "document":
+            # For documents on iOS, user caption is in ZWAMEDIAITEM.ZTITLE (media_title)
+            # while filename is in ZWAMESSAGE.ZTEXT (raw_text).
+            text = media_title or ""
+        elif media_type == "vcard":
+            text = vcard_name or raw_text
+        elif media_type in ("location", "live_location"):
+            text = media_title or vcard_name or raw_text
+        elif media_type == "poll":
+            poll_title = ""
+            raw_meta = row_dict.get("_raw_metadata")
+            if raw_meta and isinstance(raw_meta, (bytes, bytearray)):
+                poll_info = _parse_ios_poll_blob(bytes(raw_meta))
+                if poll_info and poll_info.get("question"):
+                    poll_title = poll_info["question"]
+            text = poll_title or raw_text or media_title
+        else:
+            text = raw_text
+
         file_name = ""
         if media_type == "document":
-            file_name = row_dict["text"] or ""
+            file_name = (
+                raw_text
+                or (Path(row_dict["media_path"]).name if row_dict["media_path"] else "")
+                or media_title
+            )
         elif row_dict.get("media_path"):
             file_name = Path(row_dict["media_path"]).name
+        if _is_unreadable_token(file_name):
+            file_name = ""
+
+        place_name = ""
+        if media_type in ("location", "live_location"):
+            place_name = media_title or vcard_name or raw_text
+        if _is_unreadable_token(place_name):
+            place_name = ""
+
         dur_sec = int(row_dict.get("media_duration") or 0)
         lat = row_dict.get("latitude")
         lng = row_dict.get("longitude")
@@ -716,14 +918,14 @@ def _query_ios_starred(
                 "chat_name": chat_name,
                 "sender_name": sender_name,
                 "timestamp": int(round(float(row_dict["msg_date"]) + 978307200)),
-                "text": row_dict["text"],
-                "text_body": row_dict["text"],
+                "text": text,
+                "text_body": text,
                 "media_type": media_type,
                 "duration": dur_sec,
                 "file_name": file_name,
                 "latitude": lat,
                 "longitude": lng,
-                "place_name": "",
+                "place_name": place_name,
                 "_raw_metadata": row_dict.get("_raw_metadata"),
             }
         )
@@ -1055,27 +1257,18 @@ def _query_ios_pinned(
     zwa_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
     contacts_map = _get_contacts_lookup(arch_conn)
 
-    session_pks: set[int] = set()
-    if str(chat_id).isdigit():
-        session_pks.add(int(chat_id))
+    session_pks = _resolve_ios_chat_session_pks(conn, chat_id)
     cand_jids = _resolve_ios_chat_jids(conn, chat_id)
     has_cs = bool(
         conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWACHATSESSION'"
         ).fetchone()
     )
-    if has_cs and cand_jids:
-        cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
-        j_ph = ",".join("?" * len(cand_jids))
-        ident_cond = (
-            f" OR ZCONTACTIDENTIFIER IN ({j_ph})" if "ZCONTACTIDENTIFIER" in cs_cols else ""
-        )
-        cs_params = cand_jids * (2 if ident_cond else 1)
-        for csr in conn.execute(
-            f"SELECT Z_PK FROM ZWACHATSESSION WHERE ZCONTACTJID IN ({j_ph}){ident_cond}",
-            cs_params,
-        ).fetchall():
-            session_pks.add(int(csr[0]))
+    cs_cols = (
+        {r[1] for r in conn.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
+        if has_cs
+        else set()
+    )
 
     has_mi = bool(
         conn.execute(
@@ -1283,7 +1476,9 @@ def _query_ios_pinned(
         elif media_type in ("photo", "video", "gif"):
             text = media_title or raw_text
         elif media_type == "document":
-            text = raw_text or media_title or ""
+            # For documents on iOS, user caption is in ZWAMEDIAITEM.ZTITLE (media_title)
+            # while filename is in ZWAMESSAGE.ZTEXT (raw_text).
+            text = media_title or ""
         elif media_type == "vcard":
             text = vcard_name or raw_text
         elif media_type in ("location", "live_location"):
@@ -1296,9 +1491,9 @@ def _query_ios_pinned(
         file_name = ""
         if media_type == "document":
             file_name = (
-                media_title
+                raw_text
                 or (Path(target_row["media_path"]).name if target_row["media_path"] else "")
-                or raw_text
+                or media_title
             )
         elif target_row["media_path"]:
             file_name = Path(target_row["media_path"]).name
@@ -1618,11 +1813,20 @@ def _count_chat_starred(
         if has_msg:
             m_cols = {r[1] for r in wa_conn.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
             if "ZSTARRED" in m_cols:
-                cnt_row = wa_conn.execute(
-                    "SELECT COUNT(*) FROM ZWAMESSAGE WHERE ZSTARRED = 1 AND ZCHATSESSION = ?",
-                    (target_chat_id,),
-                ).fetchone()
-                live_cnt = int(cnt_row[0]) if cnt_row else 0
+                sess_pks = _resolve_ios_chat_session_pks(wa_conn, target_chat_id)
+                if sess_pks:
+                    s_ph = ",".join("?" * len(sess_pks))
+                    cnt_row = wa_conn.execute(
+                        f"SELECT COUNT(*) FROM ZWAMESSAGE WHERE ZSTARRED = 1 AND ZCHATSESSION IN ({s_ph})",
+                        list(sess_pks),
+                    ).fetchone()
+                    live_cnt = int(cnt_row[0]) if cnt_row else 0
+                else:
+                    cnt_row = wa_conn.execute(
+                        "SELECT COUNT(*) FROM ZWAMESSAGE WHERE ZSTARRED = 1 AND ZCHATSESSION = ?",
+                        (target_chat_id,),
+                    ).fetchone()
+                    live_cnt = int(cnt_row[0]) if cnt_row else 0
 
     pres_cnt = 0
     if pres_conn is not None:

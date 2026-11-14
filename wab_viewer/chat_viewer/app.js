@@ -5598,7 +5598,10 @@
         const card = document.createElement('div');
         card.className = 'starred-card';
         card.setAttribute('tabindex', '0');
-        card.setAttribute('aria-label', `Starred message from ${m.sender_name}`);
+        const rawSender = m.sender_name || '';
+        const cleanSender = _isUnreadableToken(rawSender) ? '' : rawSender;
+        const senderDisplay = cleanSender || 'Unknown';
+        card.setAttribute('aria-label', `Starred message from ${senderDisplay}`);
 
         const topRow = document.createElement('div');
         topRow.className = 'starred-card-top';
@@ -5606,7 +5609,7 @@
         const metaEl = document.createElement('span');
         metaEl.className = 'starred-card-meta';
         const dateStr = fmtDateSep(m.timestamp * 1000);
-        metaEl.textContent = `${m.sender_name || 'Unknown'} (${dateStr})`;
+        metaEl.textContent = `${senderDisplay} (${dateStr})`;
 
         const chevron = document.createElement('span');
         chevron.className = 'starred-card-chevron';
@@ -5680,8 +5683,8 @@
 
   // ---- pinned message banner -----------------------------------------------
 
-  const _RAW_STANZA_ID_RE = /^(?:3EB0[0-9A-Za-z_-]{4,60}|[0-9A-Fa-f]{16,64})$/;
-  const _BASE64_TOKEN_RE = /^[A-Za-z0-9+/]{16,}={0,2}$/;
+  const _RAW_STANZA_ID_RE = /^(?:3EB0[0-9A-Za-z_-]{4,60}|[0-9A-Fa-f]{16,64}|[0-9]{15,20}[-_][0-9]+)$/;
+  const _BASE64_TOKEN_RE = /^(?:[A-Za-z0-9+/]{6,}={1,2}|[A-Za-z0-9+/]{16,}={0,2}|C[A-Za-z0-9+/]{6,}={0,2})$/;
   const _LID_RE = /^[0-9]+@lid$/;
 
   function _isRawStanzaId(str) {
@@ -5718,9 +5721,14 @@
         return `🎤 Voice message${durStr}`;
       }
       if (mt === 'document') {
-        const rawFname = m.file_name || preview || 'Document';
-        const fname = _isUnreadableToken(rawFname) ? 'Document' : rawFname;
-        return `📄 ${fname}`;
+        const rawFname = m.file_name || '';
+        const cleanFname = _isUnreadableToken(rawFname) ? '' : rawFname;
+        const cleanPreview = _isUnreadableToken(preview) ? '' : preview;
+        if (cleanFname && cleanPreview && cleanFname !== cleanPreview) {
+          return `📄 ${cleanFname} • ${cleanPreview}`;
+        }
+        const display = cleanFname || cleanPreview || 'Document';
+        return `📄 ${display}`;
       }
       if (mt === 'location') {
         const rawLoc = m.place_name || preview;
@@ -5992,7 +6000,9 @@
     el.dataset.chatId = String(m.chat_id);
     if (m.chat_type) el.dataset.chatType = m.chat_type;
     const preview = _formatStarredPreview(m);
-    const authorPrefix = m.sender_name ? `${m.sender_name}: ` : '';
+    const rawSender = m.sender_name || '';
+    const cleanSender = _isUnreadableToken(rawSender) ? '' : rawSender;
+    const authorPrefix = cleanSender ? `${cleanSender}: ` : '';
     el.innerHTML = `<div class="chat-name">${esc(m.chat_name || 'Chat')}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
     el.addEventListener('click', () => {
       openChatAtMessage(m.chat_id, m.id, m.chat_type, m.chat_name);
