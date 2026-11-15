@@ -191,12 +191,18 @@ def _query_android_starred(
     if "starred" not in msg_cols:
         return []
 
-    has_jm_resolved = bool(
+    has_resolved = bool(
         conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_contacts_resolved'"
+        ).fetchone()
+        and conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_lid_map_resolved'"
+        ).fetchone()
+        and conn.execute(
             "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_jid_map_resolved'"
         ).fetchone()
     )
-    if not has_jm_resolved:
+    if not has_resolved:
         _ensure_jid_map_resolved(conn, arch_conn)
 
     has_mm = bool(
@@ -1062,12 +1068,18 @@ def _query_android_pinned(
     if not has_msg:
         return []
 
-    has_jm_resolved = bool(
+    has_resolved = bool(
         conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_contacts_resolved'"
+        ).fetchone()
+        and conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_lid_map_resolved'"
+        ).fetchone()
+        and conn.execute(
             "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_jid_map_resolved'"
         ).fetchone()
     )
-    if not has_jm_resolved:
+    if not has_resolved:
         _ensure_jid_map_resolved(conn, arch_conn)
 
     has_pin_table = bool(
@@ -1077,11 +1089,13 @@ def _query_android_pinned(
     )
 
     pin_join = (
-        "JOIN message_add_on_pin_in_chat pic ON pic.message_add_on_row_id = ao._id"
+        "LEFT JOIN message_add_on_pin_in_chat pic ON pic.message_add_on_row_id = ao._id"
         if has_pin_table
         else ""
     )
-    pin_cond = "AND pic.pin_in_chat_state = 1" if has_pin_table else ""
+    pin_cond = (
+        "AND (pic.pin_in_chat_state IS NULL OR pic.pin_in_chat_state = 1)" if has_pin_table else ""
+    )
 
     chat_pred, chat_params = _resolve_android_chat_filter(conn, chat_id, chat_type, row_ids_cache)
 
