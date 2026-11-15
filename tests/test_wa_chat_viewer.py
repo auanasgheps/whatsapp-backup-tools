@@ -1427,17 +1427,23 @@ class TestApiMedia:
         app.config["TESTING"] = True
         with app.test_client() as client:
             # Video filter must strictly contain only real_video.mp4, not attached_video.mp4
-            videos = client.get("/api/media?chat_id=123456789&chat_type=contact&types=video").get_json()
+            videos = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=video"
+            ).get_json()
             assert len(videos) == 1
             assert videos[0]["msg_id"] == 101
             assert videos[0]["media_type"] == "video"
 
             # Image filter must contain 0 items
-            images = client.get("/api/media?chat_id=123456789&chat_type=contact&types=image").get_json()
+            images = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=image"
+            ).get_json()
             assert len(images) == 0
 
             # Document filter must return both documents
-            docs = client.get("/api/media?chat_id=123456789&chat_type=contact&types=document").get_json()
+            docs = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=document"
+            ).get_json()
             assert len(docs) == 2
             doc_ids = {d["msg_id"] for d in docs}
             assert doc_ids == {102, 103}
