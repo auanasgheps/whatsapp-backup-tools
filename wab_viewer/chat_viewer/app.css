@@ -1977,6 +1977,16 @@
       max-height: 85vh;
       object-fit: contain;
     }
+    .img-lightbox video.lb-video-note, .lb-stage video.lb-video-note {
+      border-radius: 50% !important;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      max-width: min(80vh, 500px);
+      max-height: min(80vh, 500px);
+      width: auto;
+      height: auto;
+      border: 3px solid var(--accent);
+    }
     .lb-stage {
       position: relative;
       display: flex;
@@ -2263,6 +2273,42 @@
       pointer-events: none;
       z-index: 1;
     }
+    .gallery-item.is-video-note {
+      border-radius: 50% !important;
+      width: 104px;
+      height: 104px;
+      margin: auto;
+      aspect-ratio: 1 / 1;
+      border: 2px solid var(--accent);
+      overflow: hidden;
+      justify-self: center;
+      align-self: center;
+    }
+    .gallery-item.is-video-note img,
+    .gallery-item.is-video-note video {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      object-fit: cover;
+    }
+    .gallery-item.is-video-note::after {
+      display: none !important;
+    }
+    .gallery-ptv-badge {
+      position: absolute;
+      bottom: 6px;
+      left: 6px;
+      background: rgba(0, 0, 0, 0.65);
+      color: #fff;
+      border-radius: 50%;
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 2;
+    }
     .gallery-video-thumb--err { object-fit: none; opacity: 0.3; }
     .gallery-video-thumb--err::before { content: '▶'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 32px; opacity: 0.7; }
     .gallery-item .gallery-doc {
@@ -2278,6 +2324,31 @@
     }
     .gallery-item.is-missing::after {
       display: none !important;
+    }
+    .gallery-item.has-thumb {
+      cursor: pointer;
+    }
+    .gallery-item.has-thumb .gallery-goto {
+      opacity: 0.9;
+    }
+    .gallery-missing-indicator-badge {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      background: rgba(11, 20, 26, 0.8);
+      border: 1px solid rgba(245, 158, 11, 0.7);
+      border-radius: 4px;
+      padding: 3px 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #f59e0b;
+      z-index: 3;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+      pointer-events: none;
+    }
+    .gallery-missing-indicator-icon {
+      display: block;
     }
     .gallery-missing-blur {
       position: absolute; inset: 0; width: 100%; height: 100%;

@@ -3187,14 +3187,24 @@ def test_group_mentions_rendering_and_navigation(tmp_path: Path, screenshot_dir:
         res = session.evaluate(
             """
             (async () => {
-                const grpItem = [...document.querySelectorAll('.chat-item')].find(
-                    e => e.textContent.includes('Project Alpha')
-                );
-                grpItem.click();
+                let grpItem = null;
+                for (let i = 0; i < 50; i++) {
+                    grpItem = [...document.querySelectorAll('.chat-item')].find(
+                        e => e.textContent.includes('Project Alpha')
+                    );
+                    if (grpItem) break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                if (grpItem) grpItem.click();
                 await new Promise(r => setTimeout(r, 300));
 
-                const msgEl = document.querySelector('.msg-row .msg-text');
-                const linked = msgEl.querySelector('a.wa-mention-link');
+                let msgEl = null;
+                for (let i = 0; i < 50; i++) {
+                    msgEl = document.querySelector('.msg-row .msg-text');
+                    if (msgEl) break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                const linked = msgEl ? msgEl.querySelector('a.wa-mention-link') : null;
                 const spans = [...msgEl.querySelectorAll('span.wa-mention')];
                 const codeEl = msgEl.querySelector('code');
                 const linkStyle = linked ? getComputedStyle(linked) : null;
@@ -3438,10 +3448,12 @@ def test_round_video_note_player_and_exclusion_from_grouping(
                 let shrunkWidth = 0;
                 if (firstEnlargeBtn) {
                     firstEnlargeBtn.click();
+                    await new Promise(r => setTimeout(r, 260));
                     const enRect = notes[0].getBoundingClientRect();
                     enlargedWidth = enRect.width;
                     enlargedSquare = Math.abs(enRect.width - enRect.height) <= 2;
                     firstEnlargeBtn.click();
+                    await new Promise(r => setTimeout(r, 260));
                     const shRect = notes[0].getBoundingClientRect();
                     shrunkWidth = shRect.width;
                 }
