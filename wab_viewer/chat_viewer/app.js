@@ -3295,10 +3295,13 @@
         panY = 0;
         return;
       }
+      const stage = lb.querySelector('.lb-stage');
+      const stageW = (stage && stage.clientWidth) ? stage.clientWidth : window.innerWidth;
+      const stageH = (stage && stage.clientHeight) ? stage.clientHeight : window.innerHeight;
       const scaledW = currentMedia.offsetWidth * scale;
       const scaledH = currentMedia.offsetHeight * scale;
-      const maxPanX = Math.max(40, (scaledW - window.innerWidth) / 2 + 40);
-      const maxPanY = Math.max(40, (scaledH - window.innerHeight) / 2 + 40);
+      const maxPanX = Math.max(40, (scaledW - stageW) / 2 + 40);
+      const maxPanY = Math.max(40, (scaledH - stageH) / 2 + 40);
       panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
       panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
     }
@@ -3333,8 +3336,10 @@
       if (nextScale > 6) {
         nextScale = 6;
       }
-      const cx = window.innerWidth / 2 + panX;
-      const cy = window.innerHeight / 2 + panY;
+      const stage = lb.querySelector('.lb-stage');
+      const stageRect = stage ? stage.getBoundingClientRect() : null;
+      const cx = (stageRect ? (stageRect.left + stageRect.width / 2) : (window.innerWidth / 2)) + panX;
+      const cy = (stageRect ? (stageRect.top + stageRect.height / 2) : (window.innerHeight / 2)) + panY;
       const dx = e.clientX - cx;
       const dy = e.clientY - cy;
       const ratio = nextScale / prevScale;
@@ -3384,8 +3389,10 @@
       e.stopPropagation();
       if (scale === 1) {
         scale = 2.5;
-        const cx = window.innerWidth / 2;
-        const cy = window.innerHeight / 2;
+        const stage = lb.querySelector('.lb-stage');
+        const stageRect = stage ? stage.getBoundingClientRect() : null;
+        const cx = stageRect ? (stageRect.left + stageRect.width / 2) : (window.innerWidth / 2);
+        const cy = stageRect ? (stageRect.top + stageRect.height / 2) : (window.innerHeight / 2);
         panX = -(e.clientX - cx) * 1.5;
         panY = -(e.clientY - cy) * 1.5;
         clampPan();
@@ -3448,7 +3455,7 @@
     const nextIdx = _nextLightboxIndex(index, 1);
     if (nextIdx !== -1) {
       const nextMsg = lightboxItems[nextIdx];
-      if (nextMsg && (nextMsg.media_type === 'image' || nextMsg.media_type === 'sticker')) {
+      if (nextMsg && !nextMsg.is_missing && (nextMsg.media_type === 'image' || nextMsg.media_type === 'sticker')) {
         const img = new Image();
         img.src = '/media/' + nextMsg.archive_path;
       }
@@ -3456,7 +3463,7 @@
     const prevIdx = _nextLightboxIndex(index, -1);
     if (prevIdx !== -1) {
       const prevMsg = lightboxItems[prevIdx];
-      if (prevMsg && (prevMsg.media_type === 'image' || prevMsg.media_type === 'sticker')) {
+      if (prevMsg && !prevMsg.is_missing && (prevMsg.media_type === 'image' || prevMsg.media_type === 'sticker')) {
         const img = new Image();
         img.src = '/media/' + prevMsg.archive_path;
       }
@@ -3543,11 +3550,19 @@
       outgoing.classList.add('lb-media-exiting');
       outgoing.style.transform = dir > 0 ? 'translateX(-40px)' : 'translateX(40px)';
       outgoing.style.opacity = '0';
+      let cleanedOutgoing = false;
+      let cleanTimer = null;
       const cleanupOutgoing = () => {
+        if (cleanedOutgoing) return;
+        cleanedOutgoing = true;
+        if (cleanTimer !== null) {
+          clearTimeout(cleanTimer);
+          cleanTimer = null;
+        }
         if (outgoing.isConnected) outgoing.remove();
       };
       outgoing.addEventListener('transitionend', cleanupOutgoing, { once: true });
-      setTimeout(cleanupOutgoing, 250);
+      cleanTimer = setTimeout(cleanupOutgoing, 250);
     }
 
     incomingMedia.classList.add('lb-media-entering');
@@ -3563,17 +3578,24 @@
       incomingMedia.style.opacity = '1';
     });
 
+    let finalized = false;
+    let finalizeTimer = null;
     const finalizeIncoming = () => {
+      if (finalized) return;
+      finalized = true;
+      if (finalizeTimer !== null) {
+        clearTimeout(finalizeTimer);
+        finalizeTimer = null;
+      }
+      if (seq !== lightboxNavSeq) return;
       incomingMedia.classList.remove('lb-media-entering');
       incomingMedia.style.transform = '';
       incomingMedia.style.opacity = '';
       incomingMedia.style.transition = '';
-      if (seq === lightboxNavSeq) {
-        lbZoomController?.attach(incomingMedia);
-      }
+      lbZoomController?.attach(incomingMedia);
     };
     incomingMedia.addEventListener('transitionend', finalizeIncoming, { once: true });
-    setTimeout(finalizeIncoming, 250);
+    finalizeTimer = setTimeout(finalizeIncoming, 250);
   }
 
   function openLightboxAt(index, dir) {
@@ -4192,6 +4214,9 @@
   }
 
   function buildMissingGalleryCard(cell, msg) {
+    if (msg) {
+      msg.is_missing = true;
+    }
     cell.classList.add('is-missing');
     cell.innerHTML = '';
     delete cell.dataset.src;
@@ -4631,9 +4656,14 @@
   function _nextLightboxIndex(from, dir) {
     let i = from + dir;
     while (i >= 0 && i < lightboxItems.length) {
+      const item = lightboxItems[i];
+      if (item && item.is_missing) {
+        i += dir;
+        continue;
+      }
       // activeTypes is a gallery-only filter; in chat context every item in
       // lightboxItems is already a renderable media message, so accept it.
-      if (lightboxContext !== 'gallery' || activeTypes.size === 0 || activeTypes.has(lightboxItems[i].media_type)) return i;
+      if (lightboxContext !== 'gallery' || activeTypes.size === 0 || activeTypes.has(item.media_type)) return i;
       i += dir;
     }
     return -1;
