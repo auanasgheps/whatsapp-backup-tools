@@ -2330,6 +2330,121 @@ def test_viewer_preserved_messages_integration(tmp_path: Path) -> None:
     assert info_data["last_ts"] == 5000
 
 
+def test_preserved_chat_info_excludes_service_messages(tmp_path: Path) -> None:
+    """GET /api/chat-info on preserved messages excludes media_type='service' from first_ts/last_ts."""
+    from wab_viewer.main import create_app
+
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    arch_db = output_root / ".wa_media_archiver.db"
+    _make_dummy_archive_db(arch_db)
+
+    # Minimal source db
+    live_db = output_root / "msgstore.db"
+    with sqlite3.connect(live_db) as conn:
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER DEFAULT 0, display_message_row_id INTEGER DEFAULT 0);
+            CREATE TABLE message (
+                _id INTEGER PRIMARY KEY, chat_row_id INTEGER, key_id TEXT, from_me INTEGER, sender_jid_row_id INTEGER, timestamp INTEGER, message_type INTEGER, text_data TEXT
+            );
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, file_path TEXT, media_name TEXT);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY);
+        """)
+
+    pres_conn = preservation.open_preservation_db(str(output_root))
+
+    rows = [
+        # Leading service message
+        {
+            "chat_id": "pres_grp",
+            "chat_type": "group",
+            "stanza_id": "p_msg_1",
+            "msg_id": 1,
+            "timestamp_ms": 1000,
+            "sender": "System",
+            "from_me": 0,
+            "text_body": "Group created",
+            "media_type": "service",
+            "media_name": "",
+            "archive_path": None,
+            "quoted_text": "",
+            "quoted_sender": "",
+            "quoted_ts": 0,
+            "reactions": None,
+            "is_edited": 0,
+            "edited_ts": None,
+            "action_type": 6,
+            "participant_name": "",
+            "preserved_at": "2026-10-15T10:00:00Z",
+            "preservation_reason": "chat_deleted",
+            "source_platform": "android",
+        },
+        # Conversational text message
+        {
+            "chat_id": "pres_grp",
+            "chat_type": "group",
+            "stanza_id": "p_msg_2",
+            "msg_id": 2,
+            "timestamp_ms": 2500,
+            "sender": "Alice",
+            "from_me": 0,
+            "text_body": "Real conversation message",
+            "media_type": "text",
+            "media_name": "",
+            "archive_path": None,
+            "quoted_text": "",
+            "quoted_sender": "",
+            "quoted_ts": 0,
+            "reactions": None,
+            "is_edited": 0,
+            "edited_ts": None,
+            "action_type": None,
+            "participant_name": "",
+            "preserved_at": "2026-10-15T10:00:00Z",
+            "preservation_reason": "chat_deleted",
+            "source_platform": "android",
+        },
+        # Trailing service message
+        {
+            "chat_id": "pres_grp",
+            "chat_type": "group",
+            "stanza_id": "p_msg_3",
+            "msg_id": 3,
+            "timestamp_ms": 4000,
+            "sender": "System",
+            "from_me": 0,
+            "text_body": "Bob left",
+            "media_type": "service",
+            "media_name": "",
+            "archive_path": None,
+            "quoted_text": "",
+            "quoted_sender": "",
+            "quoted_ts": 0,
+            "reactions": None,
+            "is_edited": 0,
+            "edited_ts": None,
+            "action_type": 12,
+            "participant_name": "",
+            "preserved_at": "2026-10-15T10:00:00Z",
+            "preservation_reason": "chat_deleted",
+            "source_platform": "android",
+        },
+    ]
+    preservation.record_preserved_messages(pres_conn, rows, "android", _TEST_LOGGER)
+    pres_conn.close()
+
+    app = create_app(output_root)
+    client = app.test_client()
+
+    info_res = client.get("/api/chat-info?chat_id=pres_grp&chat_type=group")
+    assert info_res.status_code == 200
+    info_data = info_res.get_json()
+    assert info_data["total"] == 1
+    assert info_data["first_ts"] == 2500
+    assert info_data["last_ts"] == 2500
+
+
 def test_merge_messages_same_timestamp_burst_not_dropped() -> None:
     from wab_viewer.preserved import _merge_messages
 

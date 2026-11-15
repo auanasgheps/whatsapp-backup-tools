@@ -2561,6 +2561,193 @@ class TestChatInfo:
         assert data["first_ts"] == 1700000000000
         assert data["last_ts"] == 1700000000000
 
+    def test_android_chat_info_excludes_service_messages_from_first_and_last_ts(self, tmp_path):
+        """Android /api/chat-info first_ts and last_ts exclude system/service messages."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000001')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (30, 2, 'Project Chat', 0, 1700000000000, 4)"
+        )
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
+
+        # Msg 1: Leading service message (group created / encryption notice)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (1, 30, 0, 3, 1600000000000, 'Group created', 7)"
+        )
+        # Msg 2: First conversational message (text)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (2, 30, 0, 3, 1650000000000, 'First real message', 0)"
+        )
+        # Msg 3: Last conversational message (image)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (3, 30, 1, NULL, 1680000000000, '', 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path) VALUES (3, 'WhatsApp/Media/WhatsApp Images/photo.jpg')"
+        )
+        # Msg 4: Trailing service message (e.g. member left)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (4, 30, 0, 3, 1700000000000, 'Alice left', 7)"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('30', 'Project Chat', 'Project Chat')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=30&chat_type=group").get_json()
+
+        assert data["first_ts"] == 1650000000000
+        assert data["last_ts"] == 1680000000000
+        assert data["total"] == 2
+        assert data["sent"] == 1
+        assert data["received"] == 1
+
+    def test_android_chat_info_only_service_messages_returns_none_timestamps(self, tmp_path):
+        """Android /api/chat-info with only service messages returns None first_ts/last_ts."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (2, '120363000000002')")
+        wa_conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) "
+            "VALUES (31, 2, 'Empty Group', 0, 1600000000000, 1)"
+        )
+        wa_conn.execute("INSERT INTO jid (_id, user) VALUES (3, '987654321')")
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (1, 31, 0, 3, 1600000000000, 'Group created', 7)"
+        )
+        wa_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('31', 'Empty Group', 'Empty Group')"
+        )
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=31&chat_type=group").get_json()
+
+        assert data["first_ts"] is None
+        assert data["last_ts"] is None
+        assert data["total"] == 0
+
+    def test_ios_chat_info_excludes_service_messages_from_first_and_last_ts(self, tmp_path):
+        """iOS /api/chat-info first_ts and last_ts exclude ZMESSAGETYPE in (6, 10)."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+
+        cs_conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (40, 1, '120363000000040@g.us', 'iOS Project', 0)
+        """)
+        cs_conn.execute("""
+            INSERT INTO ZWAGROUPINFO (Z_PK, ZCREATIONDATE, ZCREATORJID)
+            VALUES (1, 100.0, '15550001111@s.whatsapp.net')
+        """)
+        cs_conn.execute("""
+            INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZTITLE)
+            VALUES (1, 'Media/photo.jpg', NULL)
+        """)
+
+        # Msg 1: Group event (type 10: created/joined)
+        cs_conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZGROUPEVENTTYPE, ZTEXT)
+            VALUES (1, 40, 0, 100.0, 10, 1, 'Group created')
+        """)
+        # Msg 2: First conversational message (text)
+        cs_conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZGROUPEVENTTYPE, ZTEXT)
+            VALUES (2, 40, 0, 200.0, 0, NULL, 'Hello team')
+        """)
+        # Msg 3: Last conversational message (photo)
+        cs_conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZGROUPEVENTTYPE, ZMEDIAITEM, ZTEXT)
+            VALUES (3, 40, 1, 300.0, 1, NULL, 1, NULL)
+        """)
+        # Msg 4: Trailing service message (type 6: subject changed)
+        cs_conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZGROUPEVENTTYPE, ZTEXT)
+            VALUES (4, 40, 0, 400.0, 6, NULL, 'Subject changed')
+        """)
+        cs_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('40', 'iOS Project', 'iOS Project')"
+        )
+        archive_conn.commit()
+        cs_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=40&chat_type=group").get_json()
+
+        expected_first = int((200.0 + 978307200) * 1000)
+        expected_last = int((300.0 + 978307200) * 1000)
+        assert data["first_ts"] == expected_first
+        assert data["last_ts"] == expected_last
+        assert data["total"] == 2
+        assert data["sent"] == 1
+        assert data["received"] == 1
+
+    def test_ios_chat_info_only_service_messages_returns_none_timestamps(self, tmp_path):
+        """iOS /api/chat-info with only service messages returns None first_ts/last_ts."""
+        cs_conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+
+        cs_conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZGROUPINFO, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (41, 1, '120363000000041@g.us', 'Empty iOS Group', 0)
+        """)
+        cs_conn.execute("""
+            INSERT INTO ZWAGROUPINFO (Z_PK, ZCREATIONDATE, ZCREATORJID)
+            VALUES (1, 100.0, '15550001111@s.whatsapp.net')
+        """)
+        cs_conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZGROUPEVENTTYPE, ZTEXT)
+            VALUES (1, 41, 0, 100.0, 10, 1, 'Group created')
+        """)
+        cs_conn.commit()
+
+        archive_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('41', 'Empty iOS Group', 'Empty iOS Group')"
+        )
+        archive_conn.commit()
+        cs_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            data = client.get("/api/chat-info?chat_id=41&chat_type=group").get_json()
+
+        assert data["first_ts"] is None
+        assert data["last_ts"] is None
+        assert data["total"] == 0
+
     def test_create_app_raises_when_no_wa_db(self, tmp_path):
         """Without a WA source DB, create_app refuses to start by raising FileNotFoundError."""
         archive_path = tmp_path / ".wa_media_archiver.db"
