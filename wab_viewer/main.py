@@ -6701,7 +6701,7 @@ def create_app(output_root: Path, rescan: bool = False):
                     elif (source_type == "android" and raw_type == 5) or (
                         source_type == "ios"
                         and raw_type == 5
-                        and not (r.get("last_msg_duration") and r["last_msg_duration"] > 0)
+                        and not (d.get("last_msg_duration") and d["last_msg_duration"] > 0)
                     ):
                         d["last_msg_type"] = "location"
                     elif (source_type == "android" and raw_type == 16) or (
@@ -6710,8 +6710,8 @@ def create_app(output_root: Path, rescan: bool = False):
                             raw_type == 16
                             or (
                                 raw_type == 5
-                                and r.get("last_msg_duration")
-                                and r["last_msg_duration"] > 0
+                                and d.get("last_msg_duration")
+                                and d["last_msg_duration"] > 0
                             )
                         )
                     ):

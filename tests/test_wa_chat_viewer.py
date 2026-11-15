@@ -7182,6 +7182,85 @@ class TestEditedMessages:
         assert "msg-edited" in css_content
 
 
+class TestIosLocationChatList:
+    def test_ios_location_last_message_does_not_break_chat_list(self, tmp_path):
+        archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        archive_conn.execute("INSERT INTO contacts (number, folder) VALUES ('44123456', 'Alice')")
+        archive_conn.execute("INSERT INTO contacts (number, folder) VALUES ('44987654', 'Bob')")
+        archive_conn.commit()
+        archive_conn.close()
+
+        wa_conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        wa_conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT,
+                ZHIDDEN INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZWAMEDIAITEM (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEDIALOCALPATH TEXT,
+                ZTITLE TEXT,
+                ZVCARDNAME TEXT,
+                ZVCARDSTRING TEXT,
+                ZMOVIEDURATION INTEGER
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (
+                ZJID TEXT,
+                ZPUSHNAME TEXT
+            );
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGETYPE INTEGER,
+                ZTEXT TEXT,
+                ZMEDIAITEM INTEGER,
+                ZFROMJID TEXT,
+                ZSTANZAID TEXT,
+                ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+        """)
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (1, '44123456@s.whatsapp.net', NULL, 'Alice')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZGROUPINFO, ZPARTNERNAME) VALUES (2, '44987654@s.whatsapp.net', NULL, 'Bob')"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMOVIEDURATION) VALUES (1, NULL, NULL)"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMOVIEDURATION) VALUES (2, NULL, 60)"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES (1, 1, 0, 700000000.0, 5, NULL, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZMEDIAITEM) VALUES (2, 2, 0, 700000001.0, 5, NULL, 2)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            by_id = {c["id"]: c for c in resp.get_json()}
+            assert by_id["1"]["last_msg_type"] == "location"
+            assert by_id["2"]["last_msg_type"] == "live_location"
+
+
 class TestStickerSupport:
     def test_ios_sticker_classification_and_gallery(self, tmp_path):
         archive_path_db = tmp_path / ".wa_media_archiver.db"
