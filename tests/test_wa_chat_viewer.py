@@ -2328,6 +2328,25 @@ class TestHtmlTemplate:
         )
         assert "prefers-reduced-motion" in css, "Reduced motion must be supported for transitions"
 
+    def test_lightbox_transition_safety_and_missing_skip(self):
+        """Lightbox transition coordinator must cancel fallback timer and skip missing media."""
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        script = app_js_path.read_text(encoding="utf-8")
+
+        assert "clearTimeout(finalizeTimer)" in script, (
+            "Finalize timer must be cleared on transitionend to prevent duplicate execution"
+        )
+        assert "clearTimeout(cleanTimer)" in script, (
+            "Outgoing clean timer must be cleared on transitionend to prevent duplicate execution"
+        )
+        assert "item.is_missing" in script, "Lightbox navigation must skip media flagged as missing"
+        assert "msg.is_missing = true" in script, (
+            "buildMissingGalleryCard must mark message as missing"
+        )
+        assert "stage.clientWidth" in script, (
+            "clampPan must use stage bounding dimensions rather than pure window dimensions"
+        )
+
 
 class TestReactionsFrontendLayout:
     def test_reactions_css_corner_alignment(self):
