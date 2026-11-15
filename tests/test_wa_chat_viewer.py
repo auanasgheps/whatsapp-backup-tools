@@ -12790,6 +12790,20 @@ class TestTrack2UIShell:
         assert "#chat-header-info" in css
         assert "#sidebar-bottom-bar" in css
 
+    def test_chat_list_avatar_styling_and_script(self, app_and_tmp):
+        client, tmp_path = app_and_tmp
+        resp_css = client.get("/static/app.css")
+        assert resp_css.status_code == 200
+        css = resp_css.get_data(as_text=True)
+        assert ".chat-item-avatar" in css
+        assert ".chat-item-body" in css
+
+        resp_js = client.get("/static/app.js")
+        assert resp_js.status_code == 200
+        js = resp_js.get_data(as_text=True)
+        assert "chat-item-avatar" in js
+        assert "chat-item-body" in js
+
 
 class TestTrack3FeaturePanes:
     """Tests for Track 3: Interactive feature panes and mockup fidelity."""

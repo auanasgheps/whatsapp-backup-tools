@@ -996,10 +996,23 @@
     el.className = 'chat-item' + (chat.type === 'group' ? ' group' : '') + (isActive ? ' active' : '');
     el.dataset.id = chat.id;
     el.dataset.type = chat.type;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'chat-item-avatar';
+    const avatarKey = chat.phone_number || chat.id || chat.display_name;
+    avatar.style.backgroundColor = getAvatarColor(avatarKey);
+    avatar.textContent = getInitials(chat.display_name);
+    avatar.setAttribute('aria-hidden', 'true');
+    el.appendChild(avatar);
+
+    const body = document.createElement('div');
+    body.className = 'chat-item-body';
     const tagHtml = chat.is_preserved_only
       ? '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
       : '';
-    el.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
+    body.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
+    el.appendChild(body);
+
     el.addEventListener('click', () => selectChat(chat, el));
     return el;
   }
@@ -6286,11 +6299,25 @@
     el.dataset.msgId = String(m.id);
     el.dataset.chatId = String(m.chat_id);
     if (m.chat_type) el.dataset.chatType = m.chat_type;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'chat-item-avatar';
+    const chatName = m.chat_name || 'Chat';
+    const avatarKey = m.chat_phone || m.chat_id || chatName;
+    avatar.style.backgroundColor = getAvatarColor(avatarKey);
+    avatar.textContent = getInitials(chatName);
+    avatar.setAttribute('aria-hidden', 'true');
+    el.appendChild(avatar);
+
+    const body = document.createElement('div');
+    body.className = 'chat-item-body';
     const preview = _formatStarredPreview(m);
     const rawSender = m.sender_name || '';
     const cleanSender = _isUnreadableToken(rawSender) ? '' : rawSender;
     const authorPrefix = cleanSender ? `${cleanSender}: ` : '';
-    el.innerHTML = `<div class="chat-name">${esc(m.chat_name || 'Chat')}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
+    body.innerHTML = `<div class="chat-name">${esc(chatName)}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
+    el.appendChild(body);
+
     el.addEventListener('click', () => {
       openChatAtMessage(m.chat_id, m.id, m.chat_type, m.chat_name);
     });
