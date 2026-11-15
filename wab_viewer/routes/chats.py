@@ -720,7 +720,7 @@ def api_chat_info():
         "FROM message_index WHERE chat_id = ? AND chat_type = ?",
         (chat_id, chat_type),
     ).fetchone()
-    last_ts = ts_row["last_ts"] if ts_row else None
+    last_ts = None
     first_ts = None
     sent = received = total = None
 
@@ -738,7 +738,8 @@ def api_chat_info():
                 else ctx.queries.android_stat_select
             )
             stat_row = conn.execute(
-                f"SELECT MIN(timestamp_ms) AS first_ts, MAX(timestamp_ms) AS last_ts,"
+                f"SELECT MIN(CASE WHEN media_type != 'service' THEN timestamp_ms END) AS first_ts,"
+                f" MAX(CASE WHEN media_type != 'service' THEN timestamp_ms END) AS last_ts,"
                 f" COUNT(CASE WHEN media_type != 'service' THEN 1 END) AS total,"
                 f" SUM(CASE WHEN media_type != 'service' AND from_me=1 THEN 1 ELSE 0 END) AS sent,"
                 f" SUM(CASE WHEN media_type != 'service' AND from_me=0 THEN 1 ELSE 0 END) AS received"
@@ -747,7 +748,7 @@ def api_chat_info():
             ).fetchone()
             if stat_row:
                 first_ts = stat_row["first_ts"]
-                last_ts = last_ts or stat_row["last_ts"]
+                last_ts = stat_row["last_ts"]
                 total = stat_row["total"] or 0
                 sent = stat_row["sent"] or 0
                 received = stat_row["received"] or 0
@@ -763,12 +764,16 @@ def api_chat_info():
                 FROM ZWAMESSAGE m
                 LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
                 WHERE {chat_pred} {ctx.queries.ios_filter_ts}
+                  AND COALESCE(m.ZMESSAGETYPE, 0) NOT IN (6, 10)
                 """,
                 chat_params,
             ).fetchone()
             if live:
                 first_ts = live["first_ts"]
-                last_ts = last_ts or live["last_ts"]
+                last_ts = live["last_ts"]
+    elif ts_row:
+        first_ts = ts_row["first_ts"]
+        last_ts = ts_row["last_ts"]
 
     display_name = None
     number = None
@@ -1090,11 +1095,11 @@ def api_chat_info():
         if pres is not None:
             p_stat = pres.execute(
                 """
-                SELECT COUNT(*) AS total,
-                       SUM(CASE WHEN from_me=1 THEN 1 ELSE 0 END) AS sent,
-                       SUM(CASE WHEN from_me=0 THEN 1 ELSE 0 END) AS received,
-                       MIN(timestamp_ms) AS first_ts,
-                       MAX(timestamp_ms) AS last_ts
+                SELECT COUNT(CASE WHEN media_type != 'service' THEN 1 END) AS total,
+                       SUM(CASE WHEN media_type != 'service' AND from_me=1 THEN 1 ELSE 0 END) AS sent,
+                       SUM(CASE WHEN media_type != 'service' AND from_me=0 THEN 1 ELSE 0 END) AS received,
+                       MIN(CASE WHEN media_type != 'service' THEN timestamp_ms END) AS first_ts,
+                       MAX(CASE WHEN media_type != 'service' THEN timestamp_ms END) AS last_ts
                 FROM preserved_messages
                 WHERE chat_id = ? AND chat_type = ?
                 """,
