@@ -2310,6 +2310,24 @@ class TestHtmlTemplate:
         assert "scale" in script and "panX" in script, "Zoom scale and pan state must be tracked"
         assert "lb-zoom-badge" in script, "Zoom reset indicator badge must be supported"
 
+    def test_lightbox_smooth_transition_implemented(self):
+        """Lightbox must provide persistent stage transitions, directional motion, and preloading."""
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        script = app_js_path.read_text(encoding="utf-8")
+        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        assert "lb-stage" in script, "Lightbox must use .lb-stage container for media transitions"
+        assert "_transitionLightboxMedia" in script, "Smooth transition coordinator must be present"
+        assert "_preloadAdjacentLightboxMedia" in script, (
+            "Adjacent media preloading must be present"
+        )
+        assert ".lb-stage" in css, ".lb-stage CSS rule must be defined"
+        assert ".lb-media-entering" in css and ".lb-media-exiting" in css, (
+            "Entering and exiting transition classes must be defined in app.css"
+        )
+        assert "prefers-reduced-motion" in css, "Reduced motion must be supported for transitions"
+
 
 class TestReactionsFrontendLayout:
     def test_reactions_css_corner_alignment(self):
