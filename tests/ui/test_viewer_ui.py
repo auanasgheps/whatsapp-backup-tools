@@ -773,6 +773,178 @@ def test_media_gallery_filter_switch_instant_hiding(browser: CDPSession) -> None
     )
 
 
+def test_gallery_filter_image_isolation_in_mixed_chat(
+    browser: CDPSession, screenshot_dir: Path
+) -> None:
+    """Validate that in a mixed chat (images, videos, links, vcards), gallery opens with Total active and secondary types hidden, Image pill strictly isolates photos, and Contacts pill renders clean contact cards."""
+    # 1. Open group chat Weekend Coffee & Foodies
+    opened = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const item = [...document.querySelectorAll('.chat-item')].find(
+                    el => el.querySelector('.chat-name')?.textContent.includes('Weekend Coffee & Foodies')
+                );
+                if (item) {
+                    item.click();
+                    for (let j = 0; j < 80; j++) {
+                        await new Promise(r => setTimeout(r, 50));
+                        const loading = document.getElementById('chat-loading');
+                        if (loading && loading.style.display === 'none') {
+                            await new Promise(r => setTimeout(r, 150));
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return false;
+        })()
+        """,
+        15.0,
+    )
+    assert opened is True
+
+    # 2. Open media gallery
+    gallery = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gal = document.getElementById('media-gallery');
+                const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                if (gal && gal.classList.contains('open') && items.length > 0) {
+                    await new Promise(r => setTimeout(r, 200));
+                    return { isOpen: true };
+                }
+            }
+            return { isOpen: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(gallery, dict)
+    assert gallery["isOpen"] is True
+
+    # 3. Check initial pills & grid:
+    # Total pill is active; Image/Video pills are neutral; secondary pills (links, vcards) are dimmed;
+    # vcards and links are hidden by default from the initial grid.
+    initial_state = browser.evaluate(
+        """
+        (() => {
+            const totalPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="total"]');
+            const imgPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="image"]');
+            const vcardPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="vcard"]');
+            const visibleVcards = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="vcard"]:not(.type-hidden)');
+            const visibleImages = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)');
+            const visibleVideos = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"]:not(.type-hidden)');
+
+            return {
+                totalActive: totalPill ? totalPill.classList.contains('active') : false,
+                imgActive: imgPill ? imgPill.classList.contains('active') : false,
+                vcardDimmed: vcardPill ? vcardPill.classList.contains('dimmed') : false,
+                visibleVcards: visibleVcards.length,
+                visibleImages: visibleImages.length,
+                visibleVideos: visibleVideos.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert initial_state["totalActive"] is True
+    assert initial_state["imgActive"] is False
+    assert initial_state["vcardDimmed"] is True
+    assert initial_state["visibleVcards"] == 0
+    assert initial_state["visibleImages"] >= 1
+    assert initial_state["visibleVideos"] >= 1
+
+    # 4. Click Images pill: assert strictly only images visible, videos and vcards hidden
+    images_state = browser.evaluate(
+        """
+        (() => {
+            const imgPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="image"]');
+            if (imgPill) imgPill.click();
+
+            const visibleImages = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)');
+            const visibleVideos = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"]:not(.type-hidden)');
+            const visibleVcards = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="vcard"]:not(.type-hidden)');
+            const errorCards = [...document.querySelectorAll('#media-gallery-grid .gallery-item:not(.type-hidden)')].filter(
+                el => el.textContent.includes('Photo unavailable')
+            );
+
+            return {
+                imgActive: imgPill ? imgPill.classList.contains('active') : false,
+                visibleImages: visibleImages.length,
+                visibleVideos: visibleVideos.length,
+                visibleVcards: visibleVcards.length,
+                errorCardsCount: errorCards.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert images_state["imgActive"] is True
+    assert images_state["visibleImages"] >= 1
+    assert images_state["visibleVideos"] == 0
+    assert images_state["visibleVcards"] == 0
+    assert images_state["errorCardsCount"] == 0
+
+    # 5. Capture visual evidence of image isolation
+    browser.capture_screenshot(screenshot_dir / "gallery_filtered_images_verified.png", 5.0)
+
+    # 6. Click Contacts (vcard) pill: verify contact card renders cleanly with 📇 and contact name
+    contacts_state = browser.evaluate(
+        """
+        (async () => {
+            const vcardPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="vcard"]');
+            if (vcardPill) vcardPill.click();
+
+            for (let i = 0; i < 40; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const v = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="vcard"]:not(.type-hidden)');
+                if (v.length > 0) break;
+            }
+
+            const visibleVcards = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="vcard"]:not(.type-hidden)');
+            const errorCards = [...document.querySelectorAll('#media-gallery-grid .gallery-item:not(.type-hidden)')].filter(
+                el => el.textContent.includes('Photo unavailable')
+            );
+            const firstCardText = visibleVcards[0] ? visibleVcards[0].textContent : '';
+
+            return {
+                vcardActive: vcardPill ? vcardPill.classList.contains('active') : false,
+                visibleVcards: visibleVcards.length,
+                errorCardsCount: errorCards.length,
+                firstCardText: firstCardText,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert contacts_state["vcardActive"] is True
+    assert contacts_state["visibleVcards"] >= 1
+    assert contacts_state["errorCardsCount"] == 0
+    assert (
+        "Marco Bellini" in contacts_state["firstCardText"]
+        or "📇" in contacts_state["firstCardText"]
+    )
+
+    # 7. Cleanup: close gallery
+    browser.evaluate(
+        """
+        (() => {
+            const closeBtn = document.getElementById('media-gallery-close');
+            if (closeBtn) closeBtn.click();
+        })()
+        """,
+        5.0,
+    )
+
+
 def test_media_gallery_filter_rapid_toggle_stress(browser: CDPSession) -> None:
     """Validate that rapid synchronous toggling between gallery filter pills does not cause state corruption or leaking items."""
     # 1. Open group chat Weekend Coffee & Foodies
