@@ -1921,14 +1921,47 @@
       user-select: none;
     }
     .img-lightbox.is-closing { animation: lb-fade-out 0.15s ease forwards; }
-    .img-lightbox img {
+    .img-lightbox img, .lb-stage img {
       max-width: 90vw;
       max-height: 85vh;
       object-fit: contain;
       transform-origin: center center;
       cursor: zoom-in;
     }
-    .img-lightbox video { max-width: 90vw; max-height: 85vh; }
+    .img-lightbox video, .lb-stage video {
+      max-width: 90vw;
+      max-height: 85vh;
+      object-fit: contain;
+    }
+    .lb-stage {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 90vw;
+      height: 85vh;
+      max-width: 90vw;
+      max-height: 85vh;
+      overflow: hidden;
+    }
+    .lb-stage img, .lb-stage video {
+      will-change: transform, opacity;
+    }
+    .lb-media-entering {
+      position: absolute;
+      transition: transform 0.2s cubic-bezier(0.2, 0, 0.2, 1), opacity 0.2s cubic-bezier(0.2, 0, 0.2, 1);
+    }
+    .lb-media-exiting {
+      position: absolute;
+      pointer-events: none;
+      transition: transform 0.2s cubic-bezier(0.2, 0, 0.2, 1), opacity 0.2s cubic-bezier(0.2, 0, 0.2, 1);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .lb-media-entering, .lb-media-exiting {
+        transform: none !important;
+        transition: opacity 0.12s ease !important;
+      }
+    }
     .lb-timestamp {
       color: rgba(255,255,255,0.7);
       font-size: 12px;
