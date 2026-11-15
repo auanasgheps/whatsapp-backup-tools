@@ -16530,3 +16530,96 @@ class TestChatJumpHudPlacement:
             pins = resp.get_json()["pinned_messages"]
             assert len(pins) == 1
             assert pins[0]["text_body"] == "Old preserved pin"
+
+    def test_android_pinned_after_chat_messages_opened_resolution(self, tmp_path):
+        """Pinned query succeeds when messages endpoint ran first, populating temp resolution tables."""
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS message_add_on (
+                _id INTEGER PRIMARY KEY,
+                parent_message_row_id INTEGER,
+                chat_row_id INTEGER,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                key_id TEXT,
+                timestamp INTEGER,
+                message_add_on_type INTEGER,
+                status INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS message_add_on_pin_in_chat (
+                message_add_on_row_id INTEGER PRIMARY KEY,
+                pin_in_chat_state INTEGER,
+                sender_timestamp INTEGER
+            );
+
+            INSERT INTO jid (_id, user, raw_string) VALUES (5, '15551234', '15551234@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject) VALUES (5, 5, NULL);
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type, key_id)
+            VALUES (101, 5, 0, 1793970000000, 'Order of execution pin', 0, 'PIN_101');
+
+            INSERT INTO message_add_on (_id, parent_message_row_id, chat_row_id, from_me, message_add_on_type, timestamp)
+            VALUES (10, 101, 5, 0, 79, 1793970500000);
+            INSERT INTO message_add_on_pin_in_chat VALUES (10, 1, 1793970500000);
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # 1. Fetch messages first (runs _resolve_android_chat_row_ids before pinned endpoint)
+            m_resp = client.get("/api/messages?chat_id=15551234&chat_type=contact")
+            assert m_resp.status_code == 200
+
+            # 2. Fetch pinned messages banner (must not fail on missing _contacts_resolved)
+            resp = client.get("/api/chat/15551234/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            assert pins[0]["id"] == 101
+            assert pins[0]["text_body"] == "Order of execution pin"
+            assert pins[0]["is_pinned"] is True
+
+    def test_android_pinned_pin_table_left_join_null_state(self, tmp_path):
+        """Active pin is returned when message_add_on_pin_in_chat row is absent or has null state."""
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS message_add_on (
+                _id INTEGER PRIMARY KEY,
+                parent_message_row_id INTEGER,
+                chat_row_id INTEGER,
+                from_me INTEGER,
+                sender_jid_row_id INTEGER,
+                key_id TEXT,
+                timestamp INTEGER,
+                message_add_on_type INTEGER,
+                status INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS message_add_on_pin_in_chat (
+                message_add_on_row_id INTEGER PRIMARY KEY,
+                pin_in_chat_state INTEGER,
+                sender_timestamp INTEGER
+            );
+
+            INSERT INTO jid (_id, user, raw_string) VALUES (6, '15559999', '15559999@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, subject) VALUES (6, 6, NULL);
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type, key_id)
+            VALUES (102, 6, 0, 1793970000000, 'Orphaned pin row', 0, 'PIN_102');
+
+            -- Add-on exists with type 79, but no row in message_add_on_pin_in_chat
+            INSERT INTO message_add_on (_id, parent_message_row_id, chat_row_id, from_me, message_add_on_type, timestamp)
+            VALUES (11, 102, 6, 0, 79, 1793970500000);
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chat/15559999/pinned?chat_type=contact")
+            assert resp.status_code == 200
+            pins = resp.get_json()["pinned_messages"]
+            assert len(pins) == 1
+            assert pins[0]["id"] == 102
+            assert pins[0]["text_body"] == "Orphaned pin row"
+            assert pins[0]["is_pinned"] is True

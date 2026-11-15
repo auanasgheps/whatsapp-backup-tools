@@ -7,6 +7,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..db_cache import _ensure_jid_map_resolved
+
 if TYPE_CHECKING:
     from ..context import QuerySet, SchemaCapabilities
 
@@ -121,9 +123,13 @@ def _resolve_android_chat_row_ids(
 
     clean_id = chat_id.split(":")[0] if ":" in chat_id else chat_id
     try:
-        conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
+        has_jmr = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_jid_map_resolved'"
+            ).fetchone()
         )
+        if not has_jmr:
+            _ensure_jid_map_resolved(conn, None)
         rows = conn.execute(
             """
             SELECT c._id FROM chat c
