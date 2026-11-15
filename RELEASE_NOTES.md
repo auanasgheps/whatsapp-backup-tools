@@ -69,6 +69,7 @@ This update unlocks comprehensive Call History logs with a dedicated Call Inspec
 - **Sidebar Search Leakage During Infinite Scroll**: Prevented infinite scroll pagination in Calls and Starred lists from appending unfiltered items when an active search query is present.
 - **Android Archived Chat Retention**: Prevented empty archived chats or archived chats whose messages are recorded under a companion row from being excluded from the chat list.
 - **iOS Empty Archived Chat Retention**: Ensured archived chats with zero messages remain accessible in the Archived tab.
+- **iOS Location Message Chat List Crash**: Fixed an issue where an iOS backup containing a conversation whose most recent message is a location or live location caused an error that prevented the chat list from loading, #13.
 
 ---
 
