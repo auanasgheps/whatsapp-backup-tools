@@ -1108,6 +1108,62 @@ class TestApiMedia:
         page1_ts = {r["timestamp_ms"] for r in page1}
         assert all(r["timestamp_ms"] not in page1_ts for r in page2)
 
+    def test_pagination_with_live_photo_companion_videos_tops_up_to_full_page(self, tmp_path):
+        """When live photo companion videos are excluded from a page, /api/media tops up to 100 items."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        base_ts = 1700000000000
+        for i in range(150):
+            msg_id = 1000 + i
+            ts = base_ts + i * 10000
+            orig = f"Media/Images/photo{i}.jpg"
+            arch = f"Alice (00123456789)/photo{i}.jpg"
+            wa_conn.execute(
+                "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+                f"VALUES ({msg_id}, 10, 1, {ts}, NULL, 1)"
+            )
+            wa_conn.execute(
+                f"INSERT INTO message_media (message_row_id, file_path, media_name) VALUES ({msg_id}, '{orig}', 'p{i}.jpg')"
+            )
+            archive_conn.execute(
+                f"INSERT INTO files (original_path, md5) VALUES ('{orig}', x'deadbeef')"
+            )
+            archive_conn.execute(
+                f"INSERT INTO archive_copies (original_path, archive_path) VALUES ('{orig}', '{arch}')"
+            )
+
+        # Make item 140 a companion video for item 139 via message_association type 11
+        wa_conn.execute(
+            "CREATE TABLE IF NOT EXISTS message_association (_id INTEGER PRIMARY KEY, parent_message_row_id INTEGER, child_message_row_id INTEGER, association_type INTEGER)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_association (parent_message_row_id, child_message_row_id, association_type) VALUES (1139, 1140, 11)"
+        )
+        wa_conn.execute("UPDATE message SET message_type = 3 WHERE _id = 1140")
+
+        wa_conn.commit()
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            page1 = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
+            # Despite child video 1140 being excluded, page1 must top up to 100 items from the 150 available
+            assert len(page1) == 100
+            assert all(r["msg_id"] != 1140 for r in page1)
+            oldest_ts = page1[-1]["timestamp_ms"]
+            page2 = client.get(
+                f"/api/media?chat_id=123456789&chat_type=contact&before={oldest_ts}"
+            ).get_json()
+            assert len(page2) == 49
+            assert len(page1) + len(page2) == 149
+
     def test_media_count_returns_totals(self, app_with_media):
         """Count endpoint returns total and per-type breakdown."""
         client, _ = app_with_media
@@ -1314,6 +1370,83 @@ class TestApiMedia:
                 f"/api/media?chat_id=123456789&chat_type=contact&types=all&before={mixed[0]['timestamp_ms']}"
             ).get_json()
             assert all(r["timestamp_ms"] < mixed[0]["timestamp_ms"] for r in paged)
+
+    def test_documents_do_not_leak_into_video_or_image_filter(self, tmp_path):
+        """Documents (message_type 9) even with video/image extensions must never leak into video or image filters."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        # 1. Real video (message_type = 3)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (101, 10, 1, 1700000001000, NULL, 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (101, 'Media/Videos/real_video.mp4', 'real_video.mp4')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Videos/real_video.mp4', 'Contacts/Alice/2026/real_video.mp4')"
+        )
+
+        # 2. Document with .mp4 extension (uncompressed video sent as document, message_type = 9)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (102, 10, 1, 1700000002000, NULL, 9)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (102, 'Media/Documents/attached_video.mp4', 'attached_video.mp4')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Documents/attached_video.mp4', 'Contacts/Alice/2026/attached_video.mp4')"
+        )
+
+        # 3. Standard PDF document (message_type = 9)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (103, 10, 1, 1700000003000, NULL, 9)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (103, 'Media/Documents/paper.pdf', 'paper.pdf')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Documents/paper.pdf', 'Contacts/Alice/2026/paper.pdf')"
+        )
+
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # Video filter must strictly contain only real_video.mp4, not attached_video.mp4
+            videos = client.get("/api/media?chat_id=123456789&chat_type=contact&types=video").get_json()
+            assert len(videos) == 1
+            assert videos[0]["msg_id"] == 101
+            assert videos[0]["media_type"] == "video"
+
+            # Image filter must contain 0 items
+            images = client.get("/api/media?chat_id=123456789&chat_type=contact&types=image").get_json()
+            assert len(images) == 0
+
+            # Document filter must return both documents
+            docs = client.get("/api/media?chat_id=123456789&chat_type=contact&types=document").get_json()
+            assert len(docs) == 2
+            doc_ids = {d["msg_id"] for d in docs}
+            assert doc_ids == {102, 103}
+            assert all(d["media_type"] == "document" for d in docs)
+
+            # Counts must reflect 1 video and 2 documents
+            counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            assert counts["by_type"]["video"]["count"] == 1
+            assert counts["by_type"]["document"]["count"] == 2
 
     def test_media_documents_endpoint_returns_undownloaded_docs(self, tmp_path):
         """Documents with no file_path but a media_name are returned by /api/media/documents."""

@@ -85,45 +85,45 @@ def api_media():
                 if mt == "video":
                     if ctx.source_type == "android":
                         ext_conds.append(
-                            f"((m.message_type IN (3, 28, 43, 81) OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mp4' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mov' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.3gp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mkv') AND NOT COALESCE(({ctx.queries.android_gif_cond}), 0))"
+                            f"((m.message_type IN (3, 28, 43, 81) OR (COALESCE(m.message_type, 0) != 9 AND (LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mp4' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mov' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.3gp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mkv'))) AND NOT COALESCE(({ctx.queries.android_gif_cond}), 0))"
                         )
                     else:
                         ext_conds.append(
-                            "((m.ZMESSAGETYPE IN (2, 39, 54) OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mp4' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mov' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.3gp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mkv') AND m.ZMESSAGETYPE != 11)"
+                            "((m.ZMESSAGETYPE IN (2, 39, 54) OR (COALESCE(m.ZMESSAGETYPE, 0) != 8 AND (LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mp4' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mov' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.3gp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mkv'))) AND m.ZMESSAGETYPE != 11)"
                         )
                 elif mt == "gif":
                     is_gif = (
-                        ctx.queries.android_gif_cond
+                        f"({ctx.queries.android_gif_cond} AND COALESCE(m.message_type, 0) != 9)"
                         if ctx.source_type == "android"
-                        else "(LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.gif' OR m.ZMESSAGETYPE = 11)"
+                        else "((LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.gif' OR m.ZMESSAGETYPE = 11) AND COALESCE(m.ZMESSAGETYPE, 0) != 8)"
                     )
                     ext_conds.append(is_gif)
                 elif mt == "image":
                     if ctx.source_type == "android":
                         ext_conds.append(
-                            "(m.message_type IN (1, 42) OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heif')"
+                            "(m.message_type IN (1, 42) OR (COALESCE(m.message_type, 0) != 9 AND (LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heif')))"
                         )
                     else:
                         ext_conds.append(
-                            "(m.ZMESSAGETYPE IN (1, 38) OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heif')"
+                            "(m.ZMESSAGETYPE IN (1, 38) OR (COALESCE(m.ZMESSAGETYPE, 0) != 8 AND (LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heif')))"
                         )
                 elif mt == "audio":
                     if ctx.source_type == "android":
                         ext_conds.append(
-                            "(m.message_type IN (2, 82) OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.opus' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.m4a' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mp3' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.ogg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.aac')"
+                            "(m.message_type IN (2, 82) OR (COALESCE(m.message_type, 0) != 9 AND (LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.opus' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.m4a' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mp3' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.ogg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.aac')))"
                         )
                     else:
                         ext_conds.append(
-                            "(m.ZMESSAGETYPE IN (3, 53) OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.opus' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.m4a' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mp3' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.ogg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.aac')"
+                            "(m.ZMESSAGETYPE IN (3, 53) OR (COALESCE(m.ZMESSAGETYPE, 0) != 8 AND (LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.opus' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.m4a' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mp3' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.ogg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.aac')))"
                         )
                 elif mt == "sticker":
                     if ctx.source_type == "android":
                         ext_conds.append(
-                            "(m.message_type = 20 OR mm.file_path LIKE '%sticker%' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.was')"
+                            "(m.message_type = 20 OR (COALESCE(m.message_type, 0) != 9 AND (mm.file_path LIKE '%sticker%' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.was')))"
                         )
                     else:
                         ext_conds.append(
-                            "(m.ZMESSAGETYPE = 15 OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.was')"
+                            "(m.ZMESSAGETYPE = 15 OR (COALESCE(m.ZMESSAGETYPE, 0) != 8 AND (LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.was')))"
                         )
                 elif mt == "vcard":
                     if ctx.source_type == "android":
@@ -150,11 +150,6 @@ def api_media():
         return jsonify([])
 
     cand_pred = " OR ".join(cand_clauses)
-    params = list(chat_params)
-    ts_clause = ""
-    if before:
-        ts_clause = f"AND {ts_col} < ?"
-        params.append(int(before))
 
     if has_all:
         type_filter = "media_type NOT IN ('text', 'service', 'deleted', 'poll')"
@@ -174,23 +169,56 @@ def api_media():
     else:
         hd_dedup_clause = ""
 
-    sql = f"""
-        SELECT * FROM (
-            {select} WHERE {chat_pred} {extra} {hd_dedup_clause} AND ({cand_pred}) {ts_clause}
-            ORDER BY {ts_col} DESC
-        )
-        WHERE {type_filter}
-        ORDER BY timestamp_ms DESC
-        LIMIT ?
-    """
-    rows = [
-        dict(r) for r in conn.execute(sql, params + type_params + [GALLERY_PAGE_SIZE]).fetchall()
-    ]
-    _hydrate_quoted_rows(rows, ctx.source_type, conn)
-    _hydrate_link_preview_rows(rows, ctx.source_type)
-    _hydrate_live_photos(rows, ctx.source_type, conn)
-    rows = [r for r in rows if not r.get("is_live_photo_video")]
-    rows = [r for r in rows if not (r.get("is_view_once") and not r.get("archive_path"))]
+    rows: list[dict] = []
+    curr_before = int(before) if before else None
+    seen_ids: set = set()
+    while len(rows) < GALLERY_PAGE_SIZE:
+        batch_ts_clause = f"AND {ts_col} < ?" if curr_before else ""
+        batch_params = list(chat_params)
+        if curr_before:
+            batch_params.append(curr_before)
+        needed = GALLERY_PAGE_SIZE - len(rows)
+        batch_limit = max(needed, GALLERY_PAGE_SIZE)
+        batch_sql = f"""
+            SELECT * FROM (
+                {select} WHERE {chat_pred} {extra} {hd_dedup_clause} AND ({cand_pred}) {batch_ts_clause}
+                ORDER BY {ts_col} DESC
+            )
+            WHERE {type_filter}
+            ORDER BY timestamp_ms DESC
+            LIMIT ?
+        """
+        raw_rows = [
+            dict(r)
+            for r in conn.execute(
+                batch_sql, batch_params + type_params + [batch_limit]
+            ).fetchall()
+        ]
+        if not raw_rows:
+            break
+        _hydrate_quoted_rows(raw_rows, ctx.source_type, conn)
+        _hydrate_link_preview_rows(raw_rows, ctx.source_type)
+        _hydrate_live_photos(raw_rows, ctx.source_type, conn)
+        for r in raw_rows:
+            mid = r.get("msg_id")
+            if mid and mid in seen_ids:
+                continue
+            if r.get("is_live_photo_video"):
+                continue
+            if r.get("is_view_once") and not r.get("archive_path"):
+                continue
+            if mid:
+                seen_ids.add(mid)
+            rows.append(r)
+            if len(rows) >= GALLERY_PAGE_SIZE:
+                break
+        if len(raw_rows) < batch_limit:
+            break
+        last_ts = raw_rows[-1]["timestamp_ms"]
+        if curr_before is not None and last_ts >= curr_before:
+            curr_before = curr_before - 1
+        else:
+            curr_before = last_ts
 
     pres = ctx.get_preserved()
     if pres is not None:
