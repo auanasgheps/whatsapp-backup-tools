@@ -101,11 +101,11 @@ def api_media():
                 elif mt == "image":
                     if ctx.source_type == "android":
                         ext_conds.append(
-                            "(m.message_type IN (1, 42) OR (COALESCE(m.message_type, 0) != 9 AND (LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heif')))"
+                            "(m.message_type IN (1, 42) OR (COALESCE(m.message_type, 0) NOT IN (2, 3, 4, 9, 13, 14, 15, 20, 28, 43, 64, 66, 81, 82) AND (LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heif')))"
                         )
                     else:
                         ext_conds.append(
-                            "(m.ZMESSAGETYPE IN (1, 38) OR (COALESCE(m.ZMESSAGETYPE, 0) != 8 AND (LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heif')))"
+                            "(m.ZMESSAGETYPE IN (1, 38) OR (COALESCE(m.ZMESSAGETYPE, 0) NOT IN (2, 3, 4, 5, 6, 7, 8, 10, 11, 14, 15, 16, 39, 46, 53, 54) AND (LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heif')))"
                         )
                 elif mt == "audio":
                     if ctx.source_type == "android":
@@ -397,7 +397,7 @@ def api_media_count():
         by_type[t]["count"] += 1
         if r.get("archive_path"):
             archived += 1
-        elif t not in ("link", "text"):
+        elif t not in ("link", "text", "vcard"):
             by_type[t]["missing"] += 1
 
     for r in doc_rows:
@@ -434,7 +434,7 @@ def api_media_count():
                     by_type[pt]["count"] += 1
                     if pr.get("archive_path"):
                         archived += 1
-                    elif pt not in ("link", "text") and not pr.get("is_view_once"):
+                    elif pt not in ("link", "text", "vcard") and not pr.get("is_view_once"):
                         by_type[pt]["missing"] += 1
         except Exception:
             pass

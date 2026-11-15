@@ -3752,8 +3752,8 @@
   let activeTypes = new Set();   // empty = show all; populated = show only those types
   let defaultActiveTypes = new Set();  // restored when deselecting a secondary type or sticker
   let typesAllLoaded = new Set();
-  const SECONDARY_TYPES = new Set(['link', 'document']);  // non-media types, fetched separately
-  const DEFAULT_DESELECTED_TYPES = new Set(['sticker', 'link', 'document']);  // hidden by default, toggle exclusive
+  const SECONDARY_TYPES = new Set(['link', 'document', 'vcard']);  // non-media types, hidden by default
+  const DEFAULT_DESELECTED_TYPES = new Set(['sticker', 'link', 'document', 'vcard']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
   let galleryLoadingMore = false;
   let linksAllLoaded = false;
@@ -3931,6 +3931,8 @@
       if (activeTypes.size === 1) {
         const onlyType = [...activeTypes][0];
         expectedCount = currentGalleryStats.by_type[onlyType]?.count || 0;
+      } else if (activeTypes.size > 1) {
+        expectedCount = [...activeTypes].reduce((acc, t) => acc + (currentGalleryStats.by_type[t]?.count || 0), 0);
       } else if (activeTypes.size === 0 && currentGalleryStats.total) {
         expectedCount = currentGalleryStats.total;
       }
@@ -4239,7 +4241,10 @@
     } else {
       const typeStr = (msg && msg.media_type === 'video') ? 'Video' :
                       ((msg && msg.media_type === 'audio') ? 'Audio' :
-                      ((msg && msg.media_type === 'document') ? 'Document' : 'Photo'));
+                      ((msg && msg.media_type === 'document') ? 'Document' :
+                      ((msg && msg.media_type === 'vcard') ? 'Contact' :
+                      ((msg && msg.media_type === 'sticker') ? 'Sticker' :
+                      ((msg && (msg.media_type === 'location' || msg.media_type === 'live_location')) ? 'Location' : 'Photo')))));
       label.textContent = typeStr + ' unavailable';
     }
     overlay.appendChild(label);
@@ -4285,7 +4290,7 @@
 
     const cleanName = _sanitizeMediaName(msg.media_name);
 
-    if (!msg.archive_path && mt !== 'link') {
+    if (!msg.archive_path && mt !== 'link' && mt !== 'vcard') {
       if (msg.has_thumbnail && msg.msg_id) {
         cell.classList.add('is-missing', 'has-thumb');
         cell.dataset.hydrated = 'true';
@@ -4452,7 +4457,14 @@
       const d = document.createElement('div');
       d.className = 'gallery-doc';
       d.innerHTML = '<span style="font-size:28px">📇</span><span>' + esc(cleanName || msg.text_body || 'Contact') + '</span>';
-      d.addEventListener('click', () => window.open(src, '_blank'));
+      d.addEventListener('click', () => {
+        if (msg.archive_path) {
+          window.open(src, '_blank');
+        } else {
+          closeMediaGallery();
+          jumpToMessage(msg, 'default');
+        }
+      });
       cell.appendChild(d);
     } else {
       const d = document.createElement('div');
@@ -4758,6 +4770,17 @@
     return span;
   }
 
+  function _isDefaultActiveState() {
+    if (activeTypes.size === 0 && defaultActiveTypes.size === 0) return true;
+    if (defaultActiveTypes.size > 0 && activeTypes.size === defaultActiveTypes.size) {
+      for (const t of activeTypes) {
+        if (!defaultActiveTypes.has(t)) return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
   function _toggleTypeFilter(type) {
     const grid = document.getElementById('media-gallery-grid');
     const targetTs = grid ? _getMinVisibleGalleryTimestamp(grid) : Infinity;
@@ -4777,11 +4800,7 @@
       activeTypes = defaultActiveTypes.size > 0 ? new Set(defaultActiveTypes) : new Set();
     } else if (activeTypes.size === 1 && activeTypes.has(type)) {
       // Primary type already exclusively active -> restore default
-      if (defaultActiveTypes.size > 1 || (defaultActiveTypes.size === 1 && !defaultActiveTypes.has(type))) {
-        activeTypes = new Set(defaultActiveTypes);
-      } else {
-        activeTypes.clear();
-      }
+      activeTypes = defaultActiveTypes.size > 0 ? new Set(defaultActiveTypes) : new Set();
     } else {
       // Switch exclusively to this type!
       activeTypes = new Set([type]);
@@ -4860,21 +4879,32 @@
   }
 
   function _syncStatPills() {
-    const filtered = activeTypes.size > 0;
+    const isDefault = _isDefaultActiveState();
+    const isShowAll = activeTypes.size === 0 && defaultActiveTypes.size > 0;
+    const isSingleFiltered = !isDefault && !isShowAll && activeTypes.size > 0;
+
     document.querySelectorAll('#media-gallery-stats .gallery-stat').forEach(pill => {
       const t = pill.dataset.type;
-      // secondary types (links, docs) are never archived — hide their pills in archive view
+      // secondary types (links, docs, vcard) are never archived — hide their pills in archive view
       if (archiveViewActive && t !== 'total' && SECONDARY_TYPES.has(t)) {
         pill.style.display = 'none';
         return;
       }
       pill.style.display = '';
       if (t === 'total') {
-        pill.classList.toggle('active', !filtered);
+        pill.classList.toggle('active', isDefault || isShowAll);
         pill.classList.remove('dimmed');
+      } else if (isSingleFiltered) {
+        pill.classList.toggle('active', activeTypes.has(t));
+        pill.classList.toggle('dimmed', !activeTypes.has(t));
       } else {
-        pill.classList.toggle('active', filtered && activeTypes.has(t));
-        pill.classList.toggle('dimmed', filtered && !activeTypes.has(t));
+        // Default or Show-All:
+        pill.classList.remove('active');
+        if (isDefault && DEFAULT_DESELECTED_TYPES.has(t)) {
+          pill.classList.add('dimmed');
+        } else {
+          pill.classList.remove('dimmed');
+        }
       }
     });
   }

@@ -931,7 +931,7 @@ def seed_android_db_with_media(wa_conn, archive_conn, tmp_path):
     """Add one archived image message to the seeded chat (jid 1, chat 10)."""
     wa_conn.execute(
         "INSERT INTO message (_id, chat_row_id, from_me, sender_jid_row_id, timestamp, text_data, message_type) "
-        "VALUES (2, 10, 1, NULL, 1700000001000, NULL, 3)"
+        "VALUES (2, 10, 1, NULL, 1700000001000, NULL, 1)"
     )
     wa_conn.execute(
         "INSERT INTO message_media (message_row_id, file_path, media_name) "
@@ -1184,7 +1184,7 @@ class TestApiMedia:
         # media message with no archive_copies entry
         wa_conn.execute(
             "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
-            "VALUES (5, 10, 1, 1700000005000, NULL, 3)"
+            "VALUES (5, 10, 1, 1700000005000, NULL, 1)"
         )
         wa_conn.execute(
             "INSERT INTO message_media (message_row_id, file_path, media_name) "
@@ -1453,6 +1453,171 @@ class TestApiMedia:
             counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
             assert counts["by_type"]["video"]["count"] == 1
             assert counts["by_type"]["document"]["count"] == 2
+
+    def test_image_filter_strictly_excludes_stickers_and_videos(self, tmp_path):
+        """Gallery: types=image strictly returns only images, excluding webp stickers, videos, and vcards."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        # 1. Real photo (message_type = 1)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (201, 10, 1, 1700000001000, NULL, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (201, 'Media/Images/photo.jpg', 'photo.jpg')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Images/photo.jpg', 'Contacts/Alice/2026/photo.jpg')"
+        )
+
+        # 2. WebP sticker with STK- prefix (message_type = 20)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (202, 10, 1, 1700000002000, NULL, 20)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (202, 'Media/Stickers/STK-2026.webp', 'STK-2026.webp')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Stickers/STK-2026.webp', 'Contacts/Alice/2026/STK-2026.webp')"
+        )
+
+        # 3. WebP sticker without STK- prefix (hash filename, message_type = 20)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (203, 10, 1, 1700000003000, NULL, 20)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (203, 'Media/Stickers/a1b2c3d4e5f6.webp', 'a1b2c3d4e5f6.webp')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Stickers/a1b2c3d4e5f6.webp', 'Contacts/Alice/2026/a1b2c3d4e5f6.webp')"
+        )
+
+        # 4. Video (message_type = 3)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (204, 10, 1, 1700000004000, NULL, 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (204, 'Media/Videos/video.mp4', 'video.mp4')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Videos/video.mp4', 'Contacts/Alice/2026/video.mp4')"
+        )
+
+        # 5. vCard contact (message_type = 4)
+        wa_conn.execute(
+            "CREATE TABLE IF NOT EXISTS message_vcard (message_row_id INTEGER PRIMARY KEY, vcard TEXT)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (205, 10, 1, 1700000005000, 'John Doe', 4)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_vcard (message_row_id, vcard) VALUES (205, 'BEGIN:VCARD\\r\\nFN:John Doe\\r\\nEND:VCARD\\r\\n')"
+        )
+
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            images = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=image"
+            ).get_json()
+            assert len(images) == 1
+            assert images[0]["msg_id"] == 201
+            assert images[0]["media_type"] == "image"
+
+            stickers = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=sticker"
+            ).get_json()
+            assert len(stickers) == 2
+            stk_ids = {s["msg_id"] for s in stickers}
+            assert stk_ids == {202, 203}
+            assert all(s["media_type"] == "sticker" for s in stickers)
+
+            videos = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=video"
+            ).get_json()
+            assert len(videos) == 1
+            assert videos[0]["msg_id"] == 204
+            assert videos[0]["media_type"] == "video"
+
+            counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            assert counts["by_type"]["image"]["count"] == 1
+            assert counts["by_type"]["sticker"]["count"] == 2
+            assert counts["by_type"]["video"]["count"] == 1
+            assert counts["by_type"]["vcard"]["count"] == 1
+            assert counts["by_type"]["vcard"]["missing"] == 0
+
+    def test_android_select_honors_message_type_over_filename(self, tmp_path):
+        """Android SQL query prioritizes message_type enum over unusual file extensions."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Image message_type=1 with unusual extension .bin
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (301, 10, 1, 1700000001000, NULL, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (301, 'Media/Images/photo.bin', 'photo.bin')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Images/photo.bin', 'Contacts/Alice/2026/photo.bin')"
+        )
+
+        # Audio message_type=2 with deceptive .jpg name
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (302, 10, 1, 1700000002000, NULL, 2)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (302, 'Media/Audio/recording.jpg', 'recording.jpg')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Audio/recording.jpg', 'Contacts/Alice/2026/recording.jpg')"
+        )
+
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            images = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=image"
+            ).get_json()
+            assert len(images) == 1
+            assert images[0]["msg_id"] == 301
+            assert images[0]["media_type"] == "image"
+
+            audios = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=audio"
+            ).get_json()
+            assert len(audios) == 1
+            assert audios[0]["msg_id"] == 302
+            assert audios[0]["media_type"] == "audio"
 
     def test_media_documents_endpoint_returns_undownloaded_docs(self, tmp_path):
         """Documents with no file_path but a media_name are returned by /api/media/documents."""

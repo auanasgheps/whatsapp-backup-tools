@@ -181,14 +181,16 @@ _MEDIA_TYPE_EXPR = """
     CASE
         WHEN {col} IS NULL THEN 'text'
         WHEN LOWER({col}) LIKE '%.vcf' THEN 'vcard'
-        WHEN LOWER({col}) LIKE '%sticker%' THEN 'sticker'
+        WHEN LOWER({col}) LIKE '%sticker%'
+          OR LOWER({col}) LIKE '%.webp'
+          OR LOWER({col}) LIKE '%.was' THEN 'sticker'
         WHEN LOWER({col}) LIKE '%.gif'
           OR LOWER({col}) LIKE '%/animated gifs/%'
           OR LOWER({col}) LIKE '%whatsapp animated gifs%'
           OR LOWER({col}) LIKE '%/gif-%'
           OR LOWER({col}) LIKE 'gif-%' THEN 'gif'
         WHEN LOWER({col}) LIKE '%.jpg'  OR LOWER({col}) LIKE '%.jpeg'
-          OR LOWER({col}) LIKE '%.png'  OR LOWER({col}) LIKE '%.webp'
+          OR LOWER({col}) LIKE '%.png'
           OR LOWER({col}) LIKE '%.heic' OR LOWER({col}) LIKE '%.heif' THEN 'image'
         WHEN LOWER({col}) LIKE '%.mp4' OR LOWER({col}) LIKE '%.mov'
           OR LOWER({col}) LIKE '%.avi' OR LOWER({col}) LIKE '%.mkv'
@@ -1636,9 +1638,10 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
             WHEN m.message_type IN (4, 14) THEN 'vcard'
             WHEN m.message_type = 20 THEN 'sticker'
             WHEN {android_gif_cond} THEN 'gif'
-            WHEN m.message_type = 42 THEN 'image'
-            WHEN m.message_type IN (28, 43, 81) THEN 'video'
-            WHEN m.message_type = 82 THEN 'audio'
+            WHEN m.message_type IN (1, 42) THEN 'image'
+            WHEN m.message_type IN (3, 28, 43, 81) THEN 'video'
+            WHEN m.message_type IN (2, 82) THEN 'audio'
+            WHEN m.message_type = 9 THEN 'document'
             WHEN m.message_type = 66{extra_poll_select} THEN 'poll'
             {android_live_type_cond}
             WHEN m.message_type = 5 THEN 'location'
@@ -1647,10 +1650,6 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
                       AND (INSTR(LOWER(m.text_data), 'http://') > 0
                            OR INSTR(LOWER(m.text_data), 'https://') > 0)
                      THEN 'link' ELSE 'text' END
-            WHEN {android_file_path} IS NULL AND m.message_type = 1 THEN 'image'
-            WHEN {android_file_path} IS NULL AND m.message_type = 2 THEN 'audio'
-            WHEN {android_file_path} IS NULL AND m.message_type IN (3, 28, 81) THEN 'video'
-            WHEN m.message_type = 9 THEN 'document'
             ELSE {_MEDIA_TYPE_EXPR.format(col=f"COALESCE({android_file_path}, mm.media_name)")}
         END                                                          AS media_type,
         COALESCE(
