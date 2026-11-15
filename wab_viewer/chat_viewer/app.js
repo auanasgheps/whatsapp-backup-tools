@@ -3894,9 +3894,9 @@
 
   function _getOldestTimestampForActiveTypes(grid) {
     if (!grid) return null;
-    let selector = '.gallery-item';
+    let selector = '.gallery-item:not([data-prepopulated="true"])';
     if (activeTypes.size > 0) {
-      selector = [...activeTypes].map(t => `.gallery-item[data-type="${t}"]`).join(', ');
+      selector = [...activeTypes].map(t => `.gallery-item[data-type="${t}"]:not([data-prepopulated="true"])`).join(', ');
     }
     const items = [...grid.querySelectorAll(selector)];
     if (!items.length) return null;
@@ -3959,7 +3959,7 @@
       return;
     }
 
-    const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestTs}"]`);
+    const oldestCell = grid.querySelector(`.gallery-item:not([data-prepopulated="true"])[data-ts="${oldestTs}"]`);
     if (oldestCell) {
       const cellRect = oldestCell.getBoundingClientRect();
       const gridRect = grid.getBoundingClientRect();
@@ -4477,9 +4477,21 @@
   }
 
   function _insertGalleryGridItem(grid, msg) {
+    const isPrepopulated = Boolean(msg && msg._prepopulated);
     const msgId = msg.msg_id || msg.id;
-    if (msgId && grid.querySelector(`.gallery-item[data-msg-id="${msgId}"]`)) {
-      return;
+    if (msgId) {
+      const existing = grid.querySelector(`.gallery-item[data-msg-id="${msgId}"]`);
+      if (existing) {
+        if (!isPrepopulated && existing.dataset.prepopulated === 'true') {
+          delete existing.dataset.prepopulated;
+        }
+        if (activeTypes.size > 0) {
+          existing.classList.toggle('type-hidden', !activeTypes.has(existing.dataset.type));
+        } else {
+          existing.classList.remove('type-hidden');
+        }
+        return;
+      }
     }
 
     const mk = monthKey(msg.timestamp_ms);
@@ -4495,6 +4507,9 @@
     }
 
     const cell = renderGalleryItem(msg);
+    if (isPrepopulated) {
+      cell.dataset.prepopulated = 'true';
+    }
     if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
       cell.classList.add('type-hidden');
     }
@@ -4634,6 +4649,7 @@
 
       // append document and link cards; hidden when secondary types are filtered out by default
       for (const msg of [...docItems, ...linkItems]) {
+        msg._prepopulated = true;
         _insertGalleryGridItem(grid, msg);
       }
     } catch (err) {
@@ -4745,29 +4761,25 @@
     const anchorTopBefore = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
 
     if (type === null) {
-      // Total: toggle between show-all and the default media-only state
-      if (activeTypes.size === 0) {
+      // Total: toggle between show-all (empty set) and default media-only state
+      if (activeTypes.size === 0 && defaultActiveTypes.size > 0) {
         activeTypes = new Set(defaultActiveTypes);
       } else {
         activeTypes.clear();
       }
-    } else if (DEFAULT_DESELECTED_TYPES.has(type) && defaultActiveTypes.size > 0) {
-      // Default-deselected type (link, document, sticker): toggle exclusive ↔ default state
-      if (activeTypes.has(type)) {
+    } else if (DEFAULT_DESELECTED_TYPES.has(type) && activeTypes.size === 1 && activeTypes.has(type)) {
+      // Default-deselected type already exclusively active -> restore default
+      activeTypes = defaultActiveTypes.size > 0 ? new Set(defaultActiveTypes) : new Set();
+    } else if (activeTypes.size === 1 && activeTypes.has(type)) {
+      // Primary type already exclusively active -> restore default
+      if (defaultActiveTypes.size > 1 || (defaultActiveTypes.size === 1 && !defaultActiveTypes.has(type))) {
         activeTypes = new Set(defaultActiveTypes);
       } else {
-        activeTypes = new Set([type]);
+        activeTypes.clear();
       }
-    } else if (activeTypes.size === 0) {
-      // No filter active → first click is exclusive
-      activeTypes.add(type);
-    } else if (activeTypes.has(type)) {
-      // Already selected → deselect; if nothing left, restore default
-      activeTypes.delete(type);
-      if (activeTypes.size === 0) activeTypes = new Set(defaultActiveTypes);
     } else {
-      // Different type → add to selection
-      activeTypes.add(type);
+      // Switch exclusively to this type!
+      activeTypes = new Set([type]);
     }
     _applyTypeFilter();
     if (grid && anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
@@ -4797,22 +4809,40 @@
         animating = true;
         cell.classList.remove('is-appearing');
         cell.classList.add('is-disappearing');
-        cell.addEventListener('animationend', () => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
           cell.classList.remove('is-disappearing');
           cell.classList.add('type-hidden');
           _syncMonthHeaders();
-        }, { once: true });
+        };
+        cell.addEventListener('animationend', finish, { once: true });
+        setTimeout(finish, 200);
       } else if (!shouldHide && isHidden) {
         animating = true;
         cell.classList.remove('type-hidden');
         cell.classList.remove('is-disappearing');
         requestAnimationFrame(() => {
           cell.classList.add('is-appearing');
-          cell.addEventListener('animationend', () => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
             cell.classList.remove('is-appearing');
             _syncMonthHeaders();
-          }, { once: true });
+          };
+          cell.addEventListener('animationend', finish, { once: true });
+          setTimeout(finish, 250);
         });
+      } else if (shouldHide && cell.classList.contains('is-disappearing')) {
+        setTimeout(() => {
+          if (!cell.classList.contains('type-hidden') && activeTypes.size > 0 && !activeTypes.has(cell.dataset.type)) {
+            cell.classList.remove('is-disappearing');
+            cell.classList.add('type-hidden');
+            _syncMonthHeaders();
+          }
+        }, 200);
       }
     });
     _syncMonthHeaders();

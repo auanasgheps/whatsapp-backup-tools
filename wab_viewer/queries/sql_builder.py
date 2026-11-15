@@ -1644,7 +1644,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
             WHEN {android_file_path} IS NULL AND m.message_type = 1 THEN 'image'
             WHEN {android_file_path} IS NULL AND m.message_type = 2 THEN 'audio'
             WHEN {android_file_path} IS NULL AND m.message_type IN (3, 28, 81) THEN 'video'
-            WHEN {android_file_path} IS NULL AND m.message_type = 9 THEN 'document'
+            WHEN m.message_type = 9 THEN 'document'
             ELSE {_MEDIA_TYPE_EXPR.format(col=f"COALESCE({android_file_path}, mm.media_name)")}
         END                                                          AS media_type,
         COALESCE(
