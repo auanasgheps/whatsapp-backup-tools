@@ -28,6 +28,10 @@ from ..hydration import (
     _hydrate_live_photos,
     _hydrate_quoted_rows,
 )
+from ..preserved import (
+    _merge_messages,
+    _query_preserved_messages,
+)
 from ..queries.sql_builder import (
     _ANDROID_HD_DEDUP_CLAUSE,
     _IOS_HD_DEDUP_CLAUSE,
@@ -64,90 +68,83 @@ def api_media():
         is_link = ctx.queries.ios_is_link
         is_doc = ctx.queries.ios_is_document_undownloaded
 
-    if not types_raw:
-        if before:
-            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL AND {ts_col} < ? ORDER BY {ts_col} DESC LIMIT ?"
-            rows = [
-                dict(r)
-                for r in conn.execute(
-                    sql, chat_params + [int(before), GALLERY_PAGE_SIZE]
-                ).fetchall()
-            ]
-        else:
-            sql = f"{select} WHERE {chat_pred} {extra} AND {is_media} AND ac.archive_path IS NOT NULL ORDER BY {ts_col} DESC LIMIT ?"
-            rows = [
-                dict(r) for r in conn.execute(sql, chat_params + [GALLERY_PAGE_SIZE]).fetchall()
-            ]
-        _hydrate_link_preview_rows(rows, ctx.source_type)
-        _hydrate_live_photos(rows, ctx.source_type, conn)
-        return jsonify(rows)
-
-    types_set = {t.strip().lower() for t in types_raw.split(",") if t.strip()}
+    types_set = (
+        {t.strip().lower() for t in types_raw.split(",") if t.strip()} if types_raw else set()
+    )
     has_all = "all" in types_set
     has_link = has_all or "link" in types_set
     has_doc = has_all or "document" in types_set
     media_types = (types_set - {"link", "document", "all"}) if not has_all else set()
-    has_archived_media = has_all or bool(media_types) or has_doc
-
-    _EXT_PATTERNS = {
-        "image": ["%.jpg", "%.jpeg", "%.png", "%.heic", "%.heif"],
-        "video": ["%.mp4", "%.mov", "%.avi", "%.mkv", "%.3gp"],
-        "audio": ["%.mp3", "%.ogg", "%.aac", "%.opus", "%.m4a"],
-        "gif": ["%.gif"],
-        "sticker": ["%sticker%", "%.webp", "%.was"],
-        "vcard": ["%.vcf"],
-    }
+    has_media = has_all or bool(media_types) or not types_set
 
     cand_clauses = []
-    if has_archived_media:
-        if not has_all and not has_doc and media_types:
+    if has_media:
+        if not has_all and media_types:
             ext_conds = []
             for mt in media_types:
                 if mt == "video":
-                    vid_exts = " OR ".join(
-                        f"LOWER(ac.archive_path) LIKE '{ext}'" for ext in _EXT_PATTERNS["video"]
-                    )
-                    not_gif = (
-                        f"NOT ({ctx.queries.android_gif_cond})"
-                        if ctx.source_type == "android"
-                        else "m.ZMESSAGETYPE != 11"
-                    )
-                    ext_conds.append(f"(({vid_exts}) AND {not_gif})")
+                    if ctx.source_type == "android":
+                        ext_conds.append(
+                            f"((m.message_type IN (3, 28, 43, 81) OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mp4' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mov' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.3gp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mkv') AND NOT COALESCE(({ctx.queries.android_gif_cond}), 0))"
+                        )
+                    else:
+                        ext_conds.append(
+                            "((m.ZMESSAGETYPE IN (2, 39, 54) OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mp4' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mov' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.3gp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mkv') AND m.ZMESSAGETYPE != 11)"
+                        )
                 elif mt == "gif":
                     is_gif = (
                         ctx.queries.android_gif_cond
                         if ctx.source_type == "android"
-                        else "(LOWER(ac.archive_path) LIKE '%.gif' OR m.ZMESSAGETYPE = 11)"
+                        else "(LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.gif' OR m.ZMESSAGETYPE = 11)"
                     )
                     ext_conds.append(is_gif)
-                else:
-                    for ext in _EXT_PATTERNS.get(mt, []):
-                        ext_conds.append(f"LOWER(ac.archive_path) LIKE '{ext}'")
-                    if mt == "vcard":
-                        if ctx.source_type == "android":
-                            ext_conds.append("m.message_type IN (4, 14)")
-                        else:
-                            ext_conds.append("m.ZMESSAGETYPE = 4")
-                    if mt == "sticker":
-                        if ctx.source_type == "android":
-                            ext_conds.append(
-                                "(m.message_type = 20 OR mm.file_path LIKE '%sticker%')"
-                            )
-                        else:
-                            ext_conds.append("m.ZMESSAGETYPE = 15")
+                elif mt == "image":
+                    if ctx.source_type == "android":
+                        ext_conds.append(
+                            "(m.message_type IN (1, 42) OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heif')"
+                        )
+                    else:
+                        ext_conds.append(
+                            "(m.ZMESSAGETYPE IN (1, 38) OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.heif')"
+                        )
+                elif mt == "audio":
+                    if ctx.source_type == "android":
+                        ext_conds.append(
+                            "(m.message_type IN (2, 82) OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.opus' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.m4a' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.mp3' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.ogg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.aac')"
+                        )
+                    else:
+                        ext_conds.append(
+                            "(m.ZMESSAGETYPE IN (3, 53) OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.opus' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.m4a' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.mp3' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.ogg' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.aac')"
+                        )
+                elif mt == "sticker":
+                    if ctx.source_type == "android":
+                        ext_conds.append(
+                            "(m.message_type = 20 OR mm.file_path LIKE '%sticker%' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.was')"
+                        )
+                    else:
+                        ext_conds.append(
+                            "(m.ZMESSAGETYPE = 15 OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.webp' OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.was')"
+                        )
+                elif mt == "vcard":
+                    if ctx.source_type == "android":
+                        ext_conds.append("m.message_type IN (4, 14)")
+                    else:
+                        ext_conds.append("m.ZMESSAGETYPE = 4")
             if ext_conds:
                 prune_sql = " OR ".join(ext_conds)
-                cand_clauses.append(
-                    f"({is_media} AND ac.archive_path IS NOT NULL AND ({prune_sql}))"
-                )
+                cand_clauses.append(f"({is_media} AND ({prune_sql}))")
             else:
-                cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
+                cand_clauses.append(f"({is_media})")
         else:
-            cand_clauses.append(f"({is_media} AND ac.archive_path IS NOT NULL)")
+            cand_clauses.append(f"({is_media})")
     if has_link:
         cand_clauses.append(f"({is_link})")
     if has_doc:
-        cand_clauses.append(f"({is_doc})")
+        cand_clauses.append(
+            f"({is_doc} OR (m.message_type = 9))"
+            if ctx.source_type == "android"
+            else f"({is_doc} OR (m.ZMESSAGETYPE = 8))"
+        )
 
     if not cand_clauses:
         return jsonify([])
@@ -160,7 +157,10 @@ def api_media():
         params.append(int(before))
 
     if has_all:
-        type_filter = "media_type NOT IN ('text', 'service')"
+        type_filter = "media_type NOT IN ('text', 'service', 'deleted', 'poll')"
+        type_params = []
+    elif not types_set:
+        type_filter = "media_type NOT IN ('text', 'service', 'deleted', 'poll', 'link', 'document')"
         type_params = []
     else:
         placeholders = ", ".join("?" for _ in types_set)
@@ -176,7 +176,7 @@ def api_media():
 
     sql = f"""
         SELECT * FROM (
-            {select} WHERE {chat_pred} {hd_dedup_clause} AND ({cand_pred}) {ts_clause}
+            {select} WHERE {chat_pred} {extra} {hd_dedup_clause} AND ({cand_pred}) {ts_clause}
             ORDER BY {ts_col} DESC
         )
         WHERE {type_filter}
@@ -189,6 +189,55 @@ def api_media():
     _hydrate_quoted_rows(rows, ctx.source_type, conn)
     _hydrate_link_preview_rows(rows, ctx.source_type)
     _hydrate_live_photos(rows, ctx.source_type, conn)
+    rows = [r for r in rows if not r.get("is_live_photo_video")]
+    rows = [r for r in rows if not (r.get("is_view_once") and not r.get("archive_path"))]
+
+    pres = ctx.get_preserved()
+    if pres is not None:
+        try:
+            pres_rows = _query_preserved_messages(
+                pres,
+                chat_id=chat_id,
+                chat_type=chat_type,
+                before=int(before) if before else None,
+                after=None,
+                before_inclusive=False,
+                after_inclusive=False,
+                limit=GALLERY_PAGE_SIZE,
+            )
+            filtered_pres = []
+            for pr in pres_rows:
+                pt = pr.get("media_type")
+                if has_all:
+                    if pt in (
+                        "image",
+                        "video",
+                        "audio",
+                        "gif",
+                        "sticker",
+                        "document",
+                        "vcard",
+                        "link",
+                    ):
+                        filtered_pres.append(pr)
+                elif not types_set:
+                    if pt in ("image", "video", "audio", "gif", "sticker", "vcard"):
+                        filtered_pres.append(pr)
+                elif pt in types_set:
+                    filtered_pres.append(pr)
+            if filtered_pres:
+                rows = _merge_messages(
+                    rows, filtered_pres, descending=True, limit=GALLERY_PAGE_SIZE
+                )
+        except Exception:
+            pass
+
+    for r in rows:
+        if not r.get("archive_path") and r.get("media_type") not in ("link", "text"):
+            r["is_missing"] = 1
+        else:
+            r["is_missing"] = 0
+
     return jsonify(rows)
 
 
@@ -279,33 +328,92 @@ def api_media_count():
         is_media = ctx.queries.android_is_media
         is_link = ctx.queries.android_is_link
         is_doc_undownloaded = ctx.queries.android_is_document_undownloaded
+        hd_dedup_clause = _ANDROID_HD_DEDUP_CLAUSE if ctx.caps.has_android_hd else ""
     else:
         chat_pred, chat_params = _ios_chat_filter(chat_id)
         is_media = ctx.queries.ios_is_media
         is_link = ctx.queries.ios_is_link
         is_doc_undownloaded = ctx.queries.ios_is_document_undownloaded
-    rows = conn.execute(
-        f"{select} WHERE {chat_pred} {extra} AND {is_media}", chat_params
-    ).fetchall()
-    link_rows = conn.execute(f"{select} WHERE {chat_pred} AND {is_link}", chat_params).fetchall()
-    doc_rows = conn.execute(
-        f"{select} WHERE {chat_pred} AND {is_doc_undownloaded}", chat_params
-    ).fetchall()
-    all_rows = list(rows) + list(doc_rows) + list(link_rows)
-    total = len(all_rows)
-    archived = sum(1 for r in rows if r["archive_path"])
+        hd_dedup_clause = _IOS_HD_DEDUP_CLAUSE if ctx.caps.has_ios_hd else ""
+
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            f"{select} WHERE {chat_pred} {extra} {hd_dedup_clause} AND {is_media}", chat_params
+        ).fetchall()
+    ]
+    _hydrate_live_photos(rows, ctx.source_type, conn)
+    rows = [r for r in rows if not r.get("is_live_photo_video")]
+    rows = [r for r in rows if not (r.get("is_view_once") and not r.get("archive_path"))]
+
+    link_rows = [
+        dict(r)
+        for r in conn.execute(f"{select} WHERE {chat_pred} AND {is_link}", chat_params).fetchall()
+    ]
+    doc_rows = [
+        dict(r)
+        for r in conn.execute(
+            f"{select} WHERE {chat_pred} AND {is_doc_undownloaded}", chat_params
+        ).fetchall()
+    ]
+
     by_type: dict = {}
+    archived = 0
+
     for r in rows:
         t = r["media_type"]
+        if t in ("text", "service", "deleted", "poll"):
+            continue
+        is_vo = r.get("is_view_once") or 0
+        if is_vo and not r.get("archive_path"):
+            continue
         by_type.setdefault(t, {"count": 0, "missing": 0})
         by_type[t]["count"] += 1
-        is_vo = r["is_view_once"] if "is_view_once" in r.keys() else 0
-        if t not in ("link", "text") and not r["archive_path"] and not is_vo:
+        if r.get("archive_path"):
+            archived += 1
+        elif t not in ("link", "text"):
             by_type[t]["missing"] += 1
-    for r in list(doc_rows) + list(link_rows):
+
+    for r in doc_rows:
         t = r["media_type"]
         by_type.setdefault(t, {"count": 0, "missing": 0})
         by_type[t]["count"] += 1
+        if r.get("archive_path"):
+            archived += 1
+        else:
+            by_type[t]["missing"] += 1
+
+    for r in link_rows:
+        t = r["media_type"]
+        by_type.setdefault(t, {"count": 0, "missing": 0})
+        by_type[t]["count"] += 1
+
+    pres = ctx.get_preserved()
+    if pres is not None:
+        try:
+            pres_rows = _query_preserved_messages(
+                pres,
+                chat_id=chat_id,
+                chat_type=chat_type,
+                before=None,
+                after=None,
+                before_inclusive=False,
+                after_inclusive=False,
+                limit=100000,
+            )
+            for pr in pres_rows:
+                pt = pr.get("media_type")
+                if pt in ("image", "video", "audio", "gif", "sticker", "document", "vcard", "link"):
+                    by_type.setdefault(pt, {"count": 0, "missing": 0})
+                    by_type[pt]["count"] += 1
+                    if pr.get("archive_path"):
+                        archived += 1
+                    elif pt not in ("link", "text") and not pr.get("is_view_once"):
+                        by_type[pt]["missing"] += 1
+        except Exception:
+            pass
+
+    total = sum(d["count"] for d in by_type.values())
     return jsonify({"total": total, "archived": archived, "by_type": by_type})
 
 

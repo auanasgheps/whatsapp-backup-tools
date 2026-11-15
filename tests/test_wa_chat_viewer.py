@@ -994,8 +994,8 @@ class TestApiMedia:
         assert "timestamp_ms" in item
         assert item["timestamp_ms"] == 1700000001000
 
-    def test_excludes_unarchived_media(self, tmp_path):
-        """/api/media only returns items with an archive_copies entry."""
+    def test_includes_unarchived_media_with_missing_flag(self, tmp_path):
+        """/api/media returns missing items with is_missing=1 and archive_path=None."""
         wa_path = tmp_path / "msgstore.db"
         archive_path = tmp_path / ".wa_media_archiver.db"
         wa_conn = make_android_db(wa_path)
@@ -1016,7 +1016,9 @@ class TestApiMedia:
         app.config["TESTING"] = True
         with app.test_client() as client:
             data = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
-        assert len(data) == 0  # unarchived item excluded from gallery
+        assert len(data) == 1
+        assert data[0]["is_missing"] == 1
+        assert data[0]["archive_path"] is None
 
     def test_ordered_newest_first(self, app_with_media):
         """Results are sorted descending by timestamp."""
@@ -1398,6 +1400,162 @@ class TestApiMedia:
             docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact").get_json()
         assert len(docs) == 0
 
+    def test_media_count_excludes_live_photo_companion_video(self, tmp_path):
+        """/api/media/count must exclude motion photo / live photo companion videos from video counts."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Insert parent photo (type 1) and child video (type 3) associated via message_association type 11
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type) VALUES (101, 10, 0, 1700000001000, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) VALUES (101, 'Media/Images/parent.jpg', 'parent.jpg')"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type) VALUES (102, 10, 0, 1700000001000, 3)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) VALUES (102, 'Media/Video/child.mp4', 'child.mp4')"
+        )
+        wa_conn.execute(
+            "CREATE TABLE IF NOT EXISTS message_association (_id INTEGER PRIMARY KEY, parent_message_row_id INTEGER, child_message_row_id INTEGER, association_type INTEGER)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_association (parent_message_row_id, child_message_row_id, association_type) VALUES (101, 102, 11)"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Images/parent.jpg', 'Contacts/123456789/2023/Received/parent.jpg')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES ('Media/Video/child.mp4', 'Contacts/123456789/2023/Received/child.mp4')"
+        )
+        wa_conn.commit()
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            media = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=video"
+            ).get_json()
+
+        # Child video must NOT be counted as a standalone video
+        assert counts["by_type"].get("video", {}).get("count", 0) == 0
+        assert counts["by_type"]["image"]["count"] == 1
+        assert len(media) == 0  # companion video excluded from /api/media
+
+    def test_media_endpoint_includes_preserved_media(self, tmp_path):
+        """/api/media and /api/media/count include preserved media from preserved_messages.db."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+        wa_conn.close()
+        archive_conn.close()
+
+        pres_db = tmp_path / "preserved_messages.db"
+        with sqlite3.connect(str(pres_db)) as pres_conn:
+            pres_conn.executescript(
+                """
+                CREATE TABLE preserved_messages (
+                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_id INTEGER,
+                    stanza_id TEXT,
+                    chat_id TEXT,
+                    chat_type TEXT,
+                    timestamp_ms INTEGER,
+                    sender TEXT,
+                    from_me INTEGER,
+                    media_type TEXT,
+                    text_body TEXT,
+                    archive_path TEXT,
+                    original_path TEXT,
+                    is_view_once INTEGER DEFAULT 0,
+                    is_edited INTEGER DEFAULT 0,
+                    is_starred INTEGER DEFAULT 0,
+                    is_pinned INTEGER DEFAULT 0,
+                    preservation_reason TEXT,
+                    source_platform TEXT
+                );
+                INSERT INTO preserved_messages (
+                    rowid, msg_id, stanza_id, chat_id, chat_type, timestamp_ms,
+                    sender, from_me, media_type, text_body, archive_path, preservation_reason, source_platform
+                ) VALUES (
+                    10, 999, 'STANZA_PRES_1', '123456789', 'contact', 1700000099000,
+                    'You', 1, 'video', 'Preserved Video Note', 'Contacts/123456789/2023/Sent/ptv-123.mp4', 'deleted', 'android'
+                );
+                """
+            )
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            media = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=video"
+            ).get_json()
+
+        assert counts["by_type"]["video"]["count"] == 1
+        assert len(media) == 1
+        assert media[0]["msg_id"] == -10
+        assert media[0]["is_preserved"] == 1
+        assert media[0]["media_type"] == "video"
+
+    def test_media_filtering_returns_all_videos_including_missing(self, tmp_path):
+        """/api/media with types=video returns all videos, both archived and missing."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Insert 1 archived video (type 3) and 2 missing videos (type 3 and type 81 PTV)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type) VALUES "
+            "(201, 10, 0, 1700000001000, 3), "
+            "(202, 10, 0, 1700000002000, 3), "
+            "(203, 10, 0, 1700000003000, 81)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) VALUES "
+            "(201, 'Media/Video/vid1.mp4', 'vid1.mp4'), "
+            "(202, 'Media/Video/vid2_missing.mp4', 'vid2_missing.mp4'), "
+            "(203, 'Media/Video Notes/ptv_missing.mp4', 'ptv_missing.mp4')"
+        )
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES "
+            "('Media/Video/vid1.mp4', 'Contacts/123456789/2023/Received/vid1.mp4')"
+        )
+        wa_conn.commit()
+        archive_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            media = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=video"
+            ).get_json()
+
+        assert counts["by_type"]["video"]["count"] == 3
+        assert counts["by_type"]["video"]["missing"] == 2
+        assert len(media) == 3
+        archived = [m for m in media if m["is_missing"] == 0]
+        missing = [m for m in media if m["is_missing"] == 1]
+        assert len(archived) == 1
+        assert len(missing) == 2
+        assert any(m["is_video_note"] == 1 for m in missing)
+
     def test_gallery_missing_media_card_css_and_warning_badge(self):
         """Gallery missing media cards must use the warning badge, yellow icon, and blurred DB thumbnail."""
         css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
@@ -1409,9 +1567,27 @@ class TestApiMedia:
         assert ".gallery-missing-badge" in css
         assert ".gallery-missing-icon-warn" in css
         assert "#f59e0b" in css, "Warning yellow color token must be present in app.css"
+        assert ".gallery-missing-indicator-badge" in css
+        assert ".gallery-item.has-thumb" in css
         assert "buildMissingGalleryCard" in js
         assert "_sanitizeMediaName" in js
         assert "View Once" in js
+        assert "gallery-missing-indicator-badge" in js
+
+    def test_gallery_video_note_circular_styling_and_lightbox(self):
+        """Video notes (PTV) must enforce 1:1 circular round preview in gallery and lightbox."""
+        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        js = app_js_path.read_text(encoding="utf-8")
+
+        assert ".gallery-item.is-video-note" in css
+        assert "border-radius: 50%" in css
+        assert ".gallery-ptv-badge" in css
+        assert ".lb-video-note" in css
+        assert "is-video-note" in js
+        assert "gallery-ptv-badge" in js
+        assert "lb-video-note" in js
 
 
 class TestChatFilter:
@@ -4202,15 +4378,20 @@ class TestIosHdDeduplication:
         assert counts["by_type"]["image"]["count"] == 2
         assert counts["by_type"]["image"]["missing"] == 1
 
-        # Gallery grid only returns the archived HD photo
-        assert len(gallery) == 1
-        assert gallery[0]["msg_id"] == 101
-        assert gallery[0]["archive_path"] == "photos/hd.jpg"
+        # Gallery grid returns both the archived HD photo and genuine missing photo (LQ parent excluded)
+        assert len(gallery) == 2
+        gallery_ids = {item["msg_id"] for item in gallery}
+        assert gallery_ids == {101, 102}
+        hd_item = next(item for item in gallery if item["msg_id"] == 101)
+        missing_item = next(item for item in gallery if item["msg_id"] == 102)
+        assert hd_item["archive_path"] == "photos/hd.jpg"
+        assert missing_item["archive_path"] is None
+        assert missing_item["is_missing"] == 1
 
-        # Gallery with types filter also deduplicates and only returns the HD photo
+        # Gallery with types filter also deduplicates and returns the 2 images
         gallery_types = client.get("/api/media?chat_id=10&chat_type=group&types=image").get_json()
-        assert len(gallery_types) == 1
-        assert gallery_types[0]["msg_id"] == 101
+        assert len(gallery_types) == 2
+        assert {item["msg_id"] for item in gallery_types} == {101, 102}
 
 
 class TestGroupMembersLidResolution:

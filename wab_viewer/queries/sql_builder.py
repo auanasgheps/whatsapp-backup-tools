@@ -1563,14 +1563,14 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
     android_gif_cond = f"""(
         m.message_type = 13
         OR {android_gif_attr_cond}
-        OR mm.file_path LIKE '%WhatsApp Animated Gifs/%'
-        OR mm.file_path LIKE '%/Animated Gifs/%'
-        OR mm.file_path LIKE '%/GIF-%'
-        OR mm.file_path LIKE 'GIF-%'
-        OR ac.archive_path LIKE '%WhatsApp Animated Gifs/%'
-        OR ac.archive_path LIKE '%/Animated Gifs/%'
-        OR ac.archive_path LIKE '%/GIF-%'
-        OR ac.archive_path LIKE '%.gif'
+        OR COALESCE(mm.file_path, '') LIKE '%WhatsApp Animated Gifs/%'
+        OR COALESCE(mm.file_path, '') LIKE '%/Animated Gifs/%'
+        OR COALESCE(mm.file_path, '') LIKE '%/GIF-%'
+        OR COALESCE(mm.file_path, '') LIKE 'GIF-%'
+        OR COALESCE(ac.archive_path, '') LIKE '%WhatsApp Animated Gifs/%'
+        OR COALESCE(ac.archive_path, '') LIKE '%/Animated Gifs/%'
+        OR COALESCE(ac.archive_path, '') LIKE '%/GIF-%'
+        OR COALESCE(ac.archive_path, '') LIKE '%.gif'
     )"""
 
     has_starred_col = caps.has_msg_starred

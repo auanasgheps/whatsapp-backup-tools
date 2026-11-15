@@ -3457,6 +3457,9 @@
       media.muted = (mt === 'gif');
       media.playsInline = true;
       media.src = src;
+      if (msg.is_video_note || isVideoNote(msg)) {
+        media.classList.add('lb-video-note');
+      }
     } else {
       media = document.createElement('img');
       media.src = src;
@@ -3745,8 +3748,10 @@
   let archiveMediaObserver = null;
   let archiveViewActive = false;
   let currentGalleryItems = [];
+  let currentGalleryStats = null;
   let activeTypes = new Set();   // empty = show all; populated = show only those types
   let defaultActiveTypes = new Set();  // restored when deselecting a secondary type or sticker
+  let typesAllLoaded = new Set();
   const SECONDARY_TYPES = new Set(['link', 'document']);  // non-media types, fetched separately
   const DEFAULT_DESELECTED_TYPES = new Set(['sticker', 'link', 'document']);  // hidden by default, toggle exclusive
   let galleryAllLoaded = false;
@@ -3887,106 +3892,88 @@
     }
   }
 
-  function _checkGalleryLoadMore() {
-    if (archiveViewActive) return;
+  function _getOldestTimestampForActiveTypes(grid) {
+    if (!grid) return null;
+    let selector = '.gallery-item';
+    if (activeTypes.size > 0) {
+      selector = [...activeTypes].map(t => `.gallery-item[data-type="${t}"]`).join(', ');
+    }
+    const items = [...grid.querySelectorAll(selector)];
+    if (!items.length) return null;
+    let oldest = Infinity;
+    for (const el of items) {
+      const ts = parseInt(el.dataset.ts || '0', 10);
+      if (ts > 0 && ts < oldest) oldest = ts;
+    }
+    return oldest === Infinity ? null : oldest;
+  }
+
+  async function _checkAndFetchActiveTypeItems(gen) {
+    if (archiveViewActive || (gen != null && gen !== galleryBackfillGen)) return;
     const grid = document.getElementById('media-gallery-grid');
     if (!grid) return;
 
-    if (!linksAllLoaded && !linksLoadingMore && (activeTypes.has('link') || activeTypes.size === 0)) {
-      const linkCells = grid.querySelectorAll('.gallery-item[data-type="link"]:not(.type-hidden)');
-      const oldestLinkCell = linkCells[linkCells.length - 1];
-      if (oldestLinkCell) {
-        const cellRect = oldestLinkCell.getBoundingClientRect();
-        const gridRect = grid.getBoundingClientRect();
-        if (cellRect.top <= gridRect.bottom + 800) {
-          _loadMoreLinks();
-        }
+    const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
+    if (typesAllLoaded.has(typesKey)) return;
+    if (activeTypes.size === 0 && galleryAllLoaded) return;
+
+    let visibleCount = 0;
+    if (activeTypes.size === 0) {
+      visibleCount = grid.querySelectorAll('.gallery-item:not(.type-hidden)').length;
+    } else {
+      for (const t of activeTypes) {
+        visibleCount += grid.querySelectorAll(`.gallery-item[data-type="${t}"]:not(.type-hidden)`).length;
       }
     }
 
-    if (galleryAllLoaded || galleryLoadingMore) return;
-    const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
-    if (!mediaTypesActive) return;
+    let expectedCount = Infinity;
+    if (currentGalleryStats && currentGalleryStats.by_type) {
+      if (activeTypes.size === 1) {
+        const onlyType = [...activeTypes][0];
+        expectedCount = currentGalleryStats.by_type[onlyType]?.count || 0;
+      } else if (activeTypes.size === 0 && currentGalleryStats.total) {
+        expectedCount = currentGalleryStats.total;
+      }
+    }
 
-    const oldestMedia = currentGalleryItems[currentGalleryItems.length - 1];
-    if (!oldestMedia) return;
+    if (visibleCount < expectedCount) {
+      const oldestTs = _getOldestTimestampForActiveTypes(grid);
+      await _loadGalleryPage(oldestTs);
+      if (gen != null && gen !== galleryBackfillGen) return;
+      _applyTypeFilter();
+    }
+  }
 
-    const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestMedia.timestamp_ms}"]`);
+  function _checkGalleryLoadMore() {
+    if (archiveViewActive || galleryLoadingMore) return;
+    const grid = document.getElementById('media-gallery-grid');
+    if (!grid) return;
+
+    const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
+    if (typesAllLoaded.has(typesKey)) return;
+    if (activeTypes.size === 0 && galleryAllLoaded) return;
+
+    const oldestTs = _getOldestTimestampForActiveTypes(grid);
+    if (oldestTs == null) {
+      _loadGalleryPage(null);
+      return;
+    }
+
+    const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestTs}"]`);
     if (oldestCell) {
       const cellRect = oldestCell.getBoundingClientRect();
       const gridRect = grid.getBoundingClientRect();
       if (cellRect.top <= gridRect.bottom + 800) {
-        _loadGalleryPage(oldestMedia.timestamp_ms);
+        _loadGalleryPage(oldestTs);
       }
     } else {
-      _loadGalleryPage(oldestMedia.timestamp_ms);
+      _loadGalleryPage(oldestTs);
     }
   }
 
   async function _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen) {
     if (archiveViewActive || gen !== galleryBackfillGen) return;
-    const grid = document.getElementById('media-gallery-grid');
-    if (!grid) return;
-    const mediaTypesActive = activeTypes.size === 0 || [...activeTypes].some(t => !SECONDARY_TYPES.has(t));
-    if (!mediaTypesActive) return;
-
-    const targetMonth = targetTs !== Infinity ? monthKey(targetTs) : null;
-
-    let attempts = 0;
-    while (!galleryAllLoaded && attempts < 50) {
-      if (gen !== galleryBackfillGen) return;
-      attempts++;
-      if (galleryLoadingMore) {
-        await new Promise(r => setTimeout(r, 40));
-        continue;
-      }
-      const oldestMedia = currentGalleryItems[currentGalleryItems.length - 1];
-      if (!oldestMedia) break;
-
-      const oldestCell = grid.querySelector(`.gallery-item[data-ts="${oldestMedia.timestamp_ms}"]`);
-
-      let needsMore = false;
-      if (targetTs !== Infinity && oldestMedia.timestamp_ms > targetTs) {
-        needsMore = true;
-      } else if (oldestCell && !oldestCell.classList.contains('type-hidden')) {
-        const cellRect = oldestCell.getBoundingClientRect();
-        const gridRect = grid.getBoundingClientRect();
-        if (cellRect.top <= gridRect.bottom + 600) {
-          needsMore = true;
-        }
-      } else {
-        needsMore = true;
-      }
-
-      if (needsMore) {
-        await _loadGalleryPage(oldestMedia.timestamp_ms);
-        if (gen !== galleryBackfillGen) return;
-        if (anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
-          const delta = anchorEl.getBoundingClientRect().top - anchorTopBefore;
-          if (Math.abs(delta) > 1) {
-            grid.scrollTop += delta;
-          }
-        }
-        continue;
-      }
-      break;
-    }
-
-    if (gen !== galleryBackfillGen) return;
-
-    if (anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
-      const anchorTopAfter = anchorEl.getBoundingClientRect().top;
-      const delta = anchorTopAfter - anchorTopBefore;
-      if (Math.abs(delta) > 1) {
-        grid.scrollTop += delta;
-      }
-    } else if (targetMonth) {
-      const monthHdr = grid.querySelector(`.gallery-month-header[data-month="${targetMonth}"]`);
-      if (monthHdr && !monthHdr.classList.contains('month-empty')) {
-        monthHdr.scrollIntoView({ behavior: 'instant', block: 'start' });
-      }
-    }
-
+    await _checkAndFetchActiveTypeItems(gen);
     _hydrateVisibleGalleryItems();
   }
 
@@ -4117,19 +4104,7 @@
       }
     }
 
-    let seekStarted = false;
-    vid.addEventListener('loadedmetadata', () => {
-      if (seekStarted) return;
-      seekStarted = true;
-      try {
-        const targetTime = Math.min(0.1, (vid.duration || 1) / 2 || 0.1);
-        vid.currentTime = targetTime;
-      } catch {
-        captureFrame();
-      }
-    }, { once: true });
-
-    vid.addEventListener('seeked', () => {
+    vid.addEventListener('loadeddata', () => {
       captureFrame();
     }, { once: true });
 
@@ -4137,7 +4112,6 @@
       try {
         if (task.cell.isConnected) {
           task.img.classList.add('gallery-video-thumb--err');
-          buildMissingGalleryCard(task.cell, task.msg || task.cell._msg);
         }
       } finally {
         finish();
@@ -4164,7 +4138,9 @@
       }, { once: true });
     } else if (mt === 'video' || mt === 'gif') {
       const archivePath = cell.dataset.archivePath;
-      if (videoThumbCache.has(archivePath)) {
+      if (cell.dataset.thumbSrc) {
+        img.src = cell.dataset.thumbSrc;
+      } else if (videoThumbCache.has(archivePath)) {
         img.src = videoThumbCache.get(archivePath);
       } else {
         scheduleVisibleVideoExtraction();
@@ -4291,14 +4267,63 @@
     const mt = msg.media_type;
     cell.dataset.type = mt;
     cell.dataset.ts = String(msg.timestamp_ms || 0);
+    if (msg.msg_id || msg.id) {
+      cell.dataset.msgId = String(msg.msg_id || msg.id);
+    }
+
+    const isPtv = msg.is_video_note || isVideoNote(msg);
+    if (isPtv) {
+      cell.classList.add('is-video-note');
+      const ptvBadge = document.createElement('div');
+      ptvBadge.className = 'gallery-ptv-badge';
+      ptvBadge.title = 'Video message';
+      ptvBadge.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>';
+      cell.appendChild(ptvBadge);
+    }
+
+    const cleanName = _sanitizeMediaName(msg.media_name);
 
     if (!msg.archive_path && mt !== 'link') {
+      if (msg.has_thumbnail && msg.msg_id) {
+        cell.classList.add('is-missing', 'has-thumb');
+        cell.dataset.hydrated = 'true';
+        const img = document.createElement('img');
+        img.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+        img.alt = cleanName || (mt === 'video' ? 'Video' : 'Photo');
+        img.className = 'gallery-thumb';
+        cell.appendChild(img);
+
+        const warnBadge = document.createElement('div');
+        warnBadge.className = 'gallery-missing-indicator-badge';
+        warnBadge.title = 'Media file not found on disk';
+        warnBadge.innerHTML = '<svg class="gallery-missing-indicator-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+        cell.appendChild(warnBadge);
+
+        const btn = document.createElement('button');
+        btn.className = 'gallery-goto';
+        btn.title = 'Go to message';
+        btn.textContent = '→ in chat';
+        btn.addEventListener('click', e => {
+          e.stopPropagation();
+          if (btn.disabled) return;
+          btn.disabled = true;
+          btn.textContent = '⏳ in chat';
+          closeMediaGallery();
+          jumpToMessage(msg, 'default');
+        });
+        cell.appendChild(btn);
+
+        cell.addEventListener('click', () => {
+          closeMediaGallery();
+          jumpToMessage(msg, 'default');
+        });
+        return cell;
+      }
       buildMissingGalleryCard(cell, msg);
       return cell;
     }
 
     const src = '/media/' + msg.archive_path;
-    const cleanName = _sanitizeMediaName(msg.media_name);
 
     if (mt === 'image' || mt === 'sticker') {
       cell.dataset.src = src;
@@ -4317,6 +4342,9 @@
     } else if (mt === 'video' || mt === 'gif') {
       cell.dataset.src = src;
       cell.dataset.archivePath = msg.archive_path;
+      if (msg.has_thumbnail && msg.msg_id) {
+        cell.dataset.thumbSrc = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+      }
       cell.dataset.hydrated = 'false';
       const img = document.createElement('img');
       img.src = EMPTY_GALLERY_PIX;
@@ -4326,7 +4354,7 @@
       lightboxItems.push(msg);
       img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx, 0); });
       img.addEventListener('error', () => {
-        buildMissingGalleryCard(cell, msg);
+        img.classList.add('gallery-video-thumb--err');
       }, { once: true });
       cell.appendChild(img);
     } else if (mt === 'audio') {
@@ -4449,6 +4477,11 @@
   }
 
   function _insertGalleryGridItem(grid, msg) {
+    const msgId = msg.msg_id || msg.id;
+    if (msgId && grid.querySelector(`.gallery-item[data-msg-id="${msgId}"]`)) {
+      return;
+    }
+
     const mk = monthKey(msg.timestamp_ms);
     let monthHdr = grid.querySelector(`.gallery-month-header[data-month="${mk}"]`);
     if (!monthHdr) {
@@ -4523,8 +4556,10 @@
 
     // reset pagination state
     currentGalleryItems = [];
+    currentGalleryStats = null;
     lightboxItems = [];
     activeTypes = new Set();
+    typesAllLoaded = new Set();
     galleryAllLoaded = false;
     galleryLoadingMore = false;
     linksAllLoaded = false;
@@ -4548,6 +4583,7 @@
           return r.json();
         }),
       ]);
+      currentGalleryStats = counts;
       if (linkItems.length < 100) linksAllLoaded = true;
       stats.innerHTML = '';
       if (counts.total) {
@@ -4578,7 +4614,7 @@
       grid.appendChild(gallerySentinel);
       galleryObserver = new IntersectionObserver(entries => {
         if (entries[0].isIntersecting) {
-          const oldest = currentGalleryItems[currentGalleryItems.length - 1]?.timestamp_ms;
+          const oldest = _getOldestTimestampForActiveTypes(grid);
           _loadGalleryPage(oldest);
           if (activeTypes.has('link') || activeTypes.size === 0) {
             _loadMoreLinks();
@@ -4608,12 +4644,15 @@
   }
 
   async function _loadGalleryPage(before) {
-    if (galleryAllLoaded || galleryLoadingMore) return;
+    if (galleryLoadingMore) return;
+    const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
+    if (typesAllLoaded.has(typesKey)) return;
+    if (activeTypes.size === 0 && galleryAllLoaded) return;
     galleryLoadingMore = true;
     const grid = document.getElementById('media-gallery-grid');
     try {
-      const typesParam = (activeTypes.size > 0 && [...activeTypes].some(t => !SECONDARY_TYPES.has(t)))
-        ? '&types=' + encodeURIComponent([...activeTypes].filter(t => !SECONDARY_TYPES.has(t)).join(','))
+      const typesParam = activeTypes.size > 0
+        ? '&types=' + encodeURIComponent([...activeTypes].join(','))
         : '';
       const url = '/api/media?chat_id=' + encodeURIComponent(currentChat.id) +
                   '&chat_type=' + encodeURIComponent(currentChat.type) +
@@ -4622,7 +4661,12 @@
       const res = await fetch(url);
       if (!res.ok) throw new Error('Failed to fetch media');
       const items = await res.json();
-      if (items.length < 100) galleryAllLoaded = true;
+      if (items.length < 100) {
+        typesAllLoaded.add(typesKey);
+        if (activeTypes.size === 0) {
+          galleryAllLoaded = true;
+        }
+      }
       currentGalleryItems.push(...items);
 
       for (const msg of items) {
