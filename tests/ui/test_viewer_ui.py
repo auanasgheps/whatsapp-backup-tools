@@ -666,6 +666,198 @@ def test_media_gallery_month_dividers_filtered(browser: CDPSession) -> None:
     )
 
 
+def test_media_gallery_filter_switch_instant_hiding(browser: CDPSession) -> None:
+    """Validate that switching between gallery filters immediately hides non-matching items without delay."""
+    # 1. Open group chat Weekend Coffee & Foodies (which contains both video and image media)
+    opened = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const item = [...document.querySelectorAll('.chat-item')].find(
+                    el => el.querySelector('.chat-name')?.textContent.includes('Weekend Coffee & Foodies')
+                );
+                if (item) {
+                    item.click();
+                    for (let j = 0; j < 80; j++) {
+                        await new Promise(r => setTimeout(r, 50));
+                        const loading = document.getElementById('chat-loading');
+                        if (loading && loading.style.display === 'none') {
+                            await new Promise(r => setTimeout(r, 150));
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return false;
+        })()
+        """,
+        15.0,
+    )
+    assert opened is True
+
+    # 2. Open media gallery and wait for items to load
+    gallery = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gal = document.getElementById('media-gallery');
+                const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                if (gal && gal.classList.contains('open') && items.length > 0) {
+                    await new Promise(r => setTimeout(r, 200));
+                    return { isOpen: true };
+                }
+            }
+            return { isOpen: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(gallery, dict)
+    assert gallery["isOpen"] is True
+
+    # 3. Click Video pill: immediately verify only video is visible
+    state_video = browser.evaluate(
+        """
+        (() => {
+            const vidPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="video"]');
+            if (vidPill) vidPill.click();
+            // Immediate check: no setTimeout
+            const visibleVideos = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"]:not(.type-hidden)');
+            const visibleImages = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)');
+            return {
+                videos: visibleVideos.length,
+                images: visibleImages.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert state_video["videos"] == 1
+    assert state_video["images"] == 0
+
+    # 4. Click Photo/Image pill: immediately verify video is gone (0) in the very next tick
+    state_image = browser.evaluate(
+        """
+        (() => {
+            const imgPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="image"]');
+            if (imgPill) imgPill.click();
+            // Immediate check: no setTimeout, must be synchronous
+            const visibleVideos = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"]:not(.type-hidden)');
+            const visibleImages = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)');
+            return {
+                videos: visibleVideos.length,
+                images: visibleImages.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert state_image["videos"] == 0
+    assert state_image["images"] == 1
+
+    # Cleanup: close gallery
+    browser.evaluate(
+        """
+        (() => {
+            const closeBtn = document.getElementById('media-gallery-close');
+            if (closeBtn) closeBtn.click();
+        })()
+        """,
+        5.0,
+    )
+
+
+def test_media_gallery_filter_rapid_toggle_stress(browser: CDPSession) -> None:
+    """Validate that rapid synchronous toggling between gallery filter pills does not cause state corruption or leaking items."""
+    # 1. Open group chat Weekend Coffee & Foodies
+    open_group_chat_in_browser(browser, 25.0)
+
+    # 2. Open media gallery and wait for items to load
+    gallery = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gal = document.getElementById('media-gallery');
+                const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                if (gal && gal.classList.contains('open') && items.length > 0) {
+                    await new Promise(r => setTimeout(r, 200));
+                    return { isOpen: true };
+                }
+            }
+            return { isOpen: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(gallery, dict)
+    assert gallery["isOpen"] is True
+
+    # 3. Perform rapid-fire clicks across pills with zero inter-click delay
+    stress_res = browser.evaluate(
+        """
+        (async () => {
+            const types = ['total', 'video', 'image', 'document', 'video'];
+            for (const t of types) {
+                const pill = document.querySelector(`#media-gallery-stats .gallery-stat[data-type="${t}"]`);
+                if (pill) {
+                    pill.click();
+                }
+            }
+            // Allow a short moment for DOM settlement
+            await new Promise(r => setTimeout(r, 100));
+
+            const visibleVideos = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"]:not(.type-hidden)');
+            const visibleNonVideos = document.querySelectorAll('#media-gallery-grid .gallery-item:not([data-type="video"]):not(.type-hidden)');
+            const emptyHeadersNotMarked = [...document.querySelectorAll('#media-gallery-grid .gallery-month-header')].filter(hdr => {
+                const isMarkedEmpty = hdr.classList.contains('month-empty');
+                let el = hdr.nextElementSibling;
+                let hasVisible = false;
+                while (el && !el.classList.contains('gallery-month-header')) {
+                    if (el.classList.contains('gallery-item') && !el.classList.contains('type-hidden')) {
+                        hasVisible = true;
+                        break;
+                    }
+                    el = el.nextElementSibling;
+                }
+                return !hasVisible && !isMarkedEmpty;
+            });
+
+            return {
+                visibleVideos: visibleVideos.length,
+                visibleNonVideos: visibleNonVideos.length,
+                unmarkedEmptyHeaders: emptyHeadersNotMarked.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert isinstance(stress_res, dict)
+    assert stress_res["visibleVideos"] >= 1
+    assert stress_res["visibleNonVideos"] == 0
+    assert stress_res["unmarkedEmptyHeaders"] == 0
+
+    # Cleanup: close gallery
+    browser.evaluate(
+        """
+        (() => {
+            const closeBtn = document.getElementById('media-gallery-close');
+            if (closeBtn) closeBtn.click();
+        })()
+        """,
+        5.0,
+    )
+
+
 def test_media_gallery_viewport_hydration_and_unloading(
     browser: CDPSession, screenshot_dir: Path
 ) -> None:

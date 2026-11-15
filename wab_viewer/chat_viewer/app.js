@@ -4189,6 +4189,8 @@
     document.getElementById('media-gallery').classList.remove('open');
     if (galleryObserver) { galleryObserver.disconnect(); galleryObserver = null; }
     if (gallerySentinel) { gallerySentinel.remove(); gallerySentinel = null; }
+    const loader = document.querySelector('.gallery-filter-loading');
+    if (loader) loader.remove();
     teardownMediaObservers();
     clearVideoProbeQueue();
     clearTimeout(galleryScrollIdleTimer);
@@ -4694,6 +4696,8 @@
       }
       _syncMonthHeaders();
     } finally {
+      const loader = document.querySelector('.gallery-filter-loading');
+      if (loader) loader.remove();
       galleryLoadingMore = false;
       scheduleVisibleVideoExtraction();
     }
@@ -4757,7 +4761,8 @@
   function _toggleTypeFilter(type) {
     const grid = document.getElementById('media-gallery-grid');
     const targetTs = grid ? _getMinVisibleGalleryTimestamp(grid) : Infinity;
-    const anchorEl = grid ? _findAnchorGalleryElement(grid) : null;
+    const isSingleTypeSwitch = type !== null && !(activeTypes.size === 1 && activeTypes.has(type));
+    const anchorEl = (!isSingleTypeSwitch && grid) ? _findAnchorGalleryElement(grid) : null;
     const anchorTopBefore = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
 
     if (type === null) {
@@ -4782,7 +4787,9 @@
       activeTypes = new Set([type]);
     }
     _applyTypeFilter();
-    if (grid && anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
+    if (isSingleTypeSwitch && grid) {
+      grid.scrollTop = 0;
+    } else if (grid && anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
       const delta = anchorEl.getBoundingClientRect().top - anchorTopBefore;
       if (Math.abs(delta) > 1) {
         grid.scrollTop += delta;
@@ -4790,6 +4797,23 @@
     }
     _syncStatPills();
     scheduleVisibleVideoExtraction();
+
+    if (grid && type !== null) {
+      const hasMatchingInGrid = Boolean(grid.querySelector(`.gallery-item[data-type="${type}"]`));
+      const totalExpected = currentGalleryStats?.by_type?.[type]?.count || 0;
+      let loader = grid.querySelector('.gallery-filter-loading');
+      if (!hasMatchingInGrid && totalExpected > 0) {
+        if (!loader) {
+          loader = document.createElement('div');
+          loader.className = 'gallery-filter-loading';
+          loader.innerHTML = '<span class="gallery-filter-spinner"></span><span>Loading…</span>';
+          grid.insertBefore(loader, gallerySentinel || null);
+        }
+      } else if (loader) {
+        loader.remove();
+      }
+    }
+
     const gen = ++galleryBackfillGen;
     _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen);
     if (activeTypes.has('link')) {
@@ -4801,58 +4825,19 @@
     const items = document.querySelectorAll(
       '#media-gallery-grid .gallery-item, #media-archive-view .gallery-item'
     );
-    let animating = false;
     items.forEach(cell => {
       const shouldHide = activeTypes.size > 0 && !activeTypes.has(cell.dataset.type);
       const isHidden   = cell.classList.contains('type-hidden');
       if (shouldHide && !isHidden) {
-        animating = true;
         cell.classList.remove('is-appearing');
-        cell.classList.add('is-disappearing');
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          cell.classList.remove('is-disappearing');
-          cell.classList.add('type-hidden');
-          _syncMonthHeaders();
-        };
-        cell.addEventListener('animationend', finish, { once: true });
-        setTimeout(finish, 200);
+        cell.classList.add('type-hidden');
       } else if (!shouldHide && isHidden) {
-        animating = true;
         cell.classList.remove('type-hidden');
-        cell.classList.remove('is-disappearing');
-        requestAnimationFrame(() => {
-          cell.classList.add('is-appearing');
-          let done = false;
-          const finish = () => {
-            if (done) return;
-            done = true;
-            cell.classList.remove('is-appearing');
-            _syncMonthHeaders();
-          };
-          cell.addEventListener('animationend', finish, { once: true });
-          setTimeout(finish, 250);
-        });
-      } else if (shouldHide && cell.classList.contains('is-disappearing')) {
-        setTimeout(() => {
-          if (!cell.classList.contains('type-hidden') && activeTypes.size > 0 && !activeTypes.has(cell.dataset.type)) {
-            cell.classList.remove('is-disappearing');
-            cell.classList.add('type-hidden');
-            _syncMonthHeaders();
-          }
-        }, 200);
+        cell.classList.add('is-appearing');
       }
     });
     _syncMonthHeaders();
     _hydrateVisibleGalleryItems();
-    if (animating) {
-      setTimeout(() => {
-        _syncMonthHeaders();
-        _hydrateVisibleGalleryItems();
-      }, 250);
-    }
   }
 
   function _syncMonthHeaders() {

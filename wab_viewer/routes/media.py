@@ -190,9 +190,7 @@ def api_media():
         """
         raw_rows = [
             dict(r)
-            for r in conn.execute(
-                batch_sql, batch_params + type_params + [batch_limit]
-            ).fetchall()
+            for r in conn.execute(batch_sql, batch_params + type_params + [batch_limit]).fetchall()
         ]
         if not raw_rows:
             break
