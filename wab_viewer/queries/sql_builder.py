@@ -260,8 +260,8 @@ _ANDROID_TS = "m.timestamp"
 _IOS_TS = "CAST((m.ZMESSAGEDATE + 978307200) * 1000 AS INTEGER)"
 
 
-_ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type IN (0, 7, 15, 64, 66))"
-_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 6, 7, 10, 14, 46))"
+_ANDROID_IS_MEDIA = "NOT (m.message_type IS NULL OR m.message_type IN (0, 5, 7, 15, 16, 64, 66))"
+_IOS_IS_MEDIA = "NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 5, 6, 7, 10, 14, 16, 46))"
 
 
 _ANDROID_IS_LINK = (

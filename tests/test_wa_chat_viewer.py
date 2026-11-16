@@ -1704,6 +1704,172 @@ class TestApiMedia:
             docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact").get_json()
         assert len(docs) == 0
 
+    def test_media_count_and_gallery_exclude_locations_android(self, tmp_path):
+        """Static locations (type 5) and live locations (type 16) must be excluded from gallery and counts on Android."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+        seed_android_db_with_media(wa_conn, archive_conn, tmp_path)
+
+        # Static location (type 5) and Live location (type 16)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (51, 10, 0, 1700000051000, 'Pinned Location', 5)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (52, 10, 0, 1700000052000, 'Live Location Sharing', 16)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            default_media = client.get("/api/media?chat_id=123456789&chat_type=contact").get_json()
+            all_media = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=all"
+            ).get_json()
+            loc_media = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=location"
+            ).get_json()
+
+        # Count must only reflect the 1 archived image, not locations
+        assert counts["total"] == 1
+        assert "location" not in counts["by_type"]
+        assert "live_location" not in counts["by_type"]
+        assert counts["by_type"]["image"]["missing"] == 0
+
+        # Gallery streams must exclude locations
+        assert len(default_media) == 1
+        assert default_media[0]["media_type"] == "image"
+        assert len(all_media) == 1
+        assert all_media[0]["media_type"] == "image"
+        assert len(loc_media) == 0
+
+    def test_media_count_and_gallery_exclude_locations_ios(self, tmp_path):
+        """Static locations (type 5) and live locations (type 16) must be excluded from gallery and counts on iOS."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            -- Archived photo (ZMESSAGETYPE=1)
+            INSERT INTO ZWAMEDIAITEM VALUES (20, 'Media/photo.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 10, 0, 1000.0, 'MSG_1', 1, 20, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+            -- Static location (ZMESSAGETYPE=5)
+            INSERT INTO ZWAMESSAGE VALUES (101, 10, 0, 1001.0, 'MSG_2', 5, NULL, NULL, NULL, 'User1', 'Static Location', '15550001111@s.whatsapp.net');
+            -- Live location (ZMESSAGETYPE=16)
+            INSERT INTO ZWAMESSAGE VALUES (102, 10, 0, 1002.0, 'MSG_3', 16, NULL, NULL, NULL, 'User1', 'Live Location', '15550001111@s.whatsapp.net');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) "
+            "VALUES ('Message/Media/photo.jpg', 'photos/photo.jpg')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            counts = client.get("/api/media/count?chat_id=10&chat_type=group").get_json()
+            default_media = client.get("/api/media?chat_id=10&chat_type=group").get_json()
+            all_media = client.get("/api/media?chat_id=10&chat_type=group&types=all").get_json()
+
+        assert counts["total"] == 1
+        assert "location" not in counts["by_type"]
+        assert "live_location" not in counts["by_type"]
+        assert counts["by_type"]["image"]["missing"] == 0
+        assert len(default_media) == 1
+        assert default_media[0]["media_type"] == "image"
+        assert len(all_media) == 1
+        assert all_media[0]["media_type"] == "image"
+
+    def test_media_vcard_is_not_marked_missing_when_unarchived(self, tmp_path):
+        """Contact cards (vcard) are never marked missing even if unarchived on disk."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Contact card (type 4) with text_data (vCard string) and no archive copy
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (53, 10, 0, 1700000053000, 'BEGIN:VCARD\\nFN:John Doe\\nEND:VCARD', 4)"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            vcards = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=vcard"
+            ).get_json()
+
+        assert counts["total"] == 1
+        assert counts["by_type"]["vcard"]["count"] == 1
+        assert counts["by_type"]["vcard"]["missing"] == 0
+        assert len(vcards) == 1
+        assert vcards[0]["media_type"] == "vcard"
+        assert vcards[0]["is_missing"] == 0
+
+    def test_media_count_does_not_double_count_undownloaded_documents(self, tmp_path):
+        """Undownloaded documents must be counted once in /api/media/count and returned by /api/media/documents."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        # Undownloaded document (type 9) with file_path=NULL and media_name set
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (54, 10, 0, 1700000054000, NULL, 9)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (54, NULL, 'spec.pdf')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            counts = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact").get_json()
+
+        assert counts["total"] == 1
+        assert counts["by_type"]["document"]["count"] == 1
+        assert counts["by_type"]["document"]["missing"] == 1
+        assert len(docs) == 1
+        assert docs[0]["media_name"] == "spec.pdf"
+
     def test_media_count_excludes_live_photo_companion_video(self, tmp_path):
         """/api/media/count must exclude motion photo / live photo companion videos from video counts."""
         wa_path = tmp_path / "msgstore.db"
