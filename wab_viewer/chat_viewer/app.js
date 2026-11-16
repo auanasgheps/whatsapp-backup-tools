@@ -3772,6 +3772,8 @@
   let galleryLoadingMore = false;
   let linksAllLoaded = false;
   let linksLoadingMore = false;
+  let galleryOpenGen = 0;
+  let gallerySessionAbortController = null;
   let galleryBackfillGen = 0;
   let gallerySentinel = null;
   let galleryObserver = null;
@@ -3779,11 +3781,16 @@
   let galleryScrollDirection = 'down';
   let galleryCurrentAbortController = null;
   let galleryPendingScrollCheck = false;
+  let galleryLinkObserver = null;
 
   function teardownMediaObservers() {
     if (galleryMediaObserver) {
       galleryMediaObserver.disconnect();
       galleryMediaObserver = null;
+    }
+    if (galleryLinkObserver) {
+      galleryLinkObserver.disconnect();
+      galleryLinkObserver = null;
     }
     if (archiveMediaObserver) {
       archiveMediaObserver.disconnect();
@@ -3804,6 +3811,20 @@
     return galleryMediaObserver;
   }
   window.getGalleryMediaObserver = getGalleryMediaObserver;
+
+  function getGalleryLinkObserver() {
+    if (!galleryLinkObserver) {
+      const grid = document.getElementById('media-gallery-grid');
+      if (grid) {
+        galleryLinkObserver = new IntersectionObserver(handleMediaIntersection, {
+          root: grid,
+          rootMargin: '150px 0px 150px 0px',
+        });
+      }
+    }
+    return galleryLinkObserver;
+  }
+  window.getGalleryLinkObserver = getGalleryLinkObserver;
 
   function getArchiveMediaObserver() {
     if (!archiveMediaObserver) {
@@ -3888,6 +3909,8 @@
         if (ts > 0 && ts < oldestTs) oldestTs = ts;
       }
     }
+    const gen = galleryOpenGen;
+    const requestedChatId = currentChat.id;
     linksLoadingMore = true;
     _setStatPillsLoading(true);
 
@@ -3906,14 +3929,19 @@
       const beforeParam = (oldestTs !== Infinity && oldestTs > 0) ? '&before=' + oldestTs : '';
       const qs = 'chat_id=' + encodeURIComponent(currentChat.id) +
                  '&chat_type=' + encodeURIComponent(currentChat.type) +
-                 '&limit=100' + beforeParam;
-      const res = await fetch('/api/media/links?' + qs);
+                 '&limit=30' + beforeParam;
+      const signal = gallerySessionAbortController ? gallerySessionAbortController.signal : undefined;
+      const res = await fetch('/api/media/links?' + qs, { signal });
       if (!res.ok) throw new Error('Failed to fetch more links');
       const items = await res.json();
-      if (items.length < 100) linksAllLoaded = true;
+      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
+      if (!document.getElementById('media-gallery').classList.contains('open')) return;
+      if (items.length < 30) linksAllLoaded = true;
       _insertGalleryGridBatch(grid, items);
       _syncMonthHeaders();
     } catch (err) {
+      if (err.name === 'AbortError') return;
+      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
       console.error('Failed to load more links:', err);
     } finally {
       if (scrollLoader) scrollLoader.remove();
@@ -4284,6 +4312,9 @@
     archiveViewActive = false;
     archiveLoadingAll = false;
     galleryBackfillGen++;
+    galleryOpenGen++;
+    galleryLoadingMore = false;
+    linksLoadingMore = false;
     if (currentGalleryAudio) {
       currentGalleryAudio.pause();
       currentGalleryAudio = null;
@@ -4294,6 +4325,10 @@
     if (gallerySentinel) { gallerySentinel.remove(); gallerySentinel = null; }
     const loaders = document.querySelectorAll('.gallery-filter-loading, .gallery-scroll-loading, .gallery-end-notice, .gallery-empty-notice');
     loaders.forEach(el => el.remove());
+    if (gallerySessionAbortController) {
+      gallerySessionAbortController.abort();
+      gallerySessionAbortController = null;
+    }
     if (galleryCurrentAbortController) {
       galleryCurrentAbortController.abort();
       galleryCurrentAbortController = null;
@@ -4755,7 +4790,9 @@
   function _insertGalleryGridBatch(grid, items) {
     if (!grid || !items || !items.length) return;
     const observer = getGalleryMediaObserver();
+    const linkObserver = getGalleryLinkObserver();
     const cellsToObserve = [];
+    const linkCellsToObserve = [];
 
     // Fast check: pure tail append if items are strictly older than the last cell in grid
     const existingHeaders = [...grid.querySelectorAll('.gallery-month-header')];
@@ -4808,7 +4845,11 @@
         }
         fragment.appendChild(cell);
         if (cell.dataset.src) {
-          cellsToObserve.push(cell);
+          if (cell.dataset.type === 'link') {
+            linkCellsToObserve.push(cell);
+          } else {
+            cellsToObserve.push(cell);
+          }
         }
       }
 
@@ -4823,6 +4864,11 @@
     if (observer) {
       for (const c of cellsToObserve) {
         observer.observe(c);
+      }
+    }
+    if (linkObserver) {
+      for (const c of linkCellsToObserve) {
+        linkObserver.observe(c);
       }
     }
   }
@@ -4882,7 +4928,11 @@
     }
     grid.insertBefore(cell, insertBeforeEl);
     if (cell.dataset.src) {
-      getGalleryMediaObserver()?.observe(cell);
+      if (cell.dataset.type === 'link') {
+        getGalleryLinkObserver()?.observe(cell);
+      } else {
+        getGalleryMediaObserver()?.observe(cell);
+      }
     }
   }
 
@@ -4893,6 +4943,16 @@
     const grid = document.getElementById('media-gallery-grid');
     const stats = document.getElementById('media-gallery-stats');
     const switcher = document.getElementById('media-view-switcher');
+
+    const gen = ++galleryOpenGen;
+    const requestedChatId = currentChat.id;
+
+    if (gallerySessionAbortController) {
+      gallerySessionAbortController.abort();
+      gallerySessionAbortController = null;
+    }
+    const sessionController = new AbortController();
+    gallerySessionAbortController = sessionController;
 
     // disconnect any observer/sentinel from a previous open before clearing the grid
     if (galleryObserver) { galleryObserver.disconnect(); galleryObserver = null; }
@@ -4916,7 +4976,7 @@
     document.getElementById('media-gallery-title').textContent =
       currentChat.display_name ? `Media — ${currentChat.display_name}` : 'Media';
 
-    grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">Loading…</div>';
+    grid.innerHTML = '<div class="gallery-filter-loading gallery-initial-loading"><span class="gallery-filter-spinner"></span><span>Loading media…</span></div>';
     stats.innerHTML = '';
     document.getElementById('media-gallery').classList.add('open');
 
@@ -4937,10 +4997,14 @@
       // fetch counts for stat pills, then render initial media (strictly images + videos)
       const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
       const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
-      const counts = await fetch('/api/media/count?' + qs).then(r => {
+      const counts = await fetch('/api/media/count?' + qs, { signal: sessionController.signal }).then(r => {
         if (!r.ok) throw new Error('Failed to fetch media count');
         return r.json();
       });
+
+      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
+      if (!document.getElementById('media-gallery').classList.contains('open')) return;
+
       currentGalleryStats = counts;
       stats.innerHTML = '';
       if (counts.total) {
@@ -4995,14 +5059,23 @@
 
       await _loadGalleryPage(null);
 
-      if (!currentGalleryItems.length) {
-        grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
+      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
+      if (!document.getElementById('media-gallery').classList.contains('open')) return;
+
+      if (!currentGalleryItems.length && !sessionController.signal.aborted) {
+        grid.innerHTML = '<div class="gallery-empty-notice">No media in this chat.</div>';
         return;
       }
     } catch (err) {
+      if (err.name === 'AbortError' || sessionController.signal.aborted) {
+        return;
+      }
+      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
       console.error('Failed to load media gallery:', err);
-      grid.innerHTML = '<div style="color:var(--text-muted);padding:16px">Failed to load media gallery.</div>';
+      grid.innerHTML = '<div class="gallery-empty-notice">Failed to load media gallery.</div>';
+      return;
     }
+    if (gen !== galleryOpenGen || !document.getElementById('media-gallery').classList.contains('open')) return;
     _syncMonthHeaders();
     _syncGalleryNotices();
   }
@@ -5032,6 +5105,7 @@
   function _syncGalleryNotices() {
     const grid = document.getElementById('media-gallery-grid');
     if (!grid || archiveViewActive) return;
+    if (!document.getElementById('media-gallery').classList.contains('open')) return;
 
     grid.querySelectorAll('.gallery-end-notice, .gallery-empty-notice').forEach(n => n.remove());
 
@@ -5083,6 +5157,8 @@
     const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
     if (typesAllLoaded.has(typesKey)) return;
     if (activeTypes.size === 0 && galleryAllLoaded) return;
+    const gen = galleryOpenGen;
+    const requestedChatId = currentChat ? currentChat.id : null;
     galleryLoadingMore = true;
     _setStatPillsLoading(true);
     const grid = document.getElementById('media-gallery-grid');
@@ -5114,6 +5190,8 @@
       const res = await fetch(url, { signal: controller.signal });
       if (!res.ok) throw new Error('Failed to fetch media');
       const items = await res.json();
+      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
+      if (!document.getElementById('media-gallery').classList.contains('open')) return;
       if (items.length < 100) {
         typesAllLoaded.add(typesKey);
         if (activeTypes.size === 0) {
@@ -5132,6 +5210,7 @@
       if (err.name === 'AbortError') {
         return;
       }
+      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
       console.error('Failed to load gallery page:', err);
     } finally {
       if (galleryCurrentAbortController === controller) {
@@ -5142,7 +5221,9 @@
       if (filterLoader) filterLoader.remove();
       _setStatPillsLoading(false);
       galleryLoadingMore = false;
-      _syncGalleryNotices();
+      if (gen === galleryOpenGen && document.getElementById('media-gallery').classList.contains('open')) {
+        _syncGalleryNotices();
+      }
       scheduleVisibleVideoExtraction();
 
       // Resolve fast scrolling race condition: if still near bottom going down, continue loading
