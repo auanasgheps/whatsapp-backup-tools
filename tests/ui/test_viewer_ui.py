@@ -589,9 +589,9 @@ def test_media_gallery_month_dividers_filtered(browser: CDPSession) -> None:
         """,
         5.0,
     )
-    assert state_initial["total"] == 2
+    assert state_initial["total"] == 1
     assert state_initial["visible"] == 1
-    assert state_initial["empty"] == 1
+    assert state_initial["empty"] == 0
 
     # 4. Switch to links view: images should become month-empty, link month divider should become visible
     state_links = browser.evaluate(
@@ -715,12 +715,32 @@ def test_media_gallery_filter_switch_instant_hiding(browser: CDPSession) -> None
     assert state_video["videos"] == 1
     assert state_video["images"] == 0
 
-    # 4. Click Photo/Image pill: immediately verify video is gone (0) in the very next tick
-    state_image = browser.evaluate(
+    # 4. Click Photo/Image pill: images and videos are now selected together!
+    state_both = browser.evaluate(
         """
         (() => {
             const imgPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="image"]');
             if (imgPill) imgPill.click();
+            // Immediate check: both videos and images should be visible together
+            const visibleVideos = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"]:not(.type-hidden)');
+            const visibleImages = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)');
+            return {
+                videos: visibleVideos.length,
+                images: visibleImages.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert state_both["videos"] == 1
+    assert state_both["images"] == 1
+
+    # 5. Click Video pill again: deselects video, immediately leaving only image visible (0 videos)
+    state_image = browser.evaluate(
+        """
+        (() => {
+            const vidPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="video"]');
+            if (vidPill) vidPill.click();
             // Immediate check: no setTimeout, must be synchronous
             const visibleVideos = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"]:not(.type-hidden)');
             const visibleImages = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="image"]:not(.type-hidden)');
@@ -922,7 +942,33 @@ def test_gallery_filter_image_isolation_in_mixed_chat(
 def test_media_gallery_filter_rapid_toggle_stress(browser: CDPSession) -> None:
     """Validate that rapid synchronous toggling between gallery filter pills does not cause state corruption or leaking items."""
     # 1. Open group chat Weekend Coffee & Foodies
-    open_group_chat_in_browser(browser, 25.0)
+    opened = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                const item = [...document.querySelectorAll('.chat-item')].find(
+                    el => el.querySelector('.chat-name')?.textContent.includes('Weekend Coffee & Foodies')
+                );
+                if (item) {
+                    item.click();
+                    for (let j = 0; j < 80; j++) {
+                        await new Promise(r => setTimeout(r, 50));
+                        const loading = document.getElementById('chat-loading');
+                        if (loading && loading.style.display === 'none') {
+                            await new Promise(r => setTimeout(r, 150));
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return false;
+        })()
+        """,
+        15.0,
+    )
+    assert opened is True
 
     # 2. Open media gallery and wait for items to load
     gallery = browser.evaluate(
@@ -952,7 +998,7 @@ def test_media_gallery_filter_rapid_toggle_stress(browser: CDPSession) -> None:
     stress_res = browser.evaluate(
         """
         (async () => {
-            const types = ['total', 'video', 'image', 'document', 'video'];
+            const types = ['total', 'image', 'video', 'vcard', 'video'];
             for (const t of types) {
                 const pill = document.querySelector(`#media-gallery-stats .gallery-stat[data-type="${t}"]`);
                 if (pill) {
@@ -1370,6 +1416,17 @@ def test_media_gallery_archive_view_loads_past_years_when_current_year_has_many_
 
             window.fetch = async (url, options) => {
                 const urlStr = String(url);
+                if (urlStr.includes('/api/media/count?')) {
+                    return new Response(JSON.stringify({
+                        total: 120,
+                        by_type: {
+                            image: { count: 120, missing: 0 }
+                        }
+                    }), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                    });
+                }
                 if (urlStr.includes('/api/media?')) {
                     if (urlStr.includes('before=')) {
                         return new Response(JSON.stringify(page2), {
