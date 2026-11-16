@@ -41,6 +41,7 @@ from ..queries.sql_builder import (
 
 bp = Blueprint("media", __name__)
 _CHAT_VIEWER_DIR = Path(__file__).resolve().parents[1] / "chat_viewer"
+_NON_GALLERY_TYPES = ("text", "service", "deleted", "poll", "location", "live_location")
 
 
 @bp.route("/api/media")
@@ -106,7 +107,7 @@ def api_media():
                 elif mt == "image":
                     if ctx.source_type == "android":
                         ext_conds.append(
-                            "(m.message_type IN (1, 42) OR (COALESCE(m.message_type, 0) NOT IN (2, 3, 4, 9, 13, 14, 15, 20, 28, 43, 64, 66, 81, 82) AND (LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heif')))"
+                            "(m.message_type IN (1, 42) OR (COALESCE(m.message_type, 0) NOT IN (2, 3, 4, 5, 9, 13, 14, 15, 16, 20, 28, 43, 64, 66, 81, 82) AND (LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.jpeg' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.png' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heic' OR LOWER(COALESCE(ac.archive_path, mm.file_path, mm.media_name, '')) LIKE '%.heif')))"
                         )
                     else:
                         ext_conds.append(
@@ -146,7 +147,7 @@ def api_media():
         cand_clauses.append(f"({is_link})")
     if has_doc:
         cand_clauses.append(
-            f"({is_doc} OR (m.message_type = 9))"
+            f"({is_doc} OR (m.message_type IN (8, 9)))"
             if ctx.source_type == "android"
             else f"({is_doc} OR (m.ZMESSAGETYPE = 8))"
         )
@@ -157,11 +158,14 @@ def api_media():
     cand_pred = " OR ".join(cand_clauses)
 
     if has_all:
-        type_filter = "media_type NOT IN ('text', 'service', 'deleted', 'poll')"
-        type_params = []
+        non_gal_placeholders = ", ".join("?" for _ in _NON_GALLERY_TYPES)
+        type_filter = f"media_type NOT IN ({non_gal_placeholders})"
+        type_params = list(_NON_GALLERY_TYPES)
     elif not types_set:
-        type_filter = "media_type NOT IN ('text', 'service', 'deleted', 'poll', 'link', 'document')"
-        type_params = []
+        non_default = list(_NON_GALLERY_TYPES) + ["link", "document"]
+        non_def_placeholders = ", ".join("?" for _ in non_default)
+        type_filter = f"media_type NOT IN ({non_def_placeholders})"
+        type_params = non_default
     else:
         filter_types = set(types_set)
         if "voice" in filter_types:
@@ -248,6 +252,8 @@ def api_media():
             filtered_pres = []
             for pr in pres_rows:
                 pt = pr.get("media_type")
+                if pt in _NON_GALLERY_TYPES:
+                    continue
                 if has_all:
                     if pt in (
                         "image",
@@ -277,7 +283,11 @@ def api_media():
             pass
 
     for r in rows:
-        if not r.get("archive_path") and r.get("media_type") not in ("link", "text"):
+        if not r.get("archive_path") and r.get("media_type") not in (
+            "link",
+            "text",
+            "vcard",
+        ):
             r["is_missing"] = 1
         else:
             r["is_missing"] = 0
@@ -341,11 +351,11 @@ def api_media_documents():
         chat_pred, chat_params = _resolve_android_chat_filter(
             conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
         )
-        is_doc = ctx.queries.android_is_document_undownloaded
+        is_doc = f"({ctx.queries.android_is_document_undownloaded} OR (m.message_type IN (8, 9)))"
         ts_col = ctx.queries.android_ts
     else:
         chat_pred, chat_params = _ios_chat_filter(chat_id)
-        is_doc = ctx.queries.ios_is_document_undownloaded
+        is_doc = f"({ctx.queries.ios_is_document_undownloaded} OR (m.ZMESSAGETYPE = 8))"
         ts_col = ctx.queries.ios_ts
     sql = f"{select} WHERE {chat_pred} AND {is_doc} ORDER BY {ts_col} DESC"
     rows = [dict(r) for r in conn.execute(sql, chat_params).fetchall()]
@@ -403,11 +413,15 @@ def api_media_count():
 
     by_type: dict = {}
     archived = 0
+    seen_msg_ids: set = set()
 
     for r in rows:
         t = r["media_type"]
-        if t in ("text", "service", "deleted", "poll"):
+        if t in _NON_GALLERY_TYPES:
             continue
+        mid = r.get("msg_id")
+        if mid:
+            seen_msg_ids.add(mid)
         is_vo = r.get("is_view_once") or 0
         if is_vo and not r.get("archive_path"):
             continue
@@ -420,7 +434,14 @@ def api_media_count():
             by_type[effective_type]["missing"] += 1
 
     for r in doc_rows:
+        mid = r.get("msg_id")
+        if mid and mid in seen_msg_ids:
+            continue
         t = r["media_type"]
+        if t in _NON_GALLERY_TYPES:
+            continue
+        if mid:
+            seen_msg_ids.add(mid)
         by_type.setdefault(t, {"count": 0, "missing": 0})
         by_type[t]["count"] += 1
         if r.get("archive_path"):
@@ -429,7 +450,14 @@ def api_media_count():
             by_type[t]["missing"] += 1
 
     for r in link_rows:
+        mid = r.get("msg_id")
+        if mid and mid in seen_msg_ids:
+            continue
         t = r["media_type"]
+        if t in _NON_GALLERY_TYPES:
+            continue
+        if mid:
+            seen_msg_ids.add(mid)
         by_type.setdefault(t, {"count": 0, "missing": 0})
         by_type[t]["count"] += 1
 
@@ -448,6 +476,8 @@ def api_media_count():
             )
             for pr in pres_rows:
                 pt = pr.get("media_type")
+                if pt in _NON_GALLERY_TYPES:
+                    continue
                 if pt in ("image", "video", "audio", "gif", "sticker", "document", "vcard", "link"):
                     effective_pt = "voice" if (pt == "audio" and pr.get("is_voice_note")) else pt
                     by_type.setdefault(effective_pt, {"count": 0, "missing": 0})

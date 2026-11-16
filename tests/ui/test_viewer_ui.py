@@ -63,7 +63,7 @@ def open_chat_by_id(browser: CDPSession, chat_id: str, timeout: float) -> str:
     """Wait for chat list, click chat matching data-id, and wait for messages to load."""
     js_code = f"""
     (async () => {{
-        for (let i = 0; i < 120; i++) {{
+        for (let i = 0; i < 200; i++) {{
             const item = document.querySelector('.chat-item[data-id="{chat_id}"]');
             if (item) {{
                 const name = item.querySelector('.chat-name')?.textContent || '';
@@ -82,7 +82,7 @@ def open_chat_by_id(browser: CDPSession, chat_id: str, timeout: float) -> str:
                 }}
                 return '';
             }}
-            await new Promise(r => setTimeout(r, 50));
+            await new Promise(r => setTimeout(r, 100));
         }}
         return '';
     }})()
@@ -669,33 +669,7 @@ def test_media_gallery_month_dividers_filtered(browser: CDPSession) -> None:
 def test_media_gallery_filter_switch_instant_hiding(browser: CDPSession) -> None:
     """Validate that switching between gallery filters immediately hides non-matching items without delay."""
     # 1. Open group chat Weekend Coffee & Foodies (which contains both video and image media)
-    opened = browser.evaluate(
-        """
-        (async () => {
-            for (let i = 0; i < 60; i++) {
-                const item = [...document.querySelectorAll('.chat-item')].find(
-                    el => el.querySelector('.chat-name')?.textContent.includes('Weekend Coffee & Foodies')
-                );
-                if (item) {
-                    item.click();
-                    for (let j = 0; j < 80; j++) {
-                        await new Promise(r => setTimeout(r, 50));
-                        const loading = document.getElementById('chat-loading');
-                        if (loading && loading.style.display === 'none') {
-                            await new Promise(r => setTimeout(r, 150));
-                            return true;
-                        }
-                    }
-                    return true;
-                }
-                await new Promise(r => setTimeout(r, 100));
-            }
-            return false;
-        })()
-        """,
-        15.0,
-    )
-    assert opened is True
+    open_group_chat_in_browser(browser, 25.0)
 
     # 2. Open media gallery and wait for items to load
     gallery = browser.evaluate(
@@ -1017,6 +991,95 @@ def test_media_gallery_filter_rapid_toggle_stress(browser: CDPSession) -> None:
     assert stress_res["visibleVideos"] >= 1
     assert stress_res["visibleNonVideos"] == 0
     assert stress_res["unmarkedEmptyHeaders"] == 0
+
+    # Cleanup: close gallery
+    browser.evaluate(
+        """
+        (() => {
+            const closeBtn = document.getElementById('media-gallery-close');
+            if (closeBtn) closeBtn.click();
+        })()
+        """,
+        5.0,
+    )
+
+
+def test_gallery_filter_pill_strict_computed_display_isolation(browser: CDPSession) -> None:
+    """Verify that every filter pill strictly isolates its own media type via computed CSS display.
+
+    Ensures audio items, voice notes, documents, and missing cards are completely suppressed
+    (computed display === 'none') when non-matching pills are active.
+    """
+    # 1. Open contact chat Dr. Marcus Vance (contains photo, voice note, document, view-once photo)
+    chat_name = open_chat_by_id(browser, "15550102", 30.0)
+    assert "Marcus" in chat_name
+
+    # 2. Open media gallery
+    gallery = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gal = document.getElementById('media-gallery');
+                const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                if (gal && gal.classList.contains('open') && items.length > 0) {
+                    await new Promise(r => setTimeout(r, 200));
+                    return { isOpen: true };
+                }
+            }
+            return { isOpen: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(gallery, dict)
+    assert gallery["isOpen"] is True
+
+    # 3. For each available pill (image, voice, document, etc.), click it and assert:
+    # - all items with .type-hidden have computed style display === 'none'
+    # - all visually visible items strictly have dataset.type matching the active pill
+    filter_results = browser.evaluate(
+        """
+        (async () => {
+            const pills = [...document.querySelectorAll('#media-gallery-stats .gallery-stat[data-type]')].filter(
+                p => p.dataset.type && p.dataset.type !== 'total'
+            );
+            const results = {};
+
+            for (const pill of pills) {
+                const type = pill.dataset.type;
+                pill.click();
+                await new Promise(r => setTimeout(r, 150));
+
+                const allItems = [...document.querySelectorAll('#media-gallery-grid .gallery-item, #media-gallery-grid .gallery-link-card')];
+                const visuallyVisible = allItems.filter(el => window.getComputedStyle(el).display !== 'none');
+                const leakingItems = visuallyVisible.filter(el => el.dataset.type !== type);
+                const hiddenWithFlex = allItems.filter(
+                    el => el.classList.contains('type-hidden') && window.getComputedStyle(el).display !== 'none'
+                );
+
+                results[type] = {
+                    totalVisible: visuallyVisible.length,
+                    leakingCount: leakingItems.length,
+                    hiddenWithFlexCount: hiddenWithFlex.length,
+                };
+            }
+            return results;
+        })()
+        """,
+        15.0,
+    )
+
+    assert isinstance(filter_results, dict)
+    assert len(filter_results) > 0
+    for type_name, stats in filter_results.items():
+        assert stats["hiddenWithFlexCount"] == 0, (
+            f"Pill {type_name} has hidden items overriding display: none!"
+        )
+        assert stats["leakingCount"] == 0, f"Pill {type_name} leaked non-{type_name} items!"
 
     # Cleanup: close gallery
     browser.evaluate(
@@ -3867,3 +3930,92 @@ def test_round_video_note_player_and_exclusion_from_grouping(
             """,
             5.0,
         )
+
+
+@pytest.mark.ui
+def test_gallery_filter_loading_feedback_and_batch_rendering(browser: CDPSession) -> None:
+    """Verify visual loading feedback and end-of-results indicators in media gallery.
+
+    Ensures:
+    1. Active filter pill displays loading spinner during fetch operations.
+    2. Centered loading state appears when switching to an empty filter section.
+    3. Bottom end-of-results notice (.gallery-end-notice) appears when all items have loaded.
+    4. Fast batch rendering preserves smooth navigation across media filters.
+    """
+    screenshot_dir = Path(".test_artifacts/screenshots")
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+    chat_name = open_chat_by_id(browser, "15550102", 30.0)
+    assert "Marcus" in chat_name
+
+    # Open media gallery
+    gallery = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gal = document.getElementById('media-gallery');
+                const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                if (gal && gal.classList.contains('open') && items.length > 0) {
+                    await new Promise(r => setTimeout(r, 300));
+                    return { isOpen: true };
+                }
+            }
+            return { isOpen: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(gallery, dict)
+    assert gallery["isOpen"] is True
+
+    # 1. Check end-of-results notice in default view
+    end_notice = browser.evaluate(
+        """
+        (() => {
+            const notice = document.querySelector('#media-gallery-grid .gallery-end-notice');
+            return {
+                exists: Boolean(notice),
+                text: notice ? notice.textContent.trim() : '',
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert end_notice["exists"] is True
+    assert "loaded" in end_notice["text"].lower()
+
+    # 2. Switch to Document pill and verify feedback
+    doc_pill_res = browser.evaluate(
+        """
+        (async () => {
+            const docPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="document"]');
+            if (!docPill) return { found: false };
+            docPill.click();
+
+            // Check during / after switch
+            await new Promise(r => setTimeout(r, 300));
+            const activePill = document.querySelector('#media-gallery-stats .gallery-stat.active');
+            const endNotice = document.querySelector('#media-gallery-grid .gallery-end-notice');
+            const visibleDocs = [...document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="document"]')]
+                .filter(el => window.getComputedStyle(el).display !== 'none');
+
+            return {
+                found: true,
+                activeType: activePill ? activePill.dataset.type : '',
+                visibleCount: visibleDocs.length,
+                endNoticeText: endNotice ? endNotice.textContent.trim() : '',
+            };
+        })()
+        """,
+        10.0,
+    )
+    assert doc_pill_res["found"] is True
+    assert doc_pill_res["activeType"] == "document"
+    assert doc_pill_res["visibleCount"] > 0
+    assert "document" in doc_pill_res["endNoticeText"].lower()
+
+    browser.capture_screenshot(screenshot_dir / "gallery_feedback_document.png", 5.0)

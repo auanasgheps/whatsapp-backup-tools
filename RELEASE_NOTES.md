@@ -1,13 +1,13 @@
 # WhatsApp Backup Tools v0.80
 
-Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, introducing long-awaited navigation features, interactive communication records, and a modernized viewer interface.
+Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, focusing on the missing Viewer features and general UI/UX extension and refinements.
 
-This update unlocks comprehensive Call History logs with a dedicated Call Inspector, Starred bookmarks, Pinned message banners, an Archived chats view, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, and theme-adaptive group sender colors.
+This update brings Call History, Starred bookmarks, pinned message banners, an Archived chats view, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, and theme-adaptive group sender colors.
 
 
 #### **Release highlights:**
 
-> 📞 **Call History & Call Inspector**:
+> 📞 **Call History**:
 > Browse your complete voice and video call logs directly within the viewer. A new Call Inspector side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that navigates straight to that exact point in the conversation. Calls are also woven directly into chat timelines as chronological call bubbles.
 
 > ⭐ **Starred Messages & Quick Bookmarks**:
@@ -39,6 +39,7 @@ This update unlocks comprehensive Call History logs with a dedicated Call Inspec
 
 #### ✨ New Features
 - **Archived Chats Tab & Navigation**: A dedicated "Archived" tab in the bottom navigation bar lets you browse archived conversations separately from your active inbox, with tab-aware search and instant chat opening.
+- **Audio & Voice Note Gallery Cards**: Voice notes (PTT) and audio music tracks are now clearly differentiated in the Media Gallery with dedicated cards, duration badges, clean titles, distinct stat pills (`N voice notes`, `N audio tracks`), and an integrated inline audio player.
 - **Call History & Call Inspector**: Browse your complete voice and video call logs with dedicated filters (All, Missed, Video), two-line call cards, and a detailed Call Inspector side pane. A "Jump to this Moment in Chat" button navigates directly to the exact point in the conversation when the call took place.
 - **Circular Video Note Player**: Push-to-Video (PTV) video notes now render in an authentic circular player with animated progress rings, countdown timers, fullscreen lightbox viewing, and auto-pause when scrolled out of view.
 - **Collapsible Long Messages**: Lengthy text messages exceeding 750 characters or 15 lines are cleanly truncated with a smooth "Read More" ↔ "Show Less" toggle that keeps your timeline readable while preserving emoji formatting and scroll position.
@@ -56,6 +57,7 @@ This update unlocks comprehensive Call History logs with a dedicated Call Inspec
 - **Display Scale Settings**: The Settings panel now features a "Display scale" option that proportionally scales text, sidebar width, and media dimensions together.
 - **Dual-Theming & Contrast Polish**: Enhanced light and dark theme contrast with WCAG 2.1 AA compliant accents, refined bubble elevation drop shadows, and borderless message cards.
 - **In-Bubble Star & Pin Indicators**: Subtle star (`⭐`) and pin (`📌`) indicator icons are integrated directly into the message metadata cluster next to the timestamp, keeping message headers clean.
+- **Media Gallery Filtering, Performance & Visual Feedback**: Enhanced media gallery category pills with an "All Media" default view and exclusive category isolation (Images, Videos, Voice notes, Audio, Stickers, Documents, Contacts, Links), with instant visual filtering, clean pill state toggling, and proper singular/plural counts (`1 item` / `N items`, `1 contact` / `N contacts`). Paginates up to 95% faster via batch DOM fragment construction and responsive scroll arithmetic. Features a complete visual feedback lifecycle with animated stat pill spinners, centered category loaders, bottom scroll indicators, and clean end-of-results notices.
 - **Modernized UI Shell & Navigation Bar**: Redesigned bottom navigation bar with 4 tabs (Chats, Calls, Starred, Archived), top-right brand header with platform badge, and full keyboard tab navigation.
 - **Rich Media Cards in Starred & Pinned Views**: Starred and pinned previews now display rich media snippets (photos, videos with duration, voice notes, documents, locations, contacts, and polls) instead of generic text.
 - **Time Gap Jump Indicators**: Jumping to a chat moment from a call or starred message displays a contextual hint banner with the exact time difference when the nearest message is outside the immediate window.
@@ -63,11 +65,16 @@ This update unlocks comprehensive Call History logs with a dedicated Call Inspec
 - **iOS Pinned Announcement De-referencing**: Pin announcements with empty parent pointers are de-referenced against target message stanza IDs, suppressing raw hex hashes and ensuring readable banner text.
 
 #### 🐛 Bug Fixes
+- **Contact Card Missing Status**: Fixed an issue where contact cards (`vcard`) without on-disk copies were incorrectly flagged as missing media.
+- **Document Gallery Count**: Fixed an issue where undownloaded documents were counted twice in media gallery totals.
+- **Gallery Filter Pill Cross-Modality Leak**: Fixed a CSS cascade specificity defect where flex-based audio items, voice notes, missing media cards, and link cards overrode the filter hidden state and remained visible across non-matching filter pills (e.g. voice notes and documents appearing in Images and Videos tabs).
 - **Grouped Media Caption Visibility**: Fixed an issue where photo and video album captions placed on the first item in iOS backups were not shown on the collapsed album card.
+- **Location Pin Gallery Leak**: Fixed static and live location messages leaking into media gallery streams and triggering phantom missing media warnings.
 - **Long Message Grapheme Clustering & Toggle Spacing**: Fixed long message collapse splitting multi-character emoji sequences (such as flags and zero-width joiners) and adjusted focus ring spacing on the Read More toggle.
 - **Quote Jump Auto-Expansion**: Jumping to a quoted message that is collapsed now automatically expands the message to reveal the referenced text.
 - **Sidebar Search Leakage During Infinite Scroll**: Prevented infinite scroll pagination in Calls and Starred lists from appending unfiltered items when an active search query is present.
 - **Android Archived Chat Retention**: Prevented empty archived chats or archived chats whose messages are recorded under a companion row from being excluded from the chat list.
+- **Android Pinned Message Resolution**: Fixed a temporary table initialization issue where pinned messages failed to display if conversation messages were loaded first.
 - **iOS Empty Archived Chat Retention**: Ensured archived chats with zero messages remain accessible in the Archived tab.
 - **iOS Location Message Chat List Crash**: Fixed an issue where an iOS backup containing a conversation whose most recent message is a location or live location caused an error that prevented the chat list from loading, #13.
 
