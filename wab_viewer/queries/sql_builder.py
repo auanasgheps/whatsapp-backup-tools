@@ -367,6 +367,8 @@ _DEFAULT_IOS_SELECT = f"""
         COALESCE(
             CASE WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(m.ZTEXT, '') END,
             CASE WHEN m.ZMESSAGETYPE = 11 THEN '' END,
+            CASE WHEN m.ZMESSAGETYPE IN (3, 53) AND (mi.ZMEDIAORIGIN = 1 OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.opus') THEN 'Voice message' END,
+            CASE WHEN m.ZMESSAGETYPE IN (3, 53) THEN COALESCE(NULLIF(mi.ZTITLE, ''), 'Audio') END,
             mi.ZMEDIALOCALPATH,
             ''
         )                                                             AS media_name,
@@ -413,6 +415,7 @@ _DEFAULT_IOS_SELECT = f"""
         NULL                                                          AS edited_ts,
         CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
         CASE WHEN m.ZMESSAGETYPE = 54 THEN 1 ELSE 0 END               AS is_video_note,
+        CASE WHEN (m.ZMESSAGETYPE IN (3, 53) AND (mi.ZMEDIAORIGIN = 1 OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.opus')) THEN 1 ELSE 0 END AS is_voice_note,
         {ios_starred_expr}                                           AS is_starred,
         {ios_pinned_expr}                                            AS is_pinned,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
@@ -665,6 +668,7 @@ def detect_schema_capabilities(
                 if "message" in _wa_tables
                 else set()
             )
+            has_msg_origin = "origin" in _msg_cols
             has_android_key_id = "key_id" in _msg_cols
             _mei_cols = (
                 {r[1] for r in _tmp_wa.execute("PRAGMA table_info(message_edit_info)").fetchall()}
@@ -704,6 +708,7 @@ def detect_schema_capabilities(
                 if "ZWAMEDIAITEM" in _wa_tables
                 else set()
             )
+            has_ios_media_origin = "ZMEDIAORIGIN" in _mi_cols
             has_ios_vcard_name = "ZVCARDNAME" in _mi_cols
             has_ios_vcard_string = "ZVCARDSTRING" in _mi_cols
             has_ios_aspect_ratio = "ZASPECTRATIO" in _mi_cols
@@ -859,6 +864,8 @@ def detect_schema_capabilities(
         has_ios_mdi_matched=has_ios_mdi_matched,
         has_ios_mdi_title=has_ios_mdi_title,
         has_ios_mdi_summary=has_ios_mdi_summary,
+        has_msg_origin=has_msg_origin if wa_db_path is not None else False,
+        has_ios_media_origin=has_ios_media_origin if wa_db_path is not None else False,
     )
 
 
@@ -882,6 +889,9 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         quoted_stanza_id_ios = "qm.ZSTANZAID" if caps.has_ios_stanza_id else "NULL"
         ios_filesize_col = "COALESCE(mi.ZFILESIZE, 0)" if caps.has_ios_filesize else "0"
         ios_duration_col = "COALESCE(mi.ZMOVIEDURATION, 0)" if caps.has_ios_duration else "0"
+        ios_origin_check = "mi.ZMEDIAORIGIN = 1" if caps.has_ios_media_origin else "0"
+        ios_voice_cond = f"(m.ZMESSAGETYPE IN (3, 53) AND ({ios_origin_check} OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.opus'))"
+        ios_title_col = "NULLIF(mi.ZTITLE, '')" if caps.has_ios_title else "NULL"
         ios_aspect_ratio_col = (
             "COALESCE(mi.ZASPECTRATIO, 0.0)" if caps.has_ios_aspect_ratio else "0.0"
         )
@@ -1123,6 +1133,8 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
             CASE WHEN m.ZMESSAGETYPE = 4 THEN {vcard_name_ios} END,
             CASE WHEN m.ZMESSAGETYPE = 8 THEN NULLIF(m.ZTEXT, '') END,
             CASE WHEN m.ZMESSAGETYPE = 11 THEN '' END,
+            CASE WHEN {ios_voice_cond} THEN 'Voice message' END,
+            CASE WHEN m.ZMESSAGETYPE IN (3, 53) THEN COALESCE({ios_title_col}, 'Audio') END,
             mi.ZMEDIALOCALPATH,
             ''
         )                                                             AS media_name,
@@ -1170,6 +1182,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         NULL                                                          AS edited_ts,
         CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END   AS is_view_once,
         CASE WHEN m.ZMESSAGETYPE = 54 THEN 1 ELSE 0 END               AS is_video_note,
+        CASE WHEN {ios_voice_cond} THEN 1 ELSE 0 END                  AS is_voice_note,
         {ios_starred_expr}                                           AS is_starred,
         {ios_pinned_expr}                                            AS is_pinned,
         m.ZMESSAGETYPE                                               AS raw_msg_type,
@@ -1369,6 +1382,8 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         mm_size_col = "COALESCE(mm.file_size, 0)" if caps.has_mm_size else "0"
 
     mm_duration_col = "COALESCE(mm.media_duration, 0)" if caps.has_mm_duration else "0"
+    android_origin_check = "m.origin = 1" if caps.has_msg_origin else "0"
+    android_voice_cond = f"(m.message_type IN (2, 82) AND ({android_origin_check} OR COALESCE(ac.archive_path, {android_file_path}, '') LIKE '%Voice Notes%' OR LOWER(COALESCE(ac.archive_path, {android_file_path}, '')) LIKE '%.opus'))"
     mm_aspect_col = (
         f"CASE WHEN {mm_height_col} > 0 AND {mm_width_col} > 0 "
         f"THEN ROUND(CAST({mm_width_col} AS REAL) / CAST({mm_height_col} AS REAL), 3) "
@@ -1654,6 +1669,8 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         END                                                          AS media_type,
         COALESCE(
             CASE WHEN {android_gif_cond} THEN '' END,
+            CASE WHEN {android_voice_cond} THEN 'Voice message' END,
+            CASE WHEN m.message_type IN (2, 82) THEN COALESCE(NULLIF(mm.media_name, ''), 'Audio') END,
             mm.media_name,
             CASE WHEN m.message_type IN (4, 14) THEN m.text_data END,
             ''
@@ -1688,6 +1705,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         {edit_ts_col}                                                AS edited_ts,
         CASE WHEN m.message_type IN (42, 43, 82){mvom_or} THEN 1 ELSE 0 END   AS is_view_once,
         CASE WHEN m.message_type IN (28, 81) THEN 1 ELSE 0 END        AS is_video_note,
+        CASE WHEN {android_voice_cond} THEN 1 ELSE 0 END              AS is_voice_note,
         {android_starred_expr}                                       AS is_starred,
         {android_pinned_expr}                                        AS is_pinned,
         m.message_type                                               AS raw_msg_type,

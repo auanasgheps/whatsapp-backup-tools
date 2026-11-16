@@ -3747,6 +3747,7 @@ class TestRecentMessagesRouting:
             "is_starred",
             "is_pinned",
             "is_video_note",
+            "is_voice_note",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -16788,3 +16789,155 @@ class TestChatJumpHudPlacement:
             assert pins[0]["id"] == 102
             assert pins[0]["text_body"] == "Orphaned pin row"
             assert pins[0]["is_pinned"] is True
+
+    def test_android_and_ios_audio_and_voice_note_separation(self, tmp_path):
+        """Audio files and voice messages are correctly separated and flagged on both Android and iOS."""
+        # 1. Test Android
+        android_dir = tmp_path / "android"
+        android_dir.mkdir()
+        wa_conn = make_android_db(android_dir / "msgstore.db")
+        arc_conn = make_archive_db(android_dir / ".wa_media_archiver.db")
+        seed_android_db(wa_conn, arc_conn)
+
+        # Ensure message has origin column and message_media has duration
+        wa_conn.execute("ALTER TABLE message ADD COLUMN origin INTEGER")
+        wa_conn.execute("ALTER TABLE message_media ADD COLUMN media_duration INTEGER")
+
+        # Insert Voice Message (origin = 1, in WhatsApp Voice Notes folder)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type, origin) "
+            "VALUES (101, 10, 0, 1700000001000, NULL, 2, 1)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name, media_duration) "
+            "VALUES (101, 'Media/WhatsApp Voice Notes/202601/audio1.opus', 'audio1.opus', 42)"
+        )
+
+        # Insert Audio File (origin = 0, in WhatsApp Audio folder)
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type, origin) "
+            "VALUES (102, 10, 1, 1700000002000, NULL, 2, 0)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name, media_duration) "
+            "VALUES (102, 'Media/WhatsApp Audio/track.mp3', 'CoolSong.mp3', 180)"
+        )
+
+        # Record archive copies
+        arc_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES "
+            "('Media/WhatsApp Voice Notes/202601/audio1.opus', 'Alice (00123456789)/audio1.opus'), "
+            "('Media/WhatsApp Audio/track.mp3', 'Alice (00123456789)/track.mp3')"
+        )
+        wa_conn.commit()
+        arc_conn.commit()
+        wa_conn.close()
+        arc_conn.close()
+
+        app = viewer.create_app(android_dir, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # Check messages endpoint
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact").get_json()
+            msgs = {m["msg_id"]: m for m in resp}
+            assert msgs[101]["is_voice_note"] == 1
+            assert msgs[101]["media_name"] == "Voice message"
+            assert msgs[101]["media_duration"] == 42
+            assert msgs[102]["is_voice_note"] == 0
+            assert msgs[102]["media_name"] == "CoolSong.mp3"
+            assert msgs[102]["media_duration"] == 180
+
+            # Check media count breakdown has separate voice and audio
+            cnt = client.get("/api/media/count?chat_id=123456789&chat_type=contact").get_json()
+            assert cnt["by_type"]["voice"]["count"] == 1
+            assert cnt["by_type"]["audio"]["count"] == 1
+
+            # Check /api/media filtering by types=voice vs types=audio
+            voice_media = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=voice"
+            ).get_json()
+            assert len(voice_media) == 1
+            assert voice_media[0]["msg_id"] == 101
+
+            audio_media = client.get(
+                "/api/media?chat_id=123456789&chat_type=contact&types=audio"
+            ).get_json()
+            assert len(audio_media) == 1
+            assert audio_media[0]["msg_id"] == 102
+
+        # 2. Test iOS
+        ios_dir = tmp_path / "ios"
+        ios_dir.mkdir()
+        ios_db = make_ios_db(ios_dir / "ChatStorage.sqlite")
+        ios_arc = make_archive_db(ios_dir / ".wa_media_archiver.db")
+        ios_db.execute(
+            "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN) "
+            "VALUES (1, '123456789@s.whatsapp.net', 'Alice', 0)"
+        )
+
+        try:
+            ios_db.execute("ALTER TABLE ZWAMEDIAITEM ADD COLUMN ZMEDIAORIGIN INTEGER")
+        except Exception:
+            pass
+        try:
+            ios_db.execute("ALTER TABLE ZWAMEDIAITEM ADD COLUMN ZMOVIEDURATION INTEGER")
+        except Exception:
+            pass
+
+        # Insert iOS Voice note (ZMESSAGETYPE = 3, ZMEDIAORIGIN = 1, .opus)
+        ios_db.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAORIGIN, ZMOVIEDURATION) "
+            "VALUES (501, 'Media/chat/voice.opus', 1, 35)"
+        )
+        ios_db.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGETYPE, ZMESSAGEDATE, ZMEDIAITEM) "
+            "VALUES (201, 1, 0, 3, 700000001, 501)"
+        )
+
+        # Insert iOS Audio track (ZMESSAGETYPE = 3, ZMEDIAORIGIN = 0, ZTITLE = 'Song')
+        ios_db.execute(
+            "INSERT INTO ZWAMEDIAITEM (Z_PK, ZMEDIALOCALPATH, ZMEDIAORIGIN, ZMOVIEDURATION, ZTITLE) "
+            "VALUES (502, 'Media/chat/track.m4a', 0, 210, 'Great Song')"
+        )
+        ios_db.execute(
+            "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGETYPE, ZMESSAGEDATE, ZMEDIAITEM) "
+            "VALUES (202, 1, 1, 3, 700000002, 502)"
+        )
+
+        ios_arc.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) VALUES "
+            "('Message/Media/chat/voice.opus', 'Alice/voice.opus'), "
+            "('Message/Media/chat/track.m4a', 'Alice/track.m4a')"
+        )
+        ios_db.commit()
+        ios_arc.commit()
+        ios_db.close()
+        ios_arc.close()
+
+        app_ios = viewer.create_app(ios_dir, rescan=False)
+        app_ios.config["TESTING"] = True
+        with app_ios.test_client() as client:
+            resp = client.get("/api/messages?chat_id=1&chat_type=contact").get_json()
+            msgs = {m["msg_id"]: m for m in resp}
+            assert msgs[201]["is_voice_note"] == 1
+            assert msgs[201]["media_name"] == "Voice message"
+            assert msgs[201]["media_duration"] == 35
+            assert msgs[202]["is_voice_note"] == 0
+            assert msgs[202]["media_name"] == "Great Song"
+            assert msgs[202]["media_duration"] == 210
+
+            cnt = client.get("/api/media/count?chat_id=1&chat_type=contact").get_json()
+            assert cnt["by_type"]["voice"]["count"] == 1
+            assert cnt["by_type"]["audio"]["count"] == 1
+
+            voice_media = client.get(
+                "/api/media?chat_id=1&chat_type=contact&types=voice"
+            ).get_json()
+            assert len(voice_media) == 1
+            assert voice_media[0]["msg_id"] == 201
+
+            audio_media = client.get(
+                "/api/media?chat_id=1&chat_type=contact&types=audio"
+            ).get_json()
+            assert len(audio_media) == 1
+            assert audio_media[0]["msg_id"] == 202
