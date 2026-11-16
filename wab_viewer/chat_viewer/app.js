@@ -247,7 +247,7 @@
           lastMonth = mk;
         }
         const cell = renderGalleryItem(msg);
-        if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
+        if (activeTypes.size > 0 && !activeTypes.has(cell.dataset.type || msg.media_type)) {
           cell.classList.add('type-hidden');
         }
         grid.appendChild(cell);
@@ -318,7 +318,7 @@
       const nextSection = [...grid.querySelectorAll('.gallery-month-header')]
         .find(el => parseInt(el.dataset.month) < mk) || null;
       const cell = renderGalleryItem(msg);
-      if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
+      if (activeTypes.size > 0 && !activeTypes.has(cell.dataset.type || msg.media_type)) {
         cell.classList.add('type-hidden');
       }
       grid.insertBefore(cell, nextSection);
@@ -4188,6 +4188,11 @@
     archiveViewActive = false;
     archiveLoadingAll = false;
     galleryBackfillGen++;
+    if (currentGalleryAudio) {
+      currentGalleryAudio.pause();
+      currentGalleryAudio = null;
+      currentGalleryAudioCell = null;
+    }
     document.getElementById('media-gallery').classList.remove('open');
     if (galleryObserver) { galleryObserver.disconnect(); galleryObserver = null; }
     if (gallerySentinel) { gallerySentinel.remove(); gallerySentinel = null; }
@@ -4204,6 +4209,63 @@
     const clean = String(name).replace(/\\/g, '/');
     const base = clean.split('/').pop() || '';
     return base;
+  }
+
+  let currentGalleryAudio = null;
+  let currentGalleryAudioCell = null;
+
+  function isVoiceNote(msg) {
+    if (!msg) return false;
+    if (msg.is_voice_note === 1 || msg.is_voice_note === true) return true;
+    const p = String(msg.archive_path || msg.original_path || msg.media_name || '').toLowerCase();
+    return p.includes('voice notes') || p.endsWith('.opus');
+  }
+
+  function _formatAudioDuration(sec) {
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
+    if (s <= 0) return '';
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m}:${rem.toString().padStart(2, '0')}`;
+  }
+
+  function toggleGalleryAudioPlayback(cell, audioSrc) {
+    if (currentGalleryAudioCell === cell && currentGalleryAudio) {
+      if (currentGalleryAudio.paused) {
+        currentGalleryAudio.play();
+        cell.classList.add('is-playing');
+      } else {
+        currentGalleryAudio.pause();
+        cell.classList.remove('is-playing');
+      }
+      return;
+    }
+    if (currentGalleryAudio) {
+      currentGalleryAudio.pause();
+      currentGalleryAudio.currentTime = 0;
+      if (currentGalleryAudioCell) {
+        currentGalleryAudioCell.classList.remove('is-playing');
+      }
+    }
+    const aud = new Audio(audioSrc);
+    currentGalleryAudio = aud;
+    currentGalleryAudioCell = cell;
+    cell.classList.add('is-playing');
+    aud.play().catch(() => {
+      cell.classList.remove('is-playing');
+      if (currentGalleryAudioCell === cell) {
+        currentGalleryAudio = null;
+        currentGalleryAudioCell = null;
+      }
+    });
+    aud.addEventListener('ended', () => {
+      cell.classList.remove('is-playing');
+      currentGalleryAudio = null;
+      currentGalleryAudioCell = null;
+    });
+    aud.addEventListener('pause', () => {
+      cell.classList.remove('is-playing');
+    });
   }
 
   function buildMissingGalleryCard(cell, msg) {
@@ -4239,8 +4301,9 @@
     if (msg && msg.is_view_once) {
       label.textContent = (msg.media_type === 'video') ? 'Video · View Once' : 'Photo · View Once';
     } else {
+      const isMissingVn = msg && (msg.is_voice_note || isVoiceNote(msg));
       const typeStr = (msg && msg.media_type === 'video') ? 'Video' :
-                      ((msg && msg.media_type === 'audio') ? 'Audio' :
+                      ((msg && (msg.media_type === 'audio' || isMissingVn)) ? (isMissingVn ? 'Voice message' : 'Audio') :
                       ((msg && msg.media_type === 'document') ? 'Document' :
                       ((msg && msg.media_type === 'vcard') ? 'Contact' :
                       ((msg && msg.media_type === 'sticker') ? 'Sticker' :
@@ -4272,7 +4335,8 @@
     cell.className = 'gallery-item';
     cell._msg = msg;
     const mt = msg.media_type;
-    cell.dataset.type = mt;
+    const isVn = (mt === 'audio' && isVoiceNote(msg));
+    cell.dataset.type = isVn ? 'voice' : mt;
     cell.dataset.ts = String(msg.timestamp_ms || 0);
     if (msg.msg_id || msg.id) {
       cell.dataset.msgId = String(msg.msg_id || msg.id);
@@ -4365,11 +4429,105 @@
       }, { once: true });
       cell.appendChild(img);
     } else if (mt === 'audio') {
-      const d = document.createElement('div');
-      d.className = 'gallery-doc';
-      d.innerHTML = '<span style="font-size:28px">🎵</span><span>' + esc(cleanName || 'audio') + '</span>';
-      d.addEventListener('click', () => window.open(src, '_blank'));
-      cell.appendChild(d);
+      cell.classList.add('gallery-audio-item');
+      if (isVn) {
+        cell.classList.add('is-voice-note');
+      } else {
+        cell.classList.add('is-audio-file');
+      }
+
+      const hdr = document.createElement('div');
+      hdr.className = 'gallery-audio-header';
+
+      const badge = document.createElement('div');
+      badge.className = 'gallery-audio-badge ' + (isVn ? 'voice' : 'music');
+      if (isVn) {
+        badge.title = 'Voice message';
+        badge.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
+      } else {
+        badge.title = 'Audio file';
+        badge.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+      }
+      hdr.appendChild(badge);
+
+      const durText = _formatAudioDuration(msg.media_duration);
+      if (durText) {
+        const durPill = document.createElement('span');
+        durPill.className = 'gallery-audio-dur';
+        durPill.textContent = durText;
+        hdr.appendChild(durPill);
+      } else if (!isVn) {
+        const ext = (cleanName.match(/\.([a-z0-9]+)$/i) || [])[1];
+        if (ext) {
+          const extPill = document.createElement('span');
+          extPill.className = 'gallery-audio-dur';
+          extPill.textContent = ext.toUpperCase();
+          hdr.appendChild(extPill);
+        }
+      }
+      cell.appendChild(hdr);
+
+      const body = document.createElement('div');
+      body.className = 'gallery-audio-body';
+
+      const title = document.createElement('div');
+      title.className = 'gallery-audio-title';
+      if (isVn) {
+        title.textContent = 'Voice message';
+      } else {
+        const cleanTitle = (cleanName && cleanName !== 'audio')
+          ? cleanName.replace(/\.[a-z0-9]+$/i, '')
+          : 'Audio track';
+        title.textContent = cleanTitle;
+        title.title = cleanName || 'Audio track';
+      }
+      body.appendChild(title);
+
+      const sub = document.createElement('div');
+      sub.className = 'gallery-audio-sub';
+      const senderText = msg.sender || (msg.from_me ? 'You' : '');
+      const timeText = msg.timestamp_ms ? fmtTime(msg.timestamp_ms) : '';
+      sub.textContent = [senderText, timeText].filter(Boolean).join(' · ');
+      body.appendChild(sub);
+      cell.appendChild(body);
+
+      const footer = document.createElement('div');
+      footer.className = 'gallery-audio-footer';
+
+      const playBtn = document.createElement('button');
+      playBtn.className = 'gallery-audio-play';
+      playBtn.title = 'Play / Pause';
+      playBtn.setAttribute('aria-label', isVn ? 'Play voice message' : 'Play audio');
+      playBtn.innerHTML = '<svg class="play-icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg><svg class="pause-icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+      playBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        toggleGalleryAudioPlayback(cell, src);
+      });
+      footer.appendChild(playBtn);
+
+      const gotoBtn = document.createElement('button');
+      gotoBtn.className = 'gallery-goto';
+      gotoBtn.title = 'Go to message';
+      gotoBtn.textContent = '→ in chat';
+      gotoBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (gotoBtn.disabled) return;
+        gotoBtn.disabled = true;
+        gotoBtn.textContent = '⏳ in chat';
+        if (currentGalleryAudio) {
+          currentGalleryAudio.pause();
+          currentGalleryAudio = null;
+          currentGalleryAudioCell = null;
+        }
+        closeMediaGallery();
+        jumpToMessage(msg, 'default');
+      });
+      footer.appendChild(gotoBtn);
+      cell.appendChild(footer);
+
+      cell.addEventListener('click', () => {
+        toggleGalleryAudioPlayback(cell, src);
+      });
     } else if (mt === 'link') {
       const urlMatch = (msg.text_body || '').match(/https?:\/\/[^\s<>"]+/);
       const rawUrl = msg.link_url || (urlMatch ? urlMatch[0] : '') || msg.text_body || '';
@@ -4524,7 +4682,7 @@
     if (isPrepopulated) {
       cell.dataset.prepopulated = 'true';
     }
-    if (activeTypes.size > 0 && !activeTypes.has(msg.media_type)) {
+    if (activeTypes.size > 0 && !activeTypes.has(cell.dataset.type || msg.media_type)) {
       cell.classList.add('type-hidden');
     }
 
@@ -4596,7 +4754,7 @@
 
     try {
       // fetch counts, documents, and links in parallel, then render media
-      const typeOrder = ['image', 'video', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
+      const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
       const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
       const [counts, docItems, linkItems] = await Promise.all([
         fetch('/api/media/count?' + qs).then(r => {
@@ -4759,8 +4917,9 @@
   }
 
   function _makeStatPill(label, count, type, missing) {
-    const plurals = { audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links', vcard: 'contacts' };
-    const displayLabel = count === 1 ? label : (plurals[label] || label + 's');
+    const plurals = { voice: 'voice notes', audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links', vcard: 'contacts' };
+    const singulars = { voice: 'voice note' };
+    const displayLabel = count === 1 ? (singulars[label] || label) : (plurals[label] || label + 's');
     const span = document.createElement('span');
     span.className = 'gallery-stat';
     span.dataset.type = type || 'total';

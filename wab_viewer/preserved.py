@@ -65,6 +65,18 @@ def _query_preserved_messages(
         d["is_starred"] = int(d.get("is_starred") or 0)
         d["is_pinned"] = int(d.get("is_pinned") or 0)
         d["quoted_msg_id"] = None
+        path_check = (d.get("archive_path") or d.get("original_path") or "").lower()
+        d["is_voice_note"] = (
+            1
+            if d.get("media_type") == "audio"
+            and ("voice notes" in path_check or path_check.endswith(".opus"))
+            else 0
+        )
+        if d.get("media_type") == "audio":
+            if d["is_voice_note"]:
+                d["media_name"] = "Voice message"
+            elif not d.get("media_name") or d.get("media_name").endswith(".opus"):
+                d["media_name"] = "Audio"
         if d.get("live_location_share_duration") and d.get("media_type") == "location":
             d["media_type"] = "live_location"
         if d.get("poll_data"):

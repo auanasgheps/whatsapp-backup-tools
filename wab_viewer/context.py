@@ -108,6 +108,8 @@ class SchemaCapabilities:
     has_ios_mdi_matched: bool
     has_ios_mdi_title: bool
     has_ios_mdi_summary: bool
+    has_msg_origin: bool
+    has_ios_media_origin: bool
 
 
 @dataclass(frozen=True)

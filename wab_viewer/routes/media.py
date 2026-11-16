@@ -74,7 +74,12 @@ def api_media():
     has_all = "all" in types_set
     has_link = has_all or "link" in types_set
     has_doc = has_all or "document" in types_set
+    has_voice = has_all or "voice" in types_set
+    has_audio = has_all or "audio" in types_set
     media_types = (types_set - {"link", "document", "all"}) if not has_all else set()
+    if "voice" in media_types:
+        media_types.remove("voice")
+        media_types.add("audio")
     has_media = has_all or bool(media_types) or not types_set
 
     cand_clauses = []
@@ -158,9 +163,18 @@ def api_media():
         type_filter = "media_type NOT IN ('text', 'service', 'deleted', 'poll', 'link', 'document')"
         type_params = []
     else:
-        placeholders = ", ".join("?" for _ in types_set)
+        filter_types = set(types_set)
+        if "voice" in filter_types:
+            filter_types.remove("voice")
+            filter_types.add("audio")
+        placeholders = ", ".join("?" for _ in filter_types)
         type_filter = f"media_type IN ({placeholders})"
-        type_params = list(types_set)
+        type_params = list(filter_types)
+
+    if has_voice and not has_audio and not has_all:
+        type_filter = f"({type_filter}) AND is_voice_note = 1"
+    elif has_audio and not has_voice and not has_all:
+        type_filter = f"({type_filter}) AND is_voice_note = 0"
 
     if ctx.source_type == "android" and ctx.caps.has_android_hd:
         hd_dedup_clause = _ANDROID_HD_DEDUP_CLAUSE
@@ -249,7 +263,11 @@ def api_media():
                 elif not types_set:
                     if pt in ("image", "video", "audio", "gif", "sticker", "vcard"):
                         filtered_pres.append(pr)
-                elif pt in types_set:
+                elif pt in types_set or (pt == "audio" and (has_voice or has_audio)):
+                    if has_voice and not has_audio and not pr.get("is_voice_note"):
+                        continue
+                    if has_audio and not has_voice and pr.get("is_voice_note"):
+                        continue
                     filtered_pres.append(pr)
             if filtered_pres:
                 rows = _merge_messages(
@@ -393,12 +411,13 @@ def api_media_count():
         is_vo = r.get("is_view_once") or 0
         if is_vo and not r.get("archive_path"):
             continue
-        by_type.setdefault(t, {"count": 0, "missing": 0})
-        by_type[t]["count"] += 1
+        effective_type = "voice" if (t == "audio" and r.get("is_voice_note")) else t
+        by_type.setdefault(effective_type, {"count": 0, "missing": 0})
+        by_type[effective_type]["count"] += 1
         if r.get("archive_path"):
             archived += 1
-        elif t not in ("link", "text", "vcard"):
-            by_type[t]["missing"] += 1
+        elif effective_type not in ("link", "text", "vcard"):
+            by_type[effective_type]["missing"] += 1
 
     for r in doc_rows:
         t = r["media_type"]
@@ -430,12 +449,15 @@ def api_media_count():
             for pr in pres_rows:
                 pt = pr.get("media_type")
                 if pt in ("image", "video", "audio", "gif", "sticker", "document", "vcard", "link"):
-                    by_type.setdefault(pt, {"count": 0, "missing": 0})
-                    by_type[pt]["count"] += 1
+                    effective_pt = "voice" if (pt == "audio" and pr.get("is_voice_note")) else pt
+                    by_type.setdefault(effective_pt, {"count": 0, "missing": 0})
+                    by_type[effective_pt]["count"] += 1
                     if pr.get("archive_path"):
                         archived += 1
-                    elif pt not in ("link", "text", "vcard") and not pr.get("is_view_once"):
-                        by_type[pt]["missing"] += 1
+                    elif effective_pt not in ("link", "text", "vcard") and not pr.get(
+                        "is_view_once"
+                    ):
+                        by_type[effective_pt]["missing"] += 1
         except Exception:
             pass
 
