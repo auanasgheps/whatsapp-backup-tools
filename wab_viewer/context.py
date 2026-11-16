@@ -171,6 +171,7 @@ class ViewerContext:
         self.android_chat_row_ids_cache: dict[tuple[str, str], list[int]] = {}
         self.android_contact_chats_cache: tuple[dict[str, str], dict[str, str]] | None = None
         self.ios_contact_chats_cache: tuple[dict[str, str], dict[str, str]] | None = None
+        self.thumbnail_404_cache: set[str] = set()
 
     def get_wa(self) -> sqlite3.Connection | None:
         """Return thread-local SQLite connection to the WhatsApp source DB with ancillary attaches."""

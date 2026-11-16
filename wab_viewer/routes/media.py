@@ -42,7 +42,6 @@ from ..queries.sql_builder import (
 bp = Blueprint("media", __name__)
 _CHAT_VIEWER_DIR = Path(__file__).resolve().parents[1] / "chat_viewer"
 _NON_GALLERY_TYPES = ("text", "service", "deleted", "poll", "location", "live_location")
-_THUMBNAIL_404_CACHE: set[tuple[str, str]] = set()
 
 
 @bp.route("/api/media")
@@ -542,17 +541,19 @@ def serve_media(p):
 
 
 def _fail_thumb_404(ctx, msg_id: str | int) -> tuple[str, int]:
-    if len(_THUMBNAIL_404_CACHE) > 3000:
-        _THUMBNAIL_404_CACHE.clear()
-    _THUMBNAIL_404_CACHE.add((ctx.source_type, str(msg_id)))
+    cache = getattr(ctx, "thumbnail_404_cache", None)
+    if cache is not None:
+        if len(cache) > 3000:
+            cache.clear()
+        cache.add(str(msg_id))
     return "Thumbnail not found", 404
 
 
 @bp.route("/api/thumbnail/<msg_id>")
 def api_thumbnail(msg_id):
     ctx = get_viewer_context()
-    cache_key = (ctx.source_type, str(msg_id))
-    if cache_key in _THUMBNAIL_404_CACHE:
+    cache = getattr(ctx, "thumbnail_404_cache", None)
+    if cache is not None and str(msg_id) in cache:
         return "Thumbnail not found", 404
     conn = ctx.get_wa()
     int_msg_id: int | None = None
