@@ -42,6 +42,7 @@ from ..queries.sql_builder import (
 bp = Blueprint("media", __name__)
 _CHAT_VIEWER_DIR = Path(__file__).resolve().parents[1] / "chat_viewer"
 _NON_GALLERY_TYPES = ("text", "service", "deleted", "poll", "location", "live_location")
+_THUMBNAIL_404_CACHE: set[tuple[str, str]] = set()
 
 
 @bp.route("/api/media")
@@ -332,9 +333,7 @@ def api_media_links():
         f"{select} WHERE {chat_pred} AND {is_link} {ts_clause} ORDER BY {ts_col} DESC {lim_clause}"
     )
     rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-    _hydrate_quoted_rows(rows, ctx.source_type, conn)
     _hydrate_link_preview_rows(rows, ctx.source_type)
-    _hydrate_live_photos(rows, ctx.source_type, conn)
     return jsonify(rows)
 
 
@@ -542,9 +541,19 @@ def serve_media(p):
         return resp
 
 
+def _fail_thumb_404(ctx, msg_id: str | int) -> tuple[str, int]:
+    if len(_THUMBNAIL_404_CACHE) > 3000:
+        _THUMBNAIL_404_CACHE.clear()
+    _THUMBNAIL_404_CACHE.add((ctx.source_type, str(msg_id)))
+    return "Thumbnail not found", 404
+
+
 @bp.route("/api/thumbnail/<msg_id>")
 def api_thumbnail(msg_id):
     ctx = get_viewer_context()
+    cache_key = (ctx.source_type, str(msg_id))
+    if cache_key in _THUMBNAIL_404_CACHE:
+        return "Thumbnail not found", 404
     conn = ctx.get_wa()
     int_msg_id: int | None = None
     with contextlib.suppress(ValueError, TypeError):
@@ -639,7 +648,7 @@ def api_thumbnail(msg_id):
                                     return Response(thumb_data, mimetype="image/jpeg")
                     except Exception:
                         pass
-        return "Thumbnail not found", 404
+        return _fail_thumb_404(ctx, msg_id)
 
     msg_id_val = int_msg_id
 
@@ -653,144 +662,164 @@ def api_thumbnail(msg_id):
             if row and row["thumbnail"]:
                 thumb_bytes = row["thumbnail"]
 
-        if not thumb_bytes and ctx.caps.has_media_hash_thumbnail and ctx.caps.has_mm_file_hash:
-            row = conn.execute(
-                """
-                SELECT mht.thumbnail
-                FROM media_hash_thumbnail mht
-                JOIN message_media mm ON mm.file_hash = mht.media_hash
-                WHERE mm.message_row_id = ?
-                """,
-                (msg_id_val,),
-            ).fetchone()
-            if row and row["thumbnail"]:
-                thumb_bytes = row["thumbnail"]
+        if not thumb_bytes:
+            has_mm = False
+            try:
+                has_mm = bool(
+                    conn.execute(
+                        "SELECT 1 FROM message_media WHERE message_row_id = ? LIMIT 1",
+                        (msg_id_val,),
+                    ).fetchone()
+                )
+            except sqlite3.OperationalError:
+                pass
 
-        if not thumb_bytes and ctx.caps.has_message_quoted_media:
-            row = conn.execute(
-                "SELECT thumbnail FROM message_quoted_media WHERE message_row_id = ?",
-                (msg_id_val,),
-            ).fetchone()
-            if row and row["thumbnail"]:
-                thumb_bytes = row["thumbnail"]
-
-        if not thumb_bytes and ctx.caps.has_message_quoted_text:
-            row = conn.execute(
-                "SELECT thumbnail FROM message_quoted_text WHERE message_row_id = ?",
-                (msg_id_val,),
-            ).fetchone()
-            if row and row["thumbnail"]:
-                thumb_bytes = row["thumbnail"]
-
-        if not thumb_bytes and ctx.caps.has_message_quoted_location:
-            row = conn.execute(
-                "SELECT thumbnail FROM message_quoted_location WHERE message_row_id = ?",
-                (msg_id_val,),
-            ).fetchone()
-            if row and row["thumbnail"]:
-                thumb_bytes = row["thumbnail"]
-
-        if (
-            not thumb_bytes
-            and ctx.caps.has_message_quoted_media
-            and ctx.caps.has_mq_key_id
-            and ctx.caps.has_android_key_id
-        ):
-            row = conn.execute(
-                """
-                SELECT mqm.thumbnail
-                FROM message m
-                JOIN message_quoted mq ON mq.key_id = m.key_id
-                JOIN message_quoted_media mqm ON mqm.message_row_id = mq.message_row_id
-                WHERE m._id = ? AND mqm.thumbnail IS NOT NULL
-                LIMIT 1
-                """,
-                (msg_id_val,),
-            ).fetchone()
-            if row and row["thumbnail"]:
-                thumb_bytes = row["thumbnail"]
-
-        if (
-            not thumb_bytes
-            and ctx.caps.has_message_quoted_text
-            and ctx.caps.has_mq_key_id
-            and ctx.caps.has_android_key_id
-        ):
-            row = conn.execute(
-                """
-                SELECT mqt.thumbnail
-                FROM message m
-                JOIN message_quoted mq ON mq.key_id = m.key_id
-                JOIN message_quoted_text mqt ON mqt.message_row_id = mq.message_row_id
-                WHERE m._id = ? AND mqt.thumbnail IS NOT NULL
-                LIMIT 1
-                """,
-                (msg_id_val,),
-            ).fetchone()
-            if row and row["thumbnail"]:
-                thumb_bytes = row["thumbnail"]
-
-        if not thumb_bytes and ctx.caps.has_mq_key_id and ctx.caps.has_android_key_id:
-            if ctx.caps.has_message_thumbnail:
-                row = conn.execute(
-                    """
-                    SELECT mt.thumbnail
-                    FROM message_quoted mq
-                    JOIN message m_orig ON m_orig.key_id = mq.key_id
-                    JOIN message_thumbnail mt ON mt.message_row_id = m_orig._id
-                    WHERE mq.message_row_id = ? AND mt.thumbnail IS NOT NULL
-                    LIMIT 1
-                    """,
-                    (msg_id_val,),
-                ).fetchone()
-                if row and row["thumbnail"]:
-                    thumb_bytes = row["thumbnail"]
-
-            if not thumb_bytes and ctx.caps.has_message_quoted_media:
-                row = conn.execute(
-                    """
-                    SELECT mqm.thumbnail
-                    FROM message_quoted mq
-                    JOIN message m_orig ON m_orig.key_id = mq.key_id
-                    JOIN message_quoted_media mqm ON mqm.message_row_id = m_orig._id
-                    WHERE mq.message_row_id = ? AND mqm.thumbnail IS NOT NULL
-                    LIMIT 1
-                    """,
-                    (msg_id_val,),
-                ).fetchone()
-                if row and row["thumbnail"]:
-                    thumb_bytes = row["thumbnail"]
-
-            if not thumb_bytes and ctx.caps.has_message_quoted_text:
-                row = conn.execute(
-                    """
-                    SELECT mqt.thumbnail
-                    FROM message_quoted mq
-                    JOIN message m_orig ON m_orig.key_id = mq.key_id
-                    JOIN message_quoted_text mqt ON mqt.message_row_id = m_orig._id
-                    WHERE mq.message_row_id = ? AND mqt.thumbnail IS NOT NULL
-                    LIMIT 1
-                    """,
-                    (msg_id_val,),
-                ).fetchone()
-                if row and row["thumbnail"]:
-                    thumb_bytes = row["thumbnail"]
-
-            if not thumb_bytes and ctx.caps.has_media_hash_thumbnail and ctx.caps.has_mm_file_hash:
+            if has_mm and ctx.caps.has_media_hash_thumbnail and ctx.caps.has_mm_file_hash:
                 row = conn.execute(
                     """
                     SELECT mht.thumbnail
-                    FROM message_quoted mq
-                    JOIN message m_orig ON m_orig.key_id = mq.key_id
-                    JOIN message_media mm ON mm.message_row_id = m_orig._id
-                    JOIN media_hash_thumbnail mht ON mht.media_hash = mm.file_hash
-                    WHERE mq.message_row_id = ? AND mht.thumbnail IS NOT NULL
-                    LIMIT 1
+                    FROM media_hash_thumbnail mht
+                    JOIN message_media mm ON mm.file_hash = mht.media_hash
+                    WHERE mm.message_row_id = ?
                     """,
                     (msg_id_val,),
                 ).fetchone()
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
+
+            has_mq = False
+            if not thumb_bytes:
+                try:
+                    has_mq = bool(
+                        conn.execute(
+                            "SELECT 1 FROM message_quoted WHERE message_row_id = ? LIMIT 1",
+                            (msg_id_val,),
+                        ).fetchone()
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+            if not thumb_bytes and has_mq:
+                if ctx.caps.has_message_quoted_media:
+                    row = conn.execute(
+                        "SELECT thumbnail FROM message_quoted_media WHERE message_row_id = ?",
+                        (msg_id_val,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
+
+                if not thumb_bytes and ctx.caps.has_message_quoted_text:
+                    row = conn.execute(
+                        "SELECT thumbnail FROM message_quoted_text WHERE message_row_id = ?",
+                        (msg_id_val,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
+
+                if not thumb_bytes and ctx.caps.has_message_quoted_location:
+                    row = conn.execute(
+                        "SELECT thumbnail FROM message_quoted_location WHERE message_row_id = ?",
+                        (msg_id_val,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
+
+            if not thumb_bytes and ctx.caps.has_android_key_id:
+                if ctx.caps.has_message_quoted_media and ctx.caps.has_mq_key_id:
+                    row = conn.execute(
+                        """
+                        SELECT mqm.thumbnail
+                        FROM message m
+                        JOIN message_quoted mq ON mq.key_id = m.key_id
+                        JOIN message_quoted_media mqm ON mqm.message_row_id = mq.message_row_id
+                        WHERE m._id = ? AND mqm.thumbnail IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (msg_id_val,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
+
+                if not thumb_bytes and ctx.caps.has_message_quoted_text and ctx.caps.has_mq_key_id:
+                    row = conn.execute(
+                        """
+                        SELECT mqt.thumbnail
+                        FROM message m
+                        JOIN message_quoted mq ON mq.key_id = m.key_id
+                        JOIN message_quoted_text mqt ON mqt.message_row_id = mq.message_row_id
+                        WHERE m._id = ? AND mqt.thumbnail IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (msg_id_val,),
+                    ).fetchone()
+                    if row and row["thumbnail"]:
+                        thumb_bytes = row["thumbnail"]
+
+                if not thumb_bytes and has_mq and ctx.caps.has_mq_key_id:
+                    if ctx.caps.has_message_thumbnail:
+                        row = conn.execute(
+                            """
+                            SELECT mt.thumbnail
+                            FROM message_quoted mq
+                            JOIN message m_orig ON m_orig.key_id = mq.key_id
+                            JOIN message_thumbnail mt ON mt.message_row_id = m_orig._id
+                            WHERE mq.message_row_id = ? AND mt.thumbnail IS NOT NULL
+                            LIMIT 1
+                            """,
+                            (msg_id_val,),
+                        ).fetchone()
+                        if row and row["thumbnail"]:
+                            thumb_bytes = row["thumbnail"]
+
+                    if not thumb_bytes and ctx.caps.has_message_quoted_media:
+                        row = conn.execute(
+                            """
+                            SELECT mqm.thumbnail
+                            FROM message_quoted mq
+                            JOIN message m_orig ON m_orig.key_id = mq.key_id
+                            JOIN message_quoted_media mqm ON mqm.message_row_id = m_orig._id
+                            WHERE mq.message_row_id = ? AND mqm.thumbnail IS NOT NULL
+                            LIMIT 1
+                            """,
+                            (msg_id_val,),
+                        ).fetchone()
+                        if row and row["thumbnail"]:
+                            thumb_bytes = row["thumbnail"]
+
+                    if not thumb_bytes and ctx.caps.has_message_quoted_text:
+                        row = conn.execute(
+                            """
+                            SELECT mqt.thumbnail
+                            FROM message_quoted mq
+                            JOIN message m_orig ON m_orig.key_id = mq.key_id
+                            JOIN message_quoted_text mqt ON mqt.message_row_id = m_orig._id
+                            WHERE mq.message_row_id = ? AND mqt.thumbnail IS NOT NULL
+                            LIMIT 1
+                            """,
+                            (msg_id_val,),
+                        ).fetchone()
+                        if row and row["thumbnail"]:
+                            thumb_bytes = row["thumbnail"]
+
+                    if (
+                        not thumb_bytes
+                        and ctx.caps.has_media_hash_thumbnail
+                        and ctx.caps.has_mm_file_hash
+                    ):
+                        row = conn.execute(
+                            """
+                            SELECT mht.thumbnail
+                            FROM message_quoted mq
+                            JOIN message m_orig ON m_orig.key_id = mq.key_id
+                            JOIN message_media mm ON mm.message_row_id = m_orig._id
+                            JOIN media_hash_thumbnail mht ON mht.media_hash = mm.file_hash
+                            WHERE mq.message_row_id = ? AND mht.thumbnail IS NOT NULL
+                            LIMIT 1
+                            """,
+                            (msg_id_val,),
+                        ).fetchone()
+                        if row and row["thumbnail"]:
+                            thumb_bytes = row["thumbnail"]
     elif ctx.source_type == "ios":
         thumb_cols = []
         if "ZXMPPTHUMBPATH" in ctx.caps.mi_cols:
@@ -975,7 +1004,7 @@ def api_thumbnail(msg_id):
                     pass
 
     if not thumb_bytes or len(thumb_bytes) < 16:
-        return "Thumbnail not found", 404
+        return _fail_thumb_404(ctx, msg_id)
 
     mime = "image/jpeg"
     if thumb_bytes.startswith(b"\x89PNG\r\n\x1a\n"):

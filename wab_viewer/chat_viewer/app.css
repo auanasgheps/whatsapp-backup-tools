@@ -2241,6 +2241,10 @@
       color: var(--text-muted);
       font-size: 14px;
     }
+    .gallery-filter-loading.gallery-initial-loading {
+      margin: auto 0;
+      padding: 48px 16px;
+    }
     .gallery-scroll-loading {
       grid-column: 1 / -1;
       display: flex;
@@ -2280,6 +2284,7 @@
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
       gap: 4px; overflow-y: auto; padding: 8px;
+      flex: 1; min-height: 0;
     }
     .gallery-month-header {
       grid-column: 1 / -1;
