@@ -10037,6 +10037,73 @@ class TestPollSupport:
         assert t1.data == fake_jpeg
         assert "immutable" in t1.headers.get("Cache-Control", "")
 
+    def test_thumbnail_404_cache_isolated_between_contexts(self, tmp_path):
+        """Verify thumbnail 404 cache on one viewer context does not pollute another viewer context."""
+        dir1 = tmp_path / "dir1"
+        dir2 = tmp_path / "dir2"
+        dir1.mkdir()
+        dir2.mkdir()
+
+        # dir1: empty DB where thumbnail 1 returns 404
+        wa_conn1 = sqlite3.connect(dir1 / "ChatStorage.sqlite")
+        wa_conn1.execute(
+            "CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER)"
+        )
+        wa_conn1.execute(
+            "CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZXMPPTHUMBPATH TEXT, ZMEDIALOCALPATH TEXT, ZFILESIZE INTEGER, ZASPECTRATIO FLOAT, ZMOVIEDURATION INTEGER, ZTITLE TEXT)"
+        )
+        wa_conn1.execute(
+            "CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZISFROMME INTEGER, ZMESSAGEDATE FLOAT, ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZFROMJID TEXT, ZSTANZAID TEXT, ZPUSHNAME TEXT, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER)"
+        )
+        wa_conn1.execute("CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT)")
+        wa_conn1.execute("CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT)")
+        wa_conn1.commit()
+        wa_conn1.close()
+
+        app1 = viewer.create_app(dir1, rescan=True)
+        client1 = app1.test_client()
+        res1 = client1.get("/api/thumbnail/1")
+        assert res1.status_code == 404
+
+        # dir2: DB where thumbnail 1 actually exists
+        arch_conn2 = sqlite3.connect(dir2 / ".wa_media_archiver.db")
+        arch_conn2.execute("CREATE TABLE archive_copies (original_path TEXT, archive_path TEXT)")
+        arch_conn2.execute("CREATE TABLE contacts (number TEXT, display_name TEXT)")
+        arch_conn2.commit()
+
+        thumb_dir = dir2 / "Media" / "123@s.whatsapp.net" / "a"
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10"
+        (thumb_dir / "t.thumb").write_bytes(fake_png)
+
+        wa_conn2 = sqlite3.connect(dir2 / "ChatStorage.sqlite")
+        wa_conn2.execute(
+            "CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER)"
+        )
+        wa_conn2.execute(
+            "CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZXMPPTHUMBPATH TEXT, ZMEDIALOCALPATH TEXT, ZFILESIZE INTEGER, ZASPECTRATIO FLOAT, ZMOVIEDURATION INTEGER, ZTITLE TEXT)"
+        )
+        wa_conn2.execute(
+            "CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZISFROMME INTEGER, ZMESSAGEDATE FLOAT, ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZFROMJID TEXT, ZSTANZAID TEXT, ZPUSHNAME TEXT, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER)"
+        )
+        wa_conn2.execute("CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT)")
+        wa_conn2.execute("CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT)")
+        wa_conn2.execute("INSERT INTO ZWACHATSESSION VALUES (1, '123@s.whatsapp.net', 'Bob', NULL)")
+        wa_conn2.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (1, 'Media/123@s.whatsapp.net/a/t.thumb', 'Media/123@s.whatsapp.net/a/missing.jpg', 1234, 1.0, 0, NULL)"
+        )
+        wa_conn2.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (1, 1, 1, 0, 1000.0, 1, NULL, '123@s.whatsapp.net', 'S1', 'Bob', NULL, NULL)"
+        )
+        wa_conn2.commit()
+        wa_conn2.close()
+
+        app2 = viewer.create_app(dir2, rescan=True)
+        client2 = app2.test_client()
+        res2 = client2.get("/api/thumbnail/1")
+        assert res2.status_code == 200
+        assert res2.data == fake_png
+
 
 class TestIncrementViewerMessages:
     """Verify viewer displays messages ingested from incremental backups."""
