@@ -3751,7 +3751,9 @@
   let currentGalleryStats = null;
   let activeTypes = new Set();   // empty = show all; populated = show only those types
   let defaultActiveTypes = new Set();  // restored when deselecting a secondary type or sticker
+  let isDefaultView = true;
   let typesAllLoaded = new Set();
+  const PRIMARY_MEDIA_TYPES = new Set(['image', 'video']);
   const SECONDARY_TYPES = new Set(['link', 'vcard']);  // non-file types, hidden by default in archive view
   const DEFAULT_DESELECTED_TYPES = new Set(['voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link']);  // hidden by default, toggle exclusive
   const MEDIA_TYPE_PLURALS = {
@@ -4923,6 +4925,8 @@
     currentGalleryStats = null;
     lightboxItems = [];
     activeTypes = new Set();
+    defaultActiveTypes = new Set();
+    isDefaultView = true;
     typesAllLoaded = new Set();
     galleryAllLoaded = false;
     galleryLoadingMore = false;
@@ -5014,6 +5018,10 @@
     const currentType = activeTypes.size === 1 ? [...activeTypes][0] : (activeTypes.size === 0 ? 'total' : null);
     pills.forEach(p => {
       if (currentType && p.dataset.type === currentType) {
+        p.classList.add('is-loading');
+      } else if (!currentType && isDefaultView && p.dataset.type === 'total') {
+        p.classList.add('is-loading');
+      } else if (!currentType && !isDefaultView && activeTypes.has(p.dataset.type)) {
         p.classList.add('is-loading');
       } else {
         p.classList.remove('is-loading');
@@ -5209,39 +5217,65 @@
   }
 
   function _isDefaultActiveState() {
-    if (activeTypes.size === 0 && defaultActiveTypes.size === 0) return true;
-    if (defaultActiveTypes.size > 0 && activeTypes.size === defaultActiveTypes.size) {
-      for (const t of activeTypes) {
-        if (!defaultActiveTypes.has(t)) return false;
-      }
-      return true;
-    }
-    return false;
+    return isDefaultView && activeTypes.size > 0;
   }
 
   function _toggleTypeFilter(type) {
     const grid = document.getElementById('media-gallery-grid');
     const targetTs = grid ? _getMinVisibleGalleryTimestamp(grid) : Infinity;
-    const isSingleTypeSwitch = type !== null && !(activeTypes.size === 1 && activeTypes.has(type));
+    const isTogglingPrimary = !isDefaultView && type !== null && PRIMARY_MEDIA_TYPES.has(type) &&
+      activeTypes.size > 0 && [...activeTypes].every(t => PRIMARY_MEDIA_TYPES.has(t));
+    const isSingleTypeSwitch = !isTogglingPrimary && type !== null && !(activeTypes.size === 1 && activeTypes.has(type));
     const anchorEl = (!isSingleTypeSwitch && grid) ? _findAnchorGalleryElement(grid) : null;
     const anchorTopBefore = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
 
     if (type === null) {
       // Total: toggle between show-all (empty set) and default media-only state
       if (activeTypes.size === 0 && defaultActiveTypes.size > 0) {
+        isDefaultView = true;
         activeTypes = new Set(defaultActiveTypes);
       } else {
+        isDefaultView = false;
         activeTypes.clear();
       }
-    } else if (DEFAULT_DESELECTED_TYPES.has(type) && activeTypes.size === 1 && activeTypes.has(type)) {
-      // Default-deselected type already exclusively active -> restore default
-      activeTypes = defaultActiveTypes.size > 0 ? new Set(defaultActiveTypes) : new Set();
-    } else if (activeTypes.size === 1 && activeTypes.has(type)) {
-      // Primary type already exclusively active -> restore default
-      activeTypes = defaultActiveTypes.size > 0 ? new Set(defaultActiveTypes) : new Set();
+    } else if (DEFAULT_DESELECTED_TYPES.has(type)) {
+      if (!isDefaultView && activeTypes.size === 1 && activeTypes.has(type)) {
+        // Default-deselected type already exclusively active -> restore default
+        isDefaultView = true;
+        activeTypes = defaultActiveTypes.size > 0 ? new Set(defaultActiveTypes) : new Set();
+      } else {
+        // Switch exclusively to this deselected type!
+        isDefaultView = false;
+        activeTypes = new Set([type]);
+      }
     } else {
-      // Switch exclusively to this type!
-      activeTypes = new Set([type]);
+      // Primary visual media type: 'image' or 'video'
+      if (isDefaultView) {
+        // From default view, clicking image or video isolates it exclusively
+        isDefaultView = false;
+        activeTypes = new Set([type]);
+      } else {
+        // Currently in explicit filter mode:
+        const hasOnlyPrimary = activeTypes.size > 0 && [...activeTypes].every(t => PRIMARY_MEDIA_TYPES.has(t));
+        if (hasOnlyPrimary) {
+          if (activeTypes.has(type)) {
+            // Already active: deselect it
+            activeTypes.delete(type);
+            if (activeTypes.size === 0) {
+              // Nothing left -> restore default view
+              isDefaultView = true;
+              activeTypes = new Set(defaultActiveTypes);
+            }
+          } else {
+            // Not yet active: add it to selection (allows image + video together!)
+            activeTypes.add(type);
+          }
+        } else {
+          // Was on a secondary/deselected type (e.g. document) -> switch exclusively to this primary type
+          isDefaultView = false;
+          activeTypes = new Set([type]);
+        }
+      }
     }
     _applyTypeFilter();
     if (isSingleTypeSwitch && grid) {
@@ -5257,7 +5291,7 @@
 
     if (grid) {
       grid.querySelectorAll('.gallery-filter-loading, .gallery-scroll-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
-      if (type !== null) {
+      if (type !== null && activeTypes.size === 1) {
         const hasMatchingInGrid = Boolean(grid.querySelector(`.gallery-item[data-type="${type}"]:not(.type-hidden), .gallery-link-card[data-type="${type}"]:not(.type-hidden)`));
         const totalExpected = currentGalleryStats?.by_type?.[type]?.count || 0;
         if (!hasMatchingInGrid && totalExpected > 0) {
@@ -5322,8 +5356,7 @@
 
   function _syncStatPills() {
     const isDefault = _isDefaultActiveState();
-    const isShowAll = activeTypes.size === 0 && defaultActiveTypes.size > 0;
-    const isSingleFiltered = !isDefault && !isShowAll && activeTypes.size > 0;
+    const isShowAll = !isDefaultView && activeTypes.size === 0;
 
     document.querySelectorAll('#media-gallery-stats .gallery-stat').forEach(pill => {
       const t = pill.dataset.type;
@@ -5336,17 +5369,20 @@
       if (t === 'total') {
         pill.classList.toggle('active', isDefault || isShowAll);
         pill.classList.remove('dimmed');
-      } else if (isSingleFiltered) {
-        pill.classList.toggle('active', activeTypes.has(t));
-        pill.classList.toggle('dimmed', !activeTypes.has(t));
-      } else {
-        // Default or Show-All:
+      } else if (isDefault) {
         pill.classList.remove('active');
-        if (isDefault && DEFAULT_DESELECTED_TYPES.has(t)) {
+        if (DEFAULT_DESELECTED_TYPES.has(t)) {
           pill.classList.add('dimmed');
         } else {
           pill.classList.remove('dimmed');
         }
+      } else if (isShowAll) {
+        pill.classList.remove('active');
+        pill.classList.remove('dimmed');
+      } else {
+        // Explicit category filtering:
+        pill.classList.toggle('active', activeTypes.has(t));
+        pill.classList.toggle('dimmed', !activeTypes.has(t));
       }
     });
   }
@@ -5392,6 +5428,7 @@
       // if the active filter is secondary-types-only, those items don't exist in archive view — reset to default
       if (archiveViewActive && activeTypes.size > 0 && [...activeTypes].every(t => SECONDARY_TYPES.has(t))) {
         activeTypes = new Set(defaultActiveTypes);
+        isDefaultView = true;
       }
       _syncStatPills();
       if (archiveViewActive) {

@@ -3031,7 +3031,7 @@ class TestReactionsFrontendLayout:
         """openMediaGallery and _loadGalleryPage must synchronize month headers."""
         js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
         js = js_path.read_text(encoding="utf-8")
-        assert "_syncMonthHeaders();\n  }\n\n  async function _loadGalleryPage" in js
+        assert "_syncMonthHeaders();\n    _syncGalleryNotices();\n  }" in js
         assert (
             "_appendToArchiveView(items, activeArchiveDir());\n      }\n      _syncMonthHeaders();"
             in js
@@ -8304,6 +8304,22 @@ class TestStickerSupport:
 
         # Verify _toggleTypeFilter toggles DEFAULT_DESELECTED_TYPES exclusively
         assert "DEFAULT_DESELECTED_TYPES.has(type)" in js
+
+    def test_gallery_pills_allow_images_and_videos_selected_together(self):
+        """app.js must allow images and videos to be selected together via gallery stat pills."""
+        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "PRIMARY_MEDIA_TYPES" in js
+        match = re.search(r"PRIMARY_MEDIA_TYPES\s*=\s*new\s+Set\(\[([^\]]+)\]\)", js)
+        assert match, "PRIMARY_MEDIA_TYPES Set definition missing in app.js"
+        types = [t.strip().strip("'\"") for t in match.group(1).split(",")]
+        assert "image" in types
+        assert "video" in types
+
+        # Ensure multi-selection logic exists in _toggleTypeFilter
+        assert "PRIMARY_MEDIA_TYPES.has(t)" in js
+        assert "activeTypes.add(type)" in js
+        assert "activeTypes.delete(type)" in js
 
     def test_android_gif_classification_and_gallery(self, tmp_path):
         """Android GIFs (message_type 13, WhatsApp Animated Gifs folder, GIF- prefix, or gif_attribution)
