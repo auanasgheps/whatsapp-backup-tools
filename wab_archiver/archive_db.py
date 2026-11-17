@@ -214,6 +214,20 @@ def load_canonical_copies(conn: sqlite3.Connection, output_root: str) -> dict[by
     return canonical_map
 
 
+def load_archived_file_set(conn: sqlite3.Connection) -> set[tuple[str, str, bytes]]:
+    """
+    Load an in-memory set of (original_path, archive_path, md5) for fast O(1)
+    collision avoidance during incremental runs.
+    """
+    rows = conn.execute(
+        "SELECT ac.original_path, ac.archive_path, f.md5 "
+        "FROM archive_copies ac "
+        "JOIN files f ON f.original_path = ac.original_path "
+        "WHERE f.md5 IS NOT NULL AND length(f.md5) > 0"
+    ).fetchall()
+    return set(rows)
+
+
 # ---------------------------------------------------------------------------
 # Folder name sync and resolution
 # ---------------------------------------------------------------------------

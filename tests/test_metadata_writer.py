@@ -2,6 +2,7 @@
 Unit tests for shared/metadata_writer.py (pure-Python EXIF and MP4 timestamp writer).
 """
 
+import os
 import struct
 from datetime import UTC
 
@@ -338,3 +339,97 @@ def test_copy_or_skip_exif_disabled_by_default(tmp_path):
     assert dest_path.exists()
     # Content must match exactly (no EXIF injected)
     assert dest_path.read_bytes() == raw_bytes
+
+
+def test_load_archived_file_set_and_query_elimination(tmp_path):
+    import logging
+
+    from wab_archiver import archive_db as arc
+    from wab_archiver import main as wa
+
+    logger = logging.getLogger("test_archiver")
+    out = tmp_path / "out"
+    out.mkdir()
+    conn = arc.open_archive_db(str(out))
+    cursor = conn.cursor()
+
+    raw_bytes = _build_minimal_jpeg(with_app0=True)
+    src = tmp_path / "IMG-003.jpg"
+    src.write_bytes(raw_bytes)
+    dest_path = out / "IMG-003.jpg"
+    ts_ms = 1778416200000
+
+    # Archive file once
+    wa._copy_or_skip(
+        str(src),
+        str(dest_path),
+        str(out),
+        "Media/WhatsApp Images/IMG-003.jpg",
+        ts_ms,
+        str(out),
+        False,
+        logger,
+        cursor,
+        False,
+        {},
+        True,
+        UTC,
+    )
+    conn.commit()
+
+    # Pre-fetch archived file set
+    archived_set = arc.load_archived_file_set(conn)
+    src_hash = wa.file_md5(str(src))
+    assert ("Media/WhatsApp Images/IMG-003.jpg", "IMG-003.jpg", src_hash) in archived_set
+
+    # Second run using in-memory set with cursor=None (demonstrates 0 SQL queries needed)
+    res_cached = wa._copy_or_skip(
+        str(src),
+        str(dest_path),
+        str(out),
+        "Media/WhatsApp Images/IMG-003.jpg",
+        ts_ms,
+        str(out),
+        False,
+        logger,
+        None,  # No cursor: verified via in-memory set!
+        False,
+        {},
+        True,
+        UTC,
+        archived_set,
+    )
+    assert res_cached == (0, 1, 0)
+    conn.close()
+
+
+def test_m4a_audio_container_timestamp_patching(tmp_path):
+    m4a_bytes = _build_synthetic_mp4(version=0)
+    m4a_path = tmp_path / "voice_message.m4a"
+    m4a_path.write_bytes(m4a_bytes)
+
+    ts_ms = 1778414400000
+    res = metadata_writer.write_media_timestamp(str(m4a_path), ts_ms, None, False)
+    assert res is True
+
+    expected_qt = 1778414400 + metadata_writer.EPOCH_1904
+    data = m4a_path.read_bytes()
+    idx = data.find(b"mvhd")
+    c_time = struct.unpack(">I", data[idx + 8 : idx + 12])[0]
+    assert c_time == expected_qt
+
+
+def test_permission_error_graceful_handling(tmp_path, monkeypatch):
+    raw_jpeg = _build_minimal_jpeg(with_app0=True)
+    jpeg_path = tmp_path / "readonly.jpg"
+    jpeg_path.write_bytes(raw_jpeg)
+
+    # Monkeypatch os.replace to simulate Windows read-only attribute Access Denied
+    def _mock_replace(src, dst):
+        raise PermissionError("Access is denied (read-only file)")
+
+    monkeypatch.setattr(os, "replace", _mock_replace)
+
+    ts_ms = 1778416200000
+    res = metadata_writer.write_media_timestamp(str(jpeg_path), ts_ms, UTC, False)
+    assert res is False
