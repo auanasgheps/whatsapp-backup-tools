@@ -68,6 +68,7 @@ def make_archive_db(path: Path | str) -> sqlite3.Connection:
             edited_ts        INTEGER,
             is_view_once     INTEGER NOT NULL DEFAULT 0,
             quoted_has_thumb INTEGER NOT NULL DEFAULT 0,
+            waveform         BLOB,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -79,7 +80,7 @@ def make_archive_db(path: Path | str) -> sqlite3.Connection:
             PRIMARY KEY (chat_id, msg_id)
         );
     """)
-    conn.execute("PRAGMA user_version = 6")
+    conn.execute("PRAGMA user_version = 7")
     conn.commit()
     conn.row_factory = sqlite3.Row
     return conn

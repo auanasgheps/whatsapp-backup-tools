@@ -34,6 +34,26 @@ def _strip_none_reactions(rows: list) -> list:
     return result
 
 
+def _normalize_message_rows(rows: list) -> list[dict]:
+    """Ensure message rows are JSON-serializable dictionaries and unpack waveform BLOBs."""
+    result = []
+    for r in rows:
+        d = dict(r)
+        raw_wave = d.pop("audio_waveform", None)
+        if raw_wave is None:
+            raw_wave = d.get("waveform")
+        if isinstance(raw_wave, (bytes, bytearray)):
+            d["waveform"] = list(raw_wave)
+        elif isinstance(raw_wave, list):
+            d["waveform"] = raw_wave
+        elif "waveform" in d or "audio_waveform" in d:
+            d["waveform"] = None
+        else:
+            d["waveform"] = None
+        result.append(d)
+    return result
+
+
 def _resolve_ios_jid(jid_str: str, contacts_map: dict) -> str:
     """Resolve an iOS JID (phone or @lid) to a contact name, phone number, or Unknown."""
     if not jid_str:
@@ -1840,6 +1860,21 @@ def _backfill_recent_messages(archive_target: sqlite3.Connection | Path, rows: l
                     "mentions",
                     lambda r: (
                         json.dumps(r["mentions"], ensure_ascii=False) if r.get("mentions") else None
+                    ),
+                )
+            )
+        if "waveform" in cur_cols:
+            col_specs.append(
+                (
+                    "waveform",
+                    lambda r: (
+                        bytes(r["audio_waveform"])
+                        if isinstance(r.get("audio_waveform"), (bytes, bytearray, list))
+                        else (
+                            bytes(r["waveform"])
+                            if isinstance(r.get("waveform"), (bytes, bytearray, list))
+                            else None
+                        )
                     ),
                 )
             )

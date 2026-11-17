@@ -454,7 +454,8 @@ _DEFAULT_IOS_SELECT = f"""
             WHEN m.ZMESSAGETYPE IN (5, 16) AND mi.ZVCARDSTRING IS NOT NULL AND INSTR(mi.ZVCARDSTRING, ';') > 0
                 THEN CAST(ROUND(CAST(SUBSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), INSTR(SUBSTR(mi.ZVCARDSTRING, INSTR(mi.ZVCARDSTRING, ';') + 1), ';') + 1) AS REAL)) AS INTEGER)
         END                                                          AS live_location_share_duration,
-        NULL                                                         AS _raw_metadata
+        NULL                                                         AS _raw_metadata,
+        NULL                                                         AS audio_waveform
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
@@ -560,6 +561,7 @@ def detect_schema_capabilities(
 
     has_reactions = False
     has_ios_reactions = False
+    has_audio_data = False
     has_lid_dn = False
     has_message_system = False
     has_mcp = False
@@ -635,6 +637,7 @@ def detect_schema_capabilities(
             has_message_add_on = (
                 "message_add_on" in _wa_tables and "message_add_on_type" in _mao_cols
             )
+            has_audio_data = "audio_data" in _wa_tables
             has_ios_reactions = "ZWAMESSAGEINFO" in _wa_tables
             has_lid_dn = "lid_display_name" in _wa_tables
             has_message_system = "message_system" in _wa_tables
@@ -866,6 +869,7 @@ def detect_schema_capabilities(
         has_ios_mdi_summary=has_ios_mdi_summary,
         has_msg_origin=has_msg_origin if wa_db_path is not None else False,
         has_ios_media_origin=has_ios_media_origin if wa_db_path is not None else False,
+        has_audio_data=has_audio_data,
     )
 
 
@@ -1204,7 +1208,8 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         {ios_location_address_col}                                   AS location_address,
         {ios_location_url_col}                                       AS location_url,
         {ios_live_location_dur_col}                                  AS live_location_share_duration,
-        {ios_raw_metadata}                                           AS _raw_metadata
+        {ios_raw_metadata}                                           AS _raw_metadata,
+        NULL                                                         AS audio_waveform
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
     {mdi_join}    LEFT JOIN ZWACHATSESSION cs ON cs.Z_PK = m.ZCHATSESSION
@@ -1628,6 +1633,11 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         else "0"
     )
 
+    android_waveform_col = "ad.waveform" if caps.has_audio_data else "NULL"
+    ad_join = (
+        "    LEFT JOIN audio_data ad ON ad.message_row_id = m._id\n" if caps.has_audio_data else ""
+    )
+
     android_select = f"""
     SELECT
         m._id                                                        AS msg_id,
@@ -1726,10 +1736,11 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         {android_location_name_col}                                  AS location_name,
         {android_location_address_col}                               AS location_address,
         {android_location_url_col}                                   AS location_url,
-        {android_live_location_dur_col}                              AS live_location_share_duration
+        {android_live_location_dur_col}                              AS live_location_share_duration,
+        {android_waveform_col}                                       AS audio_waveform
     FROM message m
     LEFT JOIN message_media mm ON mm.message_row_id = m._id
-    {emd_join}{android_thumb_joins}{android_text_join}{android_loc_join}{mvom_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
+    {ad_join}{emd_join}{android_thumb_joins}{android_text_join}{android_loc_join}{mvom_join}    LEFT JOIN chat c ON c._id = m.chat_row_id
     LEFT JOIN jid j_chat ON j_chat._id = c.jid_row_id
     LEFT JOIN _jid_map_resolved jm_chat ON jm_chat.lid_row_id = c.jid_row_id
     LEFT JOIN jid j_chat_real ON j_chat_real._id = jm_chat.jid_row_id

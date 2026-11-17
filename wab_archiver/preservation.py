@@ -93,6 +93,7 @@ PRESERVED_SCHEMA_TABLES = """
         participant_name             TEXT,
         service_metadata             TEXT,
         mentions                     TEXT,
+        waveform                     BLOB,
         preserved_at                 TEXT NOT NULL,
         preservation_reason          TEXT NOT NULL,
         source_platform              TEXT NOT NULL,
@@ -198,6 +199,10 @@ NEW_V2_MESSAGE_COLUMNS: list[tuple[str, str]] = [
 
 NEW_V3_MESSAGE_COLUMNS: list[tuple[str, str]] = [
     ("mentions", "TEXT"),
+]
+
+NEW_V4_MESSAGE_COLUMNS: list[tuple[str, str]] = [
+    ("waveform", "BLOB"),
 ]
 
 NEW_V2_CHAT_COLUMNS: list[tuple[str, str]] = [
@@ -307,6 +312,15 @@ def open_preservation_db(output_root: str) -> sqlite3.Connection:
                 conn.execute(f"ALTER TABLE preserved_messages ADD COLUMN {col_name} {col_def}")
                 existing_msg_cols.add(col_name)
         conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+
+    if user_ver < 4:
+        existing_msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(preserved_messages)")}
+        for col_name, col_def in NEW_V4_MESSAGE_COLUMNS:
+            if col_name not in existing_msg_cols:
+                conn.execute(f"ALTER TABLE preserved_messages ADD COLUMN {col_name} {col_def}")
+                existing_msg_cols.add(col_name)
+        conn.execute("PRAGMA user_version = 4")
         conn.commit()
 
     conn.executescript(PRESERVED_SCHEMA_INDEXES)
@@ -1031,6 +1045,8 @@ def diff_and_extract_android(
         has_arch_copies = "archive_copies" in arch_tables
         has_message_text = "message_text" in old_tables
         has_message_thumbnail = "message_thumbnail" in old_tables
+        has_audio_data = "audio_data" in old_tables
+        ad_wave_col = "ad.waveform" if has_audio_data else "NULL"
 
         msg_cols = (
             {r[1] for r in conn.execute("PRAGMA old_db.table_info(message)").fetchall()}
@@ -1177,6 +1193,9 @@ def diff_and_extract_android(
         )
         mv_join = (
             "LEFT JOIN old_db.message_vcard mv ON mv.message_row_id = m._id" if has_vcard else ""
+        )
+        ad_join = (
+            "LEFT JOIN old_db.audio_data ad ON ad.message_row_id = m._id" if has_audio_data else ""
         )
         mvom_join = (
             "LEFT JOIN old_db.message_view_once_media mvom ON mvom.message_row_id = m._id"
@@ -1414,6 +1433,7 @@ def diff_and_extract_android(
                 {chat_created_ts_expr} AS _chat_created_ts,
                 {chat_creator_jid_expr} AS _chat_creator_jid,
                 {chat_gjid_expr} AS _chat_group_jid_id,
+                {ad_wave_col} AS waveform,
                 CASE
                     WHEN {is_device_reset} THEN 'device_reset'
                     WHEN NOT EXISTS (
@@ -1444,6 +1464,7 @@ def diff_and_extract_android(
             {con_sq_join}
             {con_mscp_join}
             {ac_join}
+            {ad_join}
             WHERE m._id IN ({{placeholders}})
         """
 
@@ -1521,6 +1542,7 @@ def diff_and_extract_android(
                 {chat_created_ts_expr} AS _chat_created_ts,
                 {chat_creator_jid_expr} AS _chat_creator_jid,
                 {chat_gjid_expr} AS _chat_group_jid_id,
+                {ad_wave_col} AS waveform,
                 CASE
                     WHEN cur.message_type = 64 THEN 'revoked_by_admin'
                     ELSE 'revoked_by_sender'
@@ -1545,6 +1567,7 @@ def diff_and_extract_android(
             {con_sq_join}
             {con_mscp_join}
             {ac_join}
+            {ad_join}
             WHERE m.message_type NOT IN (7, 15, 64)
               AND {android_content_pred}
               AND cur.message_type IN (15, 64)
@@ -2715,6 +2738,7 @@ def diff_and_extract_ios(
                 {creator_jid_col} AS _chat_creator_jid,
                 m.ZCHATSESSION AS _chat_session_pk,
                 {msg_info_col} AS _msg_info_pk,
+                NULL AS waveform,
                 CASE
                     WHEN {is_device_reset} THEN 'device_reset'
                     WHEN NOT EXISTS (
@@ -2814,6 +2838,7 @@ def diff_and_extract_ios(
                 {creator_jid_col} AS _chat_creator_jid,
                 m.ZCHATSESSION AS _chat_session_pk,
                 {msg_info_col} AS _msg_info_pk,
+                NULL AS waveform,
                 'revoked_by_sender' AS preservation_reason
             FROM old_db.ZWAMESSAGE m
             JOIN ZWAMESSAGE cur ON cur.ZSTANZAID = m.ZSTANZAID
@@ -3170,7 +3195,7 @@ def record_preserved_messages(
             live_location_share_duration, poll_data, quoted_text, quoted_sender,
             quoted_ts, quoted_stanza_id, quoted_parent_type, reactions, is_edited,
             edited_ts, is_starred, is_pinned, pin_expiry_ts, action_type,
-            participant_name, service_metadata, mentions, preserved_at, preservation_reason,
+            participant_name, service_metadata, mentions, waveform, preserved_at, preservation_reason,
             source_platform
         ) VALUES (
             :chat_id, :chat_jid, :chat_type, :stanza_id, :msg_id, :timestamp_ms,
@@ -3181,7 +3206,7 @@ def record_preserved_messages(
             :live_location_share_duration, :poll_data, :quoted_text, :quoted_sender,
             :quoted_ts, :quoted_stanza_id, :quoted_parent_type, :reactions, :is_edited,
             :edited_ts, :is_starred, :is_pinned, :pin_expiry_ts, :action_type,
-            :participant_name, :service_metadata, :mentions, :preserved_at, :preservation_reason,
+            :participant_name, :service_metadata, :mentions, :waveform, :preserved_at, :preservation_reason,
             :source_platform
         )
     """
@@ -3274,6 +3299,7 @@ def record_preserved_messages(
                     "participant_name": r.get("participant_name") or "",
                     "service_metadata": r.get("service_metadata"),
                     "mentions": r.get("mentions"),
+                    "waveform": bytes(r["waveform"]) if r.get("waveform") else None,
                     "preserved_at": r.get("preserved_at") or now_iso,
                     "preservation_reason": r.get("preservation_reason") or "deleted_on_phone",
                     "source_platform": r.get("source_platform") or platform,

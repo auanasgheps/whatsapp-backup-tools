@@ -3914,6 +3914,7 @@ class TestRecentMessagesRouting:
             "is_pinned",
             "is_video_note",
             "is_voice_note",
+            "waveform",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -10992,7 +10993,6 @@ class TestAndroidHdAndMediaMatching:
 
             # Check messages sender inside the chat
             m_resp = client.get("/api/messages?chat_id=390000000011&chat_type=contact")
-            assert m_resp.status_code == 200
             msgs = m_resp.get_json()
             assert len(msgs) == 1
             assert msgs[0]["sender"] == "Alice Contact"
@@ -15476,7 +15476,7 @@ class TestReviewFixRegressions:
         app.config["TESTING"] = True
         with sqlite3.connect(str(arch_path)) as ac:
             uv = ac.execute("PRAGMA user_version").fetchone()[0]
-            assert uv == 6
+            assert uv == 7
             cnt = ac.execute("SELECT COUNT(*) FROM recent_messages").fetchone()[0]
             assert cnt == 0
 
@@ -17190,3 +17190,103 @@ class TestChatJumpHudPlacement:
             ).get_json()
             assert len(audio_media) == 1
             assert audio_media[0]["msg_id"] == 202
+
+
+class TestVoiceWaveform:
+    """Tests for voice message waveform extraction, serialization, and cache persistence."""
+
+    def test_android_waveform_extraction_and_serialization(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS audio_data (
+                message_row_id INTEGER PRIMARY KEY,
+                waveform BLOB
+            );
+            INSERT INTO jid (_id, user, raw_string) VALUES (1, '123456789', '123456789@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, sort_timestamp) VALUES (1, 1, 1700000000000);
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type, text_data, key_id)
+            VALUES (301, 1, 0, 1700000001000, 2, 'PTT voice note', 'WAVE_KEY_1');
+            INSERT INTO message_media (message_row_id, chat_row_id, file_path, mime_type)
+            VALUES (301, 1, 'WhatsApp/Media/WhatsApp Voice Notes/202601/PTT-20260101-WA0001.opus', 'audio/ogg; codecs=opus');
+        """)
+        dummy_wave = bytes([i % 100 for i in range(64)])
+        wa_conn.execute(
+            "INSERT INTO audio_data (message_row_id, waveform) VALUES (301, ?)", (dummy_wave,)
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            msg = data[0]
+            assert msg["msg_id"] == 301
+            assert msg["is_voice_note"] == 1
+            assert isinstance(msg["waveform"], list)
+            assert len(msg["waveform"]) == 64
+            assert msg["waveform"] == list(dummy_wave)
+
+    def test_waveform_fallback_when_audio_data_missing(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.executescript("""
+            INSERT INTO jid (_id, user, raw_string) VALUES (1, '123456789', '123456789@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, sort_timestamp) VALUES (1, 1, 1700000000000);
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type, text_data, key_id)
+            VALUES (302, 1, 0, 1700000001000, 2, 'PTT note without wave table', 'WAVE_KEY_2');
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            msg = data[0]
+            assert msg["msg_id"] == 302
+            assert msg["waveform"] is None
+
+    def test_recent_messages_cache_persists_waveform(self, tmp_path):
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+        dummy_wave = bytes([5, 10, 25, 50, 75, 100] + [15] * 58)
+        archive_conn.execute(
+            """
+            INSERT INTO recent_messages
+            (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body, waveform)
+            VALUES ('123456789', 'contact', 303, 1700000000000, 'Alice', 0, 'WhatsApp Voice Notes/voice.opus', 'audio', 'Voice', '', ?)
+        """,
+            (dummy_wave,),
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            msg = data[0]
+            assert msg["msg_id"] == 303
+            assert msg["waveform"] == list(dummy_wave)

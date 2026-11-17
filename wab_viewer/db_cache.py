@@ -812,6 +812,7 @@ def open_and_migrate_archive_db(
             is_starred     INTEGER NOT NULL DEFAULT 0,
             is_pinned      INTEGER NOT NULL DEFAULT 0,
             mentions       TEXT,
+            waveform       BLOB,
             PRIMARY KEY (chat_id, chat_type, msg_id)
         );
         CREATE INDEX IF NOT EXISTS idx_recent_chat_ts
@@ -852,12 +853,13 @@ def open_and_migrate_archive_db(
         ("is_starred", "INTEGER NOT NULL DEFAULT 0"),
         ("is_pinned", "INTEGER NOT NULL DEFAULT 0"),
         ("mentions", "TEXT"),
+        ("waveform", "BLOB"),
     ):
         if col_name not in cols:
             archive_conn.execute(f"ALTER TABLE recent_messages ADD COLUMN {col_name} {col_def}")
 
     cleared_cache = False
-    if arch_user_ver < 6 or rescan or (source_is_changed and has_prior_stamp):
+    if arch_user_ver < 7 or rescan or (source_is_changed and has_prior_stamp):
         archive_conn.execute("DELETE FROM recent_messages")
         cleared_cache = True
         has_rx_cache = bool(
@@ -867,8 +869,8 @@ def open_and_migrate_archive_db(
         )
         if has_rx_cache and (rescan or (source_is_changed and has_prior_stamp)):
             archive_conn.execute("DELETE FROM reactions_cache")
-    if arch_user_ver < 6:
-        archive_conn.execute("PRAGMA user_version = 6")
+    if arch_user_ver < 7:
+        archive_conn.execute("PRAGMA user_version = 7")
     try:
         archive_conn.execute(
             """UPDATE recent_messages
