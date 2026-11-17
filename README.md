@@ -83,7 +83,7 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
 - **Deleted Message & Chat Preservation**: Seamlessly retains messages and chats deleted from your phone or revoked by senders across backup cycles (`-P`/`--preserve-deleted`), including call logs, interactive polls, shared locations, and progressive edit history.
 - **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
-- **EXIF & Container Metadata Writing**: Optionally writes original WhatsApp message timestamps directly into image EXIF metadata and MP4 video headers so third-party photo managers (Google Photos, Immich, Apple Photos) index media on chronological timelines.
+- **EXIF & Container Metadata Writing**: Optionally writes original WhatsApp message timestamps directly into image EXIF metadata and MP4/M4A video/audio headers so third-party photo managers (Google Photos, Immich, Apple Photos) index media on chronological timelines. Includes a dedicated `update-metadata` command to retroactively backfill existing archives in-place.
 - **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents, Stickers, and Contact cards (.vcf).
 
 ### WhatsApp Backup Viewer

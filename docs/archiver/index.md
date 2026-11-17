@@ -114,6 +114,13 @@ Review the generated CSV audit reports to identify any media files that were mis
 > By default, the archiver sets filesystem modification dates (`mtime`). However, cloud galleries and photo managers prioritize embedded metadata tags (`DateTimeOriginal` for photos, `mvhd` creation time for MP4 videos).
 > 
 > Pass `--exif-timestamps` (or set `exif_timestamps = true` in `config.toml`) to write message timestamps directly into media metadata headers without re-compression. Pre-existing camera capture timestamps and orientation are safely preserved.
+>
+> 🔄 **Already have an existing archive without metadata?**  
+> You do not need to delete or re-import your media. Run the dedicated updater directly on your output folder:
+> ```bash
+> wab-archiver update-metadata -o /path/to/output
+> ```
+> This scans `.wa_media_archiver.db` and injects missing EXIF tags and container creation dates in-place in seconds, without needing the phone, ADB, or backup files. See the [Command Reference](command-reference.md#update-metadata) for options like `--dry-run` and `--timezone`.
 
 ---
 

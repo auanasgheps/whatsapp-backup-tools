@@ -44,6 +44,7 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
             archive_path   TEXT NOT NULL,
             is_hardlink    INTEGER NOT NULL DEFAULT 0,
             timestamp_ms   INTEGER,
+            exif_stamped   INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (original_path, archive_path)
         );
         CREATE INDEX IF NOT EXISTS idx_archive_copies_path ON archive_copies(archive_path);
@@ -93,6 +94,13 @@ def open_archive_db(output_root: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE archive_copies ADD COLUMN is_hardlink INTEGER NOT NULL DEFAULT 0")
     if "timestamp_ms" not in existing_copies:
         conn.execute("ALTER TABLE archive_copies ADD COLUMN timestamp_ms INTEGER")
+    if "exif_stamped" not in existing_copies:
+        conn.execute(
+            "ALTER TABLE archive_copies ADD COLUMN exif_stamped INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_archive_copies_stamped ON archive_copies(exif_stamped, is_hardlink)"
+    )
     existing_recent = {r[1] for r in conn.execute("PRAGMA table_info(recent_messages)")}
     if "is_edited" not in existing_recent:
         conn.execute("ALTER TABLE recent_messages ADD COLUMN is_edited INTEGER NOT NULL DEFAULT 0")
@@ -191,6 +199,41 @@ def record_file_archived(
         "timestamp_ms = COALESCE(excluded.timestamp_ms, archive_copies.timestamp_ms)",
         (original_path, archive_path, is_hardlink, timestamp_ms),
     )
+
+
+def mark_metadata_stamped(
+    cursor: sqlite3.Cursor,
+    archive_path: str,
+    status: int,
+) -> None:
+    """Update metadata stamped status for an archived copy."""
+    cursor.execute(
+        "UPDATE archive_copies SET exif_stamped = ? WHERE archive_path = ?",
+        (status, archive_path),
+    )
+
+
+def get_pending_metadata_copies(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, int]]:
+    """Return (archive_path, timestamp_ms) for files requiring metadata injection."""
+    return conn.execute(
+        "SELECT archive_path, timestamp_ms FROM archive_copies "
+        "WHERE exif_stamped = 0 AND is_hardlink = 0 "
+        "AND timestamp_ms IS NOT NULL AND timestamp_ms > 0 "
+        "ORDER BY rowid ASC"
+    ).fetchall()
+
+
+def get_all_metadata_copies(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, int]]:
+    """Return (archive_path, timestamp_ms) for all non-hardlinked files with valid timestamps."""
+    return conn.execute(
+        "SELECT archive_path, timestamp_ms FROM archive_copies "
+        "WHERE is_hardlink = 0 AND timestamp_ms IS NOT NULL AND timestamp_ms > 0 "
+        "ORDER BY rowid ASC"
+    ).fetchall()
 
 
 def load_canonical_copies(conn: sqlite3.Connection, output_root: str) -> dict[bytes, str]:
