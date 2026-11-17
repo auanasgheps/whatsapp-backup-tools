@@ -83,6 +83,7 @@ Organise and preserve your WhatsApp media in a clean, human-readable structure.
 - **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
 - **Deleted Message & Chat Preservation**: Seamlessly retains messages and chats deleted from your phone or revoked by senders across backup cycles (`-P`/`--preserve-deleted`), including call logs, interactive polls, shared locations, and progressive edit history.
 - **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
+- **EXIF & Container Metadata Writing**: Optionally writes original WhatsApp message timestamps directly into image EXIF metadata and MP4 video headers so third-party photo managers (Google Photos, Immich, Apple Photos) index media on chronological timelines.
 - **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents, Stickers, and Contact cards (.vcf).
 
 ### WhatsApp Backup Viewer
@@ -135,7 +136,7 @@ After a successful run, the archive is organised into a clean, human-readable hi
 - Files in **Contacts** folders retain their original filename
 - Files in **Groups** folders have the sender name appended: `IMG-20230115-WA0001_JohnDoe.jpg`
 - Your own sent media in groups is appended with `_Me`
-- All copied files have their **modified date set to the original WhatsApp timestamp**
+- All copied files have their **modified date set to the original WhatsApp timestamp** (optionally, embedded EXIF `DateTimeOriginal` and MP4 container metadata can also be written using `--exif-timestamps`)
 - Contact folder names use the `00` prefix for phone numbers (e.g. `0039...`), not `+`
 
 ---

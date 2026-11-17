@@ -32,6 +32,7 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # --- Archiving Features & Filtering ---
 # preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
 # link_duplicates  = true               # Hardlink duplicate media across chats instead of copying bytes to save disk space
+# exif_timestamps  = true               # Write WhatsApp message timestamps to media EXIF/metadata headers
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 
 # --- Source: Android (Local Files & Folders) ---
@@ -83,7 +84,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
                      [--business] [--pull-media] [--staging PATH]
                      -o PATH [-l PATH] [--timezone TZ] [--config PATH]
                      [--dry-run] [--limit N] [--since DATE]
-                     [--link-duplicates] [-P]
+                     [--link-duplicates] [-P] [--exif-timestamps]
 ```
 
 | Argument | Required | Description |
@@ -109,6 +110,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--since DATE` | No | Only archive media from messages sent or received on or after this date (`YYYY-MM-DD`) |
 | `--link-duplicates` | No | Hardlink duplicate media files across chats instead of copying bytes, saving disk space. Gracefully falls back to copying if the destination filesystem does not support hardlinks (e.g. exFAT, FAT32, unsupported network shares) |
 | `-P`, `--preserve-deleted` | No | Preserve messages deleted on the phone ("Delete for Me"), messages revoked by sender ("Delete for Everyone"), and deleted chats from previous backup runs into `preserved_messages.db` |
+| `--exif-timestamps` | No | Write WhatsApp message timestamps directly into media metadata headers (EXIF `DateTimeOriginal` in images, QuickTime `creation_time` in MP4 videos) so cloud galleries (Google Photos, Immich, Apple Photos) index them chronologically. Disabled by default |
 
 ### `restore`
 
@@ -269,6 +271,24 @@ wab-archiver archive \
 ```
 
 > 💡 Preserved messages, sender-revoked messages ("Delete for Everyone"), voice and video calls (`preserved_calls`), interactive polls, shared locations, view-once media metadata, and pre-edited message drafts are retained into `preserved_messages.db` across backup cycles. Preserved content and deleted chats are automatically surfaced in the viewer with visual badges, progressive edit disclosure, and bidirectional reply linking. The archiver logs the exact counts during execution and in the completion run summary (`Preserved: X message(s) across Y chat(s)`).
+
+#### Write EXIF & Container Timestamps (`--exif-timestamps`)
+
+By default, the archiver sets filesystem modification timestamps (`mtime`) on all copied files to match the original WhatsApp message date. However, cloud galleries and photo management software (such as **Google Photos, Apple Photos, Immich, Nextcloud Memories, Synology Photos, and Adobe Lightroom**) prioritize embedded metadata tags over filesystem dates when building chronological timelines.
+
+Enable `--exif-timestamps` (or set `exif_timestamps = true` in `config.toml`) to inject timestamps directly into media metadata headers:
+
+```bash
+wab-archiver archive \
+  --config config.toml \
+  --exif-timestamps
+```
+
+> 💡 **Metadata Engine Details:**
+> - **Images (JPEG)**: Adds standard EXIF `DateTimeOriginal` and `DateTimeDigitized` tags (in local time) alongside `OffsetTimeOriginal` when a timezone is configured. If an image already contains camera capture dates or portrait orientation (`0x0112`), pre-existing tags are strictly preserved.
+> - **Videos (MP4 / MOV)**: Adds QuickTime `mvhd`, `tkhd`, and `mdhd` creation and modification timestamps in UTC.
+> - **Zero Re-compression**: Operates with 100% loss-free header manipulation; pixel data and video streams are never transcoded.
+> - **Hardlink & Incremental Protection**: Automatically skipped on hardlinked files (`--link-duplicates`) to prevent shared inodes from cross-mutating timestamps. Incremental runs cross-check `.wa_media_archiver.db` to prevent false duplicate filename renames.
 
 #### iOS — pre-extracted mode
 
