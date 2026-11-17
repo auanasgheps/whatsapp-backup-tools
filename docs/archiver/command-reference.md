@@ -120,6 +120,24 @@ Reconstruct the original `Media/` tree from an archive (Android only).
 wab-archiver restore -o PATH [-l PATH] [-v] [--dry-run] [--config PATH]
 ```
 
+### `update-metadata`
+
+Retroactively write EXIF tags and container creation timestamps into previously archived media files without re-archiving.
+
+```
+wab-archiver update-metadata -o PATH [--timezone TZ] [--config PATH] [--dry-run] [--force] [-l PATH] [-v]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `-o`, `--output PATH` | **Yes** | Destination folder of the archive (must contain `.wa_media_archiver.db`) |
+| `--timezone TZ` | No | Target timezone for local EXIF timestamps and `OffsetTimeOriginal` (falls back to `config.toml` or machine local time) |
+| `--config PATH` | No | Path to a TOML config file (auto-detected if omitted) |
+| `--dry-run` | No | Simulate the update without writing to any files or modifying the database |
+| `--force` | No | Re-evaluate all media files even if already marked as stamped |
+| `-l`, `--log PATH` | No | Custom log file path (defaults to `<output>/wab-archiver.log`) |
+| `-v`, `--debug`, `--verbose` | No | Enable debug logging |
+
 ### `config`
 
 ```
@@ -289,6 +307,22 @@ wab-archiver archive \
 > - **Videos (MP4 / MOV)**: Adds QuickTime `mvhd`, `tkhd`, and `mdhd` creation and modification timestamps in UTC.
 > - **Zero Re-compression**: Operates with 100% loss-free header manipulation; pixel data and video streams are never transcoded.
 > - **Hardlink & Incremental Protection**: Automatically skipped on hardlinked files (`--link-duplicates`) to prevent shared inodes from cross-mutating timestamps. Incremental runs cross-check `.wa_media_archiver.db` to prevent false duplicate filename renames.
+> - **Retroactive Backfill**: To backfill metadata on existing archives previously created without this flag, see [`update-metadata`](#retroactively-backfill-metadata-on-existing-archives-update-metadata).
+
+#### Retroactively Backfill Metadata on Existing Archives (`update-metadata`)
+
+If you previously archived media without `--exif-timestamps`, you can inject missing EXIF and container timestamps retroactively without re-importing:
+
+```bash
+wab-archiver update-metadata \
+  --output /path/to/output \
+  --timezone Europe/Berlin
+```
+
+* **Decoupled from phone/sources**: Operates entirely off `.wa_media_archiver.db` without needing `--wa-root`, `--msgstore`, or ADB.
+* **Simulate first**: Pass `--dry-run` to preview how many files would be stamped without writing to disk.
+* **Force re-evaluation**: Pass `--force` if you updated your timezone settings and want to re-check all files.
+* **Fast and idempotent**: Tracks injection status in `.wa_media_archiver.db` (`exif_stamped` column); subsequent runs skip already-stamped files in milliseconds.
 
 #### iOS — pre-extracted mode
 

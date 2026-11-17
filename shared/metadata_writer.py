@@ -25,6 +25,8 @@ EPOCH_1904 = 2_082_844_800
 JPEG_EXTENSIONS = frozenset({".jpg", ".jpeg"})
 # Supported video & audio container extensions (ISO-BMFF / QuickTime)
 MP4_EXTENSIONS = frozenset({".mp4", ".mov", ".3gp", ".m4a"})
+# Combined supported extensions for metadata stamping
+SUPPORTED_EXTENSIONS = JPEG_EXTENSIONS | MP4_EXTENSIONS
 
 
 def format_exif_datetime(timestamp_ms: int, tz: tzinfo | None) -> tuple[str, str | None]:

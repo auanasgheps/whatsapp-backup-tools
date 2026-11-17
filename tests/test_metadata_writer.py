@@ -433,3 +433,258 @@ def test_permission_error_graceful_handling(tmp_path, monkeypatch):
     ts_ms = 1778416200000
     res = metadata_writer.write_media_timestamp(str(jpeg_path), ts_ms, UTC, False)
     assert res is False
+
+
+def test_archive_db_exif_stamped_column_migration(tmp_path):
+    import sqlite3
+
+    from wab_archiver import archive_db as arc
+
+    out = tmp_path / "out"
+    out.mkdir()
+    db_file = out / ".wa_media_archiver.db"
+
+    # Create a pre-migration DB missing exif_stamped column with user_version = 6
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("PRAGMA user_version = 6")
+    conn.executescript("""
+        CREATE TABLE contacts (number TEXT PRIMARY KEY, folder TEXT, display_name TEXT);
+        CREATE TABLE files (original_path TEXT PRIMARY KEY, md5 BLOB, size INTEGER);
+        CREATE TABLE archive_copies (
+            original_path TEXT NOT NULL REFERENCES files(original_path),
+            archive_path TEXT NOT NULL,
+            is_hardlink INTEGER DEFAULT 0,
+            timestamp_ms INTEGER,
+            PRIMARY KEY (original_path, archive_path)
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+    # Open via open_archive_db and verify migration adds column while preserving user_version = 6
+    migrated_conn = arc.open_archive_db(str(out))
+    cols = {r[1] for r in migrated_conn.execute("PRAGMA table_info(archive_copies)").fetchall()}
+    assert "exif_stamped" in cols
+    assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 6
+
+    # Test helper methods
+    cur = migrated_conn.cursor()
+    cur.execute("INSERT INTO files VALUES ('p1', X'11', 10)")
+    cur.execute("INSERT INTO archive_copies VALUES ('p1', 'rel1.jpg', 0, 1000, 0)")
+    cur.execute("INSERT INTO files VALUES ('p2', X'22', 10)")
+    cur.execute("INSERT INTO archive_copies VALUES ('p2', 'rel2.jpg', 1, 2000, 0)")
+    migrated_conn.commit()
+
+    pending = arc.get_pending_metadata_copies(migrated_conn)
+    assert pending == [("rel1.jpg", 1000)]
+
+    arc.mark_metadata_stamped(cur, "rel1.jpg", 1)
+    migrated_conn.commit()
+
+    assert arc.get_pending_metadata_copies(migrated_conn) == []
+    all_copies = arc.get_all_metadata_copies(migrated_conn)
+    assert all_copies == [("rel1.jpg", 1000)]
+    migrated_conn.close()
+
+
+def test_update_metadata_subcommand_e2e(tmp_path):
+    import argparse
+    import logging
+    import sys
+
+    from wab_archiver import archive_db as arc
+    from wab_archiver import main as wa
+
+    logger = logging.getLogger("test_update_metadata")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Create dummy media
+    img_bytes = _build_minimal_jpeg(with_app0=True)
+    img_path = out / "photo.jpg"
+    img_path.write_bytes(img_bytes)
+
+    # Standalone photo (not hardlinked)
+    photo_standalone = out / "photo_standalone.jpg"
+    photo_standalone.write_bytes(img_bytes)
+
+    mp4_bytes = _build_synthetic_mp4(version=0)
+    mp4_path = out / "video.mp4"
+    mp4_path.write_bytes(mp4_bytes)
+
+    m4a_bytes = _build_synthetic_mp4(version=0)
+    m4a_path = out / "audio.m4a"
+    m4a_path.write_bytes(m4a_bytes)
+
+    # Hardlink
+    link_path = out / "photo_link.jpg"
+    try:
+        os.link(str(img_path), str(link_path))
+        has_hardlink = True
+    except OSError:
+        has_hardlink = False
+
+    # Unsupported format
+    txt_path = out / "doc.txt"
+    txt_path.write_bytes(b"hello text")
+
+    # Set up DB
+    conn = arc.open_archive_db(str(out))
+    cur = conn.cursor()
+    ts_ms = 1778414400000
+
+    arc.record_file_archived(
+        cur, "Media/photo_standalone.jpg", b"10", "photo_standalone.jpg", len(img_bytes), 0, ts_ms
+    )
+    arc.record_file_archived(cur, "Media/photo.jpg", b"1", "photo.jpg", len(img_bytes), 0, ts_ms)
+    arc.record_file_archived(cur, "Media/video.mp4", b"2", "video.mp4", len(mp4_bytes), 0, ts_ms)
+    arc.record_file_archived(cur, "Media/audio.m4a", b"3", "audio.m4a", len(m4a_bytes), 0, ts_ms)
+    if has_hardlink:
+        arc.record_file_archived(
+            cur, "Media/link.jpg", b"1", "photo_link.jpg", len(img_bytes), 1, ts_ms
+        )
+    arc.record_file_archived(cur, "Media/doc.txt", b"4", "doc.txt", len(b"hello text"), 0, ts_ms)
+    # File in DB but missing from disk
+    arc.record_file_archived(cur, "Media/missing.jpg", b"5", "missing.jpg", 100, 0, ts_ms)
+    conn.commit()
+
+    # 1. Dry run test
+    dry_args = argparse.Namespace(
+        output=str(out),
+        timezone=None,
+        force=False,
+        dry_run=True,
+    )
+    wa.run_update_metadata_mode(dry_args, logger)
+
+    # Verify no files modified in dry run
+    assert arc.get_pending_metadata_copies(conn) != []
+    assert metadata_writer.has_valid_camera_datetime(photo_standalone.read_bytes()[6:]) is False
+
+    # 2. Real run
+    real_args = argparse.Namespace(
+        output=str(out),
+        timezone="UTC",
+        force=False,
+        dry_run=False,
+    )
+    wa.run_update_metadata_mode(real_args, logger)
+
+    # Verify standalone JPEG got EXIF
+    app1_idx = photo_standalone.read_bytes().find(b"\xff\xe1")
+    assert app1_idx != -1
+    # Verify mtime was preserved
+    assert abs(os.path.getmtime(str(photo_standalone)) - (ts_ms / 1000.0)) < 2.0
+    if sys.platform == "win32":
+        assert abs(os.stat(str(photo_standalone)).st_ctime - (ts_ms / 1000.0)) < 2.0
+
+    # Verify MP4 got patched
+    mp4_data = mp4_path.read_bytes()
+    idx = mp4_data.find(b"mvhd")
+    c_time = struct.unpack(">I", mp4_data[idx + 8 : idx + 12])[0]
+    assert c_time == 1778414400 + metadata_writer.EPOCH_1904
+    assert abs(os.path.getmtime(str(mp4_path)) - (ts_ms / 1000.0)) < 2.0
+
+    # Verify M4A got patched
+    m4a_data = m4a_path.read_bytes()
+    idx = m4a_data.find(b"mvhd")
+    c_time_m4a = struct.unpack(">I", m4a_data[idx + 8 : idx + 12])[0]
+    assert c_time_m4a == 1778414400 + metadata_writer.EPOCH_1904
+
+    # Verify database status
+    row_standalone = conn.execute(
+        "SELECT exif_stamped FROM archive_copies WHERE archive_path = 'photo_standalone.jpg'"
+    ).fetchone()
+    assert row_standalone[0] == 1
+    if has_hardlink:
+        row_hardlink = conn.execute(
+            "SELECT exif_stamped FROM archive_copies WHERE archive_path = 'photo.jpg'"
+        ).fetchone()
+        assert row_hardlink[0] == 2
+    row_mp4 = conn.execute(
+        "SELECT exif_stamped FROM archive_copies WHERE archive_path = 'video.mp4'"
+    ).fetchone()
+    assert row_mp4[0] == 1
+    row_txt = conn.execute(
+        "SELECT exif_stamped FROM archive_copies WHERE archive_path = 'doc.txt'"
+    ).fetchone()
+    assert row_txt[0] == 2
+    row_miss = conn.execute(
+        "SELECT exif_stamped FROM archive_copies WHERE archive_path = 'missing.jpg'"
+    ).fetchone()
+    assert row_miss[0] == 3
+
+    # 3. Re-run idempotency: pending should be empty
+    assert arc.get_pending_metadata_copies(conn) == []
+    wa.run_update_metadata_mode(real_args, logger)
+
+    # 4. Force run
+    force_args = argparse.Namespace(
+        output=str(out),
+        timezone="UTC",
+        force=True,
+        dry_run=False,
+    )
+    wa.run_update_metadata_mode(force_args, logger)
+    conn.close()
+
+
+def test_copy_or_skip_marks_exif_stamped_on_ingestion(tmp_path):
+    import logging
+
+    from wab_archiver import archive_db as arc
+    from wab_archiver import main as wa
+
+    logger = logging.getLogger("test_ingestion_stamp")
+    out = tmp_path / "out"
+    out.mkdir()
+    conn = arc.open_archive_db(str(out))
+    cursor = conn.cursor()
+
+    raw_bytes = _build_minimal_jpeg(with_app0=True)
+    src = tmp_path / "IMG-004.jpg"
+    src.write_bytes(raw_bytes)
+    dest_path = out / "IMG-004.jpg"
+    ts_ms = 1778416200000
+
+    wa._copy_or_skip(
+        str(src),
+        str(dest_path),
+        str(out),
+        "Media/WhatsApp Images/IMG-004.jpg",
+        ts_ms,
+        str(out),
+        False,
+        logger,
+        cursor,
+        False,
+        {},
+        True,
+        UTC,
+    )
+    conn.commit()
+
+    # Verify exif_stamped is set to 1 directly on ingestion
+    row = conn.execute(
+        "SELECT exif_stamped FROM archive_copies WHERE archive_path = 'IMG-004.jpg'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 1
+    conn.close()
+
+
+def test_set_file_times_windows_creation_time(tmp_path):
+    import sys
+
+    from wab_archiver import main as wa
+
+    test_file = tmp_path / "timestamp_test.jpg"
+    test_file.write_bytes(b"sample bytes")
+
+    ts_ms = 1621512000000
+    wa.set_file_times(str(test_file), ts_ms)
+
+    st = os.stat(str(test_file))
+    assert abs(st.st_mtime - (ts_ms / 1000.0)) < 2.0
+    if sys.platform == "win32":
+        assert abs(st.st_ctime - (ts_ms / 1000.0)) < 2.0

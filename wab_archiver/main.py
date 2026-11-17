@@ -71,10 +71,81 @@ file_md5 = hashing.file_md5
 write_media_timestamp = metadata_writer.write_media_timestamp
 
 
+def _set_windows_creation_time(path: str, ts_sec: float) -> bool:
+    """Set the creation time (ctime) on Windows via SetFileTime Win32 API."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        CreateFileW = kernel32.CreateFileW
+        CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        CreateFileW.restype = wintypes.HANDLE
+
+        SetFileTime = kernel32.SetFileTime
+        SetFileTime.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        SetFileTime.restype = wintypes.BOOL
+
+        CloseHandle = kernel32.CloseHandle
+        CloseHandle.argtypes = [wintypes.HANDLE]
+        CloseHandle.restype = wintypes.BOOL
+
+        FILE_WRITE_ATTRIBUTES = 0x0100
+        OPEN_EXISTING = 3
+        FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+
+        # Windows FILETIME is 100-nanosecond intervals since Jan 1, 1601 UTC
+        ft = int((ts_sec + 11644473600) * 10_000_000)
+        low = ft & 0xFFFFFFFF
+        high = (ft >> 32) & 0xFFFFFFFF
+        filetime = wintypes.FILETIME(low, high)
+
+        lp_path = db.ensure_long_path(path)
+        handle = CreateFileW(
+            lp_path,
+            FILE_WRITE_ATTRIBUTES,
+            0,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        if handle == wintypes.HANDLE(-1).value:
+            return False
+        try:
+            return bool(SetFileTime(handle, ctypes.byref(filetime), None, None))
+        finally:
+            CloseHandle(handle)
+    except Exception:
+        return False
+
+
 def set_file_times(path: str, timestamp_ms: int):
-    """Set file access and modification time from a WhatsApp timestamp (ms)."""
+    """
+    Set file access, modification, and creation time from a WhatsApp timestamp (ms).
+    Sets mtime and atime via os.utime, and on Windows also sets creation time via SetFileTime.
+    """
     ts = timestamp_ms / 1000.0
-    os.utime(path, (ts, ts))
+    lp = db.ensure_long_path(path)
+    os.utime(lp, (ts, ts))
+    if sys.platform == "win32":
+        _set_windows_creation_time(lp, ts)
 
 
 def get_year(timestamp_ms: int, tz=None) -> str:
@@ -689,11 +760,14 @@ def _copy_or_skip(
             logger.error(f"ERROR copying {src} -> {resolved}: {e}")
             return CopyResult(0, 0, 1, 0)
 
+    exif_stamped_val = 0
     if exif_timestamps and not is_hardlink and timestamp is not None:
         try:
-            write_media_timestamp(resolved, timestamp, tz, False)
+            injected = write_media_timestamp(resolved, timestamp, tz, False)
+            exif_stamped_val = 1 if injected else 2
         except Exception as e:
             logger.debug(f"Could not write EXIF timestamp on {resolved}: {e}")
+            exif_stamped_val = 0
 
     if timestamp is not None:
         try:
@@ -711,6 +785,8 @@ def _copy_or_skip(
         archive_db.record_file_archived(
             cursor, file_path, src_hash, rel, os.path.getsize(resolved), is_hardlink, timestamp
         )
+        if exif_stamped_val != 0:
+            archive_db.mark_metadata_stamped(cursor, rel, exif_stamped_val)
         if archived_file_set is not None:
             archived_file_set.add((file_path, rel, src_hash))
     return CopyResult(1, 0, 0, is_hardlink)
@@ -1512,6 +1588,188 @@ def run_restore_mode(args, logger):
         conn.close()
 
 
+def run_update_metadata_mode(args: argparse.Namespace, logger: logging.Logger) -> None:
+    """
+    Retroactively write EXIF and container metadata into previously archived media.
+    Queries .wa_media_archiver.db for archive copies and injects timestamps into
+    supported image (.jpg, .jpeg) and video/audio (.mp4, .mov, .3gp, .m4a) containers.
+    """
+    db_path = os.path.join(args.output, ".wa_media_archiver.db")
+    if not os.path.isfile(db_path):
+        logger.error(
+            f"No archive database found at {db_path}. "
+            "Please specify a valid archive output directory containing .wa_media_archiver.db."
+        )
+        raise SystemExit(1)
+
+    tz = None
+    if args.timezone:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            tz = ZoneInfo(args.timezone)
+        except ZoneInfoNotFoundError:
+            msg = f"Unknown timezone: '{args.timezone}'."
+            if sys.platform == "win32":
+                msg += "\n  On Windows, the IANA timezone database must be installed: pip install tzdata"
+            msg += "\n  Use an IANA name, e.g. Europe/London, America/New_York, UTC."
+            logger.error(msg)
+            raise SystemExit(1)
+
+    conn = archive_db.open_archive_db(args.output)
+    try:
+        archive_db.check_db_health(conn, logger)
+
+        if getattr(args, "force", False):
+            pending = archive_db.get_all_metadata_copies(conn)
+        else:
+            pending = archive_db.get_pending_metadata_copies(conn)
+
+        total_files = len(pending)
+        if total_files == 0:
+            logger.info("All media files are already up-to-date. Nothing to update.")
+            return
+
+        logger.info(f"Evaluating {total_files:,} media file(s) for metadata injection...")
+
+        stats = {
+            "completed": 0,
+            "skipped": 0,
+            "hardlinks": 0,
+            "missing": 0,
+            "errors": 0,
+        }
+
+        progress = ProgressReporter("Updating metadata", total_files, logger, sys.stderr, 0.2)
+
+        cursor = conn.cursor()
+        batch_size = 250
+
+        try:
+            for idx, (archive_path, timestamp_ms) in enumerate(pending, start=1):
+                full_path = os.path.join(args.output, *archive_path.split("/"))
+                lp_full = db.ensure_long_path(full_path)
+
+                if not os.path.isfile(lp_full):
+                    stats["missing"] += 1
+                    if not args.dry_run:
+                        archive_db.mark_metadata_stamped(cursor, archive_path, 3)
+                    progress.update(
+                        idx,
+                        {
+                            "Completed": stats["completed"],
+                            "Skipped": stats["skipped"],
+                            "Hardlinks": stats["hardlinks"],
+                        },
+                    )
+                    continue
+
+                try:
+                    stat_info = os.stat(lp_full)
+                    if stat_info.st_nlink > 1:
+                        stats["hardlinks"] += 1
+                        if not args.dry_run:
+                            archive_db.mark_metadata_stamped(cursor, archive_path, 2)
+                        progress.update(
+                            idx,
+                            {
+                                "Completed": stats["completed"],
+                                "Skipped": stats["skipped"],
+                                "Hardlinks": stats["hardlinks"],
+                            },
+                        )
+                        continue
+                except OSError as e:
+                    logger.debug(f"Could not stat {full_path}: {e}")
+                    stats["errors"] += 1
+                    progress.update(
+                        idx,
+                        {
+                            "Completed": stats["completed"],
+                            "Skipped": stats["skipped"],
+                            "Hardlinks": stats["hardlinks"],
+                        },
+                    )
+                    continue
+
+                ext = os.path.splitext(full_path)[1].lower()
+                if ext not in metadata_writer.SUPPORTED_EXTENSIONS:
+                    stats["skipped"] += 1
+                    if not args.dry_run:
+                        archive_db.mark_metadata_stamped(cursor, archive_path, 2)
+                    progress.update(
+                        idx,
+                        {
+                            "Completed": stats["completed"],
+                            "Skipped": stats["skipped"],
+                            "Hardlinks": stats["hardlinks"],
+                        },
+                    )
+                    continue
+
+                if args.dry_run:
+                    stats["completed"] += 1
+                    progress.update(
+                        idx,
+                        {
+                            "Completed": stats["completed"],
+                            "Skipped": stats["skipped"],
+                            "Hardlinks": stats["hardlinks"],
+                        },
+                    )
+                    continue
+
+                try:
+                    injected = metadata_writer.write_media_timestamp(
+                        full_path, timestamp_ms, tz, False
+                    )
+                    set_file_times(full_path, timestamp_ms)
+                    if injected:
+                        stats["completed"] += 1
+                        archive_db.mark_metadata_stamped(cursor, archive_path, 1)
+                    else:
+                        stats["skipped"] += 1
+                        archive_db.mark_metadata_stamped(cursor, archive_path, 2)
+                except Exception as e:
+                    logger.warning(f"Error injecting metadata on {archive_path}: {e}")
+                    stats["errors"] += 1
+
+                if idx % batch_size == 0 and not args.dry_run:
+                    conn.commit()
+
+                progress.update(
+                    idx,
+                    {
+                        "Completed": stats["completed"],
+                        "Skipped": stats["skipped"],
+                        "Hardlinks": stats["hardlinks"],
+                    },
+                )
+        finally:
+            if not args.dry_run:
+                conn.commit()
+            progress.finish(
+                {
+                    "Completed": stats["completed"],
+                    "Skipped": stats["skipped"],
+                    "Hardlinks": stats["hardlinks"],
+                }
+            )
+
+        logger.info("=== Metadata Update Summary ===")
+        logger.info(f"  Files evaluated:     {total_files:,}")
+        logger.info(f"  Metadata completed:  {stats['completed']:,}")
+        logger.info(f"  Preserved / skipped: {stats['skipped']:,}")
+        logger.info(f"  Hardlinks protected: {stats['hardlinks']:,}")
+        if stats["missing"]:
+            logger.info(f"  Missing from disk:   {stats['missing']:,}")
+        if stats["errors"]:
+            logger.warning(f"  Errors encountered:  {stats['errors']:,}")
+        logger.info("===============================")
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Config file
 # ---------------------------------------------------------------------------
@@ -1649,7 +1907,7 @@ def _generate_config(script_dir: str):
 # Entry point
 # ---------------------------------------------------------------------------
 
-_KNOWN_COMMANDS = frozenset({"archive", "restore", "config"})
+_KNOWN_COMMANDS = frozenset({"archive", "restore", "config", "update-metadata"})
 
 
 def _inject_default_archive_command():
@@ -1976,6 +2234,63 @@ def parse_args() -> argparse.Namespace:
     _restore_config = {k: v for k, v in _config.items() if k in ("output", "log", "debug")}
     restore_p.set_defaults(**_restore_config)
 
+    # --- update-metadata ---
+    update_meta_p = subs.add_parser(
+        "update-metadata",
+        help="Retroactively inject EXIF and container metadata into previously archived media.",
+        description=(
+            "Scan .wa_media_archiver.db and inject EXIF tags (JPEGs) and container creation "
+            "timestamps (MP4/MOV/3GP/M4A) into previously archived media in the output folder."
+        ),
+    )
+    update_meta_p.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="Path to the output archive folder containing .wa_media_archiver.db.",
+    )
+    update_meta_p.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Timezone for local EXIF timestamps (e.g. Europe/Berlin).",
+    )
+    update_meta_p.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Path to a TOML config file.",
+    )
+    update_meta_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Simulate the update without modifying any files.",
+    )
+    update_meta_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-evaluate all media files even if already marked as stamped.",
+    )
+    update_meta_p.add_argument(
+        "-l",
+        "--log",
+        default=None,
+        metavar="PATH",
+        help="Path to custom log file.",
+    )
+    update_meta_p.add_argument(
+        "-v",
+        "--verbose",
+        dest="debug",
+        action="store_true",
+        help="Enable debug logging.",
+    )
+    _update_meta_config = {
+        k: v for k, v in _config.items() if k in ("output", "log", "debug", "timezone")
+    }
+    update_meta_p.set_defaults(**_update_meta_config)
+
     # --- config ---
     config_p = subs.add_parser("config", help="Manage configuration.")
     config_p.add_argument(
@@ -1996,6 +2311,11 @@ def parse_args() -> argparse.Namespace:
     if args.command == "restore":
         if not args.output:
             restore_p.error("the following arguments are required: -o/--output")
+        return args
+
+    if args.command == "update-metadata":
+        if not args.output:
+            update_meta_p.error("the following arguments are required: -o/--output")
         return args
 
     # --- archive validation ---
@@ -2999,18 +3319,31 @@ def main():
     logger = setup_logging(log_path, debug_enabled)
     _warn_network_paths(args, logger)
 
+    logger.info(f"=== WhatsApp Backup Tools - Archiver v{_get_version()} ===")
+
     if args.command == "restore":
         logger.info(
-            f"=== WhatsApp Backup Tools - Archiver v{_get_version()} started (restore mode) ==="
+            "Mode: Restore — Reconstructing the original Android WhatsApp Media/ folder tree from the archive."
         )
         if args.dry_run:
             logger.info("*** DRY RUN MODE — no files will be copied ***")
         run_restore_mode(args, logger)
         return
 
+    if args.command == "update-metadata":
+        logger.info(
+            "Mode: Update Metadata — Retroactively injecting EXIF and container timestamps into archived media."
+        )
+        if args.dry_run:
+            logger.info("*** DRY RUN MODE — no files will be modified ***")
+        run_update_metadata_mode(args, logger)
+        return
+
+    logger.info(
+        "Mode: Archive — Ingesting WhatsApp chats and organizing media into structured contact and group folders."
+    )
     if args.dry_run:
         logger.info("*** DRY RUN MODE — no files will be copied ***")
-    logger.info(f"=== WhatsApp Backup Tools - Archiver v{_get_version()} started ===")
     run_forward_mode(args, logger)
 
 
