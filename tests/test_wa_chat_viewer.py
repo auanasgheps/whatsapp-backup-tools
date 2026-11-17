@@ -3914,6 +3914,7 @@ class TestRecentMessagesRouting:
             "is_pinned",
             "is_video_note",
             "is_voice_note",
+            "waveform",
         }
         assert set(data[0].keys()) == expected_keys
 
@@ -4208,10 +4209,10 @@ class TestReactionDetailsEndpoint:
 
     def test_ios_lid_resolves_via_pushname(self, tmp_path):
         """Group reactor identified by @lid JID resolves to a name via ZWAPROFILEPUSHNAME."""
-        lid = "271936022126772"
+        lid = "145500000000004"
         blob = _make_ios_reaction_blob(
             [
-                {"token": "3A77C1478A60D1C41588", "lid": lid, "emoji": "❤️".encode()},
+                {"token": "3A000000000000000001", "lid": lid, "emoji": "❤️".encode()},
             ]
         )
         self._ios_db_with_blob(tmp_path, "99@g.us", blob)
@@ -4886,11 +4887,11 @@ class TestGroupMembersLidResolution:
                 ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
             );
 
-            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103624826949001@lid');
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103000000000001@lid');
             INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
-            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949001@lid', 1);
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103000000000001@lid', 1);
             INSERT INTO ZWAGROUPMEMBER VALUES (2, 10, '15550002222@s.whatsapp.net', 1);
-            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Alice', 'Hello', '103624826949001@lid');
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Alice', 'Hello', '103000000000001@lid');
         """)
         conn.commit()
         conn.close()
@@ -4901,7 +4902,7 @@ class TestGroupMembersLidResolution:
             CREATE TABLE ZWAADDRESSBOOKCONTACT (
                 Z_PK INTEGER PRIMARY KEY, ZLID VARCHAR, ZWHATSAPPID VARCHAR, ZFULLNAME VARCHAR
             );
-            INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (1, '103624826949001@lid', '15550001111@s.whatsapp.net', 'Alice Tester');
+            INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (1, '103000000000001@lid', '15550001111@s.whatsapp.net', 'Alice Tester');
         """)
         c_conn.commit()
         c_conn.close()
@@ -4954,10 +4955,10 @@ class TestGroupMembersLidResolution:
                 ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
             );
 
-            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103624826949002@lid');
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103000000000002@lid');
             INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
-            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949002@lid', 1);
-            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Charlie', 'Hi', '103624826949002@lid');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103000000000002@lid', 1);
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Charlie', 'Hi', '103000000000002@lid');
         """)
         conn.commit()
         conn.close()
@@ -4965,7 +4966,7 @@ class TestGroupMembersLidResolution:
         lid_conn = sqlite3.connect(str(lid_path))
         lid_conn.executescript("""
             CREATE TABLE ZWAZACCOUNT (Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER VARCHAR, ZPHONENUMBER VARCHAR);
-            INSERT INTO ZWAZACCOUNT VALUES (1, '103624826949002@lid', '15550003333');
+            INSERT INTO ZWAZACCOUNT VALUES (1, '103000000000002@lid', '15550003333');
         """)
         lid_conn.commit()
         lid_conn.close()
@@ -5010,12 +5011,12 @@ class TestGroupMembersLidResolution:
                 ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
             );
 
-            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103624826949003@lid');
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103000000000003@lid');
             INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
-            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949003@lid', 1);
-            INSERT INTO ZWAGROUPMEMBER VALUES (2, 10, '103624826949004@lid', 1);
-            INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '103624826949003@lid', 'Mystery Member');
-            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Push1', 'Hi', '103624826949003@lid');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103000000000003@lid', 1);
+            INSERT INTO ZWAGROUPMEMBER VALUES (2, 10, '103000000000004@lid', 1);
+            INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '103000000000003@lid', 'Mystery Member');
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, 'Push1', 'Hi', '103000000000003@lid');
         """)
         conn.commit()
         conn.close()
@@ -5141,17 +5142,17 @@ class TestGroupMembersLidResolution:
             );
 
             INSERT INTO jid VALUES (1, 'group1', 'g.us', 'group1@g.us');
-            INSERT INTO jid VALUES (2, '103624826949005', 'lid', '103624826949005@lid');
+            INSERT INTO jid VALUES (2, '103000000000005', 'lid', '103000000000005@lid');
             INSERT INTO jid VALUES (3, '15550005555', 's.whatsapp.net', '15550005555@s.whatsapp.net');
-            INSERT INTO jid VALUES (4, '103624826949006', 'lid', '103624826949006@lid');
+            INSERT INTO jid VALUES (4, '103000000000006', 'lid', '103000000000006@lid');
 
             INSERT INTO jid_map VALUES (2, 3);
 
             INSERT INTO chat VALUES (10, 1, 'Android Group', 0, 1700000000000, 1, 1700000000000);
             INSERT INTO message VALUES (1, 10, 0, 2, 1700000000000, NULL, 7);
 
-            INSERT INTO group_participants VALUES (1, 'group1@g.us', '103624826949005@lid', 0, 0);
-            INSERT INTO group_participants VALUES (2, 'group1@g.us', '103624826949006@lid', 0, 0);
+            INSERT INTO group_participants VALUES (1, 'group1@g.us', '103000000000005@lid', 0, 0);
+            INSERT INTO group_participants VALUES (2, 'group1@g.us', '103000000000006@lid', 0, 0);
         """)
         conn.commit()
         conn.close()
@@ -5204,12 +5205,12 @@ class TestGroupMembersLidResolution:
                 ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
             );
 
-            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103624826949007@lid');
+            INSERT INTO ZWAGROUPINFO VALUES (1, 700000000.0, '103000000000007@lid');
             INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
-            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949007@lid', 1);
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103000000000007@lid', 1);
             -- Push name stored under phone JID in ZWAPROFILEPUSHNAME
             INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '15550009999@s.whatsapp.net', 'Friendly Dave');
-            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, NULL, 'Hi', '103624826949007@lid');
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, NULL, 'Hi', '103000000000007@lid');
         """)
         conn.commit()
         conn.close()
@@ -5220,7 +5221,7 @@ class TestGroupMembersLidResolution:
             CREATE TABLE ZWAADDRESSBOOKCONTACT (
                 Z_PK INTEGER PRIMARY KEY, ZLID VARCHAR, ZWHATSAPPID VARCHAR, ZFULLNAME VARCHAR
             );
-            INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (1, '103624826949007@lid', '15550009999@s.whatsapp.net', NULL);
+            INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (1, '103000000000007@lid', '15550009999@s.whatsapp.net', NULL);
         """)
         c_conn.commit()
         c_conn.close()
@@ -5275,8 +5276,8 @@ class TestGroupMembersLidResolution:
             );
 
             INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
-            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103624826949008@lid', 1);
-            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, NULL, 'Hi', '103624826949008@lid');
+            INSERT INTO ZWAGROUPMEMBER VALUES (1, 10, '103000000000008@lid', 1);
+            INSERT INTO ZWAMESSAGE VALUES (1, 10, 0, 700000001.0, 'STANZA1', 0, NULL, 1, NULL, NULL, 'Hi', '103000000000008@lid');
         """)
         conn.commit()
         conn.close()
@@ -5284,7 +5285,7 @@ class TestGroupMembersLidResolution:
         lid_conn = sqlite3.connect(str(lid_path))
         lid_conn.executescript("""
             CREATE TABLE ZWAZACCOUNT (Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER VARCHAR, ZPHONENUMBER VARCHAR);
-            INSERT INTO ZWAZACCOUNT VALUES (1, '103624826949008@lid', '15550008888');
+            INSERT INTO ZWAZACCOUNT VALUES (1, '103000000000008@lid', '15550008888');
         """)
         lid_conn.commit()
         lid_conn.close()
@@ -5292,7 +5293,7 @@ class TestGroupMembersLidResolution:
         # In arch.contacts, build_ios_pushname_map stored the push name keyed by the LID string
         archive_conn = make_archive_db(archive_path)
         archive_conn.execute(
-            "INSERT INTO contacts (number, folder, display_name) VALUES ('103624826949008', 'Dave Folder', 'Archived Friendly Dave')"
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('103000000000008', 'Dave Folder', 'Archived Friendly Dave')"
         )
         archive_conn.execute(
             "INSERT INTO groups (chat_row_id, folder, subject) VALUES ('10', 'Test Group', 'Test Group')"
@@ -5362,14 +5363,14 @@ class TestGroupMembersLidResolution:
             -- JIDs
             INSERT INTO jid VALUES (1, 'group1', 'g.us', 'group1@g.us');
             INSERT INTO jid VALUES (2, 'lid_me', 'lid', 'lid_me');
-            INSERT INTO jid VALUES (3, '103624826949001', 'lid', '103624826949001@lid');
+            INSERT INTO jid VALUES (3, '103000000000001', 'lid', '103000000000001@lid');
             INSERT INTO jid VALUES (4, '15550001111', 's.whatsapp.net', '15550001111@s.whatsapp.net');
-            INSERT INTO jid VALUES (5, '103624826949002', 'lid', '103624826949002@lid');
+            INSERT INTO jid VALUES (5, '103000000000002', 'lid', '103000000000002@lid');
             INSERT INTO jid VALUES (6, '15550002222', 's.whatsapp.net', '15550002222@s.whatsapp.net');
-            INSERT INTO jid VALUES (7, '103624826949003', 'lid', '103624826949003@lid');
+            INSERT INTO jid VALUES (7, '103000000000003', 'lid', '103000000000003@lid');
             INSERT INTO jid VALUES (8, '15550003333', 's.whatsapp.net', '15550003333@s.whatsapp.net');
-            INSERT INTO jid VALUES (9, '103624826949004', 'lid', '103624826949004@lid');
-            INSERT INTO jid VALUES (10, '103624826949005', 'lid', '103624826949005@lid');
+            INSERT INTO jid VALUES (9, '103000000000004', 'lid', '103000000000004@lid');
+            INSERT INTO jid VALUES (10, '103000000000005', 'lid', '103000000000005@lid');
 
             -- JID map (LID -> phone)
             INSERT INTO jid_map VALUES (3, 4);
@@ -5492,7 +5493,7 @@ class TestGroupMembersLidResolution:
                 username     TEXT
             );
 
-            INSERT INTO jid VALUES (1, '103624826949010', 'lid', '103624826949010@lid');
+            INSERT INTO jid VALUES (1, '103000000000010', 'lid', '103000000000010@lid');
             INSERT INTO jid VALUES (2, '15550004444', 's.whatsapp.net', '15550004444@s.whatsapp.net');
             INSERT INTO jid VALUES (3, 'group1', 'g.us', 'group1@g.us');
 
@@ -5661,8 +5662,8 @@ class TestServiceMessages:
             -- 1. Group created with JSON payload containing subject and LID author
             INSERT INTO ZWAMESSAGE VALUES (
                 1, 10, 0, 700000000.0, 6, 12, NULL, NULL, NULL, NULL,
-                '{"subject": "Alpha Project", "author": "103624826949010@lid"}',
-                '103624826949010@lid'
+                '{"subject": "Alpha Project", "author": "103000000000010@lid"}',
+                '103000000000010@lid'
             );
             -- 2. Participant added (by me)
             INSERT INTO ZWAMESSAGE VALUES (
@@ -5702,7 +5703,7 @@ class TestServiceMessages:
             -- 9. Participant removed (by me)
             INSERT INTO ZWAMESSAGE VALUES (
                 9, 10, 1, 700000080.0, 6, 7, NULL, NULL, NULL, NULL,
-                '103624826949010@lid', NULL
+                '103000000000010@lid', NULL
             );
             -- 10. Regular chat text message (PK 30)
             INSERT INTO ZWAMESSAGE VALUES (
@@ -5726,7 +5727,7 @@ class TestServiceMessages:
                 ZFULLNAME VARCHAR, ZPHONENUMBER VARCHAR
             );
             INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (
-                1, '103624826949010@lid', '15550001111@s.whatsapp.net',
+                1, '103000000000010@lid', '15550001111@s.whatsapp.net',
                 'Alice Smith', '15550001111'
             );
         """)
@@ -5910,7 +5911,7 @@ class TestServiceMessages:
                 ZFULLNAME VARCHAR, ZPHONENUMBER VARCHAR
             );
             INSERT INTO ZWAADDRESSBOOKCONTACT VALUES (
-                1, '103624826949010@lid', '15550001111@s.whatsapp.net',
+                1, '103000000000010@lid', '15550001111@s.whatsapp.net',
                 'Alice Smith', '15550001111'
             );
         """)
@@ -6037,11 +6038,11 @@ class TestServiceMessages:
                 username     TEXT
             );
 
-            INSERT INTO jid VALUES (1, '103624826949010', 'lid', '103624826949010@lid');
+            INSERT INTO jid VALUES (1, '103000000000010', 'lid', '103000000000010@lid');
             INSERT INTO jid VALUES (2, '15550001111', 's.whatsapp.net', '15550001111@s.whatsapp.net');
             INSERT INTO jid VALUES (3, '15550002222', 's.whatsapp.net', '15550002222@s.whatsapp.net');
             INSERT INTO jid VALUES (4, 'group1', 'g.us', 'group1@g.us');
-            INSERT INTO jid VALUES (5, '103624826949099', 'lid', '103624826949099@lid');
+            INSERT INTO jid VALUES (5, '103000000000099', 'lid', '103000000000099@lid');
             INSERT INTO jid VALUES (6, 'me', 'lid', 'lid_me');
 
             INSERT INTO jid_map VALUES (1, 2);
@@ -6226,7 +6227,7 @@ class TestServiceMessages:
             # 13. Unmapped LID participant
             assert by_id[13]["media_type"] == "service"
             assert by_id[13]["text_body"] == "Alice Smith added Unknown"
-            assert "103624826949099" not in by_id[13]["text_body"]
+            assert "103000000000099" not in by_id[13]["text_body"]
             assert "@lid" not in by_id[13]["text_body"]
 
             # 14. E2E encryption notice (action 67)
@@ -6563,7 +6564,7 @@ class TestServiceMessages:
                 "chat_type": "group",
                 "timestamp_ms": 1000,
                 "message_type": 6,
-                "text_body": "103624826949010@lid",
+                "text_body": "103000000000010@lid",
                 "media_file": None,
             },
             {
@@ -7651,7 +7652,7 @@ class TestChatInfoMediaSizeAndStatus:
             CREATE TABLE message_media (message_row_id INTEGER PRIMARY KEY, chat_row_id INTEGER, file_path TEXT, media_name TEXT, mime_type TEXT);
         """)
         wa_conn.execute(
-            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '103624826949008', 'lid', '103624826949008@lid')"
+            "INSERT INTO jid (_id, user, server, raw_string) VALUES (1, '103000000000008', 'lid', '103000000000008@lid')"
         )
         wa_conn.execute(
             "INSERT INTO chat (_id, jid_row_id, subject, hidden, sort_timestamp, display_message_row_id) VALUES (1, 1, NULL, 0, 1678307200000, 1)"
@@ -7671,7 +7672,7 @@ class TestChatInfoMediaSizeAndStatus:
 
         app = viewer.create_app(tmp_path, rescan=False)
         with app.test_client() as client:
-            resp = client.get("/api/chat-info/media-size?chat_id=103624826949008&chat_type=contact")
+            resp = client.get("/api/chat-info/media-size?chat_id=103000000000008&chat_type=contact")
             assert resp.status_code == 200
             assert resp.get_json()["bytes"] == 10
 
@@ -10348,7 +10349,7 @@ class TestLidAndContactResolution:
             CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
-            INSERT INTO jid VALUES (1, '103624838274932', 'lid', '103624838274932@lid');
+            INSERT INTO jid VALUES (1, '103000000000099', 'lid', '103000000000099@lid');
             INSERT INTO jid VALUES (2, '393401234567', 's.whatsapp.net', '393401234567@s.whatsapp.net');
 
             -- Chat uses LID as jid_row_id, but account_jid_row_id links to phone JID. jid_map is EMPTY.
@@ -10403,7 +10404,7 @@ class TestLidAndContactResolution:
             CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
-            INSERT INTO jid VALUES (1, '103624838274932', 'lid', '103624838274932@lid');
+            INSERT INTO jid VALUES (1, '103000000000099', 'lid', '103000000000099@lid');
             INSERT INTO jid VALUES (2, '393401234567', 's.whatsapp.net', '393401234567@s.whatsapp.net');
 
             -- Legacy phone chat (Chat 5) and newer LID chat (Chat 10)
@@ -10514,7 +10515,7 @@ class TestLidAndContactResolution:
             CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
-            INSERT INTO jid VALUES (1, '120363028374928192', 'g.us', '120363028374928192@g.us');
+            INSERT INTO jid VALUES (1, '120363000000000001', 'g.us', '120363000000000001@g.us');
             INSERT INTO chat VALUES (10, 1, 'Project Team Alpha', 0, 1700000000000, 1);
             INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, 'Welcome to the team', 0);
         """)
@@ -10566,7 +10567,7 @@ class TestLidAndContactResolution:
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             -- Unmapped LID: no entry in jid_map, no account_jid_row_id, no lid_display_name
-            INSERT INTO jid VALUES (1, '108394829384729', 'lid', '108394829384729@lid');
+            INSERT INTO jid VALUES (1, '145500000000001', 'lid', '145500000000001@lid');
             INSERT INTO chat VALUES (5, 1, NULL, 0, 1700000000000, 1);
             INSERT INTO message VALUES (1, 5, 0, 1, 1700000000000, 'Hey there', 0);
         """)
@@ -10585,15 +10586,15 @@ class TestLidAndContactResolution:
             assert len(chats) == 1
             chat = chats[0]
             assert chat["type"] == "contact"
-            assert chat["id"] == "108394829384729"
-            # Must NOT be formatted as fake phone "+108394829384729"
-            assert not chat["display_name"].startswith("+108394829384729")
+            assert chat["id"] == "145500000000001"
+            # Must NOT be formatted as fake phone "+145500000000001"
+            assert not chat["display_name"].startswith("+145500000000001")
             assert "Unknown Contact (5)" in chat["display_name"]
 
-            msg_resp = client.get("/api/messages?chat_id=108394829384729&chat_type=contact")
+            msg_resp = client.get("/api/messages?chat_id=145500000000001&chat_type=contact")
             msgs = msg_resp.get_json()
             assert len(msgs) == 1
-            assert msgs[0]["chat_id"] == "108394829384729"
+            assert msgs[0]["chat_id"] == "145500000000001"
             assert msgs[0]["text_body"] == "Hey there"
 
     def test_api_chats_group_with_null_subject_retains_group_type(self, tmp_path):
@@ -10675,7 +10676,7 @@ class TestLidAndContactResolution:
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             -- 1-to-1 contact chat with a phantom message (type = 0, text_data = NULL, no media)
-            INSERT INTO jid VALUES (1, '393926739354', 's.whatsapp.net', '393926739354@s.whatsapp.net');
+            INSERT INTO jid VALUES (1, '390000000010', 's.whatsapp.net', '390000000010@s.whatsapp.net');
             INSERT INTO chat VALUES (10, 1, NULL, 0, 1700000000000, 1);
             INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, NULL, 0);
         """)
@@ -10722,7 +10723,7 @@ class TestLidAndContactResolution:
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             -- 1-to-1 contact chat with only system message (type = 7)
-            INSERT INTO jid VALUES (1, '393926739354', 's.whatsapp.net', '393926739354@s.whatsapp.net');
+            INSERT INTO jid VALUES (1, '390000000010', 's.whatsapp.net', '390000000010@s.whatsapp.net');
             INSERT INTO chat VALUES (10, 1, NULL, 1, 1700000000000, NULL);
             INSERT INTO message VALUES (1, 10, 0, 1, 1700000000000, NULL, 7);
         """)
@@ -10770,7 +10771,7 @@ class TestLidAndContactResolution:
             CREATE TABLE lid_display_name (lid_row_id INTEGER NOT NULL PRIMARY KEY, display_name TEXT NOT NULL, username TEXT);
 
             -- Unmapped LID chat with masked phone string in lid_display_name
-            INSERT INTO jid VALUES (1, '47386424570094', 'lid', '47386424570094@lid');
+            INSERT INTO jid VALUES (1, '145500000000003', 'lid', '145500000000003@lid');
             INSERT INTO chat VALUES (3879, 1, NULL, 0, 1700000000000, 1);
             INSERT INTO message VALUES (1, 3879, 0, 1, 1700000000000, 'Valid conversational message', 0);
             INSERT INTO lid_display_name VALUES (1, '+39\u2219\u2219\u2219\u2219\u2219\u2219\u2219\u221995', NULL);
@@ -10965,7 +10966,7 @@ class TestAndroidHdAndMediaMatching:
             CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, sender_jid_row_id INTEGER, text_data TEXT, timestamp INTEGER, from_me INTEGER);
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
-            INSERT INTO jid VALUES (1, '393806446839', 's.whatsapp.net', '393806446839@s.whatsapp.net');
+            INSERT INTO jid VALUES (1, '390000000011', 's.whatsapp.net', '390000000011@s.whatsapp.net');
             INSERT INTO chat VALUES (1, 1, NULL, 0, 1700000000000, 1);
             INSERT INTO message VALUES (1, 1, 0, 1, 1700000000000, 'Hello', 0);
         """)
@@ -10975,7 +10976,7 @@ class TestAndroidHdAndMediaMatching:
         archive_conn = make_archive_db(archive_path)
         # display_name is empty; name is embedded in folder
         archive_conn.execute(
-            "INSERT INTO contacts (number, folder, display_name) VALUES ('393806446839', 'Martina Castorina (00393806446839)', '')"
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('390000000011', 'Alice Contact (00390000000011)', '')"
         )
         archive_conn.commit()
         archive_conn.close()
@@ -10988,14 +10989,13 @@ class TestAndroidHdAndMediaMatching:
             chats = resp.get_json()
             assert len(chats) == 1
             # Clean contact name extracted from folder
-            assert chats[0]["display_name"] == "Martina Castorina"
+            assert chats[0]["display_name"] == "Alice Contact"
 
             # Check messages sender inside the chat
-            m_resp = client.get("/api/messages?chat_id=393806446839&chat_type=contact")
-            assert m_resp.status_code == 200
+            m_resp = client.get("/api/messages?chat_id=390000000011&chat_type=contact")
             msgs = m_resp.get_json()
             assert len(msgs) == 1
-            assert msgs[0]["sender"] == "Martina Castorina"
+            assert msgs[0]["sender"] == "Alice Contact"
 
     def test_ensure_jid_map_resolved_prevents_inverted_phone_to_lid_mapping(self, tmp_path):
         wa_path = tmp_path / "msgstore.db"
@@ -11027,8 +11027,8 @@ class TestAndroidHdAndMediaMatching:
             CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
 
             -- LID: id 10, Phone: id 20
-            INSERT INTO jid VALUES (10, '187123453968504', 'lid', '187123453968504@lid');
-            INSERT INTO jid VALUES (20, '393454408875', 's.whatsapp.net', '393454408875@s.whatsapp.net');
+            INSERT INTO jid VALUES (10, '145500000000012', 'lid', '145500000000012@lid');
+            INSERT INTO jid VALUES (20, '390000000012', 's.whatsapp.net', '390000000012@s.whatsapp.net');
 
             -- Chat where jid_row_id is the phone (20) and account_jid_row_id is the LID (10)
             INSERT INTO chat VALUES (100, 20, 10, NULL, 0, 1700000000000, 1);
@@ -11039,7 +11039,7 @@ class TestAndroidHdAndMediaMatching:
 
         archive_conn = make_archive_db(archive_path)
         archive_conn.execute(
-            "INSERT INTO contacts (number, folder, display_name) VALUES ('393454408875', 'Agata Folder', 'Agata')"
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('390000000012', 'Diana Folder', 'Diana Contact')"
         )
         archive_conn.commit()
         archive_conn.close()
@@ -11052,8 +11052,8 @@ class TestAndroidHdAndMediaMatching:
             chats = resp.get_json()
             assert len(chats) == 1
             # Must resolve to phone number and contact display name, NOT the raw LID
-            assert chats[0]["id"] == "393454408875"
-            assert chats[0]["display_name"] == "Agata"
+            assert chats[0]["id"] == "390000000012"
+            assert chats[0]["display_name"] == "Diana Contact"
 
     def test_ios_1_to_1_chat_resolves_partner_name_over_stale_lid_folder(self, tmp_path):
         wa_path = tmp_path / "ChatStorage.sqlite"
@@ -12706,9 +12706,9 @@ class TestExtendedMediaMap:
                 ZFROMJID TEXT
             );
 
-            INSERT INTO ZWACHATSESSION VALUES (1, 1, '120363318993512318@g.us', 'Trans-Formation');
-            INSERT INTO ZWAGROUPMEMBER VALUES (10, 1, '90490749890629@lid', 1);
-            INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '90490749890629@lid', 'Andrea Cottino');
+            INSERT INTO ZWACHATSESSION VALUES (1, 1, '120363000000000002@g.us', 'Team Project');
+            INSERT INTO ZWAGROUPMEMBER VALUES (10, 1, '145500000000002@lid', 1);
+            INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '145500000000002@lid', 'Bob Tester');
         """)
 
         def encode_varint(v):
@@ -12720,7 +12720,7 @@ class TestExtendedMediaMap:
             return bytes(res)
 
         stanza_orig = b"STANZA_LINK_ORIG"
-        url_text = b"https://youtu.be/Lol2aji_OK0?si=7n9gGhFhSpP6tbd5"
+        url_text = b"https://youtu.be/dQw4w9WgXcQ"
 
         # ExtendedTextMessage (subfield 6 in message container 19)
         # subfield 1: text
@@ -12753,16 +12753,16 @@ class TestExtendedMediaMap:
             (metadata_self_reply,),
         )
 
-        # Message 50: Original message with YouTube link sent by Andrea Cottino (ZGROUPMEMBER=10)
+        # Message 50: Original message with YouTube link sent by Bob Tester (ZGROUPMEMBER=10)
         conn.execute("""
             INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
-            VALUES (50, 1, 0, 700000000.0, 'STANZA_LINK_ORIG', 7, 1, 10, NULL, 'Andrea Cottino', 'https://youtu.be/Lol2aji_OK0?si=7n9gGhFhSpP6tbd5', '120363318993512318@g.us')
+            VALUES (50, 1, 0, 700000000.0, 'STANZA_LINK_ORIG', 7, 1, 10, NULL, 'Bob Tester', 'https://youtu.be/dQw4w9WgXcQ', '120363000000000002@g.us')
         """)
 
-        # Message 51: Self-reply sent by Andrea Cottino (ZGROUPMEMBER=10) referencing Message 50
+        # Message 51: Self-reply sent by Bob Tester (ZGROUPMEMBER=10) referencing Message 50
         conn.execute("""
             INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZSTANZAID, ZMESSAGETYPE, ZMEDIAITEM, ZGROUPMEMBER, ZPARENTMESSAGE, ZPUSHNAME, ZTEXT, ZFROMJID)
-            VALUES (51, 1, 0, 700000010.0, 'STANZA_SELF_REPLY', 0, 2, 10, NULL, 'Andrea Cottino', 'Guess what I am watching!', '120363318993512318@g.us')
+            VALUES (51, 1, 0, 700000010.0, 'STANZA_SELF_REPLY', 0, 2, 10, NULL, 'Bob Tester', 'Check out this presentation video!', '120363000000000002@g.us')
         """)
 
         conn.commit()
@@ -12781,9 +12781,9 @@ class TestExtendedMediaMap:
             reply_msg = next(m for m in msgs if m["msg_id"] == 51)
 
             # Quoted text must be extracted from extendedTextMessage (not empty!)
-            assert reply_msg["quoted_text"] == "https://youtu.be/Lol2aji_OK0?si=7n9gGhFhSpP6tbd5"
+            assert reply_msg["quoted_text"] == "https://youtu.be/dQw4w9WgXcQ"
             # Quoted sender must be inferred from the message sender for self-replies
-            assert reply_msg["quoted_sender"] == "Andrea Cottino"
+            assert reply_msg["quoted_sender"] == "Bob Tester"
             assert reply_msg["quoted_msg_id"] == 50
             assert reply_msg["quoted_ts"] == int((700000000.0 + 978307200) * 1000)
 
@@ -15476,7 +15476,7 @@ class TestReviewFixRegressions:
         app.config["TESTING"] = True
         with sqlite3.connect(str(arch_path)) as ac:
             uv = ac.execute("PRAGMA user_version").fetchone()[0]
-            assert uv == 6
+            assert uv == 7
             cnt = ac.execute("SELECT COUNT(*) FROM recent_messages").fetchone()[0]
             assert cnt == 0
 
@@ -17190,3 +17190,103 @@ class TestChatJumpHudPlacement:
             ).get_json()
             assert len(audio_media) == 1
             assert audio_media[0]["msg_id"] == 202
+
+
+class TestVoiceWaveform:
+    """Tests for voice message waveform extraction, serialization, and cache persistence."""
+
+    def test_android_waveform_extraction_and_serialization(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS audio_data (
+                message_row_id INTEGER PRIMARY KEY,
+                waveform BLOB
+            );
+            INSERT INTO jid (_id, user, raw_string) VALUES (1, '123456789', '123456789@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, sort_timestamp) VALUES (1, 1, 1700000000000);
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type, text_data, key_id)
+            VALUES (301, 1, 0, 1700000001000, 2, 'PTT voice note', 'WAVE_KEY_1');
+            INSERT INTO message_media (message_row_id, chat_row_id, file_path, mime_type)
+            VALUES (301, 1, 'WhatsApp/Media/WhatsApp Voice Notes/202601/PTT-20260101-WA0001.opus', 'audio/ogg; codecs=opus');
+        """)
+        dummy_wave = bytes([i % 100 for i in range(64)])
+        wa_conn.execute(
+            "INSERT INTO audio_data (message_row_id, waveform) VALUES (301, ?)", (dummy_wave,)
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            msg = data[0]
+            assert msg["msg_id"] == 301
+            assert msg["is_voice_note"] == 1
+            assert isinstance(msg["waveform"], list)
+            assert len(msg["waveform"]) == 64
+            assert msg["waveform"] == list(dummy_wave)
+
+    def test_waveform_fallback_when_audio_data_missing(self, tmp_path):
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.executescript("""
+            INSERT INTO jid (_id, user, raw_string) VALUES (1, '123456789', '123456789@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, sort_timestamp) VALUES (1, 1, 1700000000000);
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type, text_data, key_id)
+            VALUES (302, 1, 0, 1700000001000, 2, 'PTT note without wave table', 'WAVE_KEY_2');
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            msg = data[0]
+            assert msg["msg_id"] == 302
+            assert msg["waveform"] is None
+
+    def test_recent_messages_cache_persists_waveform(self, tmp_path):
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        archive_conn = make_archive_db(archive_path)
+        dummy_wave = bytes([5, 10, 25, 50, 75, 100] + [15] * 58)
+        archive_conn.execute(
+            """
+            INSERT INTO recent_messages
+            (chat_id, chat_type, msg_id, timestamp_ms, sender, from_me, archive_path, media_type, media_name, text_body, waveform)
+            VALUES ('123456789', 'contact', 303, 1700000000000, 'Alice', 0, 'WhatsApp Voice Notes/voice.opus', 'audio', 'Voice', '', ?)
+        """,
+            (dummy_wave,),
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            msg = data[0]
+            assert msg["msg_id"] == 303
+            assert msg["waveform"] == list(dummy_wave)

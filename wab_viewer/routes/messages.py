@@ -21,6 +21,7 @@ from ..hydration import (
     _hydrate_quoted_rows,
     _ios_reactions,
     _ios_read_without_timestamp,
+    _normalize_message_rows,
     _parse_ios_receipt_blob,
     _parse_ios_receipt_device_rows,
     _resolve_and_cache_reactions,
@@ -294,7 +295,7 @@ def api_messages():
                     rows = _merge_chat_calls_with_messages(
                         rows, live_calls, pres_calls, True, limit
                     )
-                    return jsonify(rows)
+                    return jsonify(_normalize_message_rows(rows))
 
     conn = ctx.get_wa()
     if conn is None:
@@ -323,7 +324,7 @@ def api_messages():
             ctx.android_chat_row_ids_cache,
         )
         merged = _merge_chat_calls_with_messages(pres_rows, [], pres_calls, descending, limit)
-        return jsonify(merged)
+        return jsonify(_normalize_message_rows(merged))
 
     if b_val is None and a_val is None:
         _maybe_start_indexing(
@@ -485,7 +486,7 @@ def api_messages():
         ctx.android_chat_row_ids_cache,
     )
     rows = _merge_chat_calls_with_messages(rows, live_calls, pres_calls, descending, limit)
-    return jsonify(rows)
+    return jsonify(_normalize_message_rows(rows))
 
 
 @bp.route("/api/messages/at")
@@ -644,7 +645,7 @@ def api_messages_at():
             merged_after, pres_after + pres_calls_after, target_key
         )
         combined = list(reversed(merged_before)) + merged_after
-        return jsonify(combined)
+        return jsonify(_normalize_message_rows(combined))
 
     select = ctx.queries.android_select if ctx.source_type == "android" else ctx.queries.ios_select
     extra = ctx.queries.android_filter if ctx.source_type == "android" else ctx.queries.ios_filter

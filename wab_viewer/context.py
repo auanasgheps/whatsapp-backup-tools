@@ -110,6 +110,7 @@ class SchemaCapabilities:
     has_ios_mdi_summary: bool
     has_msg_origin: bool
     has_ios_media_origin: bool
+    has_audio_data: bool
 
 
 @dataclass(frozen=True)

@@ -1003,6 +1003,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
             file_sha256 = aud_fields.get(3, [(2, b"")])[0][1] if 3 in aud_fields else b""
             file_length = aud_fields.get(4, [(0, 0)])[0][1] if 4 in aud_fields else 0
             is_ptt = bool(aud_fields.get(6, [(0, 0)])[0][1]) if 6 in aud_fields else False
+            waveform = aud_fields.get(19, [(2, b"")])[0][1] if 19 in aud_fields else None
             media_info = {
                 "mime_type": mimetype,
                 "file_size": file_length,
@@ -1011,6 +1012,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "message_url": url,
                 "media_type": "audio",
                 "ptt": is_ptt,
+                "waveform": waveform,
             }
 
         # 9: videoMessage
@@ -1219,6 +1221,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                         )
                         file_sha256 = aud_f.get(3, [(2, b"")])[0][1] if 3 in aud_f else b""
                         file_length = aud_f.get(4, [(0, 0)])[0][1] if 4 in aud_f else 0
+                        waveform = aud_f.get(19, [(2, b"")])[0][1] if 19 in aud_f else None
                         media_info = {
                             "mime_type": mimetype,
                             "file_size": file_length,
@@ -1226,6 +1229,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                             "media_name": None,
                             "message_url": url,
                             "media_type": "audio",
+                            "waveform": waveform,
                         }
 
                     # 9: videoMessage
@@ -3651,6 +3655,8 @@ def apply_protocol_record(
                         pass
                 if get_table_columns(conn, "message_media", schema_cache):
                     cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (target_id,))
+                if get_table_columns(conn, "audio_data", schema_cache):
+                    cur.execute("DELETE FROM audio_data WHERE message_row_id = ?", (target_id,))
                 if get_table_columns(conn, "message_text", schema_cache):
                     cur.execute("DELETE FROM message_text WHERE message_row_id = ?", (target_id,))
                 if get_table_columns(conn, "message_thumbnail", schema_cache):
@@ -4102,6 +4108,7 @@ def apply_message_deletions(
     has_vcard = bool(get_table_columns(conn, "message_vcard", schema_cache))
     has_edit = bool(get_table_columns(conn, "message_edit_info", schema_cache))
     has_media = bool(get_table_columns(conn, "message_media", schema_cache))
+    has_audio_data = bool(get_table_columns(conn, "audio_data", schema_cache))
     has_quoted = bool(get_table_columns(conn, "message_quoted", schema_cache))
     has_quoted_media = bool(get_table_columns(conn, "message_quoted_media", schema_cache))
     has_quoted_text = bool(get_table_columns(conn, "message_quoted_text", schema_cache))
@@ -4186,6 +4193,11 @@ def apply_message_deletions(
         if has_media:
             cur.execute(
                 f"DELETE FROM message_media WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_audio_data:
+            cur.execute(
+                f"DELETE FROM audio_data WHERE message_row_id IN ({placeholders})",
                 chunk,
             )
         if has_quoted:
@@ -4645,6 +4657,7 @@ def apply_messages_bin(
         if schema_cache is not None:
             schema_cache["message_revoked"] = {"exists"} if has_message_revoked_table else set()
 
+    has_audio_data_table = bool(get_table_columns(conn, "audio_data", schema_cache))
     has_mms_thumbnail_metadata = bool(
         get_table_columns(conn, "mms_thumbnail_metadata", schema_cache)
     )
@@ -5047,6 +5060,10 @@ def apply_messages_bin(
                     cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (msg_row_id,))
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    cur.execute("DELETE FROM audio_data WHERE message_row_id = ?", (msg_row_id,))
+                except sqlite3.OperationalError:
+                    pass
 
             # Apply poll creation metadata
             if msg.get("poll_info"):
@@ -5086,6 +5103,14 @@ def apply_messages_bin(
                     f"INSERT OR REPLACE INTO message_media ({', '.join(target_media_cols)}) VALUES ({', '.join('?' for _ in target_media_cols)})",
                     [media_row_map[c] for c in target_media_cols],
                 )
+                if has_audio_data_table and media.get("waveform"):
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO audio_data (message_row_id, waveform) VALUES (?, ?)",
+                            (msg_row_id, media["waveform"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
 
             # Update location record if present
             if msg.get("location_info"):
@@ -5206,6 +5231,12 @@ def apply_messages_bin(
                         )
                     except sqlite3.OperationalError:
                         pass
+                    try:
+                        cur.execute(
+                            "DELETE FROM audio_data WHERE message_row_id = ?", (msg_row_id,)
+                        )
+                    except sqlite3.OperationalError:
+                        pass
             elif is_stub and has_message_system_table and msg_row_id and msg["message_type"] == 7:
                 try:
                     cur.execute(
@@ -5250,6 +5281,14 @@ def apply_messages_bin(
                     "transferred": 1,
                 }
                 cur.execute(sql_insert_media, [media_row_map[c] for c in target_media_cols])
+                if has_audio_data_table and media.get("waveform"):
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO audio_data (message_row_id, waveform) VALUES (?, ?)",
+                            (msg_row_id, media["waveform"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
 
             # Insert location record
             if msg.get("location_info") and msg_row_id:
@@ -5762,6 +5801,7 @@ def apply_messages_bin(
                                     ("message_mentions", "message_row_id"),
                                     ("message_quoted_mentions", "message_row_id"),
                                     ("message_media", "message_row_id"),
+                                    ("audio_data", "message_row_id"),
                                     ("receipt_user", "message_row_id"),
                                     ("message_view_once_media", "message_row_id"),
                                     ("message_secret", "message_row_id"),
@@ -6940,6 +6980,7 @@ def merge_increments(
             )
             tables_to_check = [
                 ("message_media", "message_row_id"),
+                ("audio_data", "message_row_id"),
                 ("message_vcard", "message_row_id"),
                 ("message_location", "message_row_id"),
                 ("message_text", "message_row_id"),

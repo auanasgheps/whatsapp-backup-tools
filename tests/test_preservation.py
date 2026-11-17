@@ -54,12 +54,14 @@ def test_open_preservation_db(tmp_path: Path) -> None:
     assert "preservation_runs" in tables
 
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 3
+    assert version == 4
 
-    # Verify all v2 columns are present
+    # Verify all v2 & v4 columns are present
     msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(preserved_messages)").fetchall()}
     for col_name, _ in preservation.NEW_V2_MESSAGE_COLUMNS:
         assert col_name in msg_cols, f"Missing v2 column {col_name} in preserved_messages"
+    for col_name, _ in preservation.NEW_V4_MESSAGE_COLUMNS:
+        assert col_name in msg_cols, f"Missing v4 column {col_name} in preserved_messages"
 
     chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(preserved_chats)").fetchall()}
     for col_name, _ in preservation.NEW_V2_CHAT_COLUMNS:
@@ -143,7 +145,7 @@ def test_preservation_db_v1_to_v2_migration(tmp_path: Path) -> None:
 
     # 2. Open with open_preservation_db to trigger automated migration
     migrated_conn = preservation.open_preservation_db(str(tmp_path))
-    assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
     # Check that existing data is intact
     msgs = migrated_conn.execute(
@@ -4079,5 +4081,38 @@ def test_record_preserved_messages_empty_revoked_ignored(tmp_path: Path) -> None
         assert len(rows) == 1
         assert rows[0][0] == "REV_VALID_1"
         assert rows[0][1] == "I had text before revoking"
+    finally:
+        pres_conn.close()
+
+
+def test_preservation_retains_waveform(tmp_path: Path) -> None:
+    """Verify that voice message waveform BLOB is correctly stored in preserved_messages."""
+    pres_conn = preservation.open_preservation_db(str(tmp_path))
+    try:
+        dummy_wave = bytes([i % 100 for i in range(64)])
+        voice_msg = {
+            "chat_id": "chat_voice",
+            "stanza_id": "WAVE_PRESERVE_1",
+            "msg_id": 999,
+            "timestamp_ms": 1700000000000,
+            "from_me": 0,
+            "text_body": "Voice message",
+            "media_type": "audio",
+            "media_name": "PTT.opus",
+            "archive_path": "WhatsApp Voice Notes/PTT.opus",
+            "waveform": dummy_wave,
+            "preservation_reason": "deleted_on_phone",
+        }
+        res = preservation.record_preserved_messages(
+            pres_conn, [voice_msg], "android", _TEST_LOGGER
+        )
+        assert res.messages == 1
+
+        row = pres_conn.execute(
+            "SELECT stanza_id, waveform FROM preserved_messages WHERE stanza_id = 'WAVE_PRESERVE_1'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "WAVE_PRESERVE_1"
+        assert bytes(row[1]) == dummy_wave
     finally:
         pres_conn.close()
