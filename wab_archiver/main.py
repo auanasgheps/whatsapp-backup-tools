@@ -591,6 +591,7 @@ def _copy_or_skip(
     hash_to_canonical: dict[bytes, str],
     exif_timestamps: bool = False,
     tz=None,
+    archived_file_set: set[tuple[str, str, bytes]] | None = None,
 ) -> tuple[int, int, int]:
     """
     Copy or hardlink src to dest, handling dry-run, dedup, and collision.
@@ -613,7 +614,9 @@ def _copy_or_skip(
     if os.path.exists(dest_path):
         src_hash = file_md5(src)
         rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
-        if (
+        if archived_file_set is not None and (file_path, rel, src_hash) in archived_file_set:
+            resolved = None
+        elif (
             cursor is not None
             and cursor.execute(
                 "SELECT 1 FROM archive_copies ac JOIN files f ON f.original_path = ac.original_path "
@@ -625,6 +628,8 @@ def _copy_or_skip(
         else:
             resolved = resolve_unique_dest(dest_path, src, logger, src_hash=src_hash)
         if resolved is None:
+            if archived_file_set is not None:
+                archived_file_set.add((file_path, rel, src_hash))
             if cursor is not None:
                 is_hardlink_val = 1 if os.stat(dest_path).st_nlink > 1 else 0
                 archive_db.record_file_archived(
@@ -706,6 +711,8 @@ def _copy_or_skip(
         archive_db.record_file_archived(
             cursor, file_path, src_hash, rel, os.path.getsize(resolved), is_hardlink, timestamp
         )
+        if archived_file_set is not None:
+            archived_file_set.add((file_path, rel, src_hash))
     return CopyResult(1, 0, 0, is_hardlink)
 
 
@@ -725,6 +732,7 @@ def process_rows(
     link_duplicates: bool,
     hash_to_canonical: dict[bytes, str],
     exif_timestamps: bool = False,
+    archived_file_set: set[tuple[str, str, bytes]] | None = None,
 ):
     stats = {
         "copied": 0,
@@ -964,6 +972,7 @@ def process_rows(
             hash_to_canonical,
             exif_timestamps,
             tz,
+            archived_file_set,
         )
         copied, skipped, warnings = res
         stats["copied"] += copied
@@ -2791,8 +2800,10 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
             if archive_conn is not None:
                 hash_to_canonical = archive_db.load_canonical_copies(archive_conn, args.output)
+                archived_file_set = archive_db.load_archived_file_set(archive_conn)
             else:
                 hash_to_canonical = {}
+                archived_file_set = set()
 
             logger.info("Executing query...")
             cursor.execute(query)
@@ -2812,6 +2823,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 link_duplicates=link_duplicates,
                 hash_to_canonical=hash_to_canonical,
                 exif_timestamps=bool(getattr(args, "exif_timestamps", False)),
+                archived_file_set=archived_file_set,
             )
 
             if vcard_query:

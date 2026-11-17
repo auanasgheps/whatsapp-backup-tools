@@ -14,6 +14,8 @@ import os
 import struct
 from datetime import datetime, tzinfo
 
+from shared.db import ensure_long_path
+
 logger = logging.getLogger(__name__)
 
 # QuickTime epoch: seconds between 1904-01-01 00:00:00 UTC and 1970-01-01 00:00:00 UTC
@@ -21,8 +23,8 @@ EPOCH_1904 = 2_082_844_800
 
 # Supported image extensions
 JPEG_EXTENSIONS = frozenset({".jpg", ".jpeg"})
-# Supported video extensions
-MP4_EXTENSIONS = frozenset({".mp4", ".mov", ".3gp"})
+# Supported video & audio container extensions (ISO-BMFF / QuickTime)
+MP4_EXTENSIONS = frozenset({".mp4", ".mov", ".3gp", ".m4a"})
 
 
 def format_exif_datetime(timestamp_ms: int, tz: tzinfo | None) -> tuple[str, str | None]:
@@ -298,9 +300,10 @@ def patch_mp4_timestamps(dest_path: str, timestamp_ms: int) -> bool:
         return False
 
     qt_time_32 = qt_time & 0xFFFFFFFF
+    lp_dest = ensure_long_path(dest_path)
 
     try:
-        with open(dest_path, "r+b") as f:
+        with open(lp_dest, "r+b") as f:
             f.seek(0, 2)
             file_size = f.tell()
             f.seek(0)
@@ -430,8 +433,9 @@ def write_media_timestamp(
     ext = os.path.splitext(dest_path)[1].lower()
 
     if ext in JPEG_EXTENSIONS:
+        lp_dest = ensure_long_path(dest_path)
         try:
-            with open(dest_path, "rb") as f:
+            with open(lp_dest, "rb") as f:
                 raw_bytes = f.read()
 
             dt_str, tz_offset_str = format_exif_datetime(timestamp_ms, tz)
@@ -440,10 +444,14 @@ def write_media_timestamp(
                 return False
 
             tmp_path = dest_path + ".tmp"
-            with open(tmp_path, "wb") as f:
+            lp_tmp = ensure_long_path(tmp_path)
+            with open(lp_tmp, "wb") as f:
                 f.write(modified)
-            os.replace(tmp_path, dest_path)
+            os.replace(lp_tmp, lp_dest)
             return True
+        except PermissionError as e:
+            logger.debug(f"Permission denied modifying EXIF on {dest_path}: {e}")
+            return False
         except (OSError, ValueError) as e:
             logger.debug(f"Could not inject EXIF timestamp on {dest_path}: {e}")
             return False
