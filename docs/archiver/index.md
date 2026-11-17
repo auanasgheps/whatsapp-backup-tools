@@ -110,6 +110,11 @@ When finished, your output folder will be structured as follows:
 
 Review the generated CSV audit reports to identify any media files that were missing from device storage or duplicate files skipped.
 
+> 💡 **Photo Library & Cloud Sync (Google Photos, Immich, Apple Photos):**
+> By default, the archiver sets filesystem modification dates (`mtime`). However, cloud galleries and photo managers prioritize embedded metadata tags (`DateTimeOriginal` for photos, `mvhd` creation time for MP4 videos).
+> 
+> Pass `--exif-timestamps` (or set `exif_timestamps = true` in `config.toml`) to write message timestamps directly into media metadata headers without re-compression. Pre-existing camera capture timestamps and orientation are safely preserved.
+
 ---
 
 ### Step 5: Explore Your Archive in the Web Viewer

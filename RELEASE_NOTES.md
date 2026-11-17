@@ -27,6 +27,7 @@ This update brings Call History, Starred bookmarks, pinned message banners, an A
 ### 📁 WhatsApp Archiver
 
 #### ✨ New Features
+- **EXIF & Container Timestamp Writing**: Write WhatsApp message timestamps directly into media metadata headers (EXIF `DateTimeOriginal` in images, QuickTime `creation_time` in MP4 videos) via `--exif-timestamps` or `exif_timestamps = true` in config. Cloud gallery apps (Google Photos, Immich, Apple Photos) can now organize archived media chronologically without relying solely on filesystem dates. Operates natively with zero dependencies, protects camera capture dates and orientation, and avoids duplicate renames on incremental runs.
 - **Group Mention Preservation**: Group `@mentions` are now preserved across backup extractions and incremental merges in `preserved_messages.db`, retaining mention metadata and participant associations even when messages are removed from your phone.
 - **iOS Call History Archiving**: Discovers, verifies, and stages WhatsApp call history databases (`CallHistory.sqlite`) from iOS backups across standard and AppDomain paths for browsing in the viewer.
 

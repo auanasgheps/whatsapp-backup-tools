@@ -25,7 +25,7 @@ import tomllib
 import zlib
 from datetime import UTC, date, datetime
 
-from shared import db, hashing
+from shared import db, hashing, metadata_writer
 
 from . import (
     adb_extractor,
@@ -68,6 +68,7 @@ escape_like = db.escape_like
 format_phone = db.format_phone
 build_contact_folder_name = db.build_contact_folder_name
 file_md5 = hashing.file_md5
+write_media_timestamp = metadata_writer.write_media_timestamp
 
 
 def set_file_times(path: str, timestamp_ms: int):
@@ -588,6 +589,8 @@ def _copy_or_skip(
     cursor: sqlite3.Cursor | None,
     link_duplicates: bool,
     hash_to_canonical: dict[bytes, str],
+    exif_timestamps: bool = False,
+    tz=None,
 ) -> tuple[int, int, int]:
     """
     Copy or hardlink src to dest, handling dry-run, dedup, and collision.
@@ -609,10 +612,20 @@ def _copy_or_skip(
 
     if os.path.exists(dest_path):
         src_hash = file_md5(src)
-        resolved = resolve_unique_dest(dest_path, src, logger, src_hash=src_hash)
+        rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
+        if (
+            cursor is not None
+            and cursor.execute(
+                "SELECT 1 FROM archive_copies ac JOIN files f ON f.original_path = ac.original_path "
+                "WHERE ac.original_path = ? AND ac.archive_path = ? AND f.md5 = ?",
+                (file_path, rel, src_hash),
+            ).fetchone()
+        ):
+            resolved = None
+        else:
+            resolved = resolve_unique_dest(dest_path, src, logger, src_hash=src_hash)
         if resolved is None:
             if cursor is not None:
-                rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
                 is_hardlink_val = 1 if os.stat(dest_path).st_nlink > 1 else 0
                 archive_db.record_file_archived(
                     cursor,
@@ -671,6 +684,12 @@ def _copy_or_skip(
             logger.error(f"ERROR copying {src} -> {resolved}: {e}")
             return CopyResult(0, 0, 1, 0)
 
+    if exif_timestamps and not is_hardlink and timestamp is not None:
+        try:
+            write_media_timestamp(resolved, timestamp, tz, False)
+        except Exception as e:
+            logger.debug(f"Could not write EXIF timestamp on {resolved}: {e}")
+
     if timestamp is not None:
         try:
             set_file_times(resolved, timestamp)
@@ -678,7 +697,7 @@ def _copy_or_skip(
             logger.debug(f"Could not set timestamps on {resolved}: {e}")
 
     if src_hash is None:
-        src_hash = file_md5(resolved)
+        src_hash = file_md5(src)
     if src_hash not in hash_to_canonical:
         hash_to_canonical[src_hash] = resolved
 
@@ -705,6 +724,7 @@ def process_rows(
     tz,
     link_duplicates: bool,
     hash_to_canonical: dict[bytes, str],
+    exif_timestamps: bool = False,
 ):
     stats = {
         "copied": 0,
@@ -942,6 +962,8 @@ def process_rows(
             cursor,
             link_duplicates,
             hash_to_canonical,
+            exif_timestamps,
+            tz,
         )
         copied, skipped, warnings = res
         stats["copied"] += copied
@@ -1504,6 +1526,7 @@ _VALID_CONFIG_KEYS = {
     "staging",
     "link_duplicates",
     "preserve_deleted",
+    "exif_timestamps",
 }
 
 _EXAMPLE_CONFIG = """\
@@ -1532,6 +1555,7 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # -----------------------------------------------------------------------------
 # preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
 # link_duplicates  = true               # Save disk space by hardlinking duplicate media across chats
+# exif_timestamps  = true               # Write WhatsApp message timestamps to media EXIF/metadata headers
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 
 # -----------------------------------------------------------------------------
@@ -1881,6 +1905,13 @@ def parse_args() -> argparse.Namespace:
         dest="preserve_deleted",
         default=False,
         help="Preserve messages deleted or revoked on device into preserved_messages.db.",
+    )
+    archive_p.add_argument(
+        "--exif-timestamps",
+        action="store_true",
+        dest="exif_timestamps",
+        default=False,
+        help="Write WhatsApp message timestamps to media EXIF/metadata headers (disabled by default).",
     )
     archive_p.add_argument(
         "-v",
@@ -2780,6 +2811,7 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                 tz=tz,
                 link_duplicates=link_duplicates,
                 hash_to_canonical=hash_to_canonical,
+                exif_timestamps=bool(getattr(args, "exif_timestamps", False)),
             )
 
             if vcard_query:
