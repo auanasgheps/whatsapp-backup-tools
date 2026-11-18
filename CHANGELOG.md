@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
+- **Large Chat Loading Latency & Tail Anchoring Acceleration**:
+  - Replaced hardcoded 1,500 ms `requestAnimationFrame` loop in `_pinToBottom` with adaptive image settling in `wab_viewer/chat_viewer/app.js`. Text chats, cached media, and chats with 0 pending images unfreeze and settle in 2 animation frames (~32 ms) instead of waiting 1.5 seconds, while uncached media settles as soon as thumbnails load (typically 80–200 ms).
+  - Added connection-level idempotency to `_ensure_jid_map_resolved` via sentinel temporary table `temp._resolution_done` in `wab_viewer/db_cache.py`, preventing repeated mapping rebuilds and dropping warm execution on the same connection from ~2,100 ms to <0.05 ms.
+  - Bounded Step 6 direct message scanning in `_ensure_jid_map_resolved` strictly to chats with unresolved LIDs, eliminating unindexed `SCAN m` passes across 1M+ messages and accelerating cold resolution on 682 MB databases from 841 ms down to 6.1 ms with 100% mapping fidelity.
+  - Added `_get_call_log_present_jids` process-level call JID caching in `wab_viewer/queries/calls.py`. In `_query_android_chat_calls`, chats without calls bypass SQL joins, participant counting, and caller info resolution, eliminating 800–1,200 ms of latency for >98% of chats.
+  - Accelerated cold chat load on 236k-message chats from 5,259 ms to 383 ms (a 13.7x speedup) and warm chat load from 4,200 ms to 20 ms (a 200x speedup).
+- **Media Gallery Query & Performance Optimizations**:
+  - Implemented Two-Stage Deferred Join Pagination (`/api/media`) by selecting candidate message IDs first via indexed tables in 5–15 ms before hydrating full media joins, accelerating page 1 on 236k-message chats from 6,070 ms to 80 ms (a 75x acceleration).
+  - Accelerated media count queries (`/api/media/count`) via direct SQL aggregations and session-level caching (`ViewerContext.media_counts_cache`), dropping count latency from 6,940 ms to 750 ms cold / 0.3 ms cached.
+  - Decoupled media count fetching from page rendering so the gallery opens optimistically with default media types and dispatches page 1 requests immediately without waiting for counts.
+
 - **Media Gallery Unified Stream Replay & Stat Filter Synchronicity**: Fixed an issue where switching from default photos+videos to all items ("Total" stat pill) failed to render new media types within the existing window. Reset pagination stream and reloaded page 1 (`types=all`) when toggling from filtered subsets to prevent skipped items, while keeping toggles back to default photos+videos as instantaneous in-memory DOM filters. Preserved archive view header counts on unpopulated past years.
 - **Media Gallery Sparse Grid Row Packing & Layout Stabilization**: Packed grid rows to the top (`align-content: start; grid-auto-rows: min-content`) in `#media-gallery-grid` and pinned the infinite scroll sentinel to span all columns invisibly, eliminating layout distortion in sparse or single-item filtered views.
 - **Voice Message Waveforms & Audio Player Component**: Implemented interactive 64-bar waveform scrubber and circular player with playback speed toggling (`1x`, `1.2x`, `1.5x`, `2x`). Extracts raw amplitude data from Android `audio_data.waveform` and Protobuf `audioMessage` tags, decodes iOS Opus audio client-side via Web Audio API (`decodeAudioData`), renders flat baseline fallbacks for undecodable audio, and caches waveforms in `recent_messages` and `preserved_messages`.

@@ -1052,6 +1052,42 @@ def _resolve_preserved_call_jids(
     return sorted(candidates)
 
 
+_CALL_LOG_JIDS_CACHE: dict[int, tuple[set[int], set[int]]] = {}
+
+
+def _get_call_log_present_jids(conn: sqlite3.Connection) -> tuple[set[int], set[int]]:
+    """Return cached (contact_jids, group_jids) present in call_log for fast pre-filtering."""
+    conn_key = id(conn)
+    cached = _CALL_LOG_JIDS_CACHE.get(conn_key)
+    if cached is not None:
+        return cached
+    try:
+        cl_cols = {r[1] for r in conn.execute("PRAGMA table_info(call_log)").fetchall()}
+        if "jid_row_id" not in cl_cols:
+            res: tuple[set[int], set[int]] = (set(), set())
+            _CALL_LOG_JIDS_CACHE[conn_key] = res
+            return res
+        contact_jids = {
+            int(r[0])
+            for r in conn.execute(
+                "SELECT DISTINCT jid_row_id FROM call_log WHERE jid_row_id IS NOT NULL"
+            ).fetchall()
+        }
+        group_jids = set()
+        if "group_jid_row_id" in cl_cols:
+            group_jids = {
+                int(r[0])
+                for r in conn.execute(
+                    "SELECT DISTINCT group_jid_row_id FROM call_log WHERE group_jid_row_id IS NOT NULL AND group_jid_row_id > 0"
+                ).fetchall()
+            }
+        res = (contact_jids, group_jids)
+        _CALL_LOG_JIDS_CACHE[conn_key] = res
+        return res
+    except sqlite3.OperationalError:
+        return set(), set()
+
+
 def _query_android_chat_calls(
     conn: sqlite3.Connection,
     arch_conn: sqlite3.Connection | None,
@@ -1085,20 +1121,28 @@ def _query_android_chat_calls(
     if chat_type == "group" and not has_group:
         return []
 
+    present_contacts, present_groups = _get_call_log_present_jids(conn)
+    if chat_type == "group" and not present_groups:
+        return []
+    if chat_type != "group" and not present_contacts:
+        return []
+
     contact_jid_ids, group_jid_ids = _resolve_android_call_targets(
         conn, arch_conn, chat_id, chat_type, row_ids_cache
     )
     if chat_type == "group":
-        if not group_jid_ids:
+        matching_groups = group_jid_ids.intersection(present_groups)
+        if not matching_groups:
             return []
-        target_ids = sorted(group_jid_ids)
+        target_ids = sorted(matching_groups)
         scope_ph = ",".join("?" * len(target_ids))
         scope_pred = f"cl.group_jid_row_id IN ({scope_ph})"
         scope_params: list = list(target_ids)
     else:
-        if not contact_jid_ids:
+        matching_contacts = contact_jid_ids.intersection(present_contacts)
+        if not matching_contacts:
             return []
-        target_ids = sorted(contact_jid_ids)
+        target_ids = sorted(matching_contacts)
         scope_ph = ",".join("?" * len(target_ids))
         if has_group:
             scope_pred = (
