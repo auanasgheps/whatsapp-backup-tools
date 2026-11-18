@@ -1,38 +1,46 @@
 # WhatsApp Backup Tools v0.80
 
-Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, focusing on the missing Viewer features and general UI/UX extension and refinements.
+Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, focusing on new viewer navigation features, interactive audio playback, media timestamping, and general UI/UX refinements.
 
-This update brings Call History, Starred bookmarks, pinned message banners, an Archived chats view, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, and theme-adaptive group sender colors.
+This update introduces Call History logs, Starred bookmarks, pinned message banners, an Archived chats view, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, voice message waveforms, retroactively backfillable photo and video timestamps, and theme-adaptive group sender colors.
 
 
 #### **Release highlights:**
 
 > 📞 **Call History**:
-> Browse your complete voice and video call logs directly within the viewer. A new Call Inspector side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that navigates straight to that exact point in the conversation. Calls are also woven directly into chat timelines as chronological call bubbles.
+> Browse your complete voice and video call logs directly within the viewer. A new Call Inspector side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that brings you straight to that exact point in time. Calls are also woven directly into chat timelines as chronological call bubbles.
 
-> ⭐ **Starred Messages & Quick Bookmarks**:
-> Access your saved and starred messages globally from the new Starred tab or from an in-chat flyout drawer. Clicking any starred message jumps directly to its original conversation context with a pulsing golden highlight.
+> ⭐ **Starred Messages & Bookmarks**:
+> Quickly view your saved and starred messages from the dedicated Starred tab or from an in-chat slide-out panel. Tapping any starred message jumps straight to that message in the conversation with a glowing golden highlight.
+
+> 🎙️ **Voice Message Waveforms & Audio Player**:
+> Voice notes now look and feel authentic with interactive sound waveforms, adjustable playback speeds (1x to 2x), and a circular play/pause button. Tap or drag anywhere on the waveform to scrub forward and backward.
+
+> 🏷️ **Photo & Video Timestamp Embedding**:
+> Save original WhatsApp message dates directly into your photos and videos (`--exif-timestamps`), or update existing archives with the new `wab-archiver update-metadata` command. Cloud photo apps like Google Photos, Apple Photos, and Immich will now organize your archived media in the correct order.
 
 > 📌 **Pinned Messages Banner Strip**:
-> Important conversations with pinned messages now display an authentic pinned banner strip beneath the chat header. Cycle through multiple pins, dismiss the banner for your session, or jump straight to the pinned bubble with a pulsing emerald highlight.
+> Conversations with pinned messages now show an authentic banner strip beneath the chat header. Flip through multiple pins, dismiss the banner for your session, or jump straight to any pinned message with an emerald highlight.
 
-> 👥 **Interactive Group `@mentions`**:
-> Group mentions (`@Alice`, `@Bob`) are now recognized and rendered as styled mention badges. Clicking a mention opens your 1-to-1 conversation with that participant if an archived chat exists.
+> 👥 **Interactive Group Mentions**:
+> Mentions in group chats (`@Alice`, `@Bob`) are now recognized and styled as badges. Clicking a mention opens your 1-to-1 conversation with that person if an archived chat exists.
 
 > 📜 **Collapsible Long Messages & Circular Video Notes**:
-> Lengthy text messages are cleanly truncated with a smooth "Read More" / "Show Less" toggle that keeps your timeline readable. Push-to-Video notes are now rendered in their signature circular player with live countdown progress rings.
+> Long text messages and photo captions are neatly trimmed with a simple "Read More" button to keep your timeline readable. Quick video notes also play in their signature circular player with live countdown rings.
 
 ---
 
 ### 📁 WhatsApp Archiver
 
 #### ✨ New Features
-- **EXIF & Container Timestamp Writing**: Write WhatsApp message timestamps directly into media metadata headers (EXIF `DateTimeOriginal` in images, QuickTime `creation_time` in MP4 videos) via `--exif-timestamps` or `exif_timestamps = true` in config. Cloud gallery apps (Google Photos, Immich, Apple Photos) can now organize archived media chronologically without relying solely on filesystem dates. Operates natively with zero dependencies, protects camera capture dates and orientation, and avoids duplicate renames on incremental runs.
-- **Group Mention Preservation**: Group `@mentions` are now preserved across backup extractions and incremental merges in `preserved_messages.db`, retaining mention metadata and participant associations even when messages are removed from your phone.
-- **iOS Call History Archiving**: Discovers, verifies, and stages WhatsApp call history databases (`CallHistory.sqlite`) from iOS backups across standard and AppDomain paths for browsing in the viewer.
+- **EXIF & Video Timestamp Embedding**: Embed WhatsApp message dates directly into your saved photos and videos (via `--exif-timestamps` or in your configuration). Cloud gallery apps like Google Photos, Apple Photos, and Immich can now organize your media chronologically. Your original camera capture details and photo orientations are safely preserved.
+- **Group Mention Preservation**: Group `@mentions` are now preserved across backup extractions and incremental updates, keeping participant mentions intact even if messages were removed from your phone.
+- **Retroactive Timestamp Backfill (`update-metadata`)**: Update timestamps on previously saved photos and videos at any time with the new `wab-archiver update-metadata` command. It works directly with your existing archive without needing a phone or backup connection, automatically skips files that were already updated, and ensures Windows file dates match the original messages.
+- **iOS Call History Archiving**: Automatically discovers and archives your WhatsApp voice and video call logs from iPhone backups so you can explore them in the viewer.
 
 #### ⚡ Improvements
-- **Android Mention Ingestion in Incremental Merges**: Extracts and indexes participant mentions from Android incremental backup streams, recording mention metadata into merged databases.
+- **Faster Incremental Checks & Audio Container Support**: Smarter, faster checks when archiving new media avoid accidental file renames and add timestamp embedding support for `.m4a` audio recordings.
+- **Android Mention Tracking in Incremental Backups**: Captures and tracks group mentions from incremental Android backup files when merging them into your archive.
 
 ---
 
@@ -40,44 +48,52 @@ This update brings Call History, Starred bookmarks, pinned message banners, an A
 
 #### ✨ New Features
 - **Archived Chats Tab & Navigation**: A dedicated "Archived" tab in the bottom navigation bar lets you browse archived conversations separately from your active inbox, with tab-aware search and instant chat opening.
-- **Audio & Voice Note Gallery Cards**: Voice notes (PTT) and audio music tracks are now clearly differentiated in the Media Gallery with dedicated cards, duration badges, clean titles, distinct stat pills (`N voice notes`, `N audio tracks`), and an integrated inline audio player.
-- **Call History & Call Inspector**: Browse your complete voice and video call logs with dedicated filters (All, Missed, Video), two-line call cards, and a detailed Call Inspector side pane. A "Jump to this Moment in Chat" button navigates directly to the exact point in the conversation when the call took place.
-- **Circular Video Note Player**: Push-to-Video (PTV) video notes now render in an authentic circular player with animated progress rings, countdown timers, fullscreen lightbox viewing, and auto-pause when scrolled out of view.
-- **Collapsible Long Messages**: Lengthy text messages exceeding 750 characters or 15 lines are cleanly truncated with a smooth "Read More" ↔ "Show Less" toggle that keeps your timeline readable while preserving emoji formatting and scroll position.
-- **Group `@mentions` with 1-to-1 Chat Links**: Mentions in group chats are highlighted as interactive badges. Clicking a mention smoothly opens your 1-to-1 chat with that contact if an archived conversation exists.
-- **Group Sender Name Colors**: Group chat participants now receive distinctive, theme-adaptive sender name colors (matching WhatsApp's 10-color palette) across dark and light modes, applied to message headers and quoted reply borders.
-- **In-Chat Chronological Call Bubbles**: Voice and video calls are seamlessly woven directly into chat timelines as chronological call bubbles, showing call outcome, duration, and metadata at a glance.
-- **Pinned Messages Strip & Jump**: Pinned messages appear in a dedicated banner strip beneath the chat header with multi-pin cycling (`1 of N`), chevrons, session dismissal, and a 1-click jump to the pinned message with a pulsing emerald highlight.
-- **Starred Messages & Drawer**: Starred messages can be browsed globally via the sidebar "Starred" tab or per-chat via the header flyout drawer, with 1-click jump to context accompanied by a pulsing gold halo.
+- **Audio & Voice Note Gallery Cards**: Voice notes and music tracks are now neatly separated in the Media Gallery with custom cards, duration badges, clean titles, counts, and a built-in audio player.
+- **Avatars in Chat List & Starred Views**: Circular contact avatars with generated initials and distinct colors now appear in active and archived chat lists as well as starred message previews, matching call list styling.
+- **Call History & Call Inspector**: Browse your complete voice and video call logs with dedicated filters (All, Missed, Video), two-line call cards, and a detailed Call Inspector side pane. A "Jump to this Moment in Chat" button navigates directly to the conversation at the time of the call.
+- **Circular Video Note Player**: Quick video notes now play in an authentic circular bubble with an animated countdown ring, fullscreen viewing, and automatic pausing when you scroll past.
+- **Collapsible Long Messages & Media Captions**: Long text messages and photo captions are neatly trimmed with an easy "Read More" / "Show Less" toggle, keeping your chat timeline clean and readable while preserving formatting and emojis.
+- **Group `@mentions` with 1-to-1 Chat Links**: Mentions in group chats are highlighted as interactive badges. Clicking a mention smoothly opens your 1-to-1 chat with that person if an archived conversation exists.
+- **Group Sender Name Colors**: Group chat participants now receive distinctive, theme-adaptive sender name colors (matching WhatsApp's palette) across dark and light modes, applied to message headers and quoted reply borders.
+- **In-Chat Chronological Call Bubbles**: Voice and video calls are seamlessly woven directly into chat timelines as chronological call bubbles, showing call outcome, duration, and details at a glance.
+- **Lightbox Smooth Slide Transitions**: Browsing photos and videos in full screen is now much smoother, featuring seamless slide animations, instant image pre-loading, improved zoom and pan controls, and automatic skipping of unavailable files.
+- **Pinned Messages Banner Strip & Jump**: Important conversations with pinned messages display an authentic banner strip beneath the chat header. Flip through multiple pins, dismiss the banner for your session, or jump straight to any pinned message with an emerald highlight.
+- **Starred Messages & Drawer**: Starred messages can be browsed globally via the sidebar "Starred" tab or per-chat via the header slide-out drawer, with a 1-click jump to context accompanied by a pulsing gold halo.
 - **Tab-Aware Search & Universal Shortcuts**: The search bar dynamically adapts to your active navigation tab—searching messages, call history, starred bookmarks, or archived chats—with instant `Ctrl+K` (or `/`) keyboard shortcuts.
-- **Android Calls & Starred Identity Resolution**: Automatically maps privacy Linked Identities (`@lid`) and companion chat rows in Android call logs and starred messages to real contact names and normalized phone numbers for reliable chat navigation.
-- **iOS Call History & CoreData Relationship Mapping**: Fully maps iOS `CallHistory.sqlite` CoreData relationships, resolving call participants, outcomes, privacy LIDs, and companion chat links.
+- **Voice Message Waveforms & Authentic Player**: Voice notes now look and feel like native WhatsApp messages, featuring interactive sound waveforms you can tap or drag to scrub through, adjustable playback speeds (`1x`, `1.2x`, `1.5x`, `2x`), and duration counters.
+- **Android Calls & Starred Identity Resolution**: Matches privacy identifiers in Android call logs and starred messages to actual contact names and phone numbers, ensuring direct links open the right conversation.
+- **iOS Call History & Contact Linking**: Accurately connects call participants, outcomes (incoming, outgoing, missed), and conversation links from iPhone backup records.
 
 #### ⚡ Improvements
-- **Captioned Media Containment & Sizing**: Media bubbles tightly wrap captions and photos without unnecessary horizontal space or stretching, using orientation-clamped dimensions for landscape and portrait media.
-- **Display Scale Settings**: The Settings panel now features a "Display scale" option that proportionally scales text, sidebar width, and media dimensions together.
-- **Dual-Theming & Contrast Polish**: Enhanced light and dark theme contrast with WCAG 2.1 AA compliant accents, refined bubble elevation drop shadows, and borderless message cards.
-- **In-Bubble Star & Pin Indicators**: Subtle star (`⭐`) and pin (`📌`) indicator icons are integrated directly into the message metadata cluster next to the timestamp, keeping message headers clean.
-- **Media Gallery Filtering, Performance & Visual Feedback**: Enhanced media gallery category pills with an "All Media" default view and exclusive category isolation (Images, Videos, Voice notes, Audio, Stickers, Documents, Contacts, Links), with instant visual filtering, clean pill state toggling, and proper singular/plural counts (`1 item` / `N items`, `1 contact` / `N contacts`). Paginates up to 95% faster via batch DOM fragment construction and responsive scroll arithmetic. Features a complete visual feedback lifecycle with animated stat pill spinners, centered category loaders, bottom scroll indicators, and clean end-of-results notices.
-- **Modernized UI Shell & Navigation Bar**: Redesigned bottom navigation bar with 4 tabs (Chats, Calls, Starred, Archived), top-right brand header with platform badge, and full keyboard tab navigation.
-- **Rich Media Cards in Starred & Pinned Views**: Starred and pinned previews now display rich media snippets (photos, videos with duration, voice notes, documents, locations, contacts, and polls) instead of generic text.
-- **Time Gap Jump Indicators**: Jumping to a chat moment from a call or starred message displays a contextual hint banner with the exact time difference when the nearest message is outside the immediate window.
-- **iOS High-Performance Message Pagination**: Optimized message timeline queries for iOS to scan physical columns directly, eliminating temporary sorting tables and accelerating scrolling in large group chats.
-- **iOS Pinned Announcement De-referencing**: Pin announcements with empty parent pointers are de-referenced against target message stanza IDs, suppressing raw hex hashes and ensuring readable banner text.
+- **Captioned Media Containment & Sizing**: Photos and videos with captions now fit together naturally without awkward extra space or stretched bubbles, nicely framing portrait and landscape media.
+- **Chat Duration & System Message Exclusion**: System notices (such as encryption alerts or group creation notices) are no longer counted toward conversation start dates and chat durations, giving you a true reflection of when you actually talked.
+- **Display Scale Settings**: Adjust the entire viewer interface with a new "Display scale" setting to comfortably size text, sidebars, and media for your screen.
+- **Dual-Theming & Contrast Polish**: Refined colors, better contrast, and subtle shadows across both light and dark modes make messages easier to read in any lighting.
+- **In-Bubble Star & Pin Indicators**: Subtle star (`⭐`) and pin (`📌`) icons sit neatly next to the message time, keeping message cards compact and uncluttered.
+- **Media Gallery Centered Loading & Navigation**: Opening the media gallery is now smoother, featuring centered loading indicators, seamless chat switching without glitches, and fast preview loading for shared links as you scroll.
+- **Media Gallery Filtering & Performance**: The media gallery is significantly faster and easier to explore. You can now view photos and videos together or filter down to specific categories (Photos, Videos, Voice notes, Audio, Documents, Links, Stickers, and Contacts) with instant visual updates, smooth scrolling, and helpful end-of-results notices.
+- **Modernized UI Shell & Navigation Bar**: A refreshed navigation bar with four clear tabs (Chats, Calls, Starred, Archived), an updated header, and full keyboard navigation support.
+- **Rich Media Cards in Starred & Pinned Views**: Starred and pinned previews now show rich visual snippets—such as photo thumbnails, video lengths, voice note badges, and document icons—rather than plain text placeholders.
+- **Time Gap Jump Indicators**: When jumping to a moment from call history or a starred message, a helpful banner tells you how far apart the nearest message was if no messages were sent on that exact day.
+- **iOS High-Performance Message Scrolling**: Significantly faster timeline scrolling and instant message loading for large group chats from iPhone backups.
+- **iOS Pinned Message Previews**: Pin alerts in iPhone backups now display the actual pinned message preview instead of technical ID codes.
 
 #### 🐛 Bug Fixes
-- **Contact Card Missing Status**: Fixed an issue where contact cards (`vcard`) without on-disk copies were incorrectly flagged as missing media.
-- **Document Gallery Count**: Fixed an issue where undownloaded documents were counted twice in media gallery totals.
-- **Gallery Filter Pill Cross-Modality Leak**: Fixed a CSS cascade specificity defect where flex-based audio items, voice notes, missing media cards, and link cards overrode the filter hidden state and remained visible across non-matching filter pills (e.g. voice notes and documents appearing in Images and Videos tabs).
-- **Grouped Media Caption Visibility**: Fixed an issue where photo and video album captions placed on the first item in iOS backups were not shown on the collapsed album card.
-- **Location Pin Gallery Leak**: Fixed static and live location messages leaking into media gallery streams and triggering phantom missing media warnings.
-- **Long Message Grapheme Clustering & Toggle Spacing**: Fixed long message collapse splitting multi-character emoji sequences (such as flags and zero-width joiners) and adjusted focus ring spacing on the Read More toggle.
-- **Quote Jump Auto-Expansion**: Jumping to a quoted message that is collapsed now automatically expands the message to reveal the referenced text.
-- **Sidebar Search Leakage During Infinite Scroll**: Prevented infinite scroll pagination in Calls and Starred lists from appending unfiltered items when an active search query is present.
-- **Android Archived Chat Retention**: Prevented empty archived chats or archived chats whose messages are recorded under a companion row from being excluded from the chat list.
-- **Android Pinned Message Resolution**: Fixed a temporary table initialization issue where pinned messages failed to display if conversation messages were loaded first.
-- **iOS Empty Archived Chat Retention**: Ensured archived chats with zero messages remain accessible in the Archived tab.
-- **iOS Location Message Chat List Crash**: Fixed an issue where an iOS backup containing a conversation whose most recent message is a location or live location caused an error that prevented the chat list from loading, #13.
+- **Chat Missing Media Placeholders**: If a photo or video cannot be found on disk, the chat now displays a clean placeholder card with a blurred preview and the file size, rather than a broken image icon.
+- **Contact Card Missing Status**: Shared contact cards are no longer incorrectly flagged as missing media since their contact details are stored directly in your messages.
+- **Document Gallery Count**: Fixed an issue where certain documents were counted twice in the media gallery total.
+- **Gallery Filter Cross-Category Isolation**: Fixed a visual issue where voice notes, audio files, or links would occasionally remain visible after selecting the Photos or Videos filter.
+- **Grouped Media Caption Visibility**: Captions on multi-photo albums from iPhone backups now display correctly on the grouped album card.
+- **Location Pin Gallery Display**: Location shares no longer appear as broken files in the media gallery.
+- **Long Message Emoji Truncation**: Fixed an issue where truncating long messages could cut complex emojis (like flags or family icons) in half.
+- **Media Gallery Audio Errors**: Fixed an error when playing audio in the media gallery or jumping into chat from a voice note.
+- **Quote Jump Auto-Expansion**: Clicking a quoted reply that refers to a collapsed long message now automatically expands it so you can read the full context.
+- **Sidebar Search During Scroll**: Searching through your Call History or Starred messages now keeps your search filter active as you scroll down the list.
+- **Thumbnail Cache Reliability**: Improved thumbnail caching so missing preview lookups reset properly across viewer sessions.
+- **Android Archived Chat Retention**: Archived chats on Android remain accessible in the Archived tab even if they have no recent messages or are stored under a companion phone record.
+- **Android Pinned Message Resolution**: Fixed an issue where pinned message banners occasionally failed to show on Android backups if the conversation was opened before the pins loaded.
+- **iOS Empty Archived Chat Retention**: Empty archived chats from iPhone backups now reliably appear in the Archived tab.
+- **iOS Location Message Chat List Crash**: Fixed an issue where an iPhone conversation whose latest message was a shared location caused the chat list to fail to load (#13).
 
 ---
 
