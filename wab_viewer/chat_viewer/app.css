@@ -2397,7 +2397,7 @@
       display: grid;
       transition: max-height 0.22s ease, padding 0.22s ease;
     }
-    .archive-year.open .archive-year-grid { max-height: 2000px; padding: 8px; }
+    .archive-year.open .archive-year-grid { max-height: none; padding: 8px; }
     #media-gallery-stats {
       padding: 8px 16px; background: var(--surface);
       border-bottom: 1px solid var(--border);
@@ -2411,7 +2411,12 @@
       transition: background 0.15s, border-color 0.15s, opacity 0.15s;
     }
     .gallery-stat:hover { background: var(--surface2); }
-    .gallery-stat.active { border-color: var(--accent); color: var(--text); }
+    .gallery-stat.active {
+      border-color: var(--accent);
+      color: var(--text);
+      background: var(--surface2);
+      font-weight: 500;
+    }
     .gallery-stat.dimmed { opacity: 0.4; }
     .gallery-stat.is-loading {
       opacity: 0.85;

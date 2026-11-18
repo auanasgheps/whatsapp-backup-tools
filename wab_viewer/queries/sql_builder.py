@@ -1821,6 +1821,22 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
     {mrev_join}
     """
 
+    android_media_id_select = f"""
+    SELECT m._id, {_ANDROID_TS} AS timestamp_ms
+    FROM message m
+    LEFT JOIN message_media mm ON mm.message_row_id = m._id
+    {mvom_join}
+    {ms_join}
+    LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+    """
+
+    ios_media_id_select = f"""
+    SELECT m.Z_PK, {_IOS_TS} AS timestamp_ms
+    FROM ZWAMESSAGE m
+    LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+    LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)
+    """
+
     return QuerySet(
         android_select=android_select,
         android_stat_select=android_stat_select,
@@ -1839,4 +1855,6 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
         ios_is_media=_IOS_IS_MEDIA,
         ios_is_link=ios_is_link,
         ios_is_document_undownloaded=_IOS_IS_DOCUMENT_UNDOWNLOADED,
+        android_media_id_select=android_media_id_select,
+        ios_media_id_select=ios_media_id_select,
     )

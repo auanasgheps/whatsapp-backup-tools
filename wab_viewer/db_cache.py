@@ -113,10 +113,23 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
             ).fetchone()
             if has_android:
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_message_chat_ts "
-                    "ON message(chat_row_id, timestamp)"
-                )
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
+                if {"chat_row_id", "timestamp"} <= cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_message_chat_ts "
+                        "ON message(chat_row_id, timestamp)"
+                    )
+        if "idx_message_chat_type_ts" not in existing:
+            has_android = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'"
+            ).fetchone()
+            if has_android:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
+                if {"chat_row_id", "message_type", "timestamp"} <= cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_message_chat_type_ts "
+                        "ON message(chat_row_id, message_type, timestamp)"
+                    )
         if "idx_poll_option_msg" not in existing:
             has_poll_opt = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_poll_option'"
@@ -146,10 +159,23 @@ def _ensure_wa_indexes(wa_db_path: Path) -> None:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
             ).fetchone()
             if has_ios:
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_zwamessage_chat_ts "
-                    "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE)"
-                )
+                zwa_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
+                if {"ZCHATSESSION", "ZMESSAGEDATE"} <= zwa_cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_zwamessage_chat_ts "
+                        "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE)"
+                    )
+        if "idx_zwamessage_chat_type_date" not in existing:
+            has_ios = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"
+            ).fetchone()
+            if has_ios:
+                zwa_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAMESSAGE)").fetchall()}
+                if {"ZCHATSESSION", "ZMESSAGETYPE", "ZMESSAGEDATE"} <= zwa_cols:
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_zwamessage_chat_type_date "
+                        "ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGETYPE, ZMESSAGEDATE)"
+                    )
         if "idx_zwamessage_pin_lookup" not in existing or "idx_zwamessage_stanza" not in existing:
             has_ios = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAMESSAGE'"

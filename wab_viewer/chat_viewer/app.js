@@ -204,6 +204,34 @@
     return { year: parts[2], direction: parts[3] };
   }
 
+  function _populateArchiveYear(block) {
+    if (!block || block._populated) return;
+    const grid = block.querySelector('.archive-year-grid');
+    const observer = getArchiveMediaObserver();
+    const messages = block._messages || [];
+    let lastMonth = null;
+    for (const msg of messages) {
+      const mk = monthKey(msg.timestamp_ms);
+      if (mk !== lastMonth) {
+        const mhdr = document.createElement('div');
+        mhdr.className = 'gallery-month-header';
+        mhdr.dataset.month = mk;
+        mhdr.textContent = new Date(msg.timestamp_ms).toLocaleString('default', { month: 'long' });
+        grid.appendChild(mhdr);
+        lastMonth = mk;
+      }
+      const cell = renderGalleryItem(msg);
+      if (activeTypes.size > 0 && !activeTypes.has(cell.dataset.type || msg.media_type)) {
+        cell.classList.add('type-hidden');
+      }
+      grid.appendChild(cell);
+      if (cell.dataset.src && observer) {
+        observer.observe(cell);
+      }
+    }
+    block._populated = true;
+  }
+
   function buildArchiveView(items, direction) {
     const tree = document.getElementById('media-archive-tree');
     tree.innerHTML = '';
@@ -211,7 +239,6 @@
       archiveMediaObserver.disconnect();
       archiveMediaObserver = null;
     }
-    const observer = getArchiveMediaObserver();
 
     const filtered = items.filter(m => m.archive_path &&
       (direction === null || archiveSegments(m.archive_path).direction === direction));
@@ -229,47 +256,40 @@
       (byYear[year] = byYear[year] || []).push(msg);
     }
 
-    for (const year of Object.keys(byYear).sort((a, b) => b - a)) {
-      const block = _createArchiveYearBlock(year);
-      const grid = block.querySelector('.archive-year-grid');
+    const sortedYears = Object.keys(byYear).sort((a, b) => b - a);
+    const latestYear = sortedYears[0];
+    for (const year of sortedYears) {
+      const isLatest = (year === latestYear);
+      const block = _createArchiveYearBlock(year, isLatest);
+      block._messages = byYear[year];
       const countEl = block.querySelector('.archive-year-count');
       countEl.textContent = byYear[year].length;
 
-      let lastMonth = null;
-      for (const msg of byYear[year]) {
-        const mk = monthKey(msg.timestamp_ms);
-        if (mk !== lastMonth) {
-          const mhdr = document.createElement('div');
-          mhdr.className = 'gallery-month-header';
-          mhdr.dataset.month = mk;
-          mhdr.textContent = new Date(msg.timestamp_ms).toLocaleString('default', { month: 'long' });
-          grid.appendChild(mhdr);
-          lastMonth = mk;
-        }
-        const cell = renderGalleryItem(msg);
-        if (activeTypes.size > 0 && !activeTypes.has(cell.dataset.type || msg.media_type)) {
-          cell.classList.add('type-hidden');
-        }
-        grid.appendChild(cell);
-        if (cell.dataset.src && observer) {
-          observer.observe(cell);
-        }
+      if (isLatest) {
+        _populateArchiveYear(block);
       }
 
       tree.appendChild(block);
     }
   }
 
-  function _createArchiveYearBlock(year) {
+  function _createArchiveYearBlock(year, isOpen = false) {
     const block = document.createElement('div');
-    block.className = 'archive-year open';
+    block.className = isOpen ? 'archive-year open' : 'archive-year';
     block.dataset.year = year;
+    block._messages = [];
+    block._populated = false;
     const hdr = document.createElement('div');
     hdr.className = 'archive-year-header';
     hdr.innerHTML =
       `<span class="archive-year-chevron">&#9658;</span><span>${year}</span>` +
       `<span class="archive-year-count" style="margin-left:auto;font-weight:400;color:var(--text-muted);font-size:12px">0</span>`;
-    hdr.addEventListener('click', () => block.classList.toggle('open'));
+    hdr.addEventListener('click', () => {
+      block.classList.toggle('open');
+      if (block.classList.contains('open') && !block._populated) {
+        _populateArchiveYear(block);
+      }
+    });
     const grid = document.createElement('div');
     grid.className = 'archive-year-grid';
     block.appendChild(hdr);
@@ -291,39 +311,43 @@
 
       let block = tree.querySelector(`.archive-year[data-year="${year}"]`);
       if (!block) {
-        block = _createArchiveYearBlock(year);
+        const isLatest = !tree.querySelector('.archive-year');
+        block = _createArchiveYearBlock(year, isLatest);
         // insert in descending year order
         const after = [...tree.querySelectorAll('.archive-year')]
           .find(el => parseInt(el.dataset.year) < parseInt(year));
         tree.insertBefore(block, after || null);
       }
 
-      const grid = block.querySelector('.archive-year-grid');
-      const countEl = block.querySelector('.archive-year-count');
-      countEl.textContent = parseInt(countEl.textContent || '0') + 1;
+      block._messages = block._messages || [];
+      block._messages.push(msg);
 
-      const mk = monthKey(msg.timestamp_ms);
-      let monthHdr = grid.querySelector(`.gallery-month-header[data-month="${mk}"]`);
-      if (!monthHdr) {
-        monthHdr = document.createElement('div');
-        monthHdr.className = 'gallery-month-header';
-        monthHdr.dataset.month = mk;
-        monthHdr.textContent = new Date(msg.timestamp_ms).toLocaleString('default', { month: 'long' });
-        // insert before the first section with an older month key
-        const olderHdr = [...grid.querySelectorAll('.gallery-month-header')]
-          .find(el => parseInt(el.dataset.month) < mk);
-        grid.insertBefore(monthHdr, olderHdr || null);
-      }
-      // insert item after its month header, before the next month header
-      const nextSection = [...grid.querySelectorAll('.gallery-month-header')]
-        .find(el => parseInt(el.dataset.month) < mk) || null;
-      const cell = renderGalleryItem(msg);
-      if (activeTypes.size > 0 && !activeTypes.has(cell.dataset.type || msg.media_type)) {
-        cell.classList.add('type-hidden');
-      }
-      grid.insertBefore(cell, nextSection);
-      if (cell.dataset.src) {
-        getArchiveMediaObserver()?.observe(cell);
+      const countEl = block.querySelector('.archive-year-count');
+      countEl.textContent = block._messages.length;
+
+      if (block.classList.contains('open') && block._populated) {
+        const grid = block.querySelector('.archive-year-grid');
+        const mk = monthKey(msg.timestamp_ms);
+        let monthHdr = grid.querySelector(`.gallery-month-header[data-month="${mk}"]`);
+        if (!monthHdr) {
+          monthHdr = document.createElement('div');
+          monthHdr.className = 'gallery-month-header';
+          monthHdr.dataset.month = mk;
+          monthHdr.textContent = new Date(msg.timestamp_ms).toLocaleString('default', { month: 'long' });
+          const olderHdr = [...grid.querySelectorAll('.gallery-month-header')]
+            .find(el => parseInt(el.dataset.month) < mk);
+          grid.insertBefore(monthHdr, olderHdr || null);
+        }
+        const nextSection = [...grid.querySelectorAll('.gallery-month-header')]
+          .find(el => parseInt(el.dataset.month) < mk) || null;
+        const cell = renderGalleryItem(msg);
+        if (activeTypes.size > 0 && !activeTypes.has(cell.dataset.type || msg.media_type)) {
+          cell.classList.add('type-hidden');
+        }
+        grid.insertBefore(cell, nextSection);
+        if (cell.dataset.src) {
+          getArchiveMediaObserver()?.observe(cell);
+        }
       }
     }
   }
@@ -5540,48 +5564,13 @@
     linksLoadingMore = false;
 
     try {
-      // fetch counts for stat pills, then render initial media (strictly images + videos)
       const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
       const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
-      const counts = await fetch('/api/media/count?' + qs, { signal: sessionController.signal }).then(r => {
-        if (!r.ok) throw new Error('Failed to fetch media count');
-        return r.json();
-      });
 
-      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
-      if (!document.getElementById('media-gallery').classList.contains('open')) return;
-
-      currentGalleryStats = counts;
-      stats.innerHTML = '';
-      if (counts.total) {
-        const totalMissing = Object.values(counts.by_type || {}).reduce((acc, d) => acc + (d.missing || 0), 0);
-        stats.appendChild(_makeStatPill('total', counts.total, null, totalMissing));
-        for (const t of typeOrder) {
-          const d = counts.by_type[t];
-          if (!d) continue;
-          stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
-        }
-        // by default, only enable images + videos
-        const hasDeselected = typeOrder.some(t => DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
-        const defaultTypes = typeOrder.filter(t => !DEFAULT_DESELECTED_TYPES.has(t) && counts.by_type[t]);
-        if (hasDeselected && defaultTypes.length > 0) {
-          defaultTypes.forEach(t => activeTypes.add(t));
-          defaultActiveTypes = new Set(activeTypes);
-        } else if (defaultTypes.length > 0) {
-          defaultTypes.forEach(t => activeTypes.add(t));
-          defaultActiveTypes = new Set(activeTypes);
-        } else {
-          // If neither images nor videos exist in chat, fall back to first available type
-          const firstAvailable = typeOrder.find(t => counts.by_type[t]);
-          if (firstAvailable) {
-            activeTypes.add(firstAvailable);
-            defaultActiveTypes = new Set([firstAvailable]);
-          } else {
-            defaultActiveTypes = new Set();
-          }
-        }
-        _syncStatPills();
-      }
+      // Optimistically default to images + videos (filtering out any DEFAULT_DESELECTED_TYPES)
+      activeTypes = new Set(['image', 'video'].filter(t => !DEFAULT_DESELECTED_TYPES.has(t)));
+      defaultActiveTypes = new Set(activeTypes);
+      isDefaultView = true;
 
       grid.innerHTML = '';
 
@@ -5603,10 +5592,52 @@
 
       getGalleryMediaObserver();
 
+      // Initiate count aggregation in background without blocking initial media render
+      const countPromise = fetch('/api/media/count?' + qs, { signal: sessionController.signal })
+        .then(r => r.ok ? r.json() : null)
+        .catch(err => {
+          if (err.name !== 'AbortError') console.error('Failed to fetch media count:', err);
+          return null;
+        });
+
+      // Render page 1 immediately
       await _loadGalleryPage(null);
 
       if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
       if (!document.getElementById('media-gallery').classList.contains('open')) return;
+
+      // Handle counts when ready
+      const counts = await countPromise;
+      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
+      if (!document.getElementById('media-gallery').classList.contains('open')) return;
+
+      if (counts) {
+        currentGalleryStats = counts;
+        stats.innerHTML = '';
+        if (counts.total) {
+          const totalMissing = Object.values(counts.by_type || {}).reduce((acc, d) => acc + (d.missing || 0), 0);
+          stats.appendChild(_makeStatPill('total', counts.total, null, totalMissing));
+          for (const t of typeOrder) {
+            const d = counts.by_type[t];
+            if (!d) continue;
+            stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
+          }
+
+          // If chat has no images or videos, switch to first available type
+          const hasImagesOrVideos = (counts.by_type['image']?.count || 0) + (counts.by_type['video']?.count || 0) > 0;
+          if (!hasImagesOrVideos && counts.total > 0) {
+            const firstAvailable = typeOrder.find(t => counts.by_type[t]?.count > 0);
+            if (firstAvailable) {
+              activeTypes = new Set([firstAvailable]);
+              defaultActiveTypes = new Set([firstAvailable]);
+              _syncStatPills();
+              await _loadGalleryPage(null);
+            }
+          } else {
+            _syncStatPills();
+          }
+        }
+      }
 
       if (!currentGalleryItems.length && !sessionController.signal.aborted) {
         grid.innerHTML = '<div class="gallery-empty-notice">No media in this chat.</div>';
@@ -5638,9 +5669,7 @@
     pills.forEach(p => {
       if (currentType && p.dataset.type === currentType) {
         p.classList.add('is-loading');
-      } else if (!currentType && isDefaultView && p.dataset.type === 'total') {
-        p.classList.add('is-loading');
-      } else if (!currentType && !isDefaultView && activeTypes.has(p.dataset.type)) {
+      } else if (!currentType && activeTypes.has(p.dataset.type)) {
         p.classList.add('is-loading');
       } else {
         p.classList.remove('is-loading');
@@ -5982,8 +6011,7 @@
   }
 
   function _syncStatPills() {
-    const isDefault = _isDefaultActiveState();
-    const isShowAll = !isDefaultView && activeTypes.size === 0;
+    const isShowAll = activeTypes.size === 0;
 
     document.querySelectorAll('#media-gallery-stats .gallery-stat').forEach(pill => {
       const t = pill.dataset.type;
@@ -5994,20 +6022,13 @@
       }
       pill.style.display = '';
       if (t === 'total') {
-        pill.classList.toggle('active', isDefault || isShowAll);
+        pill.classList.toggle('active', isShowAll);
         pill.classList.remove('dimmed');
-      } else if (isDefault) {
-        pill.classList.remove('active');
-        if (DEFAULT_DESELECTED_TYPES.has(t)) {
-          pill.classList.add('dimmed');
-        } else {
-          pill.classList.remove('dimmed');
-        }
       } else if (isShowAll) {
         pill.classList.remove('active');
         pill.classList.remove('dimmed');
       } else {
-        // Explicit category filtering:
+        // Category filtering (default image+video or explicit type selection):
         pill.classList.toggle('active', activeTypes.has(t));
         pill.classList.toggle('dimmed', !activeTypes.has(t));
       }

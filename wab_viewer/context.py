@@ -134,6 +134,8 @@ class QuerySet:
     ios_is_media: str
     ios_is_link: str
     ios_is_document_undownloaded: str
+    android_media_id_select: str | None = None
+    ios_media_id_select: str | None = None
 
 
 class ViewerContext:
@@ -173,6 +175,7 @@ class ViewerContext:
         self.android_contact_chats_cache: tuple[dict[str, str], dict[str, str]] | None = None
         self.ios_contact_chats_cache: tuple[dict[str, str], dict[str, str]] | None = None
         self.thumbnail_404_cache: set[str] = set()
+        self.media_counts_cache: dict[tuple[str, str], dict] = {}
 
     def get_wa(self) -> sqlite3.Connection | None:
         """Return thread-local SQLite connection to the WhatsApp source DB with ancillary attaches."""
