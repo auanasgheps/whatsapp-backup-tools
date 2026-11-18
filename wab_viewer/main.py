@@ -245,6 +245,7 @@ def main():
                 with contextlib.suppress(Exception):
                     stream.reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()
+    print(f"=== WhatsApp Backup Tools - Viewer v{get_version()} ===")
     raw_path = args.output_root
     output_root = Path(raw_path).expanduser().resolve()
 

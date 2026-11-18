@@ -6864,6 +6864,24 @@ class TestViewerEntrypoint:
             viewer.main()
             assert logging.getLogger("werkzeug").level == logging.INFO
 
+    def test_main_start_header(self, tmp_path, capsys):
+        from unittest.mock import MagicMock, patch
+
+        archive_dir = str(tmp_path)
+        mock_app = MagicMock()
+
+        with (
+            patch.object(sys, "argv", ["wab-viewer", archive_dir]),
+            patch("wab_viewer.main.validate_output_root"),
+            patch("wab_viewer.main.create_app", return_value=mock_app),
+            patch("wab_viewer.main.webbrowser.open"),
+        ):
+            viewer.main()
+            captured = capsys.readouterr()
+            expected_header = f"=== WhatsApp Backup Tools - Viewer v{viewer.get_version()} ==="
+            assert expected_header in captured.out
+            assert captured.out.strip().startswith(expected_header)
+
 
 class TestDatabaseOptimizationsAndMaintenance:
     def test_index_created_on_first_create_app(self, tmp_path):
