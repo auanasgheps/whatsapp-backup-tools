@@ -82,7 +82,10 @@ This update introduces Call History logs, Starred bookmarks, pinned message bann
 - **Chat Missing Media Placeholders**: If a photo or video cannot be found on disk, the chat now displays a clean placeholder card with a blurred preview and the file size, rather than a broken image icon.
 - **Contact Card Missing Status**: Shared contact cards are no longer incorrectly flagged as missing media since their contact details are stored directly in your messages.
 - **Document Gallery Count**: Fixed an issue where certain documents were counted twice in the media gallery total.
+- **Gallery All-Media View Switch**: When switching from the default photos and videos view to all media types in the gallery, all newly revealed items (like audio, documents, and stickers) now immediately appear in your view without needing to scroll down first.
+- **Gallery Archive Year Counts**: Yearly totals in the Media Gallery Archive view now stay accurate and display correct item counts even before expanding past years.
 - **Gallery Filter Cross-Category Isolation**: Fixed a visual issue where voice notes, audio files, or links would occasionally remain visible after selecting the Photos or Videos filter.
+- **Gallery Sparse Grid Packing**: Fixed an issue where viewing a single audio track or document in the gallery pushed the card down toward the bottom of the window.
 - **Grouped Media Caption Visibility**: Captions on multi-photo albums from iPhone backups now display correctly on the grouped album card.
 - **Location Pin Gallery Display**: Location shares no longer appear as broken files in the media gallery.
 - **Long Message Emoji Truncation**: Fixed an issue where truncating long messages could cut complex emojis (like flags or family icons) in half.

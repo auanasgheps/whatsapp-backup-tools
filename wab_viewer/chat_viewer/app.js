@@ -4326,6 +4326,8 @@
   let defaultActiveTypes = new Set();  // restored when deselecting a secondary type or sticker
   let isDefaultView = true;
   let typesAllLoaded = new Set();
+  let allMediaStreamLoaded = false;
+  let streamHasFilteredTail = false;
   const PRIMARY_MEDIA_TYPES = new Set(['image', 'video']);
   const SECONDARY_TYPES = new Set(['link', 'vcard']);  // non-file types, hidden by default in archive view
   const DEFAULT_DESELECTED_TYPES = new Set(['voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link']);  // hidden by default, toggle exclusive
@@ -4987,6 +4989,11 @@
     delete cell.dataset.archivePath;
     cell.dataset.hydrated = 'true';
 
+    // Clicking the unavailable media card should do nothing
+    cell.addEventListener('click', e => {
+      e.stopPropagation();
+    });
+
     if (msg && msg.has_thumbnail && msg.msg_id) {
       const blurImg = document.createElement('img');
       blurImg.className = 'gallery-missing-blur';
@@ -5000,26 +5007,57 @@
     const overlay = document.createElement('div');
     overlay.className = 'gallery-missing-overlay';
 
+    const videoNote = Boolean(msg && msg.media_type === 'video' && (msg.is_video_note || isVideoNote(msg)));
+    const isVn = Boolean(msg && (msg.is_voice_note || isVoiceNote(msg)));
+    const mt = msg ? msg.media_type : '';
+
     const badge = document.createElement('div');
     badge.className = 'gallery-missing-badge';
-    badge.innerHTML = '<svg class="gallery-missing-icon-warn" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+    const icon = videoNote ? '🎥' :
+                 isVn ? '🎤' :
+                 mt === 'video' ? '🎥' :
+                 mt === 'audio' ? '🎵' :
+                 mt === 'sticker' ? '🩹' :
+                 mt === 'gif' ? '🎞️' :
+                 mt === 'vcard' ? '📇' :
+                 mt === 'document' ? '📄' : '🖼️';
+    badge.textContent = icon;
     overlay.appendChild(badge);
+
+    const info = document.createElement('div');
+    info.className = 'media-missing-info';
 
     const label = document.createElement('div');
     label.className = 'gallery-missing-label';
     if (msg && msg.is_view_once) {
-      label.textContent = (msg.media_type === 'video') ? 'Video · View Once' : 'Photo · View Once';
+      label.textContent = (mt === 'video') ? 'Video · View Once' : 'Photo · View Once';
     } else {
-      const isMissingVn = msg && (msg.is_voice_note || isVoiceNote(msg));
-      const typeStr = (msg && msg.media_type === 'video') ? 'Video' :
-                      ((msg && (msg.media_type === 'audio' || isMissingVn)) ? (isMissingVn ? 'Voice message' : 'Audio') :
-                      ((msg && msg.media_type === 'document') ? 'Document' :
-                      ((msg && msg.media_type === 'vcard') ? 'Contact' :
-                      ((msg && msg.media_type === 'sticker') ? 'Sticker' :
-                      ((msg && (msg.media_type === 'location' || msg.media_type === 'live_location')) ? 'Location' : 'Photo')))));
+      const typeStr = videoNote ? 'Video message' :
+                      isVn ? 'Voice message' :
+                      mt === 'video' ? 'Video' :
+                      mt === 'gif' ? 'GIF' :
+                      mt === 'audio' ? 'Audio' :
+                      mt === 'document' ? 'Document' :
+                      mt === 'sticker' ? 'Sticker' :
+                      (mt === 'location' || mt === 'live_location') ? 'Location' : 'Photo';
       label.textContent = typeStr + ' unavailable';
     }
-    overlay.appendChild(label);
+    info.appendChild(label);
+
+    const sizeStr = (msg && msg.media_size) ? _formatBytes(msg.media_size) : '';
+    const durStr = (msg && msg.media_duration && msg.media_duration > 0) ? _formatTimer(msg.media_duration) : '';
+
+    const metaParts = [];
+    if (sizeStr) metaParts.push(sizeStr);
+    if (durStr) metaParts.push(durStr);
+    if (metaParts.length > 0) {
+      const meta = document.createElement('div');
+      meta.className = 'media-missing-meta';
+      meta.textContent = metaParts.join(' · ');
+      info.appendChild(meta);
+    }
+
+    overlay.appendChild(info);
     cell.appendChild(overlay);
 
     if (msg) {
@@ -5093,9 +5131,9 @@
         });
         cell.appendChild(btn);
 
-        cell.addEventListener('click', () => {
-          closeMediaGallery();
-          jumpToMessage(msg, 'default');
+        // Clicking the unavailable media should do nothing
+        cell.addEventListener('click', e => {
+          e.stopPropagation();
         });
         return cell;
       }
@@ -5399,11 +5437,13 @@
         const mk = monthKey(msg.timestamp_ms);
         if (mk !== currentMk) {
           currentMk = mk;
-          const monthHdr = document.createElement('div');
-          monthHdr.className = 'gallery-month-header';
-          monthHdr.dataset.month = String(mk);
-          monthHdr.textContent = fmtMonthHeader(msg.timestamp_ms);
-          fragment.appendChild(monthHdr);
+          if (!grid.querySelector(`.gallery-month-header[data-month="${mk}"]`)) {
+            const monthHdr = document.createElement('div');
+            monthHdr.className = 'gallery-month-header';
+            monthHdr.dataset.month = String(mk);
+            monthHdr.textContent = fmtMonthHeader(msg.timestamp_ms);
+            fragment.appendChild(monthHdr);
+          }
         }
 
         const cell = renderGalleryItem(msg);
@@ -5557,6 +5597,8 @@
     activeTypes = new Set();
     defaultActiveTypes = new Set();
     isDefaultView = true;
+    allMediaStreamLoaded = false;
+    streamHasFilteredTail = false;
     typesAllLoaded = new Set();
     galleryAllLoaded = false;
     galleryLoadingMore = false;
@@ -5576,6 +5618,7 @@
 
       // attach IntersectionObserver sentinel at bottom of grid
       gallerySentinel = document.createElement('div');
+      gallerySentinel.className = 'gallery-sentinel';
       gallerySentinel.style.height = '1px';
       grid.appendChild(gallerySentinel);
       galleryObserver = new IntersectionObserver(entries => {
@@ -5714,10 +5757,10 @@
                       (activeTypes.size === 1 && activeTypes.has('link') && linksAllLoaded) ||
                       (totalExpected > 0 && visibleCount >= totalExpected);
 
-    if (totalExpected === 0 && type) {
+    if ((totalExpected === 0 && type) || (isAllDone && visibleCount === 0)) {
       const notice = document.createElement('div');
       notice.className = 'gallery-empty-notice';
-      notice.textContent = `No ${typeLabel} in this chat.`;
+      notice.textContent = type ? `No ${typeLabel} in this chat.` : 'No media in this chat.';
       grid.insertBefore(notice, gallerySentinel || null);
     } else if (isAllDone && visibleCount > 0) {
       const notice = document.createElement('div');
@@ -5772,6 +5815,9 @@
         if (activeTypes.size === 0) {
           galleryAllLoaded = true;
         }
+      }
+      if (before != null && activeTypes.size > 0) {
+        streamHasFilteredTail = true;
       }
       currentGalleryItems.push(...items);
 
@@ -5890,9 +5936,78 @@
       if (activeTypes.size === 0 && defaultActiveTypes.size > 0) {
         isDefaultView = true;
         activeTypes = new Set(defaultActiveTypes);
+        _applyTypeFilter();
+        if (grid && anchorEl && anchorEl.isConnected && !anchorEl.classList.contains('type-hidden')) {
+          const delta = anchorEl.getBoundingClientRect().top - anchorTopBefore;
+          if (Math.abs(delta) > 1) {
+            grid.scrollTop += delta;
+          }
+        }
+        _syncStatPills();
+        scheduleVisibleVideoExtraction();
+        _syncGalleryNotices();
+        return;
       } else {
         isDefaultView = false;
         activeTypes.clear();
+        _syncStatPills();
+
+        if (allMediaStreamLoaded && !streamHasFilteredTail) {
+          _applyTypeFilter();
+          _syncMonthHeaders();
+          scheduleVisibleVideoExtraction();
+          _syncGalleryNotices();
+          return;
+        }
+
+        // Clean unified stream reload from top
+        if (currentGalleryAudio && !currentGalleryAudio.paused) {
+          currentGalleryAudio.pause();
+          currentGalleryAudio = null;
+          if (currentGalleryAudioCell) {
+            currentGalleryAudioCell.classList.remove('is-playing');
+            currentGalleryAudioCell = null;
+          }
+        }
+        if (galleryCurrentAbortController) {
+          galleryCurrentAbortController.abort();
+          galleryCurrentAbortController = null;
+        }
+
+        if (grid) {
+          grid.scrollTop = 0;
+          grid.querySelectorAll('.gallery-filter-loading, .gallery-scroll-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
+          const loader = document.createElement('div');
+          loader.className = 'gallery-filter-loading';
+          loader.innerHTML = '<span class="gallery-filter-spinner"></span><span>Loading all items…</span>';
+          grid.innerHTML = '';
+          grid.appendChild(loader);
+          if (gallerySentinel) {
+            grid.appendChild(gallerySentinel);
+            galleryObserver?.observe(gallerySentinel);
+          }
+        }
+
+        currentGalleryItems = [];
+        lightboxItems = [];
+        galleryAllLoaded = false;
+        typesAllLoaded.delete('all');
+
+        const gen = ++galleryBackfillGen;
+        _setStatPillsLoading(true);
+
+        _loadGalleryPage(null).then(() => {
+          if (gen !== galleryBackfillGen || !document.getElementById('media-gallery').classList.contains('open')) return;
+          allMediaStreamLoaded = true;
+          streamHasFilteredTail = false;
+          if (archiveViewActive) {
+            buildArchiveView(currentGalleryItems, activeArchiveDir());
+          }
+          _syncMonthHeaders();
+          _syncGalleryNotices();
+          scheduleVisibleVideoExtraction();
+        });
+        return;
       }
     } else if (DEFAULT_DESELECTED_TYPES.has(type)) {
       if (!isDefaultView && activeTypes.size === 1 && activeTypes.has(type)) {
@@ -6005,8 +6120,20 @@
       hdr.classList.toggle('month-empty', !hasVisible);
     });
     document.querySelectorAll('.archive-year').forEach(block => {
-      const visible = block.querySelectorAll('.gallery-item:not(.type-hidden)').length;
-      block.querySelector('.archive-year-count').textContent = visible;
+      let visible = 0;
+      if (block._populated) {
+        visible = block.querySelectorAll('.gallery-item:not(.type-hidden)').length;
+      } else if (block._messages) {
+        if (activeTypes.size > 0) {
+          visible = block._messages.filter(m => activeTypes.has(m.media_type)).length;
+        } else {
+          visible = block._messages.length;
+        }
+      }
+      const countEl = block.querySelector('.archive-year-count');
+      if (countEl) {
+        countEl.textContent = visible;
+      }
     });
   }
 
