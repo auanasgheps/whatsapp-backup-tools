@@ -365,6 +365,10 @@ def api_search():
             _hydrate_mentions(pres_results, ctx.source_type, wa, pres)
             results.extend(pres_results)
 
+    for r in results:
+        r.pop("audio_waveform", None)
+        r.pop("waveform", None)
+        r.pop("_raw_metadata", None)
     results.sort(key=lambda r: (r.get("timestamp_ms", 0), r.get("msg_id", 0)))
     indexed_count = ctx.get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
     return jsonify({"results": results, "indexed_count": indexed_count})

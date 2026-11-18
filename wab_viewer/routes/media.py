@@ -283,6 +283,9 @@ def api_media():
             pass
 
     for r in rows:
+        r.pop("audio_waveform", None)
+        r.pop("waveform", None)
+        r.pop("_raw_metadata", None)
         if not r.get("archive_path") and r.get("media_type") not in (
             "link",
             "text",
@@ -333,6 +336,10 @@ def api_media_links():
     )
     rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
     _hydrate_link_preview_rows(rows, ctx.source_type)
+    for r in rows:
+        r.pop("audio_waveform", None)
+        r.pop("waveform", None)
+        r.pop("_raw_metadata", None)
     return jsonify(rows)
 
 
@@ -360,6 +367,10 @@ def api_media_documents():
     _hydrate_quoted_rows(rows, ctx.source_type, conn)
     _hydrate_link_preview_rows(rows, ctx.source_type)
     _hydrate_live_photos(rows, ctx.source_type, conn)
+    for r in rows:
+        r.pop("audio_waveform", None)
+        r.pop("waveform", None)
+        r.pop("_raw_metadata", None)
     return jsonify(rows)
 
 
