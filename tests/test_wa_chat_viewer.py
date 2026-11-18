@@ -17290,3 +17290,72 @@ class TestVoiceWaveform:
             msg = data[0]
             assert msg["msg_id"] == 303
             assert msg["waveform"] == list(dummy_wave)
+
+    def test_gallery_api_media_with_audio_waveform_bytes(self, tmp_path):
+        """Ensure /api/media endpoints do not crash with TypeError when audio_waveform BLOB is present."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path)
+
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS audio_data (
+                message_row_id INTEGER PRIMARY KEY,
+                waveform BLOB
+            );
+            INSERT INTO jid (_id, user, raw_string) VALUES (1, '123456789', '123456789@s.whatsapp.net');
+            INSERT INTO chat (_id, jid_row_id, sort_timestamp) VALUES (1, 1, 1700000000000);
+            INSERT INTO message (_id, chat_row_id, from_me, timestamp, message_type, text_data, key_id)
+            VALUES (401, 1, 0, 1700000001000, 2, 'Voice note with wave', 'WAVE_KEY_401');
+            INSERT INTO message_media (message_row_id, chat_row_id, file_path, mime_type)
+            VALUES (401, 1, 'WhatsApp/Media/WhatsApp Voice Notes/202601/PTT-401.opus', 'audio/ogg; codecs=opus');
+        """)
+        dummy_wave = bytes([i % 80 for i in range(64)])
+        wa_conn.execute(
+            "INSERT INTO audio_data (message_row_id, waveform) VALUES (401, ?)", (dummy_wave,)
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            # Default media query
+            resp = client.get("/api/media?chat_id=123456789&chat_type=contact")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) == 1
+            assert data[0]["msg_id"] == 401
+            assert "audio_waveform" not in data[0]
+
+            # types=voice
+            resp_voice = client.get("/api/media?chat_id=123456789&chat_type=contact&types=voice")
+            assert resp_voice.status_code == 200
+            data_voice = resp_voice.get_json()
+            assert len(data_voice) == 1
+            assert data_voice[0]["msg_id"] == 401
+
+            # types=all
+            resp_all = client.get("/api/media?chat_id=123456789&chat_type=contact&types=all")
+            assert resp_all.status_code == 200
+            assert len(resp_all.get_json()) == 1
+
+            # /api/media/documents
+            resp_docs = client.get("/api/media/documents?chat_id=123456789&chat_type=contact")
+            assert resp_docs.status_code == 200
+
+            # /api/media/links
+            resp_links = client.get("/api/media/links?chat_id=123456789&chat_type=contact")
+            assert resp_links.status_code == 200
+
+            # Jump to message in chat view via /api/messages/at
+            resp_at = client.get(
+                "/api/messages/at?chat_id=123456789&chat_type=contact&ts=1700000001000"
+            )
+            assert resp_at.status_code == 200
+            data_at = resp_at.get_json()
+            assert len(data_at) == 1
+            assert data_at[0]["msg_id"] == 401
+            assert "audio_waveform" not in data_at[0]
+            assert data_at[0]["waveform"] == list(dummy_wave)

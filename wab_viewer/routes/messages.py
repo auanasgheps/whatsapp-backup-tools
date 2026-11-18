@@ -798,7 +798,7 @@ def api_messages_at():
         target_key,
     )
     combined = list(reversed(final_before)) + final_after
-    return jsonify(_strip_none_reactions(combined))
+    return jsonify(_strip_none_reactions(_normalize_message_rows(combined)))
 
 
 @bp.route("/api/message_receipts/<int:message_id>")

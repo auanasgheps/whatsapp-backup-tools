@@ -39,6 +39,7 @@ def _normalize_message_rows(rows: list) -> list[dict]:
     result = []
     for r in rows:
         d = dict(r)
+        d.pop("_raw_metadata", None)
         raw_wave = d.pop("audio_waveform", None)
         if raw_wave is None:
             raw_wave = d.get("waveform")
