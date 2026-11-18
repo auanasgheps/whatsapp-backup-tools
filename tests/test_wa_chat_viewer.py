@@ -2059,6 +2059,21 @@ class TestApiMedia:
         assert "gallery-ptv-badge" in js
         assert "lb-video-note" in js
 
+    def test_chat_missing_media_fallback_and_grid_styling(self):
+        """Chat view and media grid must dynamically fallback to renderMissingMedia on error."""
+        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
+        css = css_path.read_text(encoding="utf-8")
+        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
+        js = app_js_path.read_text(encoding="utf-8")
+
+        assert ".media-grid-cell .media-missing-card" in css
+        assert ".media-grid-cell .media-missing-badge" in css
+        assert "renderMissingMedia(msg)" in js
+        assert "wrap.replaceWith(missingCard)" in js
+        assert "!m.is_missing" in js
+        assert "showLightboxForGroup" in js
+        assert "_sanitizeMediaName(msg.media_name)" in js
+
 
 class TestChatFilter:
     """Tests for _android_chat_filter and _ios_chat_filter."""
