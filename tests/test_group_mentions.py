@@ -292,7 +292,7 @@ def test_android_mentions_hydration_masked_lid_and_self(tmp_path: Path) -> None:
 
 
 def test_db_cache_migration_to_v5_adds_mentions(tmp_path: Path) -> None:
-    """open_and_migrate_archive_db upgrades v4 recent_messages to v5 with mentions column."""
+    """open_and_migrate_archive_db upgrades v4 recent_messages to latest user_version (v7) with mentions column."""
     arch_path = tmp_path / ".wa_media_archiver.db"
     c = sqlite3.connect(str(arch_path))
     c.executescript("""
@@ -321,7 +321,7 @@ def test_db_cache_migration_to_v5_adds_mentions(tmp_path: Path) -> None:
     migrated, cleared = open_and_migrate_archive_db(arch_path, False, False, False)
     try:
         assert cleared is True
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 7
         cols = {r[1] for r in migrated.execute("PRAGMA table_info(recent_messages)").fetchall()}
         assert "mentions" in cols
         assert migrated.execute("SELECT COUNT(*) FROM recent_messages").fetchone()[0] == 0
