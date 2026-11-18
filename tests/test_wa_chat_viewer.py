@@ -8364,6 +8364,21 @@ class TestStickerSupport:
         assert "pill.classList.toggle('active', activeTypes.has(t))" in js
         assert "pill.classList.toggle('dimmed', !activeTypes.has(t))" in js
 
+    def test_gallery_total_pill_switching_initiates_unified_stream_and_avoids_stale_window_leakage(
+        self,
+    ):
+        """app.js must transition cleanly from default (photos+videos) to unified all-media stream
+        when clicking the Total stat pill, ensuring non-photo/non-video items are loaded for
+        the existing window rather than leaving temporal holes.
+        """
+        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "allMediaStreamLoaded" in js
+        assert "streamHasFilteredTail" in js
+        assert "allMediaStreamLoaded && !streamHasFilteredTail" in js
+        assert "Loading all items" in js
+        assert "allMediaStreamLoaded = true" in js
+
     def test_android_gif_classification_and_gallery(self, tmp_path):
         """Android GIFs (message_type 13, WhatsApp Animated Gifs folder, GIF- prefix, or gif_attribution)
         are classified as 'gif', suppress raw media_name, and are correctly isolated in gallery queries."""

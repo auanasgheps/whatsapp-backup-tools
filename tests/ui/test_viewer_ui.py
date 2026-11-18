@@ -849,8 +849,8 @@ def test_gallery_filter_image_isolation_in_mixed_chat(
         """,
         5.0,
     )
-    assert initial_state["totalActive"] is True
-    assert initial_state["imgActive"] is False
+    assert initial_state["totalActive"] is False
+    assert initial_state["imgActive"] is True
     assert initial_state["vcardDimmed"] is True
     assert initial_state["visibleVcards"] == 0
     assert initial_state["visibleImages"] >= 1
@@ -4076,3 +4076,123 @@ def test_gallery_filter_loading_feedback_and_batch_rendering(browser: CDPSession
     assert "document" in doc_pill_res["endNoticeText"].lower()
 
     browser.capture_screenshot(screenshot_dir / "gallery_feedback_document.png", 5.0)
+
+
+@pytest.mark.ui
+def test_gallery_switch_from_default_photos_videos_to_all_items(browser: CDPSession) -> None:
+    """Verify that switching from default photos+videos to all items loads all media types
+
+    (including non-photo/non-video items like vcards) into the existing window immediately without scrolling.
+    """
+    screenshot_dir = Path(".test_artifacts/screenshots")
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+    open_group_chat_in_browser(browser, 25.0)
+
+    # 1. Open gallery
+    gallery = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gal = document.getElementById('media-gallery');
+                const items = document.querySelectorAll('#media-gallery-grid .gallery-item');
+                if (gal && gal.classList.contains('open') && items.length > 0) {
+                    await new Promise(r => setTimeout(r, 300));
+                    return { isOpen: true };
+                }
+            }
+            return { isOpen: false };
+        })()
+        """,
+        10.0,
+    )
+    assert isinstance(gallery, dict)
+    assert gallery["isOpen"] is True
+
+    # 2. Check default state: photos and videos visible, vcards not in grid
+    default_state = browser.evaluate(
+        """
+        (() => {
+            const allItems = [...document.querySelectorAll('#media-gallery-grid .gallery-item')];
+            const visiblePhotos = allItems.filter(el => el.dataset.type === 'image' && window.getComputedStyle(el).display !== 'none');
+            const visibleVideos = allItems.filter(el => el.dataset.type === 'video' && window.getComputedStyle(el).display !== 'none');
+            const visibleVcards = allItems.filter(el => el.dataset.type === 'vcard' && window.getComputedStyle(el).display !== 'none');
+            return {
+                photos: visiblePhotos.length,
+                videos: visibleVideos.length,
+                vcards: visibleVcards.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert default_state["photos"] > 0
+    assert default_state["videos"] > 0
+    assert default_state["vcards"] == 0
+
+    # 3. Click 'Total' stat pill to switch to 'All items'
+    all_items_state = browser.evaluate(
+        """
+        (async () => {
+            const totalPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="total"]');
+            if (!totalPill) return { error: 'Total pill not found' };
+            totalPill.click();
+
+            // Wait for unified stream to fetch and render
+            for (let i = 0; i < 40; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const vcardItems = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="vcard"]');
+                if (vcardItems.length > 0) {
+                    break;
+                }
+            }
+            await new Promise(r => setTimeout(r, 200));
+
+            const allItems = [...document.querySelectorAll('#media-gallery-grid .gallery-item')];
+            const visiblePhotos = allItems.filter(el => el.dataset.type === 'image' && window.getComputedStyle(el).display !== 'none');
+            const visibleVideos = allItems.filter(el => el.dataset.type === 'video' && window.getComputedStyle(el).display !== 'none');
+            const visibleVcards = allItems.filter(el => el.dataset.type === 'vcard' && window.getComputedStyle(el).display !== 'none');
+
+            return {
+                photos: visiblePhotos.length,
+                videos: visibleVideos.length,
+                vcards: visibleVcards.length,
+            };
+        })()
+        """,
+        10.0,
+    )
+    assert all_items_state["photos"] > 0
+    assert all_items_state["videos"] > 0
+    assert all_items_state["vcards"] > 0
+
+    browser.capture_screenshot(screenshot_dir / "gallery_switch_all_items.png", 5.0)
+
+    # 4. Click 'Total' again to toggle back to default view (instant in-memory hide)
+    toggle_back_state = browser.evaluate(
+        """
+        (() => {
+            const totalPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="total"]');
+            if (totalPill) totalPill.click();
+
+            const allItems = [...document.querySelectorAll('#media-gallery-grid .gallery-item')];
+            const visiblePhotos = allItems.filter(el => el.dataset.type === 'image' && window.getComputedStyle(el).display !== 'none');
+            const visibleVideos = allItems.filter(el => el.dataset.type === 'video' && window.getComputedStyle(el).display !== 'none');
+            const visibleVcards = allItems.filter(el => el.dataset.type === 'vcard' && window.getComputedStyle(el).display !== 'none');
+
+            return {
+                photos: visiblePhotos.length,
+                videos: visibleVideos.length,
+                vcards: visibleVcards.length,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert toggle_back_state["photos"] > 0
+    assert toggle_back_state["videos"] > 0
+    assert toggle_back_state["vcards"] == 0
