@@ -168,6 +168,23 @@ def append_sender_to_filename(filename: str, sender: str) -> str:
     return f"{root}_{safe_sender}{ext}"
 
 
+def find_identical_variant(dest_path: str, src_hash: bytes) -> str | None:
+    """
+    Return dest_path, or one of its existing collision variants (_1, _2, ...), if its
+    content matches src_hash. A previous run may have written this content under a
+    suffixed name: without this check every re-run would add one more suffixed copy.
+    """
+    base, ext = os.path.splitext(dest_path)
+    candidate = dest_path
+    counter = 0
+    while os.path.exists(candidate):
+        if file_md5(candidate) == src_hash:
+            return candidate
+        counter += 1
+        candidate = f"{base}_{counter}{ext}"
+    return None
+
+
 def resolve_unique_dest(
     dest_path: str, src_path: str, logger: logging.Logger, src_hash: bytes | None = None
 ) -> str | None:
@@ -669,6 +686,8 @@ def _copy_or_skip(
     Returns (copied, skipped, warnings) deltas.
     """
     if dry_run:
+        if os.path.exists(dest_path) and find_identical_variant(dest_path, file_md5(src)):
+            return CopyResult(0, 1, 0, 0)
         resolved = resolve_unique_dest(dest_path, src, logger)
         if resolved is None:
             return CopyResult(0, 1, 0, 0)
@@ -684,6 +703,7 @@ def _copy_or_skip(
 
     if os.path.exists(dest_path):
         src_hash = file_md5(src)
+        dest_path = find_identical_variant(dest_path, src_hash) or dest_path
         rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
         if archived_file_set is not None and (file_path, rel, src_hash) in archived_file_set:
             resolved = None
@@ -1195,6 +1215,8 @@ def process_vcard_rows(
         vcard_hash = hashing.bytes_md5(vcard_bytes)
         vcard_size = len(vcard_bytes)
         virtual_orig_path = f"vcard:{msg_id}"
+        if os.path.exists(dest_path):
+            dest_path = find_identical_variant(dest_path, vcard_hash) or dest_path
 
         if dry_run:
             resolved = resolve_unique_vcard_dest(dest_path, vcard_hash, logger)

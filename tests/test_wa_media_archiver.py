@@ -2566,6 +2566,85 @@ class TestResolveUniqueDest:
         assert result == str(tmp_path / "image_2.jpg")
 
 
+class TestFindIdenticalVariant:
+    def test_matches_base_name(self, tmp_path):
+        dest = tmp_path / "doc.pdf"
+        dest.write_bytes(b"same")
+        assert wa.find_identical_variant(str(dest), hashlib.md5(b"same").digest()) == str(dest)
+
+    def test_matches_suffixed_variant(self, tmp_path):
+        dest = tmp_path / "doc.pdf"
+        dest.write_bytes(b"first")
+        (tmp_path / "doc_1.pdf").write_bytes(b"second")
+        (tmp_path / "doc_2.pdf").write_bytes(b"third")
+        result = wa.find_identical_variant(str(dest), hashlib.md5(b"third").digest())
+        assert result == str(tmp_path / "doc_2.pdf")
+
+    def test_no_match_returns_none(self, tmp_path):
+        dest = tmp_path / "doc.pdf"
+        dest.write_bytes(b"first")
+        (tmp_path / "doc_1.pdf").write_bytes(b"second")
+        assert wa.find_identical_variant(str(dest), hashlib.md5(b"other").digest()) is None
+
+
+class TestCollisionRerun:
+    """Two different files with the same archive name must not gain a new suffix on every run."""
+
+    @staticmethod
+    def _run(sources, dest_path, out, logger, cursor):
+        return [
+            wa._copy_or_skip(
+                str(src),
+                str(dest_path),
+                str(dest_path.parent),
+                orig,
+                None,
+                str(out),
+                False,
+                logger,
+                cursor,
+                False,
+                {},
+            )
+            for orig, src in sources
+        ]
+
+    @pytest.mark.parametrize("keep_archive_db", [True, False])
+    def test_rerun_skips_suffixed_copy(self, tmp_path, logger, keep_archive_db):
+        out = tmp_path / "out"
+        out.mkdir()
+        src_a = tmp_path / "a.docx"
+        src_b = tmp_path / "b.docx"
+        src_a.write_bytes(b"first document")
+        src_b.write_bytes(b"second document, same name")
+        sources = [
+            ("Media/WhatsApp Documents/a.docx", src_a),
+            ("Media/WhatsApp Documents/Sent/a.docx", src_b),
+        ]
+        dest_path = out / "Contacts" / "Alice" / "2026" / "Notes.docx"
+
+        conn = arc.open_archive_db(str(out))
+        assert self._run(sources, dest_path, out, logger, conn.cursor()) == [(1, 0, 0), (1, 0, 0)]
+        conn.commit()
+        conn.close()
+        if not keep_archive_db:
+            os.remove(out / ".wa_media_archiver.db")
+
+        for _ in range(2):
+            conn = arc.open_archive_db(str(out))
+            cursor = conn.cursor()
+            assert self._run(sources, dest_path, out, logger, cursor) == [(0, 1, 0), (0, 1, 0)]
+            conn.commit()
+            archive_path = cursor.execute(
+                "SELECT archive_path FROM archive_copies WHERE original_path = ?",
+                (sources[1][0],),
+            ).fetchone()[0]
+            conn.close()
+            assert archive_path == "Contacts/Alice/2026/Notes_1.docx"
+
+        assert sorted(p.name for p in dest_path.parent.iterdir()) == ["Notes.docx", "Notes_1.docx"]
+
+
 # ===========================================================================
 # Filesystem: validate_wa_root
 # ===========================================================================
@@ -6935,6 +7014,46 @@ class TestVcardExtraction:
         assert stats_repeat["skipped"] == 2
 
         archive_conn.close()
+
+    def test_process_vcard_rows_rerun_does_not_add_suffixes(self, tmp_path, logger):
+        # Two different vCards for the same contact name in the same chat and year:
+        # the second one is stored as "<name>_1.vcf" and must be found again on re-runs.
+        rows = [
+            {
+                "message_id": message_id,
+                "timestamp_ms": 1600000000000 + message_id,
+                "chat_row_id": "4412345",
+                "chat_subject": None,
+                "sender": "4412345",
+                "key_from_me": 0,
+                "contact_name": "Doctor Smith",
+                "vcard_text": f"BEGIN:VCARD\r\nFN:Doctor Smith\r\nTEL:+1555{message_id}\r\nEND:VCARD\r\n",
+            }
+            for message_id in (201, 202)
+        ]
+        contacts = {"4412345": "Alice"}
+        folder_index = {"4412345": "Alice (4412345)"}
+
+        for expected_copied in (2, 0, 0):
+            archive_conn = arc.open_archive_db(str(tmp_path))
+            stats, folder_index, _ = wa.process_vcard_rows(
+                rows,
+                contacts,
+                {},
+                folder_index,
+                {},
+                str(tmp_path),
+                logger,
+                False,
+                archive_conn,
+                None,
+            )
+            archive_conn.commit()
+            archive_conn.close()
+            assert stats["copied"] == expected_copied
+
+        names = sorted(p.name for p in (tmp_path / "Contacts").rglob("*.vcf"))
+        assert names == ["Doctor Smith.vcf", "Doctor Smith_1.vcf"]
 
 
 # ===========================================================================
