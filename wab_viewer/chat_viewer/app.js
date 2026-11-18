@@ -1731,11 +1731,26 @@
       const mt = msg.media_type;
 
       if (mt === 'image' || mt === 'sticker') {
+        const cleanName = _sanitizeMediaName(msg.media_name);
         const img = document.createElement('img');
         img.src = src;
         img.loading = 'lazy';
-        img.alt = msg.media_name || 'image';
+        img.alt = cleanName || (mt === 'sticker' ? 'Sticker' : 'Photo');
         img.addEventListener('click', () => showLightboxForGroup(group, idx));
+        img.addEventListener('error', () => {
+          msg.is_missing = 1;
+          const missingCard = renderMissingMedia(msg);
+          if (wrap.isConnected) {
+            wrap.replaceWith(missingCard);
+          } else {
+            wrap.innerHTML = '';
+            wrap.className = missingCard.className;
+            wrap.style.cssText = missingCard.style.cssText;
+            while (missingCard.firstChild) {
+              wrap.appendChild(missingCard.firstChild);
+            }
+          }
+        }, { once: true });
         _attachMediaScrollAnchor(img);
         wrap.appendChild(img);
       } else if (mt === 'video' || mt === 'gif') {
@@ -1743,6 +1758,21 @@
         vid.controls = (mt === 'video');
         vid.preload = 'metadata';
         vid.src = src;
+        const handleGridVideoError = () => {
+          msg.is_missing = 1;
+          const missingCard = renderMissingMedia(msg);
+          if (wrap.isConnected) {
+            wrap.replaceWith(missingCard);
+          } else {
+            wrap.innerHTML = '';
+            wrap.className = missingCard.className;
+            wrap.style.cssText = missingCard.style.cssText;
+            while (missingCard.firstChild) {
+              wrap.appendChild(missingCard.firstChild);
+            }
+          }
+        };
+        vid.addEventListener('error', handleGridVideoError, { once: true });
         if (mt === 'gif') {
           vid.muted = true;
           vid.playsInline = true;
@@ -1792,6 +1822,7 @@
   }
 
   function showLightboxForGroup(group, index) {
+    if (group[index] && group[index].is_missing) return;
     showLightbox(group[index]);
   }
 
@@ -3257,10 +3288,31 @@
       } else {
         _applyMediaOrientationBox(wrap, ratio);
       }
+      const cleanName = _sanitizeMediaName(msg.media_name);
       const img = document.createElement('img');
       img.src = src;
       img.loading = 'lazy';
-      img.alt = msg.media_name || 'image';
+      img.alt = cleanName || (mt === 'sticker' ? 'Sticker' : 'Photo');
+      img.addEventListener('error', () => {
+        msg.is_missing = 1;
+        const missingCard = renderMissingMedia(msg);
+        if (wrap.isConnected) {
+          wrap.replaceWith(missingCard);
+        } else {
+          wrap.innerHTML = '';
+          wrap.className = missingCard.className;
+          wrap.style.cssText = missingCard.style.cssText;
+          while (missingCard.firstChild) {
+            wrap.appendChild(missingCard.firstChild);
+          }
+        }
+        const scroll = document.getElementById('message-scroll');
+        if (scroll && isUserAtBottom) {
+          suppressScroll = true;
+          scroll.scrollTop = scroll.scrollHeight;
+          suppressScroll = false;
+        }
+      }, { once: true });
       if (mt !== 'sticker' && ratio <= 0) {
         img.addEventListener('load', () => {
           if (img.naturalWidth > 0 && img.naturalHeight > 0) {
@@ -3268,7 +3320,9 @@
           }
         }, { once: true });
       }
-      img.addEventListener('click', () => showLightbox(msg));
+      img.addEventListener('click', () => {
+        if (!msg.is_missing) showLightbox(msg);
+      });
       _attachMediaScrollAnchor(img);
       wrap.appendChild(img);
 
@@ -3329,6 +3383,27 @@
       vid.preload = 'none';
       vid.src = src;
       wrap.appendChild(vid);
+      const handleVideoError = () => {
+        msg.is_missing = 1;
+        const missingCard = renderMissingMedia(msg);
+        if (wrap.isConnected) {
+          wrap.replaceWith(missingCard);
+        } else {
+          wrap.innerHTML = '';
+          wrap.className = missingCard.className;
+          wrap.style.cssText = missingCard.style.cssText;
+          while (missingCard.firstChild) {
+            wrap.appendChild(missingCard.firstChild);
+          }
+        }
+        const scroll = document.getElementById('message-scroll');
+        if (scroll && isUserAtBottom) {
+          suppressScroll = true;
+          scroll.scrollTop = scroll.scrollHeight;
+          suppressScroll = false;
+        }
+      };
+      vid.addEventListener('error', handleVideoError, { once: true });
       // extract first frame as poster so the bubble isn't blank before playback
       const probe = document.createElement('video');
       probe.src = src;
@@ -3351,7 +3426,10 @@
           suppressScroll = false;
         }
       }, { once: true });
-      probe.addEventListener('error', () => { probe.src = ''; }, { once: true });
+      probe.addEventListener('error', () => {
+        probe.src = '';
+        handleVideoError();
+      }, { once: true });
     } else if (mt === 'audio') {
       if (isVoiceNote(msg)) {
         return renderVoiceNoteBubble(msg);
@@ -3722,7 +3800,7 @@
   let lightboxContext = 'gallery'; // 'gallery' | 'chat' — controls pagination + type filtering
 
   function isLightboxMedia(m) {
-    return m.archive_path && (m.media_type === 'image' || m.media_type === 'video' ||
+    return m.archive_path && !m.is_missing && (m.media_type === 'image' || m.media_type === 'video' ||
       m.media_type === 'gif' || m.media_type === 'sticker');
   }
 
@@ -4194,6 +4272,7 @@
   }
 
   function showLightbox(msg) {
+    if (!msg || msg.is_missing) return;
     // Navigate the chat's currently-loaded media (chronological), not the stale
     // gallery list. msg is the same object reference held in msgList, so identity
     // lookup gives its position. Falls back to a single-item view if not found.
