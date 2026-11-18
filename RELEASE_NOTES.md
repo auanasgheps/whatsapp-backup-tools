@@ -1,17 +1,18 @@
 # WhatsApp Backup Tools v0.80
 
-Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, focusing on new viewer navigation features, interactive audio playback, media timestamping, and general UI/UX refinements.
+Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, focusing on new Viewer features, interactive audio playback, media timestamping, and general UI/UX refinements.
 
-This update introduces Call History logs, Starred bookmarks, pinned message banners, an Archived chats view, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, voice message waveforms, retroactively backfillable photo and video timestamps, and theme-adaptive group sender colors.
+This update introduces a lot of stuff! 
+
+Views for Call History, Archived chats, Starred bookmarks, the ability to see pinned messages, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, voice message waveforms, retroactively backfillable photo and video timestamps, and theme-adaptive group sender colors.
+
+We have reached parity with major Whatsapp features, while work continues on minor features.
 
 
 #### **Release highlights:**
 
-> ⚡ **Supercharged Chat & Gallery Loading**:
-> Conversations with hundreds of thousands of messages now open in a fraction of a second—up to 15 times faster. The viewer skips redundant background work and instantly settles chat timelines, while the Media Gallery loads pages and categories smoothly without delays.
-
 > 📞 **Call History**:
-> Browse your complete voice and video call logs directly within the viewer. A new Call Inspector side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that brings you straight to that exact point in time. Calls are also woven directly into chat timelines as chronological call bubbles.
+> Browse your complete voice and video call logs directly within the viewer. A new Call side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that brings you straight to that exact point in time. Calls are also displayed directly into chat timelines as chronological call bubbles.
 
 > ⭐ **Starred Messages & Bookmarks**:
 > Quickly view your saved and starred messages from the dedicated Starred tab or from an in-chat slide-out panel. Tapping any starred message jumps straight to that message in the conversation with a glowing golden highlight.
@@ -31,6 +32,8 @@ This update introduces Call History logs, Starred bookmarks, pinned message bann
 > 📜 **Collapsible Long Messages & Circular Video Notes**:
 > Long text messages and photo captions are neatly trimmed with a simple "Read More" button to keep your timeline readable. Quick video notes also play in their signature circular player with live countdown rings.
 
+> ⚡ **Supercharged Chat & Gallery Loading**:
+> Conversations with hundreds of thousands of messages now open at least 3 times faster, while the Gallery loads much faster as well. 
 ---
 
 ### 📁 WhatsApp Archiver
