@@ -4,11 +4,13 @@ on:
   push:
     paths:
       - '**.py'
+      - 'wab_viewer/chat_viewer/**'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
   pull_request:
     paths:
       - '**.py'
+      - 'wab_viewer/chat_viewer/**'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
 
@@ -36,6 +38,7 @@ jobs:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 

@@ -199,9 +199,6 @@ NEW_V2_MESSAGE_COLUMNS: list[tuple[str, str]] = [
 
 NEW_V3_MESSAGE_COLUMNS: list[tuple[str, str]] = [
     ("mentions", "TEXT"),
-]
-
-NEW_V4_MESSAGE_COLUMNS: list[tuple[str, str]] = [
     ("waveform", "BLOB"),
 ]
 
@@ -312,15 +309,6 @@ def open_preservation_db(output_root: str) -> sqlite3.Connection:
                 conn.execute(f"ALTER TABLE preserved_messages ADD COLUMN {col_name} {col_def}")
                 existing_msg_cols.add(col_name)
         conn.execute("PRAGMA user_version = 3")
-        conn.commit()
-
-    if user_ver < 4:
-        existing_msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(preserved_messages)")}
-        for col_name, col_def in NEW_V4_MESSAGE_COLUMNS:
-            if col_name not in existing_msg_cols:
-                conn.execute(f"ALTER TABLE preserved_messages ADD COLUMN {col_name} {col_def}")
-                existing_msg_cols.add(col_name)
-        conn.execute("PRAGMA user_version = 4")
         conn.commit()
 
     conn.executescript(PRESERVED_SCHEMA_INDEXES)

@@ -54,14 +54,14 @@ def test_open_preservation_db(tmp_path: Path) -> None:
     assert "preservation_runs" in tables
 
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 4
+    assert version == 3
 
-    # Verify all v2 & v4 columns are present
+    # Verify all v2 & v3 columns are present
     msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(preserved_messages)").fetchall()}
     for col_name, _ in preservation.NEW_V2_MESSAGE_COLUMNS:
         assert col_name in msg_cols, f"Missing v2 column {col_name} in preserved_messages"
-    for col_name, _ in preservation.NEW_V4_MESSAGE_COLUMNS:
-        assert col_name in msg_cols, f"Missing v4 column {col_name} in preserved_messages"
+    for col_name, _ in preservation.NEW_V3_MESSAGE_COLUMNS:
+        assert col_name in msg_cols, f"Missing v3 column {col_name} in preserved_messages"
 
     chat_cols = {r[1] for r in conn.execute("PRAGMA table_info(preserved_chats)").fetchall()}
     for col_name, _ in preservation.NEW_V2_CHAT_COLUMNS:
@@ -145,7 +145,7 @@ def test_preservation_db_v1_to_v2_migration(tmp_path: Path) -> None:
 
     # 2. Open with open_preservation_db to trigger automated migration
     migrated_conn = preservation.open_preservation_db(str(tmp_path))
-    assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert migrated_conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
     # Check that existing data is intact
     msgs = migrated_conn.execute(
