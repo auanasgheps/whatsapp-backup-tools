@@ -444,6 +444,14 @@ def _ensure_jid_map_resolved(
     archive_conn: sqlite3.Connection | None,
 ) -> None:
     """Populate temporary lookup tables for resolved JIDs, LIDs, and contacts."""
+    try:
+        if conn.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_resolution_done'"
+        ).fetchone():
+            return
+    except sqlite3.OperationalError:
+        pass
+
     conn.execute(
         "CREATE TEMP TABLE IF NOT EXISTS _jid_map_resolved (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER)"
     )
@@ -690,30 +698,89 @@ def _ensure_jid_map_resolved(
     # 6. Populate from 1-to-1 message history
     if has_message and has_chat and "jid" in tables:
         try:
+            # Check if there are any 1-to-1 LID chats whose LID is not yet resolved
+            unresolved_chats = []
             if has_jid_server:
-                conn.execute("""
-                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
-                    SELECT j_lid._id, j_phone._id
-                    FROM message m
-                    JOIN chat c ON c._id = m.chat_row_id AND c.subject IS NULL
-                    JOIN jid j_chat ON j_chat._id = c.jid_row_id
-                    JOIN jid j_sender ON j_sender._id = m.sender_jid_row_id
-                    JOIN jid j_lid ON j_lid._id IN (j_chat._id, j_sender._id) AND j_lid.server = 'lid'
-                    JOIN jid j_phone ON j_phone._id IN (j_chat._id, j_sender._id) AND j_phone.server = 's.whatsapp.net'
-                    WHERE m.from_me = 0
-                """)
+                unresolved_chats = [
+                    r[0]
+                    for r in conn.execute("""
+                        SELECT c._id
+                        FROM chat c
+                        JOIN jid j ON j._id = c.jid_row_id AND j.server = 'lid'
+                        WHERE c.subject IS NULL
+                          AND c.jid_row_id NOT IN (SELECT lid_row_id FROM _jid_map_resolved)
+                    """).fetchall()
+                ]
             elif has_jid_raw_string:
-                conn.execute("""
-                    INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
-                    SELECT j_lid._id, j_phone._id
-                    FROM message m
-                    JOIN chat c ON c._id = m.chat_row_id AND c.subject IS NULL
-                    JOIN jid j_chat ON j_chat._id = c.jid_row_id
-                    JOIN jid j_sender ON j_sender._id = m.sender_jid_row_id
-                    JOIN jid j_lid ON j_lid._id IN (j_chat._id, j_sender._id) AND j_lid.raw_string LIKE '%@lid'
-                    JOIN jid j_phone ON j_phone._id IN (j_chat._id, j_sender._id) AND j_phone.raw_string LIKE '%@s.whatsapp.net'
-                    WHERE m.from_me = 0
-                """)
+                unresolved_chats = [
+                    r[0]
+                    for r in conn.execute("""
+                        SELECT c._id
+                        FROM chat c
+                        JOIN jid j ON j._id = c.jid_row_id AND j.raw_string LIKE '%@lid'
+                        WHERE c.subject IS NULL
+                          AND c.jid_row_id NOT IN (SELECT lid_row_id FROM _jid_map_resolved)
+                    """).fetchall()
+                ]
+
+            has_resolved = bool(conn.execute("SELECT 1 FROM _jid_map_resolved LIMIT 1").fetchone())
+            if unresolved_chats:
+                ph = ",".join("?" * len(unresolved_chats))
+                if has_jid_server:
+                    conn.execute(
+                        f"""
+                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                        SELECT j_lid._id, j_phone._id
+                        FROM message m
+                        JOIN chat c ON c._id = m.chat_row_id AND c._id IN ({ph})
+                        JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                        JOIN jid j_sender ON j_sender._id = m.sender_jid_row_id
+                        JOIN jid j_lid ON j_lid._id IN (j_chat._id, j_sender._id) AND j_lid.server = 'lid'
+                        JOIN jid j_phone ON j_phone._id IN (j_chat._id, j_sender._id) AND j_phone.server = 's.whatsapp.net'
+                        WHERE m.from_me = 0
+                        """,
+                        unresolved_chats,
+                    )
+                elif has_jid_raw_string:
+                    conn.execute(
+                        f"""
+                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                        SELECT j_lid._id, j_phone._id
+                        FROM message m
+                        JOIN chat c ON c._id = m.chat_row_id AND c._id IN ({ph})
+                        JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                        JOIN jid j_sender ON j_sender._id = m.sender_jid_row_id
+                        JOIN jid j_lid ON j_lid._id IN (j_chat._id, j_sender._id) AND j_lid.raw_string LIKE '%@lid'
+                        JOIN jid j_phone ON j_phone._id IN (j_chat._id, j_sender._id) AND j_phone.raw_string LIKE '%@s.whatsapp.net'
+                        WHERE m.from_me = 0
+                        """,
+                        unresolved_chats,
+                    )
+            elif not has_resolved:
+                if has_jid_server:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                        SELECT j_lid._id, j_phone._id
+                        FROM message m
+                        JOIN chat c ON c._id = m.chat_row_id AND c.subject IS NULL
+                        JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                        JOIN jid j_sender ON j_sender._id = m.sender_jid_row_id
+                        JOIN jid j_lid ON j_lid._id IN (j_chat._id, j_sender._id) AND j_lid.server = 'lid'
+                        JOIN jid j_phone ON j_phone._id IN (j_chat._id, j_sender._id) AND j_phone.server = 's.whatsapp.net'
+                        WHERE m.from_me = 0
+                    """)
+                elif has_jid_raw_string:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO _jid_map_resolved (lid_row_id, jid_row_id)
+                        SELECT j_lid._id, j_phone._id
+                        FROM message m
+                        JOIN chat c ON c._id = m.chat_row_id AND c.subject IS NULL
+                        JOIN jid j_chat ON j_chat._id = c.jid_row_id
+                        JOIN jid j_sender ON j_sender._id = m.sender_jid_row_id
+                        JOIN jid j_lid ON j_lid._id IN (j_chat._id, j_sender._id) AND j_lid.raw_string LIKE '%@lid'
+                        JOIN jid j_phone ON j_phone._id IN (j_chat._id, j_sender._id) AND j_phone.raw_string LIKE '%@s.whatsapp.net'
+                        WHERE m.from_me = 0
+                    """)
         except sqlite3.OperationalError:
             pass
 
@@ -738,6 +805,11 @@ def _ensure_jid_map_resolved(
             SELECT jid_row_id, lid_row_id
             FROM _jid_map_resolved
         """)
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS _resolution_done (done INTEGER PRIMARY KEY)")
     except sqlite3.OperationalError:
         pass
 

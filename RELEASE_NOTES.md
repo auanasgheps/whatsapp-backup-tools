@@ -7,6 +7,9 @@ This update introduces Call History logs, Starred bookmarks, pinned message bann
 
 #### **Release highlights:**
 
+> ⚡ **Supercharged Chat & Gallery Loading**:
+> Conversations with hundreds of thousands of messages now open in a fraction of a second—up to 15 times faster. The viewer skips redundant background work and instantly settles chat timelines, while the Media Gallery loads pages and categories smoothly without delays.
+
 > 📞 **Call History**:
 > Browse your complete voice and video call logs directly within the viewer. A new Call Inspector side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that brings you straight to that exact point in time. Calls are also woven directly into chat timelines as chronological call bubbles.
 
@@ -65,16 +68,18 @@ This update introduces Call History logs, Starred bookmarks, pinned message bann
 - **iOS Call History & Contact Linking**: Accurately connects call participants, outcomes (incoming, outgoing, missed), and conversation links from iPhone backup records.
 
 #### ⚡ Improvements
+- **Accelerated Chat Loading for Massive Conversations**: Opening large chats with tens or hundreds of thousands of messages is now up to 10–20 times faster. Conversations open near-instantly without freezing, and text messages snap to the bottom in milliseconds without waiting for lazy media.
 - **Captioned Media Containment & Sizing**: Photos and videos with captions now fit together naturally without awkward extra space or stretched bubbles, nicely framing portrait and landscape media.
 - **Chat Duration & System Message Exclusion**: System notices (such as encryption alerts or group creation notices) are no longer counted toward conversation start dates and chat durations, giving you a true reflection of when you actually talked.
 - **Display Scale Settings**: Adjust the entire viewer interface with a new "Display scale" setting to comfortably size text, sidebars, and media for your screen.
 - **Dual-Theming & Contrast Polish**: Refined colors, better contrast, and subtle shadows across both light and dark modes make messages easier to read in any lighting.
 - **In-Bubble Star & Pin Indicators**: Subtle star (`⭐`) and pin (`📌`) icons sit neatly next to the message time, keeping message cards compact and uncluttered.
 - **Media Gallery Centered Loading & Navigation**: Opening the media gallery is now smoother, featuring centered loading indicators, seamless chat switching without glitches, and fast preview loading for shared links as you scroll.
-- **Media Gallery Filtering & Performance**: The media gallery is significantly faster and easier to explore. You can now view photos and videos together or filter down to specific categories (Photos, Videos, Voice notes, Audio, Documents, Links, Stickers, and Contacts) with instant visual updates, smooth scrolling, and helpful end-of-results notices.
+- **Media Gallery Filtering & High-Speed Loading**: The media gallery is significantly faster and easier to explore. You can now view photos and videos together or filter down to specific categories (Photos, Videos, Voice notes, Audio, Documents, Links, Stickers, and Contacts) with instant visual updates, smooth scrolling, and helpful end-of-results notices.
 - **Modernized UI Shell & Navigation Bar**: A refreshed navigation bar with four clear tabs (Chats, Calls, Starred, Archived), an updated header, and full keyboard navigation support.
 - **Rich Media Cards in Starred & Pinned Views**: Starred and pinned previews now show rich visual snippets—such as photo thumbnails, video lengths, voice note badges, and document icons—rather than plain text placeholders.
 - **Time Gap Jump Indicators**: When jumping to a moment from call history or a starred message, a helpful banner tells you how far apart the nearest message was if no messages were sent on that exact day.
+- **Android Accelerated Call History Matching in Chats**: Looking up voice and video calls in chat timelines is now instantaneous, skipping unnecessary database queries for conversations without call records.
 - **iOS High-Performance Message Scrolling**: Significantly faster timeline scrolling and instant message loading for large group chats from iPhone backups.
 - **iOS Pinned Message Previews**: Pin alerts in iPhone backups now display the actual pinned message preview instead of technical ID codes.
 

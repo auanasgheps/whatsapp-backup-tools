@@ -6592,9 +6592,18 @@
     scroll.addEventListener('pointerdown', onUserScroll, { capture: true, passive: true });
 
     const pendingImgs = [...scroll.querySelectorAll('img')].filter(img => !img.complete);
+    let remaining = pendingImgs.length;
     const onMediaLoad = () => {
       if (done || gen !== _loadGen) return;
       snap();
+      remaining--;
+      if (remaining <= 0) {
+        requestAnimationFrame(() => {
+          if (done || gen !== _loadGen) return;
+          snap();
+          cleanup();
+        });
+      }
     };
     pendingImgs.forEach(img => {
       img.addEventListener('load', onMediaLoad, { once: true });
@@ -6607,6 +6616,15 @@
         snap();
       });
       ro.observe(scroll);
+    }
+
+    if (pendingImgs.length === 0) {
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      if (gen === _loadGen) {
+        snap();
+      }
+      cleanup();
+      return;
     }
 
     const start = performance.now();
