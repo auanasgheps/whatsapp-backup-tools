@@ -187,6 +187,13 @@ def api_media():
     else:
         hd_dedup_clause = ""
 
+    id_select = (
+        ctx.queries.android_media_id_select
+        if ctx.source_type == "android"
+        else ctx.queries.ios_media_id_select
+    )
+    id_col = "m._id" if ctx.source_type == "android" else "m.Z_PK"
+
     rows: list[dict] = []
     curr_before = int(before) if before else None
     seen_ids: set = set()
@@ -197,40 +204,50 @@ def api_media():
             batch_params.append(curr_before)
         needed = GALLERY_PAGE_SIZE - len(rows)
         batch_limit = max(needed, GALLERY_PAGE_SIZE)
-        batch_sql = f"""
+
+        # Stage 1: Fast candidate ID selection (scans indexed table with limit)
+        stage1_sql = f"""
+            {id_select}
+            WHERE {chat_pred} {extra} {hd_dedup_clause} AND ({cand_pred}) {batch_ts_clause}
+            ORDER BY {ts_col} DESC
+            LIMIT ?
+        """
+        id_rows = conn.execute(stage1_sql, batch_params + [batch_limit]).fetchall()
+        if not id_rows:
+            break
+        cand_ids = [r[0] for r in id_rows]
+
+        # Stage 2: Targeted hydration of selected IDs with full joins
+        ph = ", ".join("?" for _ in cand_ids)
+        stage2_sql = f"""
             SELECT * FROM (
-                {select} WHERE {chat_pred} {extra} {hd_dedup_clause} AND ({cand_pred}) {batch_ts_clause}
-                ORDER BY {ts_col} DESC
+                {select}
+                WHERE {id_col} IN ({ph})
             )
             WHERE {type_filter}
             ORDER BY timestamp_ms DESC
-            LIMIT ?
         """
-        raw_rows = [
-            dict(r)
-            for r in conn.execute(batch_sql, batch_params + type_params + [batch_limit]).fetchall()
-        ]
-        if not raw_rows:
+        raw_rows = [dict(r) for r in conn.execute(stage2_sql, cand_ids + type_params).fetchall()]
+        if raw_rows:
+            _hydrate_quoted_rows(raw_rows, ctx.source_type, conn)
+            _hydrate_link_preview_rows(raw_rows, ctx.source_type)
+            _hydrate_live_photos(raw_rows, ctx.source_type, conn)
+            for r in raw_rows:
+                mid = r.get("msg_id")
+                if mid and mid in seen_ids:
+                    continue
+                if r.get("is_live_photo_video"):
+                    continue
+                if r.get("is_view_once") and not r.get("archive_path"):
+                    continue
+                if mid:
+                    seen_ids.add(mid)
+                rows.append(r)
+                if len(rows) >= GALLERY_PAGE_SIZE:
+                    break
+        if len(id_rows) < batch_limit:
             break
-        _hydrate_quoted_rows(raw_rows, ctx.source_type, conn)
-        _hydrate_link_preview_rows(raw_rows, ctx.source_type)
-        _hydrate_live_photos(raw_rows, ctx.source_type, conn)
-        for r in raw_rows:
-            mid = r.get("msg_id")
-            if mid and mid in seen_ids:
-                continue
-            if r.get("is_live_photo_video"):
-                continue
-            if r.get("is_view_once") and not r.get("archive_path"):
-                continue
-            if mid:
-                seen_ids.add(mid)
-            rows.append(r)
-            if len(rows) >= GALLERY_PAGE_SIZE:
-                break
-        if len(raw_rows) < batch_limit:
-            break
-        last_ts = raw_rows[-1]["timestamp_ms"]
+        last_ts = id_rows[-1][1]
         if curr_before is not None and last_ts >= curr_before:
             curr_before = curr_before - 1
         else:
@@ -382,93 +399,156 @@ def api_media_count():
     conn = ctx.get_wa()
     if conn is None:
         return jsonify({})
-    select = ctx.queries.android_select if ctx.source_type == "android" else ctx.queries.ios_select
-    extra = ctx.queries.android_filter if ctx.source_type == "android" else ctx.queries.ios_filter
+
+    cache_key = (chat_id, chat_type)
+    if cache_key in ctx.media_counts_cache:
+        return jsonify(ctx.media_counts_cache[cache_key])
+
     if ctx.source_type == "android":
         chat_pred, chat_params = _resolve_android_chat_filter(
             conn, chat_id, chat_type, ctx.android_chat_row_ids_cache
         )
-        is_media = ctx.queries.android_is_media
-        is_link = ctx.queries.android_is_link
-        is_doc_undownloaded = ctx.queries.android_is_document_undownloaded
+        mvom_join = (
+            "LEFT JOIN message_view_once_media mvom ON mvom.message_row_id = m._id"
+            if ctx.caps.has_message_view_once_media
+            else ""
+        )
+        mvom_or = (
+            " OR mvom.message_row_id IS NOT NULL" if ctx.caps.has_message_view_once_media else ""
+        )
+        mrev_join = (
+            "LEFT JOIN message_revoked mrev ON mrev.message_row_id = m._id"
+            if ctx.caps.has_message_revoked
+            else ""
+        )
+        mrev_pred = "mrev.message_row_id IS NOT NULL" if ctx.caps.has_message_revoked else "0"
+        android_origin_check = "m.origin = 1" if ctx.caps.has_msg_origin else "0"
+        android_file_path = "mm.file_path"
+        android_voice_cond = (
+            f"(m.message_type IN (2, 82) AND ({android_origin_check} "
+            f"OR COALESCE(ac.archive_path, {android_file_path}, '') LIKE '%Voice Notes%' "
+            f"OR LOWER(COALESCE(ac.archive_path, {android_file_path}, '')) LIKE '%.opus'))"
+        )
         hd_dedup_clause = _ANDROID_HD_DEDUP_CLAUSE if ctx.caps.has_android_hd else ""
+        has_msg_assoc = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_association'"
+            ).fetchone()
+        )
+        motion_photo_clause = (
+            "AND m._id NOT IN (SELECT child_message_row_id FROM message_association WHERE association_type = 11)"
+            if has_msg_assoc
+            else ""
+        )
+        sql_media = f"""
+            SELECT
+                CASE
+                    WHEN m.message_type IN (15, 64) OR {mrev_pred} THEN 'deleted'
+                    WHEN m.message_type IN (1, 42) THEN 'image'
+                    WHEN {ctx.queries.android_gif_cond} THEN 'gif'
+                    WHEN m.message_type IN (3, 28, 43, 81) THEN 'video'
+                    WHEN m.message_type = 20 THEN 'sticker'
+                    WHEN m.message_type = 9 OR (mm.file_path IS NULL AND mm.media_name IS NOT NULL AND mm.media_name != '') THEN 'document'
+                    WHEN m.message_type IN (4, 14) THEN 'vcard'
+                    WHEN m.message_type IN (2, 82) THEN
+                        CASE WHEN {android_voice_cond} THEN 'voice' ELSE 'audio' END
+                    ELSE 'other'
+                END AS m_type,
+                CASE WHEN (m.message_type IN (42, 43, 82){mvom_or}) THEN 1 ELSE 0 END AS is_vo,
+                CASE WHEN ac.archive_path IS NOT NULL AND ac.archive_path != '' THEN 1 ELSE 0 END AS is_arch,
+                COUNT(*) as cnt
+            FROM message m
+            LEFT JOIN message_media mm ON mm.message_row_id = m._id
+            {mvom_join}
+            {mrev_join}
+            LEFT JOIN arch.archive_copies ac ON ac.original_path = mm.file_path
+            WHERE {chat_pred} {hd_dedup_clause} {motion_photo_clause}
+              AND m.message_type NOT IN (0, 7)
+            GROUP BY m_type, is_vo, is_arch
+        """
+        sql_link = f"""
+            SELECT COUNT(*)
+            FROM message m
+            WHERE {chat_pred}
+              AND (m.message_type IS NULL OR m.message_type = 0)
+              AND m.text_data IS NOT NULL
+              AND (INSTR(LOWER(m.text_data), 'http://') > 0 OR INSTR(LOWER(m.text_data), 'https://') > 0)
+        """
     else:
         chat_pred, chat_params = _ios_chat_filter(chat_id)
-        is_media = ctx.queries.ios_is_media
-        is_link = ctx.queries.ios_is_link
-        is_doc_undownloaded = ctx.queries.ios_is_document_undownloaded
+        ios_origin_check = "mi.ZMEDIAORIGIN = 1" if ctx.caps.has_ios_media_origin else "0"
+        ios_voice_cond = (
+            f"(m.ZMESSAGETYPE IN (3, 53) AND ({ios_origin_check} "
+            f"OR LOWER(COALESCE(ac.archive_path, mi.ZMEDIALOCALPATH, '')) LIKE '%.opus'))"
+        )
         hd_dedup_clause = _IOS_HD_DEDUP_CLAUSE if ctx.caps.has_ios_hd else ""
+        ios_live_photo_clause = (
+            "AND m.ZSTANZAID NOT IN (SELECT stanza_id FROM ext.message_parent_association WHERE type = 11)"
+            if ctx.caps.has_ios_hd
+            else ""
+        )
+        sql_media = f"""
+            SELECT
+                CASE
+                    WHEN m.ZMESSAGETYPE = 14 THEN 'deleted'
+                    WHEN m.ZMESSAGETYPE IN (1, 38) THEN 'image'
+                    WHEN m.ZMESSAGETYPE IN (2, 39, 54) THEN 'video'
+                    WHEN m.ZMESSAGETYPE = 11 THEN 'gif'
+                    WHEN m.ZMESSAGETYPE = 15 THEN 'sticker'
+                    WHEN m.ZMESSAGETYPE = 8 THEN 'document'
+                    WHEN m.ZMESSAGETYPE = 4 THEN 'vcard'
+                    WHEN m.ZMESSAGETYPE IN (3, 53) THEN
+                        CASE WHEN {ios_voice_cond} THEN 'voice' ELSE 'audio' END
+                    ELSE 'other'
+                END AS m_type,
+                CASE WHEN m.ZMESSAGETYPE IN (38, 39, 53) THEN 1 ELSE 0 END AS is_vo,
+                CASE WHEN ac.archive_path IS NOT NULL AND ac.archive_path != '' THEN 1 ELSE 0 END AS is_arch,
+                COUNT(*) as cnt
+            FROM ZWAMESSAGE m
+            LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+            LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)
+            WHERE {chat_pred} {hd_dedup_clause} {ios_live_photo_clause}
+              AND NOT (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE IN (0, 5, 6, 7, 10, 14, 16, 46))
+            GROUP BY m_type, is_vo, is_arch
+        """
+        sql_link = f"""
+            SELECT COUNT(*)
+            FROM ZWAMESSAGE m
+            WHERE {chat_pred}
+              AND (
+                m.ZMESSAGETYPE = 7
+                OR (
+                    (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)
+                    AND m.ZTEXT IS NOT NULL
+                    AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0 OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)
+                )
+              )
+        """
 
-    rows = [
-        dict(r)
-        for r in conn.execute(
-            f"{select} WHERE {chat_pred} {extra} {hd_dedup_clause} AND {is_media}", chat_params
-        ).fetchall()
-    ]
-    _hydrate_live_photos(rows, ctx.source_type, conn)
-    rows = [r for r in rows if not r.get("is_live_photo_video")]
-    rows = [r for r in rows if not (r.get("is_view_once") and not r.get("archive_path"))]
-
-    link_rows = [
-        dict(r)
-        for r in conn.execute(f"{select} WHERE {chat_pred} AND {is_link}", chat_params).fetchall()
-    ]
-    doc_rows = [
-        dict(r)
-        for r in conn.execute(
-            f"{select} WHERE {chat_pred} AND {is_doc_undownloaded}", chat_params
-        ).fetchall()
-    ]
+    m_rows = conn.execute(sql_media, chat_params).fetchall()
+    link_cnt = conn.execute(sql_link, chat_params).fetchone()[0]
 
     by_type: dict = {}
     archived = 0
-    seen_msg_ids: set = set()
-
-    for r in rows:
-        t = r["media_type"]
-        if t in _NON_GALLERY_TYPES:
+    for r in m_rows:
+        t = r[0]
+        if t in _NON_GALLERY_TYPES or t == "other":
             continue
-        mid = r.get("msg_id")
-        if mid:
-            seen_msg_ids.add(mid)
-        is_vo = r.get("is_view_once") or 0
-        if is_vo and not r.get("archive_path"):
+        is_vo = r[1]
+        is_arch = r[2]
+        cnt = r[3]
+        if is_vo and not is_arch:
             continue
-        effective_type = "voice" if (t == "audio" and r.get("is_voice_note")) else t
-        by_type.setdefault(effective_type, {"count": 0, "missing": 0})
-        by_type[effective_type]["count"] += 1
-        if r.get("archive_path"):
-            archived += 1
-        elif effective_type not in ("link", "text", "vcard"):
-            by_type[effective_type]["missing"] += 1
-
-    for r in doc_rows:
-        mid = r.get("msg_id")
-        if mid and mid in seen_msg_ids:
-            continue
-        t = r["media_type"]
-        if t in _NON_GALLERY_TYPES:
-            continue
-        if mid:
-            seen_msg_ids.add(mid)
         by_type.setdefault(t, {"count": 0, "missing": 0})
-        by_type[t]["count"] += 1
-        if r.get("archive_path"):
-            archived += 1
-        else:
-            by_type[t]["missing"] += 1
+        by_type[t]["count"] += cnt
+        if is_arch:
+            archived += cnt
+        elif t not in ("link", "text", "vcard"):
+            by_type[t]["missing"] += cnt
 
-    for r in link_rows:
-        mid = r.get("msg_id")
-        if mid and mid in seen_msg_ids:
-            continue
-        t = r["media_type"]
-        if t in _NON_GALLERY_TYPES:
-            continue
-        if mid:
-            seen_msg_ids.add(mid)
-        by_type.setdefault(t, {"count": 0, "missing": 0})
-        by_type[t]["count"] += 1
+    if link_cnt > 0:
+        by_type.setdefault("link", {"count": 0, "missing": 0})
+        by_type["link"]["count"] += link_cnt
 
     pres = ctx.get_preserved()
     if pres is not None:
@@ -501,7 +581,9 @@ def api_media_count():
             pass
 
     total = sum(d["count"] for d in by_type.values())
-    return jsonify({"total": total, "archived": archived, "by_type": by_type})
+    result = {"total": total, "archived": archived, "by_type": by_type}
+    ctx.media_counts_cache[cache_key] = result
+    return jsonify(result)
 
 
 @bp.route("/media/<path:p>")

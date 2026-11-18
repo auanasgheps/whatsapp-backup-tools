@@ -8355,6 +8355,15 @@ class TestStickerSupport:
         assert "activeTypes.add(type)" in js
         assert "activeTypes.delete(type)" in js
 
+    def test_gallery_default_stat_pills_selection_state(self):
+        """app.js must visually mark active media types (image + video) as active,
+        not the total pill, so the visual focus matches the default selection."""
+        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        js = js_path.read_text(encoding="utf-8")
+        assert "pill.classList.toggle('active', isShowAll)" in js
+        assert "pill.classList.toggle('active', activeTypes.has(t))" in js
+        assert "pill.classList.toggle('dimmed', !activeTypes.has(t))" in js
+
     def test_android_gif_classification_and_gallery(self, tmp_path):
         """Android GIFs (message_type 13, WhatsApp Animated Gifs folder, GIF- prefix, or gif_attribution)
         are classified as 'gif', suppress raw media_name, and are correctly isolated in gallery queries."""
