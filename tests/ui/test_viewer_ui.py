@@ -4244,7 +4244,12 @@ def test_archive_view_total_pill_switch_and_media_types(browser: CDPSession) -> 
     total_switch = browser.evaluate(
         """
         (async () => {
-            const totalPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="total"]');
+            let totalPill = null;
+            for (let i = 0; i < 60; i++) {
+                totalPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="total"]');
+                if (totalPill) break;
+                await new Promise(r => setTimeout(r, 50));
+            }
             if (!totalPill) return { error: 'Total pill not found' };
             totalPill.click();
 
@@ -4281,7 +4286,7 @@ def test_gallery_video_thumbnail_no_path_leak_and_shimmer(browser: CDPSession) -
     """
     open_group_chat_in_browser(browser, 25.0)
 
-    # Check gallery video elements
+    # Check gallery video elements and shimmer lifecycle
     video_check = browser.evaluate(
         """
         (async () => {
@@ -4299,9 +4304,24 @@ def test_gallery_video_thumbnail_no_path_leak_and_shimmer(browser: CDPSession) -
             const videoImgs = [...document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"] img')];
             const leakyAlts = videoImgs.map(img => img.alt).filter(alt => alt.includes('/') || alt.includes('\\\\') || alt.endsWith('.mp4') || alt.endsWith('.mov'));
 
+            // Verify that .gallery-item.is-loading-thumb CSS shimmer rule is present in document stylesheets
+            let hasShimmerRule = false;
+            for (const sheet of document.styleSheets) {
+                try {
+                    for (const rule of sheet.cssRules) {
+                        if (rule.selectorText && rule.selectorText.includes('is-loading-thumb')) {
+                            hasShimmerRule = true;
+                            break;
+                        }
+                    }
+                } catch (e) {}
+                if (hasShimmerRule) break;
+            }
+
             return {
                 videoCount: videoImgs.length,
                 leakyAlts: leakyAlts,
+                hasShimmerRule: hasShimmerRule,
             };
         })()
         """,
@@ -4309,3 +4329,4 @@ def test_gallery_video_thumbnail_no_path_leak_and_shimmer(browser: CDPSession) -
     )
     assert video_check["videoCount"] > 0
     assert len(video_check["leakyAlts"]) == 0
+    assert video_check["hasShimmerRule"] is True
