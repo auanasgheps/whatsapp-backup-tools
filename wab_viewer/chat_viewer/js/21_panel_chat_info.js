@@ -46,6 +46,7 @@
 
   async function openChatInfo() {
     if (!currentChat) return;
+    closeChatMenu();
     closeMediaGallery();
     closeChatStarred();
     const panel = document.getElementById('chat-info-panel');
@@ -139,22 +140,25 @@
     const fmtTs = ts => ts ? new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
     const fmtNum = n => (n === null || n === undefined || n < 0) ? '—' : n.toLocaleString();
 
+    const overviewCard = document.createElement('div');
+    overviewCard.className = 'chat-info-card';
+
     if (currentChat.type === 'contact' && info.number) {
-      details.appendChild(_infoRow('Phone', '+' + info.number).row);
+      overviewCard.appendChild(_infoRow('Phone', '+' + info.number).row);
     }
 
     if (currentChat.type === 'group' && info.created_ts) {
-      details.appendChild(_infoRow('Group created', fmtTs(info.created_ts)).row);
+      overviewCard.appendChild(_infoRow('Group created', fmtTs(info.created_ts)).row);
       if (info.creator_number || info.creator_name) {
         const match = info.creator_number ? (info.members || []).find(m => m.number && m.number === info.creator_number) : null;
         const creatorName = (match && match.name) ? match.name : (info.creator_name || (info.creator_number ? '+' + info.creator_number : ''));
         if (creatorName) {
-          details.appendChild(_infoRow('Created by', creatorName).row);
+          overviewCard.appendChild(_infoRow('Created by', creatorName).row);
         }
       }
     }
 
-    details.appendChild(_infoRow('Conversation since', fmtTs(info.first_ts)).row);
+    overviewCard.appendChild(_infoRow('Conversation since', fmtTs(info.first_ts)).row);
 
     if (info.first_ts && info.last_ts && info.last_ts !== info.first_ts) {
       const days = Math.round((info.last_ts - info.first_ts) / 86400000);
@@ -164,40 +168,49 @@
       if (years > 0) span += years + (years === 1 ? ' year' : ' years');
       if (months > 0) span += (span ? ', ' : '') + months + (months === 1 ? ' month' : ' months');
       if (!span) span = days + (days === 1 ? ' day' : ' days');
-      details.appendChild(_infoRow('Duration', span).row);
+      overviewCard.appendChild(_infoRow('Duration', span).row);
     }
 
     if (currentChat.type === 'contact') {
       const sentReceived = document.createElement('span');
       sentReceived.textContent = fmtNum(info.sent) + ' sent · ' + fmtNum(info.received) + ' received';
-      details.appendChild(_infoRow('Messages', sentReceived).row);
+      overviewCard.appendChild(_infoRow('Messages', sentReceived).row);
     } else {
-      details.appendChild(_infoRow('Total messages', fmtNum(info.total)).row);
+      overviewCard.appendChild(_infoRow('Total messages', fmtNum(info.total)).row);
     }
 
     if (info.calls_count) {
-      details.appendChild(_infoRow('Calls', fmtNum(info.calls_count)).row);
+      overviewCard.appendChild(_infoRow('Calls', fmtNum(info.calls_count)).row);
     }
 
-    // Gallery link row
-    const galleryLink = document.createElement('button');
-    galleryLink.className = 'chat-info-link';
-    galleryLink.textContent = 'Open Media Gallery →';
-    galleryLink.addEventListener('click', () => { closeChatInfo(); openMediaGallery(); });
-    details.appendChild(_infoRow('Media', galleryLink).row);
-
-    // Media size row
+    // Media size row (placed before gallery link button)
     const sizeRowObj = _infoRow('Media size', 'Calculating…');
-    details.appendChild(sizeRowObj.row);
+    overviewCard.appendChild(sizeRowObj.row);
     sizePromise.then(sizeData => {
       if (currentChat === chatAtOpen && panel.classList.contains('open')) {
         sizeRowObj.val.textContent = _formatBytes(sizeData.bytes || 0);
       }
     });
 
-    // Group members
+    // Gallery link row (last button/row of the overview section)
+    const galleryLink = document.createElement('button');
+    galleryLink.className = 'chat-info-link';
+    galleryLink.textContent = 'Open Media Gallery →';
+    galleryLink.addEventListener('click', () => { closeChatInfo(); openMediaGallery(); });
+    overviewCard.appendChild(_infoRow('Media', galleryLink).row);
+
+    details.appendChild(overviewCard);
+
+    // Group members (Card 2: before Top Senders, with grey card background)
     if (currentChat.type === 'group' && info.members && info.members.length > 0) {
       const SHOW = 10;
+      const membersCard = document.createElement('div');
+      membersCard.className = 'chat-info-card';
+      const membersTitle = document.createElement('div');
+      membersTitle.className = 'chat-info-card-title';
+      membersTitle.textContent = 'Members (' + info.members.length + ')';
+      membersCard.appendChild(membersTitle);
+
       const membersWrap = document.createElement('div');
       membersWrap.className = 'chat-info-members';
       const renderMember = m => {
@@ -212,7 +225,7 @@
       if (info.members.length > SHOW) {
         const more = document.createElement('button');
         more.className = 'chat-info-link';
-        more.style.marginTop = '4px';
+        more.style.marginTop = '6px';
         const remaining = info.members.length - SHOW;
         more.textContent = '+ ' + remaining + ' more…';
         more.addEventListener('click', () => {
@@ -221,19 +234,29 @@
         });
         membersWrap.appendChild(more);
       }
-      details.appendChild(_infoRow('Members (' + info.members.length + ')', membersWrap).row);
+      membersCard.appendChild(membersWrap);
+      details.appendChild(membersCard);
     }
 
-    // Top senders
+    // Top senders (Card 3: after Members, with grey card background)
     if (currentChat.type === 'group' && info.top_senders && info.top_senders.length > 0) {
+      const sendersCard = document.createElement('div');
+      sendersCard.className = 'chat-info-card';
+      const sendersTitle = document.createElement('div');
+      sendersTitle.className = 'chat-info-card-title';
+      sendersTitle.textContent = 'Top senders';
+      sendersCard.appendChild(sendersTitle);
+
       const sendersWrap = document.createElement('div');
+      sendersWrap.className = 'chat-info-senders';
       info.top_senders.forEach(s => {
         const el = document.createElement('div');
         el.className = 'chat-info-member';
         el.textContent = (s.name || '?') + ': ' + s.count.toLocaleString();
         sendersWrap.appendChild(el);
       });
-      details.appendChild(_infoRow('Top senders', sendersWrap).row);
+      sendersCard.appendChild(sendersWrap);
+      details.appendChild(sendersCard);
     }
   }
 
@@ -259,8 +282,13 @@
   }
   document.getElementById('chat-info-close').addEventListener('click', closeChatInfo);
 
-  // Dismiss open drawers when clicking into the conversation or chat pane outside the drawer
+  // Dismiss open drawers and menus when clicking into the conversation or chat pane outside
   document.addEventListener('pointerdown', e => {
+    const menuContainer = document.getElementById('chat-menu-container');
+    if (menuContainer && !menuContainer.contains(e.target)) {
+      closeChatMenu();
+    }
+
     const infoDrawer = document.getElementById('chat-info-panel');
     const starredDrawer = document.getElementById('chat-starred-drawer');
 

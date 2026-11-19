@@ -382,3 +382,85 @@ const COLLAPSE_CHAR_LIMIT = 750;
       console.warn('Failed to check calls availability:', err);
     }
   }
+
+  // ---- chat header overflow menu -------------------------------------------
+
+  function openChatMenu() {
+    const dropdown = document.getElementById('chat-menu-dropdown');
+    const btn = document.getElementById('chat-menu-btn');
+    if (!dropdown || !btn) return;
+    dropdown.style.display = 'block';
+    requestAnimationFrame(() => {
+      dropdown.classList.add('open');
+    });
+    btn.setAttribute('aria-expanded', 'true');
+    btn.classList.add('active');
+    const firstItem = dropdown.querySelector('.chat-menu-item');
+    if (firstItem) {
+      firstItem.focus();
+    }
+  }
+
+  function closeChatMenu() {
+    const dropdown = document.getElementById('chat-menu-dropdown');
+    const btn = document.getElementById('chat-menu-btn');
+    if (!dropdown || !btn) return;
+    if (!dropdown.classList.contains('open') && dropdown.style.display === 'none') return;
+    dropdown.classList.remove('open');
+    btn.setAttribute('aria-expanded', 'false');
+    btn.classList.remove('active');
+    setTimeout(() => {
+      if (!dropdown.classList.contains('open')) {
+        dropdown.style.display = 'none';
+      }
+    }, 140);
+  }
+
+  function toggleChatMenu() {
+    const dropdown = document.getElementById('chat-menu-dropdown');
+    if (dropdown && dropdown.classList.contains('open')) {
+      closeChatMenu();
+    } else {
+      openChatMenu();
+    }
+  }
+
+  const chatMenuBtn = document.getElementById('chat-menu-btn');
+  if (chatMenuBtn) {
+    chatMenuBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleChatMenu();
+    });
+    chatMenuBtn.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        openChatMenu();
+      }
+    });
+  }
+
+  const chatMenuDropdown = document.getElementById('chat-menu-dropdown');
+  if (chatMenuDropdown) {
+    chatMenuDropdown.addEventListener('keydown', e => {
+      const items = Array.from(chatMenuDropdown.querySelectorAll('.chat-menu-item'));
+      if (items.length === 0) return;
+      const activeIdx = items.indexOf(document.activeElement);
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeChatMenu();
+        const btn = document.getElementById('chat-menu-btn');
+        if (btn) btn.focus();
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        const nextIdx = (activeIdx + 1) % items.length;
+        items[nextIdx].focus();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        const prevIdx = (activeIdx - 1 + items.length) % items.length;
+        items[prevIdx].focus();
+      } else if (e.key === 'Tab') {
+        closeChatMenu();
+      }
+    });
+  }
