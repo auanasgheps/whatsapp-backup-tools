@@ -40,6 +40,7 @@
 
   async function openChatStarred() {
     if (!currentChat) return;
+    closeChatMenu();
     closeChatInfo();
     closeMediaGallery();
 

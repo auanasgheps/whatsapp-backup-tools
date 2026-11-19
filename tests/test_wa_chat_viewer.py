@@ -13744,6 +13744,40 @@ class TestTrack3FeaturePanes:
         assert ".chat-info-name" in css
         assert ".chat-info-phone" in css
 
+    def test_chat_menu_and_info_card_elements(self, app_and_tmp):
+        """Chat 3-dot overflow menu and info card container elements must be present."""
+        client, _ = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert 'id="chat-menu-container"' in html
+        assert 'id="chat-menu-btn"' in html
+        assert 'id="chat-menu-dropdown"' in html
+        assert 'id="chat-starred-btn"' in html
+        assert 'id="chat-info-btn"' in html
+        assert 'id="chat-info-menu-label"' in html
+
+        starred_idx = html.find('id="chat-starred-btn"')
+        info_idx = html.find('id="chat-info-btn"')
+        assert starred_idx < info_idx, "Starred messages must precede Info in the 3-dot menu"
+
+        css_resp = client.get("/static/app.css")
+        assert css_resp.status_code == 200
+        css = css_resp.get_data(as_text=True)
+        assert ".chat-menu-container" in css
+        assert "#chat-menu-btn" in css
+        assert ".chat-menu-dropdown" in css
+        assert ".chat-menu-item" in css
+        assert ".chat-info-card" in css
+        assert ".chat-info-card-title" in css
+
+        js_resp = client.get("/static/app.js")
+        assert js_resp.status_code == 200
+        js = js_resp.get_data(as_text=True)
+        assert "openChatMenu" in js
+        assert "closeChatMenu" in js
+        assert "toggleChatMenu" in js
+
     def test_pulsing_glow_animations(self, app_and_tmp):
         """Pulsing gold and emerald glow keyframes must be present in app.css."""
         client, _ = app_and_tmp

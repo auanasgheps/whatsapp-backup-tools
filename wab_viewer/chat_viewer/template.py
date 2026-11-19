@@ -103,12 +103,33 @@ HTML_TEMPLATE = (
         </div>
         <div id="chat-toolbar">
           <button id="toolbar-toggle" title="Search &amp; date">&#128269;</button>
-          <button id="chat-starred-btn" class="chat-toolbar-btn" title="Starred messages" aria-label="Starred messages">
-            <span class="chat-toolbar-icon" aria-hidden="true">&#9733;</span>
-            <span id="chat-starred-badge" class="chat-toolbar-badge" style="display:none;">0</span>
-          </button>
           <button id="media-btn" title="Media">&#128247;</button>
-          <button id="chat-info-btn" title="Chat info">&#8505;</button>
+          <div id="chat-menu-container" class="chat-menu-container">
+            <button id="chat-menu-btn" class="chat-toolbar-btn" title="Menu" aria-label="Chat options" aria-haspopup="true" aria-expanded="false">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <circle cx="12" cy="5" r="1.75"/>
+                <circle cx="12" cy="12" r="1.75"/>
+                <circle cx="12" cy="19" r="1.75"/>
+              </svg>
+            </button>
+            <div id="chat-menu-dropdown" class="chat-menu-dropdown" role="menu" aria-label="Chat options" style="display:none;">
+              <button id="chat-starred-btn" class="chat-menu-item" role="menuitem" tabindex="-1">
+                <svg class="chat-menu-item-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+                <span class="chat-menu-item-text">Starred messages</span>
+                <span id="chat-starred-badge" class="chat-menu-badge" style="display:none;">0</span>
+              </button>
+              <button id="chat-info-btn" class="chat-menu-item" role="menuitem" tabindex="-1">
+                <svg class="chat-menu-item-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="12" y1="16" x2="12" y2="12"/>
+                  <line x1="12" y1="8" x2="12.01" y2="8"/>
+                </svg>
+                <span id="chat-info-menu-label" class="chat-menu-item-text">Chat info</span>
+              </button>
+            </div>
+          </div>
         </div>
         <div id="toolbar-expanded">
           <div id="chat-search-wrap">

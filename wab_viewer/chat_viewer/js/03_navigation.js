@@ -229,6 +229,7 @@
         if (contextBanner) contextBanner.style.display = 'none';
         closeChatInfo();
         closeChatStarred();
+        closeChatMenu();
         closeMediaGallery();
 
         if (emptyPane) {
@@ -252,6 +253,7 @@
         if (contextBanner) contextBanner.style.display = 'none';
         closeChatInfo();
         closeChatStarred();
+        closeChatMenu();
         closeMediaGallery();
 
         if (emptyPane) {
@@ -274,6 +276,7 @@
         if (contextBanner) contextBanner.style.display = 'none';
         closeChatInfo();
         closeChatStarred();
+        closeChatMenu();
         closeMediaGallery();
 
         if (emptyPane) {
@@ -325,6 +328,7 @@
   function _prepareChatPane(chat, isJumping) {
     closeChatInfo();
     closeChatStarred();
+    closeChatMenu();
     closeMediaGallery();
     currentChat = chat;
     msgList = [];
@@ -368,6 +372,11 @@
         }
         subtitleEl.innerHTML = subHtml;
       }
+    }
+
+    const infoMenuLabel = document.getElementById('chat-info-menu-label');
+    if (infoMenuLabel) {
+      infoMenuLabel.textContent = chat.type === 'group' ? 'Group info' : 'Contact info';
     }
 
     document.getElementById('empty-pane').style.display = 'none';
