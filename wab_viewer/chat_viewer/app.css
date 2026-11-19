@@ -2605,9 +2605,26 @@
       position: relative; height: 120px; cursor: pointer;
       background: var(--surface); overflow: hidden; border-radius: 4px;
     }
+    @keyframes gallery-thumb-shimmer {
+      0%, 100% {
+        background-color: var(--surface);
+      }
+      50% {
+        background-color: var(--surface2);
+      }
+    }
+    .gallery-item.is-loading-thumb {
+      animation: gallery-thumb-shimmer 1.4s ease-in-out infinite;
+    }
+    .gallery-item.is-loading-thumb img {
+      opacity: 0 !important;
+    }
+    .gallery-item.is-loading-thumb::after {
+      opacity: 0.5;
+    }
     .gallery-item img, .gallery-item video {
       width: 100%; height: 100%; object-fit: cover; display: block;
-      transition: opacity 0.15s ease;
+      transition: opacity 0.2s ease;
     }
     .gallery-item[data-hydrated="false"] img {
       opacity: 0;

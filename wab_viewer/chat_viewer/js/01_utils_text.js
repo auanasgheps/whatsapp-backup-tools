@@ -206,10 +206,13 @@
     const filtered = items.filter(m => m.archive_path &&
       (direction === null || archiveSegments(m.archive_path).direction === direction));
 
+    const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
+    const isDone = (activeTypes.size === 0 && galleryAllLoaded) || typesAllLoaded.has(typesKey);
+
     if (!filtered.length) {
-      tree.innerHTML = galleryAllLoaded
+      tree.innerHTML = isDone
         ? '<div class="archive-empty-notice" style="color:var(--text-muted);padding:16px">No media in this chat.</div>'
-        : '<div class="archive-empty-notice" style="color:var(--text-muted);padding:16px">Loading…</div>';
+        : '<div class="gallery-filter-loading"><span class="gallery-filter-spinner"></span><span>Loading media…</span></div>';
       return;
     }
 
@@ -262,8 +265,8 @@
 
   function _appendToArchiveView(items, direction) {
     const tree = document.getElementById('media-archive-tree');
-    // clear empty notice placeholder if present
-    tree.querySelectorAll('.archive-empty-notice').forEach(el => el.remove());
+    // clear empty notice and loader placeholders if present
+    tree.querySelectorAll('.archive-empty-notice, .gallery-filter-loading').forEach(el => el.remove());
 
     const filtered = items.filter(m => m.archive_path &&
       (direction === null || archiveSegments(m.archive_path).direction === direction));

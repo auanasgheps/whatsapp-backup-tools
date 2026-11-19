@@ -1293,6 +1293,49 @@ class TestApiMedia:
         assert data["by_type"]["link"]["count"] == 2
         assert data["by_type"]["link"]["missing"] == 0  # links cannot be missing
 
+    def test_ios_api_media_all_types_with_mdi_table(self, tmp_path):
+        """/api/media with types=all on iOS with ZWAMESSAGEDATAITEM table executes stage1_sql without column error."""
+        wa_path = tmp_path / "ChatStorage.sqlite"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZGROUPINFO INTEGER, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+            CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+            CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT);
+            CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, ZJID TEXT, ZPUSHNAME TEXT);
+            CREATE TABLE ZWAMESSAGEDATAITEM (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZINDEX INTEGER, ZMATCHEDTEXT TEXT, ZTITLE TEXT, ZSUMMARY TEXT);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZISFROMME INTEGER,
+                ZMESSAGEDATE REAL, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER,
+                ZMEDIAITEM INTEGER, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER,
+                ZPUSHNAME TEXT, ZTEXT TEXT, ZFROMJID TEXT
+            );
+
+            INSERT INTO ZWACHATSESSION VALUES (10, 1, 'group1@g.us', 'Test Group');
+            INSERT INTO ZWAMEDIAITEM VALUES (20, 'Media/photo.jpg', NULL);
+            INSERT INTO ZWAMESSAGE VALUES (100, 10, 0, 1000.0, 'MSG_1', 1, 20, NULL, NULL, 'User1', NULL, '15550001111@s.whatsapp.net');
+            INSERT INTO ZWAMESSAGEDATAITEM VALUES (1, 100, 0, 'https://example.com', 'Title', 'Summary');
+        """)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.execute(
+            "INSERT INTO archive_copies (original_path, archive_path) "
+            "VALUES ('Message/Media/photo.jpg', 'photos/photo.jpg')"
+        )
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/media?chat_id=10&chat_type=group&types=all")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) >= 1
+
     def test_media_links_endpoint(self, tmp_path):
         """/api/media/links returns link rows; /api/media never returns them."""
         wa_path = tmp_path / "msgstore.db"

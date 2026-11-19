@@ -398,6 +398,10 @@ async function openMediaGallery() {
         _syncStatPills();
         scheduleVisibleVideoExtraction();
         _syncGalleryNotices();
+        if (archiveViewActive) {
+          buildArchiveView(currentGalleryItems, activeArchiveDir());
+          _loadAllArchivePages();
+        }
         return;
       } else {
         isDefaultView = false;
@@ -409,6 +413,10 @@ async function openMediaGallery() {
           _syncMonthHeaders();
           scheduleVisibleVideoExtraction();
           _syncGalleryNotices();
+          if (archiveViewActive) {
+            buildArchiveView(currentGalleryItems, activeArchiveDir());
+            _loadAllArchivePages();
+          }
           return;
         }
 
@@ -424,6 +432,13 @@ async function openMediaGallery() {
         if (galleryCurrentAbortController) {
           galleryCurrentAbortController.abort();
           galleryCurrentAbortController = null;
+        }
+
+        if (archiveViewActive) {
+          const tree = document.getElementById('media-archive-tree');
+          if (tree) {
+            tree.innerHTML = '<div class="gallery-filter-loading"><span class="gallery-filter-spinner"></span><span>Loading all items…</span></div>';
+          }
         }
 
         if (grid) {
@@ -454,6 +469,7 @@ async function openMediaGallery() {
           streamHasFilteredTail = false;
           if (archiveViewActive) {
             buildArchiveView(currentGalleryItems, activeArchiveDir());
+            _loadAllArchivePages();
           }
           _syncMonthHeaders();
           _syncGalleryNotices();
@@ -537,6 +553,9 @@ async function openMediaGallery() {
     if (activeTypes.has('link')) {
       _checkGalleryLoadMore();
     }
+    if (archiveViewActive) {
+      _loadAllArchivePages();
+    }
   }
 
   function _applyTypeFilter() {
@@ -577,7 +596,10 @@ async function openMediaGallery() {
         visible = block.querySelectorAll('.gallery-item:not(.type-hidden)').length;
       } else if (block._messages) {
         if (activeTypes.size > 0) {
-          visible = block._messages.filter(m => activeTypes.has(m.media_type)).length;
+          visible = block._messages.filter(m => {
+            const t = (m.media_type === 'audio' && isVoiceNote(m)) ? 'voice' : m.media_type;
+            return activeTypes.has(t);
+          }).length;
         } else {
           visible = block._messages.length;
         }

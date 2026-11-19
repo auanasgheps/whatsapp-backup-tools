@@ -881,6 +881,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
     ios_filter = _BASE_IOS_FILTER
     ios_filter_ts = _BASE_IOS_FILTER
     ios_is_link = _DEFAULT_IOS_IS_LINK
+    mdi_join = ""
     if source_type == "ios":
         vcard_name_ios = "mi.ZVCARDNAME" if caps.has_ios_vcard_name else "NULL"
         group_ev_col = "m.ZGROUPEVENTTYPE" if caps.has_ios_group_event else "0"
@@ -1834,7 +1835,7 @@ def build_viewer_queries(caps: SchemaCapabilities, source_type: str | None) -> Q
     SELECT m.Z_PK, {_IOS_TS} AS timestamp_ms
     FROM ZWAMESSAGE m
     LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
-    LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)
+    {mdi_join}    LEFT JOIN arch.archive_copies ac ON ac.original_path = COALESCE('Message/' || mi.ZMEDIALOCALPATH, 'vcard:' || m.Z_PK)
     """
 
     return QuerySet(

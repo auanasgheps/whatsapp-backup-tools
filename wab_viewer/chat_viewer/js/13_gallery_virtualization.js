@@ -401,6 +401,7 @@
 
       if (videoThumbCache.has(archivePath)) {
         img.src = videoThumbCache.get(archivePath);
+        cell.classList.remove('is-loading-thumb');
         continue;
       }
 
