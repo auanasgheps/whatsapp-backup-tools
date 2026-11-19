@@ -61,7 +61,7 @@ The source WhatsApp database (`msgstore.db` or `ChatStorage.sqlite`) is strictly
 - **Chat timeline** — messages displayed chronologically (oldest at top, newest at bottom), lazy-loaded as you scroll
 - **Interactive WhatsApp polls** — poll cards rendered with options, vote count bars, percentages, checkmarks, and an interactive "View votes" popup detailing voter identities (Android & iOS)
 - **Revoked & view-once badges** — "This message was deleted" tombstones and View-Once badges for ephemeral media
-- **Full-text search** — search across all messages; scoped to the current chat or across all chats
+- **Full-text & chat list search** — search across chats and messages with instant query matching, displaying formatted international phone numbers for individual contacts, group descriptions (or "Group chat") for groups, and full-text keyword matching across message bodies
 - **Media & animated GIF playback** — images, videos, looping animated GIFs, and audio stream directly in the browser with HTTP Range support, interactive click-to-play GIF badges, and video/audio seeking
 - **Circular video notes (Push-to-Video)** — round video messages render in authentic circular bubbles with duration rings, play/pause controls, and standalone positioning (Android & iOS)
 - **Image lightbox** — click any image to open it full-screen with smooth zoom and pan

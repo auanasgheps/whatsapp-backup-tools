@@ -275,6 +275,43 @@ def api_chats():
                 ic.phone_number
             )
         """
+        has_groupinfo = bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ZWAGROUPINFO'"
+            ).fetchone()
+        )
+        gi_cols = (
+            {r[1] for r in conn.execute("PRAGMA table_info(ZWAGROUPINFO)").fetchall()}
+            if has_groupinfo
+            else set()
+        )
+        gi_join = "LEFT JOIN ZWAGROUPINFO gi ON gi.Z_PK = cs.ZGROUPINFO" if has_groupinfo else ""
+        extra_gi_cols = []
+        if "ZDESCRIPTION" in gi_cols:
+            extra_gi_cols.append("gi.ZDESCRIPTION AS group_direct_desc")
+        elif "ZGROUPDESCRIPTION" in gi_cols:
+            extra_gi_cols.append("gi.ZGROUPDESCRIPTION AS group_direct_desc")
+        else:
+            extra_gi_cols.append("NULL AS group_direct_desc")
+
+        if "ZPICTUREID" in gi_cols:
+            extra_gi_cols.append("gi.ZPICTUREID AS group_picture_id")
+        else:
+            extra_gi_cols.append("NULL AS group_picture_id")
+        extra_gi_select = ", " + ", ".join(extra_gi_cols)
+
+        try:
+            arch_grp_cols = {
+                c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()
+            }
+        except sqlite3.OperationalError:
+            arch_grp_cols = set()
+        arch_grp_desc_col = (
+            "grp.description AS group_arch_desc,"
+            if "description" in arch_grp_cols
+            else "NULL AS group_arch_desc,"
+        )
+
         rows = conn.execute(f"""
             SELECT
                 CAST(cs.Z_PK AS TEXT)                               AS id,
@@ -284,6 +321,7 @@ def api_chats():
                 CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN ''
                      ELSE COALESCE(({ios_phone_expr}), '')
                 END                                                 AS phone_number,
+                {arch_grp_desc_col}
                 COALESCE(
                     NULLIF(con.display_name, ''),
                     NULLIF(con_lid.display_name, ''),
@@ -307,7 +345,9 @@ def api_chats():
                 mi.ZMEDIALOCALPATH                                  AS last_msg_media_path,
                 CASE WHEN m.ZFROMJID NOT LIKE '%@g.us' THEN m.ZFROMJID END AS last_msg_sender_jid,
                 gm.ZMEMBERJID                                       AS last_msg_member_jid
+                {extra_gi_select}
             FROM ZWACHATSESSION cs
+            {gi_join}
             LEFT JOIN _ios_contacts ic ON ic.jid = cs.ZCONTACTJID
             LEFT JOIN arch.contacts con
                   ON con.number = ({ios_phone_expr})
@@ -508,9 +548,73 @@ def api_chats():
             except sqlite3.OperationalError:
                 pass
 
+        android_group_desc: dict[int, str | None] = {}
+        group_c_ids = [
+            r["chat_row_id"]
+            for r in rows
+            if r.get("type") == "group" and r.get("chat_row_id") is not None
+        ]
+        if group_c_ids:
+            g_ph = ",".join("?" * len(group_c_ids))
+            if ctx.caps.has_message_system:
+                try:
+                    desc_rows = conn.execute(
+                        f"""
+                        SELECT m.chat_row_id, ms.action_type, m.text_data
+                        FROM message m
+                        JOIN message_system ms ON ms.message_row_id = m._id
+                        WHERE ms.action_type IN (27, 28) AND m.chat_row_id IN ({g_ph})
+                        ORDER BY m.timestamp ASC, m._id ASC
+                        """,
+                        group_c_ids,
+                    ).fetchall()
+                    for dr in desc_rows:
+                        if dr["action_type"] == 27 and dr["text_data"]:
+                            android_group_desc[dr["chat_row_id"]] = dr["text_data"].strip() or None
+                        else:
+                            android_group_desc[dr["chat_row_id"]] = None
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                arch_grp_cols = {
+                    c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()
+                }
+                if "description" in arch_grp_cols:
+                    arch_desc_rows = conn.execute(
+                        f"SELECT chat_row_id, NULLIF(description, '') AS description FROM arch.groups WHERE chat_row_id IN ({g_ph})",
+                        [str(cid) for cid in group_c_ids],
+                    ).fetchall()
+                    for ar in arch_desc_rows:
+                        cid_str = str(ar["chat_row_id"])
+                        cid_val = int(cid_str) if cid_str.isdigit() else cid_str
+                        if ar["description"] and not android_group_desc.get(cid_val):
+                            android_group_desc[cid_val] = ar["description"].strip()
+            except sqlite3.OperationalError:
+                pass
+
     for r in rows:
         d = dict(r)
         c_row_id = d.pop("chat_row_id", None)
+        if ctx.source_type == "android":
+            if d.get("type") == "group" and c_row_id is not None:
+                d["description"] = android_group_desc.get(c_row_id)
+            else:
+                d["description"] = None
+        elif ctx.source_type == "ios":
+            group_direct_desc = d.pop("group_direct_desc", None)
+            group_picture_id = d.pop("group_picture_id", None)
+            group_arch_desc = d.pop("group_arch_desc", None)
+            if d.get("type") == "group":
+                if group_direct_desc:
+                    d["description"] = str(group_direct_desc).strip() or None
+                elif group_picture_id:
+                    d["description"] = _extract_ios_group_description(group_picture_id)
+                elif group_arch_desc:
+                    d["description"] = str(group_arch_desc).strip() or None
+                else:
+                    d["description"] = None
+            else:
+                d["description"] = None
         if ctx.source_type == "android" and c_row_id is not None:
             c_key = (d["id"], d["type"])
             existing_c = ctx.android_chat_row_ids_cache.get(c_key)
@@ -704,6 +808,7 @@ def api_chats():
     else:
         for c in result:
             c.setdefault("is_preserved_only", False)
+            c.setdefault("description", None)
     return jsonify(result)
 
 

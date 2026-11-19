@@ -464,18 +464,27 @@ def _merge_preserved_chats(
     for c in result:
         c.setdefault("is_preserved_only", False)
         c.setdefault("is_archived", 0)
+        c.setdefault("description", None)
+
+    try:
+        pres_cols = {
+            c[1] for c in pres_conn.execute("PRAGMA table_info(preserved_chats)").fetchall()
+        }
+    except sqlite3.OperationalError:
+        pres_cols = set()
+
+    select_cols = ["chat_id", "chat_type", "newest_ts"]
+    if "subject" in pres_cols:
+        select_cols.append("subject")
+    if "description" in pres_cols:
+        select_cols.append("description")
 
     try:
         pres_chats = pres_conn.execute(
-            "SELECT chat_id, chat_type, newest_ts, subject FROM preserved_chats"
+            f"SELECT {', '.join(select_cols)} FROM preserved_chats"
         ).fetchall()
     except sqlite3.OperationalError:
-        try:
-            pres_chats = pres_conn.execute(
-                "SELECT chat_id, chat_type, newest_ts FROM preserved_chats"
-            ).fetchall()
-        except sqlite3.OperationalError:
-            pres_chats = []
+        pres_chats = []
 
     for pc in pres_chats:
         cid = pc["chat_id"]
@@ -484,6 +493,7 @@ def _merge_preserved_chats(
             continue
 
         display_name = cid
+        description = None
         if ctype == "group":
             grp_row = archive_conn.execute(
                 "SELECT subject, folder FROM groups WHERE chat_row_id = ?", (cid,)
@@ -494,6 +504,23 @@ def _merge_preserved_chats(
                 display_name = pc["subject"]
             elif grp_row and grp_row["folder"]:
                 display_name = grp_row["folder"]
+
+            if "description" in pc.keys() and pc["description"]:
+                description = str(pc["description"]).strip() or None
+            if not description:
+                try:
+                    arch_grp_cols = {
+                        c[1] for c in archive_conn.execute("PRAGMA table_info(groups)").fetchall()
+                    }
+                    if "description" in arch_grp_cols:
+                        grp_desc_row = archive_conn.execute(
+                            "SELECT NULLIF(description, '') AS description FROM groups WHERE chat_row_id = ?",
+                            (cid,),
+                        ).fetchone()
+                        if grp_desc_row and grp_desc_row["description"]:
+                            description = str(grp_desc_row["description"]).strip() or None
+                except sqlite3.OperationalError:
+                    pass
         else:
             con_row = archive_conn.execute(
                 "SELECT display_name, folder FROM contacts WHERE number = ?", (cid,)
@@ -545,6 +572,7 @@ def _merge_preserved_chats(
                 "type": ctype,
                 "phone_number": "" if ctype == "group" else cid,
                 "display_name": display_name,
+                "description": description,
                 "newest_ts": pc["newest_ts"],
                 "last_msg_preview": last_preview,
                 "last_msg_type": last_type,

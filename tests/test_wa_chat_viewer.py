@@ -17490,3 +17490,257 @@ class TestVoiceWaveform:
             assert data_at[0]["msg_id"] == 401
             assert "audio_waveform" not in data_at[0]
             assert data_at[0]["waveform"] == list(dummy_wave)
+
+
+class TestChatListSearchAndDescription:
+    """Tests for chat list search subtitles and group description propagation."""
+
+    def test_app_js_bundle_includes_updated_search_subtitles_and_section_header(self):
+        js = _get_app_js()
+        # Section header renamed to Chats
+        assert "makeSectionLabel('Chats')" in js
+        # Subtitle logic contains Group chat fallback
+        assert "'Group chat'" in js
+        # Subtitle logic formats contact phone number
+        assert "formatPhoneNumber(chat.phone_number || chat.id)" in js
+        # Client-side search filters include description and phone_number
+        assert "c.description" in js
+        assert "c.phone_number" in js
+
+    def test_android_api_chats_includes_group_description(self, tmp_path):
+        conn = make_android_db(tmp_path / "msgstore.db")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS message_system (message_row_id INTEGER PRIMARY KEY, action_type INTEGER)"
+        )
+        # 1. Individual contact chat
+        conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) VALUES (1, '123456789', '123456789@s.whatsapp.net')"
+        )
+        conn.execute("INSERT INTO chat (_id, jid_row_id) VALUES (1, 1)")
+        conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (1, 1, 0, 'k1', 1, 1700000001000, 'Hello contact', 0)"
+        )
+
+        # 2. Group chat with system description (action 27)
+        conn.execute("INSERT INTO jid (_id, user, raw_string) VALUES (2, 'group1', 'group1@g.us')")
+        conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (2, 2, 'Hiking Club')")
+        conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (2, 2, 0, 'k2', 1, 1700000002000, 'Hiking club announcements', 7)"
+        )
+        conn.execute("INSERT INTO message_system (message_row_id, action_type) VALUES (2, 27)")
+
+        # 3. Group chat where description was changed then deleted (action 28)
+        conn.execute("INSERT INTO jid (_id, user, raw_string) VALUES (3, 'group2', 'group2@g.us')")
+        conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (3, 3, 'Old Group')")
+        conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (3, 3, 0, 'k3', 1, 1700000003000, 'Old desc', 7)"
+        )
+        conn.execute("INSERT INTO message_system (message_row_id, action_type) VALUES (3, 27)")
+        conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (4, 3, 0, 'k4', 1, 1700000004000, '', 7)"
+        )
+        conn.execute("INSERT INTO message_system (message_row_id, action_type) VALUES (4, 28)")
+
+        # 4. Group chat with fallback to arch.groups description
+        conn.execute("INSERT INTO jid (_id, user, raw_string) VALUES (4, 'group3', 'group3@g.us')")
+        conn.execute("INSERT INTO chat (_id, jid_row_id, subject) VALUES (4, 4, 'Book Club')")
+        conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, text_data, message_type) "
+            "VALUES (5, 4, 0, 'k5', 1, 1700000005000, 'Welcome', 0)"
+        )
+        conn.commit()
+        conn.close()
+
+        # Archive DB with groups description
+        arch_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arch_cols = {c[1] for c in arch_conn.execute("PRAGMA table_info(groups)").fetchall()}
+        if "description" not in arch_cols:
+            arch_conn.execute("ALTER TABLE groups ADD COLUMN description TEXT")
+        arch_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject, description) VALUES ('4', 'Book Club', 'Book Club', 'Weekly reading list')"
+        )
+        arch_conn.commit()
+        arch_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            chat_map = {c["id"]: c for c in chats}
+
+            # Contact chat has description None and phone number
+            c1 = chat_map["123456789"]
+            assert c1["type"] == "contact"
+            assert c1["description"] is None
+            assert c1["phone_number"] == "123456789"
+
+            # Group 2 has description from message_system 27
+            c2 = chat_map["2"]
+            assert c2["type"] == "group"
+            assert c2["description"] == "Hiking club announcements"
+
+            # Group 3 had description deleted by action 28
+            c3 = chat_map["3"]
+            assert c3["type"] == "group"
+            assert c3["description"] is None
+
+            # Group 4 fell back to arch.groups.description
+            c4 = chat_map["4"]
+            assert c4["type"] == "group"
+            assert c4["description"] == "Weekly reading list"
+
+    def test_ios_api_chats_includes_group_description(self, tmp_path):
+        conn = make_ios_db(tmp_path / "ChatStorage.sqlite")
+        gi_cols = {r[1] for r in conn.execute("PRAGMA table_info(ZWAGROUPINFO)").fetchall()}
+        if "ZDESCRIPTION" not in gi_cols:
+            conn.execute("ALTER TABLE ZWAGROUPINFO ADD COLUMN ZDESCRIPTION TEXT")
+        if "ZPICTUREID" not in gi_cols:
+            conn.execute("ALTER TABLE ZWAGROUPINFO ADD COLUMN ZPICTUREID TEXT")
+
+        # 1. Group with direct ZDESCRIPTION
+        conn.execute(
+            "INSERT INTO ZWAGROUPINFO (Z_PK, ZDESCRIPTION) VALUES (1, 'Cooking and recipes')"
+        )
+        conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZGROUPINFO)
+            VALUES (1, 'group1@g.us', 'Foodies', 0, 1)
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE)
+            VALUES (1, 1, 0, 720000000, 'Welcome foodies', 0)
+        """)
+
+        # 2. Contact chat
+        conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN)
+            VALUES (2, '987654321@s.whatsapp.net', 'Alice', 0)
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE)
+            VALUES (2, 2, 0, 720000001, 'Hello', 0)
+        """)
+
+        # 3. Group with fallback to arch.groups description
+        conn.execute("INSERT INTO ZWAGROUPINFO (Z_PK) VALUES (3)")
+        conn.execute("""
+            INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZGROUPINFO)
+            VALUES (3, 'group3@g.us', 'Tech Talks', 0, 3)
+        """)
+        conn.execute("""
+            INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZTEXT, ZMESSAGETYPE)
+            VALUES (3, 3, 0, 720000002, 'Tech discussion', 0)
+        """)
+        conn.commit()
+        conn.close()
+
+        # Archive DB
+        arch_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arch_cols = {c[1] for c in arch_conn.execute("PRAGMA table_info(groups)").fetchall()}
+        if "description" not in arch_cols:
+            arch_conn.execute("ALTER TABLE groups ADD COLUMN description TEXT")
+        arch_conn.execute(
+            "INSERT INTO groups (chat_row_id, folder, subject, description) VALUES ('3', 'Tech Talks', 'Tech Talks', 'Python & Rust talks')"
+        )
+        arch_conn.commit()
+        arch_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            chat_map = {c["id"]: c for c in chats}
+
+            # Group 1 has direct description
+            c1 = chat_map["1"]
+            assert c1["type"] == "group"
+            assert c1["description"] == "Cooking and recipes"
+
+            # Contact 2 has description None and phone number
+            c2 = chat_map["2"]
+            assert c2["type"] == "contact"
+            assert c2["description"] is None
+            assert c2["phone_number"] == "987654321"
+
+            # Group 3 fell back to arch.groups
+            c3 = chat_map["3"]
+            assert c3["type"] == "group"
+            assert c3["description"] == "Python & Rust talks"
+
+    def test_preserved_chats_includes_description(self, tmp_path):
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        wa_conn.close()
+
+        pres_db = tmp_path / "preserved_messages.db"
+        conn = sqlite3.connect(str(pres_db))
+        conn.execute("""
+            CREATE TABLE preserved_chats (
+                chat_id TEXT NOT NULL,
+                chat_type TEXT NOT NULL,
+                newest_ts INTEGER,
+                subject TEXT,
+                description TEXT,
+                PRIMARY KEY (chat_id, chat_type)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE preserved_messages (
+                msg_id INTEGER PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                chat_type TEXT NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                sender TEXT NOT NULL,
+                from_me INTEGER NOT NULL,
+                text_body TEXT,
+                media_type TEXT DEFAULT 'text',
+                media_name TEXT,
+                is_view_once INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute(
+            "INSERT INTO preserved_chats (chat_id, chat_type, newest_ts, subject, description) "
+            "VALUES ('grp_pres_1', 'group', 1700000000000, 'Preserved Group', 'Preserved group description')"
+        )
+        conn.execute(
+            "INSERT INTO preserved_chats (chat_id, chat_type, newest_ts, subject, description) "
+            "VALUES ('123456789', 'contact', 1700000001000, NULL, NULL)"
+        )
+        conn.execute(
+            "INSERT INTO preserved_messages (msg_id, chat_id, chat_type, timestamp_ms, sender, from_me, text_body) "
+            "VALUES (1, 'grp_pres_1', 'group', 1700000000000, 'user', 0, 'Preserved msg')"
+        )
+        conn.execute(
+            "INSERT INTO preserved_messages (msg_id, chat_id, chat_type, timestamp_ms, sender, from_me, text_body) "
+            "VALUES (2, '123456789', 'contact', 1700000001000, 'user', 0, 'Preserved 1:1 msg')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Archive DB
+        arch_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arch_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            chat_map = {c["id"]: c for c in chats}
+
+            g = chat_map["grp_pres_1"]
+            assert g["type"] == "group"
+            assert g["is_preserved_only"] is True
+            assert g["description"] == "Preserved group description"
+
+            c = chat_map["123456789"]
+            assert c["type"] == "contact"
+            assert c["is_preserved_only"] is True
+            assert c["description"] is None

@@ -63,11 +63,15 @@
   }
 
   async function doSearch(q) {
-    // Contact name matches — client-side, instant
+    // Chat and contact matches — client-side, instant
     const ql = q.toLowerCase();
-    const contactMatches = allChats.filter(c =>
-      c.display_name.toLowerCase().includes(ql) || c.id.toLowerCase().includes(ql)
-    );
+    const chatMatches = allChats.filter(c => {
+      if (c.display_name && c.display_name.toLowerCase().includes(ql)) return true;
+      if (c.id && c.id.toLowerCase().includes(ql)) return true;
+      if (c.phone_number && c.phone_number.toLowerCase().includes(ql)) return true;
+      if (c.description && c.description.toLowerCase().includes(ql)) return true;
+      return false;
+    });
 
     // Show loading state while FTS fetch is in flight
     const container = document.getElementById('search-results');
@@ -78,7 +82,7 @@
     const res = await fetch('/api/search?' + new URLSearchParams({ q }));
     const data = await res.json();
 
-    renderSearchResults(q, contactMatches, data.results, data.indexed_count);
+    renderSearchResults(q, chatMatches, data.results, data.indexed_count);
   }
 
   function clearSearchResults() {
@@ -93,10 +97,24 @@
     return el;
   }
 
-  function makeContactResultItem(chat, q) {
+  function makeChatResultItem(chat, q) {
     const el = document.createElement('div');
     el.className = 'search-result-item';
-    el.innerHTML = `<div class="sr-chat">${highlight(chat.display_name, q)}</div><div class="sr-text">${esc(chat.id)}</div>`;
+
+    let subHtml = '';
+    if (chat.type === 'group') {
+      const desc = (chat.description || '').trim();
+      subHtml = desc ? highlight(desc.replace(/\s+/g, ' '), q) : 'Group chat';
+    } else {
+      const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
+      subHtml = formattedPhone ? highlight(formattedPhone, q) : '';
+    }
+
+    const tagHtml = chat.is_preserved_only
+      ? ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
+      : '';
+
+    el.innerHTML = `<div class="sr-chat">${highlight(chat.display_name, q)}${tagHtml}</div><div class="sr-text">${subHtml}</div>`;
     el.addEventListener('click', () => {
       document.getElementById('search-input').value = '';
       clearSearchResults();
@@ -106,6 +124,7 @@
     });
     return el;
   }
+  const makeContactResultItem = makeChatResultItem;
 
   function makeTextResultItem(r, q) {
     const el = document.createElement('div');
@@ -142,18 +161,18 @@
     return el;
   }
 
-  function renderSearchResults(q, contactMatches, textResults, indexedCount) {
+  function renderSearchResults(q, chatMatches, textResults, indexedCount) {
     const container = document.getElementById('search-results');
-    if (!contactMatches.length && !textResults.length) {
+    if (!chatMatches.length && !textResults.length) {
       clearSearchResults();
       return;
     }
     container.classList.add('has-results');
     container.innerHTML = '';
 
-    if (contactMatches.length) {
-      container.appendChild(makeSectionLabel('Contacts'));
-      contactMatches.forEach(chat => container.appendChild(makeContactResultItem(chat, q)));
+    if (chatMatches.length) {
+      container.appendChild(makeSectionLabel('Chats'));
+      chatMatches.forEach(chat => container.appendChild(makeChatResultItem(chat, q)));
     }
 
     if (textResults.length) {
