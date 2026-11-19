@@ -24,12 +24,18 @@ function renderGalleryItem(msg) {
 
     if (!msg.archive_path && mt !== 'link' && mt !== 'vcard') {
       if (msg.has_thumbnail && msg.msg_id) {
-        cell.classList.add('is-missing', 'has-thumb');
+        cell.classList.add('is-missing', 'has-thumb', 'is-loading-thumb');
         cell.dataset.hydrated = 'true';
         const img = document.createElement('img');
         img.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
         img.alt = (mt === 'video' ? 'Video' : 'Photo');
         img.className = 'gallery-thumb';
+        img.addEventListener('load', () => {
+          cell.classList.remove('is-loading-thumb');
+        });
+        img.addEventListener('error', () => {
+          cell.classList.remove('is-loading-thumb');
+        });
         cell.appendChild(img);
 
         const warnBadge = document.createElement('div');
@@ -67,6 +73,7 @@ function renderGalleryItem(msg) {
     if (mt === 'image' || mt === 'sticker') {
       cell.dataset.src = src;
       cell.dataset.hydrated = 'false';
+      cell.classList.add('is-loading-thumb');
       const img = document.createElement('img');
       img.src = EMPTY_GALLERY_PIX;
       img.alt = (mt === 'sticker' ? 'Sticker' : 'Photo');
@@ -74,7 +81,13 @@ function renderGalleryItem(msg) {
       const idx = lightboxItems.length;
       lightboxItems.push(msg);
       img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx, 0); });
+      img.addEventListener('load', () => {
+        if (img.src && !img.src.startsWith('data:image/svg')) {
+          cell.classList.remove('is-loading-thumb');
+        }
+      });
       img.addEventListener('error', () => {
+        cell.classList.remove('is-loading-thumb');
         buildMissingGalleryCard(cell, msg);
       }, { once: true });
       cell.appendChild(img);
@@ -83,7 +96,8 @@ function renderGalleryItem(msg) {
       cell.dataset.archivePath = msg.archive_path;
       if (msg.has_thumbnail && msg.msg_id) {
         cell.dataset.thumbSrc = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
-      } else if (!videoThumbCache.has(msg.archive_path)) {
+      }
+      if (!videoThumbCache.has(msg.archive_path)) {
         cell.classList.add('is-loading-thumb');
       }
       cell.dataset.hydrated = 'false';
@@ -95,9 +109,16 @@ function renderGalleryItem(msg) {
       lightboxItems.push(msg);
       img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx, 0); });
       img.addEventListener('error', () => {
-        cell.classList.remove('is-loading-thumb');
-        img.classList.add('gallery-video-thumb--err');
-      }, { once: true });
+        if (cell.dataset.thumbSrc) {
+          delete cell.dataset.thumbSrc;
+          if (cell.isConnected && cell.dataset.hydrated === 'true') {
+            enqueueVideoThumbnail(cell, img, cell.dataset.src, msg.archive_path, msg);
+          }
+        } else {
+          cell.classList.remove('is-loading-thumb');
+          img.classList.add('gallery-video-thumb--err');
+        }
+      });
       img.addEventListener('load', () => {
         if (img.src && !img.src.startsWith('data:image/svg')) {
           cell.classList.remove('is-loading-thumb');

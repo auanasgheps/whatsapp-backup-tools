@@ -46,6 +46,10 @@ function clearVideoProbeQueue() {
     let settled = false;
 
     const safetyTimeout = setTimeout(() => {
+      if (task.cell && task.cell.isConnected) {
+        task.cell.classList.remove('is-loading-thumb');
+        if (task.img) task.img.classList.add('gallery-video-thumb--err');
+      }
       finish();
     }, 6000);
 
@@ -119,7 +123,8 @@ function clearVideoProbeQueue() {
       const archivePath = cell.dataset.archivePath;
       if (cell.dataset.thumbSrc) {
         img.src = cell.dataset.thumbSrc;
-        cell.classList.remove('is-loading-thumb');
+        // Do not remove 'is-loading-thumb' here; img.onload removes it once bytes arrive,
+        // or img.onerror triggers fallback video frame probe.
       } else if (videoThumbCache.has(archivePath)) {
         img.src = videoThumbCache.get(archivePath);
         cell.classList.remove('is-loading-thumb');
