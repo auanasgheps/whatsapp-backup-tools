@@ -7,7 +7,7 @@
     async function poll() {
       if (gen !== _bulkIndexPollGen) return;
       try {
-        const r = await fetch('/api/index/progress');
+        const r = await fetch(API + '/index/progress');
         const d = await r.json();
         if (gen !== _bulkIndexPollGen) return;
         const pct = d.total_msgs > 0 ? Math.round(d.indexed_msgs / d.total_msgs * 100) : 0;
@@ -36,7 +36,7 @@
     if (sBody) sBody.scrollTop = 0;
     document.getElementById('settings-modal').classList.add('open');
     try {
-      const r = await fetch('/api/index/progress');
+      const r = await fetch(API + '/index/progress');
       const d = await r.json();
       if (d.running) {
         document.getElementById('index-all-btn').disabled = true;
@@ -55,7 +55,7 @@
     btn.addEventListener('click', () => {
       prefs[btn.dataset.pref] = btn.dataset.value;
       applyPrefs();
-      fetch('/api/preferences', {
+      fetch(API + '/preferences', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: btn.dataset.pref, value: btn.dataset.value })
@@ -66,7 +66,7 @@
   document.getElementById('index-all-btn').addEventListener('click', async () => {
     let sizeBytes = 0;
     try {
-      const r = await fetch('/api/index/source-size');
+      const r = await fetch(API + '/index/source-size');
       const d = await r.json();
       sizeBytes = d.bytes || 0;
     } catch (_) {}
@@ -77,7 +77,7 @@
     }
     if (!confirm('Index all chats for search? This will run in the background while you use the viewer.')) return;
 
-    const res = await fetch('/api/index/all', { method: 'POST' });
+    const res = await fetch(API + '/index/all', { method: 'POST' });
     const data = await res.json();
     if (data.error) { alert(data.error); return; }
 
@@ -91,7 +91,7 @@
   document.getElementById('clear-index-btn').addEventListener('click', async () => {
     if (!confirm('Clear the search index? Indexed data will be deleted. Chats will be re-indexed when you open them.')) return;
     const btn = document.getElementById('clear-index-btn');
-    await fetch('/api/index/clear', { method: 'POST' });
+    await fetch(API + '/index/clear', { method: 'POST' });
     const orig = btn.textContent;
     btn.textContent = 'Cleared.';
     setTimeout(() => { btn.textContent = orig; }, 2000);
@@ -111,7 +111,7 @@
         statusEl.style.display = 'block';
       }
       try {
-        const res = await fetch('/api/index/optimize', { method: 'POST' });
+        const res = await fetch(API + '/index/optimize', { method: 'POST' });
         const data = await res.json();
         if (data.error) {
           if (statusEl) {

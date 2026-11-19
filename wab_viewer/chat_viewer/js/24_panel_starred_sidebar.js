@@ -31,7 +31,7 @@
       });
       if (q) params.set('q', q);
 
-      const res = await fetch(`/api/starred?${params}`);
+      const res = await fetch(`${API}/starred?${params}`);
       if (!res.ok) {
         throw new Error(`Server returned HTTP ${res.status} when fetching starred messages`);
       }

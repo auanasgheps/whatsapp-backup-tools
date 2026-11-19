@@ -12,7 +12,7 @@ function renderMedia(msg) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-media';
     const path = msg.archive_path;
-    const src = '/media/' + path;
+    const src = MEDIA + path;
     const mt = msg.media_type;
 
     const ratio = _extractMsgAspectRatio(msg);
@@ -76,7 +76,7 @@ function renderMedia(msg) {
           if (!liveVid) {
             liveVid = document.createElement('video');
             liveVid.className = 'live-photo-video';
-            liveVid.src = '/media/' + msg.live_photo_path;
+            liveVid.src = MEDIA + msg.live_photo_path;
             liveVid.muted = true;
             liveVid.loop = true;
             liveVid.playsInline = true;
@@ -299,7 +299,7 @@ function renderMedia(msg) {
       img.className = 'location-map-thumb';
       img.loading = 'lazy';
       img.alt = msg.location_name || (isLive ? 'Live Location' : 'Location map');
-      img.src = '/api/thumbnail/' + msg.msg_id;
+      img.src = API + '/thumbnail/' + msg.msg_id;
       img.addEventListener('error', fallbackVector, { once: true });
       mapHeader.appendChild(img);
     } else {

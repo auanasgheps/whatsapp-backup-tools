@@ -194,7 +194,7 @@
                  '&chat_type=' + encodeURIComponent(currentChat.type) +
                  '&limit=30' + beforeParam;
       const signal = gallerySessionAbortController ? gallerySessionAbortController.signal : undefined;
-      const res = await fetch('/api/media/links?' + qs, { signal });
+      const res = await fetch(API + '/media/links?' + qs, { signal });
       if (!res.ok) throw new Error('Failed to fetch more links');
       const items = await res.json();
       if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
@@ -297,7 +297,7 @@
     const grid = document.getElementById('media-gallery-grid');
     if (!grid || !currentChat) return;
     try {
-      const url = '/api/media?chat_id=' + encodeURIComponent(currentChat.id) +
+      const url = API + '/media?chat_id=' + encodeURIComponent(currentChat.id) +
                   '&chat_type=' + encodeURIComponent(currentChat.type) +
                   '&types=' + encodeURIComponent(type);
       const res = await fetch(url);

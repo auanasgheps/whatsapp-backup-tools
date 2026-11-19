@@ -79,7 +79,7 @@
     container.innerHTML = '<div class="sr-section-label">Searching…</div>';
 
     // Full-text search across indexed chats
-    const res = await fetch('/api/search?' + new URLSearchParams({ q }));
+    const res = await fetch(API + '/search?' + new URLSearchParams({ q }));
     const data = await res.json();
 
     renderSearchResults(q, chatMatches, data.results, data.indexed_count);
@@ -231,7 +231,7 @@
     if (!currentChat) return;
     const nav = document.getElementById('chat-search-nav');
     const count = document.getElementById('chat-search-count');
-    const statusRes = await fetch('/api/chat-index-status?chat_id=' +
+    const statusRes = await fetch(API + '/chat-index-status?chat_id=' +
       encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type));
     const statusData = await statusRes.json();
     if (statusData.status !== 'done') {
@@ -246,7 +246,7 @@
     document.getElementById('search-prev').disabled = true;
     document.getElementById('search-next').disabled = true;
     const params = new URLSearchParams({ q, chat_id: currentChat.id, chat_type: currentChat.type });
-    const res = await fetch('/api/search?' + params);
+    const res = await fetch(API + '/search?' + params);
     const data = await res.json();
     chatSearchResults = data.results;
     chatSearchIdx = chatSearchResults.length > 0 ? 0 : -1;

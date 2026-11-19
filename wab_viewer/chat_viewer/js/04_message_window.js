@@ -45,7 +45,7 @@
     showSpinner(direction === 'older' ? 'top' : 'bottom');
 
     try {
-      let res = await fetch('/api/messages?' + params);
+      let res = await fetch(API + '/messages?' + params);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       }
@@ -59,7 +59,7 @@
       if (addedCount === 0 && msgs.length >= 50 && params.has('inclusive')) {
         // More than one page shares the boundary timestamp; fall back to strict < / >.
         params.delete('inclusive');
-        res = await fetch('/api/messages?' + params);
+        res = await fetch(API + '/messages?' + params);
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}: ${res.statusText}`);
         }

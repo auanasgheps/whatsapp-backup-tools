@@ -27,7 +27,7 @@ function renderGalleryItem(msg) {
         cell.classList.add('is-missing', 'has-thumb', 'is-loading-thumb');
         cell.dataset.hydrated = 'true';
         const img = document.createElement('img');
-        img.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+        img.src = API + '/thumbnail/' + encodeURIComponent(msg.msg_id);
         img.alt = (mt === 'video' ? 'Video' : 'Photo');
         img.className = 'gallery-thumb';
         img.addEventListener('load', () => {
@@ -68,7 +68,7 @@ function renderGalleryItem(msg) {
       return cell;
     }
 
-    const src = '/media/' + msg.archive_path;
+    const src = MEDIA + msg.archive_path;
 
     if (mt === 'image' || mt === 'sticker') {
       cell.dataset.src = src;
@@ -95,7 +95,7 @@ function renderGalleryItem(msg) {
       cell.dataset.src = src;
       cell.dataset.archivePath = msg.archive_path;
       if (msg.has_thumbnail && msg.msg_id) {
-        cell.dataset.thumbSrc = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+        cell.dataset.thumbSrc = API + '/thumbnail/' + encodeURIComponent(msg.msg_id);
       }
       if (!videoThumbCache.has(msg.archive_path)) {
         cell.classList.add('is-loading-thumb');
@@ -237,7 +237,7 @@ function renderGalleryItem(msg) {
       mediaBox.className = 'gallery-rich-link-media';
 
       if (msg.has_thumbnail && msg.msg_id) {
-        cell.dataset.src = '/api/thumbnail/' + msg.msg_id;
+        cell.dataset.src = API + '/thumbnail/' + msg.msg_id;
         cell.dataset.hydrated = 'false';
         const img = document.createElement('img');
         img.className = 'gallery-thumb gallery-rich-link-thumb';

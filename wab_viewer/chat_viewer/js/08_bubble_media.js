@@ -7,7 +7,7 @@ function renderGif(msg) {
     const ratio = _extractMsgAspectRatio(msg);
     _applyMediaOrientationBox(wrap, ratio);
 
-    const src = '/media/' + msg.archive_path;
+    const src = MEDIA + msg.archive_path;
     const isImageGif = (msg.archive_path || '').toLowerCase().endsWith('.gif');
     if (isImageGif) {
       const img = document.createElement('img');
