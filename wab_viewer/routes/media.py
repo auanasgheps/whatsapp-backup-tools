@@ -6,6 +6,7 @@ import base64
 import contextlib
 import json
 import mimetypes
+import os
 import sqlite3
 from pathlib import Path
 
@@ -589,9 +590,13 @@ def api_media_count():
 @bp.route("/media/<path:p>")
 def serve_media(p):
     ctx = get_viewer_context()
+    # The containment check is lexical: "..", absolute paths and anything else that leaves the
+    # archive root is rejected, but symlinks inside the archive are followed. Users may keep
+    # Contacts/ or Groups/ on another disk and link them into the archive; resolving the path
+    # first would turn every one of those files into a 403.
     try:
-        safe = (ctx.output_root / p).resolve()
         root = ctx.output_root.resolve()
+        safe = Path(os.path.normpath(root / p))
         safe.relative_to(root)
     except (OSError, ValueError):
         return "Forbidden", 403
