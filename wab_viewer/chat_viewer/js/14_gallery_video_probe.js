@@ -12,6 +12,7 @@ function clearVideoProbeQueue() {
   function enqueueVideoThumbnail(cell, img, src, archivePath, msg) {
     if (videoThumbCache.has(archivePath)) {
       img.src = videoThumbCache.get(archivePath);
+      cell.classList.remove('is-loading-thumb');
       return;
     }
     if (videoProbeQueue.some(item => item.cell === cell)) {
@@ -29,6 +30,7 @@ function clearVideoProbeQueue() {
       }
       if (videoThumbCache.has(next.archivePath)) {
         next.img.src = videoThumbCache.get(next.archivePath);
+        next.cell.classList.remove('is-loading-thumb');
         continue;
       }
       activeVideoProbes++;
@@ -67,10 +69,12 @@ function clearVideoProbeQueue() {
         videoThumbCache.set(task.archivePath, dataUrl);
         if (task.cell.isConnected && task.cell.dataset.hydrated === 'true') {
           task.img.src = dataUrl;
+          task.cell.classList.remove('is-loading-thumb');
           task.img.classList.remove('gallery-video-thumb--err');
         }
       } catch {
         if (task.cell.isConnected) {
+          task.cell.classList.remove('is-loading-thumb');
           task.img.classList.add('gallery-video-thumb--err');
         }
       } finally {
@@ -85,6 +89,7 @@ function clearVideoProbeQueue() {
     vid.addEventListener('error', () => {
       try {
         if (task.cell.isConnected) {
+          task.cell.classList.remove('is-loading-thumb');
           task.img.classList.add('gallery-video-thumb--err');
         }
       } finally {
@@ -114,9 +119,12 @@ function clearVideoProbeQueue() {
       const archivePath = cell.dataset.archivePath;
       if (cell.dataset.thumbSrc) {
         img.src = cell.dataset.thumbSrc;
+        cell.classList.remove('is-loading-thumb');
       } else if (videoThumbCache.has(archivePath)) {
         img.src = videoThumbCache.get(archivePath);
+        cell.classList.remove('is-loading-thumb');
       } else {
+        cell.classList.add('is-loading-thumb');
         scheduleVisibleVideoExtraction();
       }
     } else if (mt === 'link') {

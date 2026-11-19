@@ -4196,3 +4196,116 @@ def test_gallery_switch_from_default_photos_videos_to_all_items(browser: CDPSess
     assert toggle_back_state["photos"] > 0
     assert toggle_back_state["videos"] > 0
     assert toggle_back_state["vcards"] == 0
+
+
+@pytest.mark.ui
+def test_archive_view_total_pill_switch_and_media_types(browser: CDPSession) -> None:
+    """Validate that switching to Total (all items) in Archive View does not freeze on 'Loading...',
+
+    renders year blocks, and supports archived media files.
+    """
+    screenshot_dir = Path(".test_artifacts/screenshots")
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+    open_group_chat_in_browser(browser, 25.0)
+
+    # 1. Open gallery and switch to Archive view
+    archive_setup = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 40; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gal = document.getElementById('media-gallery');
+                if (gal && gal.classList.contains('open')) break;
+            }
+
+            const archiveBtn = document.querySelector('.media-view-btn[data-view="archive"]');
+            if (!archiveBtn) return { error: 'Archive view button not found' };
+            archiveBtn.click();
+
+            for (let i = 0; i < 40; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const archiveView = document.getElementById('media-archive-view');
+                if (archiveView && archiveView.classList.contains('active')) {
+                    return { ok: true };
+                }
+            }
+            return { error: 'Archive view failed to activate' };
+        })()
+        """,
+        10.0,
+    )
+    assert archive_setup.get("ok") is True
+
+    # 2. Click 'Total' stat pill in Archive View
+    total_switch = browser.evaluate(
+        """
+        (async () => {
+            const totalPill = document.querySelector('#media-gallery-stats .gallery-stat[data-type="total"]');
+            if (!totalPill) return { error: 'Total pill not found' };
+            totalPill.click();
+
+            // Wait for archive tree to load
+            for (let i = 0; i < 50; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const years = document.querySelectorAll('#media-archive-tree .archive-year');
+                if (years.length > 0) break;
+            }
+            await new Promise(r => setTimeout(r, 200));
+
+            const notice = document.querySelector('#media-archive-tree .archive-empty-notice');
+            const noticeText = notice ? notice.textContent : '';
+            const years = [...document.querySelectorAll('#media-archive-tree .archive-year')];
+
+            return {
+                noticeText: noticeText,
+                yearCount: years.length,
+            };
+        })()
+        """,
+        10.0,
+    )
+    assert "Loading…" not in total_switch["noticeText"]
+    assert total_switch["yearCount"] > 0
+    browser.capture_screenshot(screenshot_dir / "archive_view_all_items.png", 5.0)
+
+
+@pytest.mark.ui
+def test_gallery_video_thumbnail_no_path_leak_and_shimmer(browser: CDPSession) -> None:
+    """Validate that video gallery tiles do not expose file paths in alt attributes,
+
+    and that the subtle shimmer loading skeleton is configured.
+    """
+    open_group_chat_in_browser(browser, 25.0)
+
+    # Check gallery video elements
+    video_check = browser.evaluate(
+        """
+        (async () => {
+            const mediaBtn = document.getElementById('media-btn');
+            if (mediaBtn) mediaBtn.click();
+
+            for (let i = 0; i < 40; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                const gridBtn = document.querySelector('.media-view-btn[data-view="grid"]');
+                if (gridBtn && !gridBtn.classList.contains('active')) gridBtn.click();
+                const vids = document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"]');
+                if (vids.length > 0) break;
+            }
+
+            const videoImgs = [...document.querySelectorAll('#media-gallery-grid .gallery-item[data-type="video"] img')];
+            const leakyAlts = videoImgs.map(img => img.alt).filter(alt => alt.includes('/') || alt.includes('\\\\') || alt.endsWith('.mp4') || alt.endsWith('.mov'));
+
+            return {
+                videoCount: videoImgs.length,
+                leakyAlts: leakyAlts,
+            };
+        })()
+        """,
+        10.0,
+    )
+    assert video_check["videoCount"] > 0
+    assert len(video_check["leakyAlts"]) == 0

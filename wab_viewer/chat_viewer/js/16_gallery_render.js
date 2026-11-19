@@ -28,7 +28,7 @@ function renderGalleryItem(msg) {
         cell.dataset.hydrated = 'true';
         const img = document.createElement('img');
         img.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
-        img.alt = cleanName || (mt === 'video' ? 'Video' : 'Photo');
+        img.alt = (mt === 'video' ? 'Video' : 'Photo');
         img.className = 'gallery-thumb';
         cell.appendChild(img);
 
@@ -69,7 +69,7 @@ function renderGalleryItem(msg) {
       cell.dataset.hydrated = 'false';
       const img = document.createElement('img');
       img.src = EMPTY_GALLERY_PIX;
-      img.alt = cleanName || 'Photo';
+      img.alt = (mt === 'sticker' ? 'Sticker' : 'Photo');
       img.className = 'gallery-thumb';
       const idx = lightboxItems.length;
       lightboxItems.push(msg);
@@ -83,18 +83,26 @@ function renderGalleryItem(msg) {
       cell.dataset.archivePath = msg.archive_path;
       if (msg.has_thumbnail && msg.msg_id) {
         cell.dataset.thumbSrc = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+      } else if (!videoThumbCache.has(msg.archive_path)) {
+        cell.classList.add('is-loading-thumb');
       }
       cell.dataset.hydrated = 'false';
       const img = document.createElement('img');
       img.src = EMPTY_GALLERY_PIX;
-      img.alt = cleanName || (mt === 'gif' ? 'GIF' : 'Video');
+      img.alt = (mt === 'gif' ? 'GIF' : 'Video');
       img.className = 'gallery-thumb gallery-video-thumb';
       const idx = lightboxItems.length;
       lightboxItems.push(msg);
       img.addEventListener('click', () => { lightboxContext = 'gallery'; lightboxIndex = idx; openLightboxAt(idx, 0); });
       img.addEventListener('error', () => {
+        cell.classList.remove('is-loading-thumb');
         img.classList.add('gallery-video-thumb--err');
       }, { once: true });
+      img.addEventListener('load', () => {
+        if (img.src && !img.src.startsWith('data:image/svg')) {
+          cell.classList.remove('is-loading-thumb');
+        }
+      });
       cell.appendChild(img);
     } else if (mt === 'audio') {
       cell.classList.add('gallery-audio-item');

@@ -3,7 +3,10 @@ async function _loadAllArchivePages() {
     archiveLoadingAll = true;
     let consecutiveErrors = 0;
     try {
-      while (archiveViewActive && !galleryAllLoaded && consecutiveErrors < 3) {
+      while (archiveViewActive && consecutiveErrors < 3) {
+        const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
+        const isDone = (activeTypes.size === 0 && galleryAllLoaded) || typesAllLoaded.has(typesKey);
+        if (isDone) break;
         if (galleryLoadingMore) {
           await new Promise(r => setTimeout(r, 40));
           continue;
@@ -15,7 +18,8 @@ async function _loadAllArchivePages() {
         }
         const countBefore = currentGalleryItems.length;
         await _loadGalleryPage(oldest);
-        if (currentGalleryItems.length === countBefore && !galleryAllLoaded) {
+        const checkDone = (activeTypes.size === 0 && galleryAllLoaded) || typesAllLoaded.has(typesKey);
+        if (currentGalleryItems.length === countBefore && !checkDone) {
           consecutiveErrors++;
         } else {
           consecutiveErrors = 0;
@@ -24,6 +28,14 @@ async function _loadAllArchivePages() {
       }
     } finally {
       archiveLoadingAll = false;
+      const tree = document.getElementById('media-archive-tree');
+      if (tree && !tree.querySelector('.archive-year')) {
+        const filtered = currentGalleryItems.filter(m => m.archive_path &&
+          (activeArchiveDir() === null || archiveSegments(m.archive_path).direction === activeArchiveDir()));
+        if (!filtered.length) {
+          tree.innerHTML = '<div class="archive-empty-notice" style="color:var(--text-muted);padding:16px">No media in this chat.</div>';
+        }
+      }
     }
   }
 
