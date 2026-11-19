@@ -4,7 +4,6 @@ from pathlib import Path
 
 _CHAT_VIEWER_DIR = Path(__file__).resolve().parent
 _JS_DIR = _CHAT_VIEWER_DIR / "js"
-_OUTPUT_BUNDLE = _CHAT_VIEWER_DIR / "app.js"
 
 MODULE_ORDER = [
     "00_state.js",
@@ -40,13 +39,14 @@ MODULE_ORDER = [
     "30_bootstrap.js",
 ]
 
+_CACHED_BUNDLE: str | None = None
+
 
 def assemble_app_js() -> str:
     """Concatenate modular JS files in exact order within the top-level IIFE."""
     parts = [
         "// WhatsApp Backup Tools - Web Viewer Application Bundle\n",
-        "// DO NOT EDIT DIRECTLY. This file is generated from wab_viewer/chat_viewer/js/*.js.\n",
-        "// Run 'python -m wab_viewer.chat_viewer.builder' to rebuild.\n\n",
+        "// Assembled in-memory from wab_viewer/chat_viewer/js/*.js.\n\n",
         "(function () {\n  'use strict';\n\n",
     ]
     for mod_name in MODULE_ORDER:
@@ -67,13 +67,9 @@ def assemble_app_js() -> str:
     return "".join(parts)
 
 
-def build_bundle() -> Path:
-    """Build and write the assembled app.js bundle to disk."""
-    bundle_code = assemble_app_js()
-    _OUTPUT_BUNDLE.write_text(bundle_code, encoding="utf-8")
-    return _OUTPUT_BUNDLE
-
-
-if __name__ == "__main__":
-    out = build_bundle()
-    print(f"Successfully assembled {len(MODULE_ORDER)} modules into {out}")
+def get_bundle_content(debug: bool) -> str:
+    """Return the assembled JavaScript bundle, caching in memory when not in debug mode."""
+    global _CACHED_BUNDLE
+    if debug or _CACHED_BUNDLE is None:
+        _CACHED_BUNDLE = assemble_app_js()
+    return _CACHED_BUNDLE

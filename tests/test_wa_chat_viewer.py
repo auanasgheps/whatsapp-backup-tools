@@ -35,6 +35,12 @@ from wab_viewer.chat_viewer.template import HTML_TEMPLATE as VIEWER_HTML_TEMPLAT
 from wab_viewer.queries import sql_builder as viewer_sql_builder
 
 
+def _get_app_js() -> str:
+    from wab_viewer.chat_viewer import builder
+
+    return builder.assemble_app_js()
+
+
 def make_cache_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.executescript(viewer_db_cache.CACHE_SCHEMA)
@@ -2030,8 +2036,7 @@ class TestApiMedia:
         """Gallery missing media cards must use the warning badge, yellow icon, and blurred DB thumbnail."""
         css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
         css = css_path.read_text(encoding="utf-8")
-        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        js = app_js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
 
         assert ".gallery-item.is-missing" in css
         assert ".gallery-missing-badge" in css
@@ -2048,8 +2053,7 @@ class TestApiMedia:
         """Video notes (PTV) must enforce 1:1 circular round preview in gallery and lightbox."""
         css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
         css = css_path.read_text(encoding="utf-8")
-        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        js = app_js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
 
         assert ".gallery-item.is-video-note" in css
         assert "border-radius: 50%" in css
@@ -2063,8 +2067,7 @@ class TestApiMedia:
         """Chat view and media grid must dynamically fallback to renderMissingMedia on error."""
         css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
         css = css_path.read_text(encoding="utf-8")
-        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        js = app_js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
 
         assert ".media-grid-cell .media-missing-card" in css
         assert ".media-grid-cell .media-missing-badge" in css
@@ -2884,16 +2887,14 @@ class TestIOSReactions:
 
 
 class TestHtmlTemplate:
-    def test_app_js_bundle_is_in_sync_with_modules(self):
-        """Guarantee that app.js on disk is 100% in sync with wab_viewer/chat_viewer/js/*.js."""
+    def test_app_js_bundle_assembles_cleanly(self):
+        """Guarantee that builder.assemble_app_js() cleanly concatenates all 31 modules."""
         from wab_viewer.chat_viewer import builder
 
-        expected = builder.assemble_app_js()
-        actual = (builder._OUTPUT_BUNDLE).read_text(encoding="utf-8")
-        assert actual == expected, (
-            "app.js is out of sync with modular sources in wab_viewer/chat_viewer/js/. "
-            "Run 'python -m wab_viewer.chat_viewer.builder' to synchronize."
-        )
+        js = builder.assemble_app_js()
+        assert js.startswith("// WhatsApp Backup Tools - Web Viewer Application Bundle")
+        assert js.strip().endswith("})();")
+        assert len(js) > 300000
 
     def test_all_getElementById_targets_exist_before_script(self):
         """Every getElementById('id') in app.js must refer to an element defined
@@ -2904,8 +2905,7 @@ class TestHtmlTemplate:
         script_start = template.index("<script>")
         html_before_script = template[:script_start]
 
-        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        script_body = app_js_path.read_text(encoding="utf-8")
+        script_body = _get_app_js()
 
         ids_in_html = set(re.findall(r'\bid=["\']([^"\']+)["\']', html_before_script))
         ids_accessed = set(re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)", script_body))
@@ -2920,8 +2920,7 @@ class TestHtmlTemplate:
     def test_load_gallery_page_does_not_push_lightbox_items(self):
         """renderGalleryItem owns lightboxItems.push — _loadGalleryPage must not do it
         too or every item ends up double-counted, breaking lightbox indices."""
-        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        script = app_js_path.read_text(encoding="utf-8")
+        script = _get_app_js()
 
         # isolate the _loadGalleryPage function body
         fn_start = script.index("async function _loadGalleryPage(")
@@ -2974,8 +2973,7 @@ class TestHtmlTemplate:
 
     def test_lightbox_wheel_zoom_implemented(self):
         """app.js must provide lightbox wheel-to-zoom and pan functionality."""
-        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        script = app_js_path.read_text(encoding="utf-8")
+        script = _get_app_js()
 
         assert "_setupLightboxZoom" in script, "_setupLightboxZoom helper must be present in app.js"
         assert "lb.addEventListener('wheel'" in script, "Lightbox wheel listener must be registered"
@@ -2984,8 +2982,7 @@ class TestHtmlTemplate:
 
     def test_lightbox_smooth_transition_implemented(self):
         """Lightbox must provide persistent stage transitions, directional motion, and preloading."""
-        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        script = app_js_path.read_text(encoding="utf-8")
+        script = _get_app_js()
         css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
         css = css_path.read_text(encoding="utf-8")
 
@@ -3002,8 +2999,7 @@ class TestHtmlTemplate:
 
     def test_lightbox_transition_safety_and_missing_skip(self):
         """Lightbox transition coordinator must cancel fallback timer and skip missing media."""
-        app_js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        script = app_js_path.read_text(encoding="utf-8")
+        script = _get_app_js()
 
         assert "clearTimeout(finalizeTimer)" in script, (
             "Finalize timer must be cleared on transitionend to prevent duplicate execution"
@@ -3043,20 +3039,17 @@ class TestReactionsFrontendLayout:
 
     def test_reactions_js_no_split_logic(self):
         """app.js must not split reactions into rx-badge-2."""
-        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        js = js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
         assert "rx-badge-2" not in js, "Obsolete rx-badge-2 logic still found in app.js"
 
     def test_reactions_js_marks_has_reactions(self):
         """app.js must add 'has-reactions' class to message rows with reactions."""
-        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        js = js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
         assert "has-reactions" in js
 
     def test_gallery_month_headers_synced_on_open_and_load(self):
         """openMediaGallery and _loadGalleryPage must synchronize month headers."""
-        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        js = js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
         assert "_syncMonthHeaders();\n    _syncGalleryNotices();\n  }" in js
         assert (
             "_appendToArchiveView(items, activeArchiveDir());\n      }\n      _syncMonthHeaders();"
@@ -3066,8 +3059,7 @@ class TestReactionsFrontendLayout:
     def test_gallery_month_headers_chronological_insertion(self):
         """Gallery grid items and month headers must be inserted in strictly descending
         chronological order without stale global month state."""
-        js_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.js"
-        js = js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
         assert "function _insertGalleryGridItem(grid, msg)" in js
         assert "galleryLastMonthKey" not in js, (
             "Stale galleryLastMonthKey state must not exist in app.js"
@@ -8167,9 +8159,8 @@ class TestEditedMessages:
             assert msgs[0]["edited_ts"] == 1700000005000
 
     def test_frontend_assets_include_msg_edited(self):
-        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        js_content = _get_app_js()
         css_path = Path(viewer.__file__).parent / "chat_viewer" / "app.css"
-        js_content = js_path.read_text(encoding="utf-8")
         css_content = css_path.read_text(encoding="utf-8")
         assert "msg-edited" in js_content
         assert "msg-edited" in css_content
@@ -8334,8 +8325,7 @@ class TestStickerSupport:
     def test_sticker_deselected_from_default_media_view_frontend(self):
         """Stickers, links, and documents must be in DEFAULT_DESELECTED_TYPES in app.js
         so stickers are deselected by default when opening the media gallery."""
-        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
-        js = js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
         assert "DEFAULT_DESELECTED_TYPES" in js
         match = re.search(r"DEFAULT_DESELECTED_TYPES\s*=\s*new\s+Set\(\[([^\]]+)\]\)", js)
         assert match, "DEFAULT_DESELECTED_TYPES Set definition missing in app.js"
@@ -8352,8 +8342,7 @@ class TestStickerSupport:
 
     def test_gallery_pills_allow_images_and_videos_selected_together(self):
         """app.js must allow images and videos to be selected together via gallery stat pills."""
-        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
-        js = js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
         assert "PRIMARY_MEDIA_TYPES" in js
         match = re.search(r"PRIMARY_MEDIA_TYPES\s*=\s*new\s+Set\(\[([^\]]+)\]\)", js)
         assert match, "PRIMARY_MEDIA_TYPES Set definition missing in app.js"
@@ -8369,8 +8358,7 @@ class TestStickerSupport:
     def test_gallery_default_stat_pills_selection_state(self):
         """app.js must visually mark active media types (image + video) as active,
         not the total pill, so the visual focus matches the default selection."""
-        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
-        js = js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
         assert "pill.classList.toggle('active', isShowAll)" in js
         assert "pill.classList.toggle('active', activeTypes.has(t))" in js
         assert "pill.classList.toggle('dimmed', !activeTypes.has(t))" in js
@@ -8382,8 +8370,7 @@ class TestStickerSupport:
         when clicking the Total stat pill, ensuring non-photo/non-video items are loaded for
         the existing window rather than leaving temporal holes.
         """
-        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
-        js = js_path.read_text(encoding="utf-8")
+        js = _get_app_js()
         assert "allMediaStreamLoaded" in js
         assert "streamHasFilteredTail" in js
         assert "allMediaStreamLoaded && !streamHasFilteredTail" in js
@@ -9597,9 +9584,8 @@ class TestPollSupport:
 
     def test_poll_frontend_badge_wording_and_star(self):
         """Verify poll badge uses descriptive wording without action verbs and winner star is defined."""
-        js_path = Path(viewer.__file__).parent / "chat_viewer" / "app.js"
+        js_content = _get_app_js()
         css_path = Path(viewer.__file__).parent / "chat_viewer" / "app.css"
-        js_content = js_path.read_text(encoding="utf-8")
         css_content = css_path.read_text(encoding="utf-8")
 
         # Badge wording must describe without an action verb

@@ -1123,9 +1123,8 @@ def serve_app_css():
 def serve_app_js():
     from ..chat_viewer import builder
 
-    if current_app.debug or not (_CHAT_VIEWER_DIR / "app.js").exists():
-        builder.build_bundle()
-    resp = make_response(send_from_directory(_CHAT_VIEWER_DIR, "app.js"))
+    js_code = builder.get_bundle_content(current_app.debug)
+    resp = Response(js_code, mimetype="application/javascript")
     resp.headers["Cache-Control"] = "no-cache, must-revalidate"
     return resp
 
