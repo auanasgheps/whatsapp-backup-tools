@@ -60,10 +60,10 @@ ruff format .
 ### 3. Frontend Development (`wab_viewer`)
 
 The chat viewer Web UI uses a zero-build, pure Python assembly architecture:
-- **Source of Truth**: Modular JavaScript source files live in `wab_viewer/chat_viewer/js/`. Never edit `app.js` directly.
-- **Rebuilding the Bundle**: Run `python -m wab_viewer.chat_viewer.builder` to assemble the distribution bundle at `wab_viewer/chat_viewer/app.js`.
-- **Sync Verification**: The test suite enforces 100% synchronization (`test_app_js_bundle_is_in_sync_with_modules`), failing in CI if `app.js` is out of sync with `js/`.
-- **Dev-Mode Hot Reloading**: Running Flask in debug mode (`wab-viewer --verbose`) automatically re-assembles `app.js` when files in `js/` are modified.
+- **Source of Truth**: Modular JavaScript source files live in `wab_viewer/chat_viewer/js/`. There is no static `app.js` file on disk.
+- **In-Memory Bundle Assembly**: At runtime, Flask serves `/static/app.js` assembled directly in-memory from `wab_viewer/chat_viewer/js/*.js` via `builder.get_bundle_content()`.
+- **Dev-Mode Hot Reloading**: In debug mode (`wab-viewer --verbose`), changes in `js/` take effect immediately without requiring manual builds.
+- **Assembly Verification**: `test_app_js_bundle_assembles_cleanly` in `tests/test_wa_chat_viewer.py` validates that all 31 modules assemble into a valid bundle.
 
 ---
 
