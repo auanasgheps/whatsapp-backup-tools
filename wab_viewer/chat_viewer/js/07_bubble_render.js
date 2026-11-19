@@ -141,10 +141,10 @@ function renderBubble(unit) {
         qThumb.decoding = 'async';
         const primaryId = msg.quoted_msg_id || msg.msg_id;
         const fallbackId = (msg.quoted_msg_id && msg.msg_id && msg.quoted_msg_id !== msg.msg_id) ? msg.msg_id : null;
-        qThumb.src = '/api/thumbnail/' + primaryId;
+        qThumb.src = API + '/thumbnail/' + primaryId;
         qThumb.onerror = () => {
           if (fallbackId && qThumb.src.indexOf('/' + fallbackId) === -1) {
-            qThumb.src = '/api/thumbnail/' + fallbackId;
+            qThumb.src = API + '/thumbnail/' + fallbackId;
           } else {
             qThumb.remove();
           }
@@ -401,7 +401,7 @@ function renderBubble(unit) {
       mediaBox.className = 'link-preview-media';
       const img = document.createElement('img');
       img.className = 'link-preview-thumb';
-      img.src = '/api/thumbnail/' + msg.msg_id;
+      img.src = API + '/thumbnail/' + msg.msg_id;
       img.alt = '';
       img.loading = 'lazy';
       img.onerror = () => {
@@ -462,7 +462,7 @@ function renderBubble(unit) {
     if (msg.has_thumbnail) {
       const img = document.createElement('img');
       img.className = 'media-blurred-bg';
-      img.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+      img.src = API + '/thumbnail/' + encodeURIComponent(msg.msg_id);
       img.loading = 'lazy';
       img.alt = '';
       img.onerror = () => {

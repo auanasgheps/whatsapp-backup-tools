@@ -112,7 +112,7 @@ function closeMediaGallery() {
     if (msg && msg.has_thumbnail && msg.msg_id) {
       const blurImg = document.createElement('img');
       blurImg.className = 'gallery-missing-blur';
-      blurImg.src = '/api/thumbnail/' + encodeURIComponent(msg.msg_id);
+      blurImg.src = API + '/thumbnail/' + encodeURIComponent(msg.msg_id);
       blurImg.alt = '';
       blurImg.loading = 'lazy';
       blurImg.onerror = () => { blurImg.style.display = 'none'; };

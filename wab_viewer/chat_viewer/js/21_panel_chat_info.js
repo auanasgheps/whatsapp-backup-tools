@@ -98,13 +98,13 @@
     const chatAtOpen = currentChat;
 
     // Kick off both requests in parallel
-    const sizePromise = fetch('/api/chat-info/media-size?' + params)
+    const sizePromise = fetch(API + '/chat-info/media-size?' + params)
       .then(r => r.ok ? r.json() : { bytes: 0 })
       .catch(() => ({ bytes: 0 }));
 
     let info;
     try {
-      const infoResp = await fetch('/api/chat-info?' + params);
+      const infoResp = await fetch(API + '/chat-info?' + params);
       info = await infoResp.json();
     } catch (_) {
       if (currentChat === chatAtOpen && panel.classList.contains('open')) {

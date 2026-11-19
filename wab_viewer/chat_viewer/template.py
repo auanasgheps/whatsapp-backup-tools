@@ -15,11 +15,11 @@ HTML_TEMPLATE = (
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta id="meta-color-scheme" name="color-scheme" content="dark">
   <title>WhatsApp Backup Tools</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" type="image/svg+xml" href="{{ base_path }}/static/favicon.svg">
   <style>"""
     + _PICO_CSS
     + r"""</style>
-  <link rel="stylesheet" href="/static/app.css?v={{ version }}">
+  <link rel="stylesheet" href="{{ base_path }}/static/app.css?v={{ version }}">
 </head>
 <body>
 <div id="app">
@@ -295,7 +295,7 @@ HTML_TEMPLATE = (
     </div>
     <div id="settings-body">
       <div id="settings-app-info">
-        <img id="settings-app-logo" src="/static/favicon.svg" alt="" width="52" height="52">
+        <img id="settings-app-logo" src="{{ base_path }}/static/favicon.svg" alt="" width="52" height="52">
         <div id="settings-app-details">
           <h2 id="settings-app-name">WhatsApp Backup Viewer</h2>
           <p id="settings-app-subtitle">from WhatsApp Backup Tools</p>
@@ -398,8 +398,9 @@ HTML_TEMPLATE = (
   </div>
 </div>
 
-<script>window.OUTPUT_ROOT = {{ output_root | tojson }};</script>
-<script src="/static/app.js?v={{ version }}"></script>
+<script>window.OUTPUT_ROOT = {{ output_root | tojson }};
+window.BASE_PATH = {{ base_path | tojson }};</script>
+<script src="{{ base_path }}/static/app.js?v={{ version }}"></script>
 
 </body>
 </html>

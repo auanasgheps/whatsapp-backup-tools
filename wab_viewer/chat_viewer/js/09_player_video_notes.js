@@ -9,7 +9,7 @@ function renderVideoNote(msg) {
       : 'Video message';
     wrap.setAttribute('aria-label', `${baseAriaLabel}, click to play`);
 
-    const src = '/media/' + msg.archive_path;
+    const src = MEDIA + msg.archive_path;
 
     const vid = document.createElement('video');
     vid.className = 'video-note-video';

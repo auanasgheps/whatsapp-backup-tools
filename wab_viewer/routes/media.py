@@ -1222,6 +1222,7 @@ def index():
     return render_template_string(
         HTML_TEMPLATE,
         output_root=str(ctx.output_root),
+        base_path=current_app.config.get("BASE_PATH", ""),
         version=get_version(),
         platform_name=p_name,
         schema_alert=current_app.config.get("SCHEMA_ALERT"),

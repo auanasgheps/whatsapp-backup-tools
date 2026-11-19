@@ -1,4 +1,9 @@
 const outputRoot = window.OUTPUT_ROOT;
+  // Prefix the viewer is served under (--base-path), '' at the root. Every request to the
+  // viewer's own routes is built from API and MEDIA, never from a bare /api or /media string.
+  const BASE_PATH = window.BASE_PATH || '';
+  const API = BASE_PATH + '/api';
+  const MEDIA = BASE_PATH + '/media/';
   let allChats = [];
   let currentChat = null;
   let msgList = [];
@@ -6,7 +11,7 @@ const outputRoot = window.OUTPUT_ROOT;
   let prefs = { theme: 'dark', date_format: 'DD/MM/YYYY', font_size: 'medium' };
 
   async function loadPrefs() {
-    const res = await fetch('/api/preferences');
+    const res = await fetch(API + '/preferences');
     prefs = await res.json();
     applyPrefs();
   }
