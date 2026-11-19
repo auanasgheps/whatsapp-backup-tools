@@ -1121,6 +1121,10 @@ def serve_app_css():
 
 @bp.route("/static/app.js")
 def serve_app_js():
+    from ..chat_viewer import builder
+
+    if current_app.debug or not (_CHAT_VIEWER_DIR / "app.js").exists():
+        builder.build_bundle()
     resp = make_response(send_from_directory(_CHAT_VIEWER_DIR, "app.js"))
     resp.headers["Cache-Control"] = "no-cache, must-revalidate"
     return resp

@@ -1,7 +1,15 @@
+// WhatsApp Backup Tools - Web Viewer Application Bundle
+// DO NOT EDIT DIRECTLY. This file is generated from wab_viewer/chat_viewer/js/*.js.
+// Run 'python -m wab_viewer.chat_viewer.builder' to rebuild.
+
 (function () {
   'use strict';
 
-  const outputRoot = window.OUTPUT_ROOT;
+  // ============================================================================
+  // MODULE: 00_state.js
+  // ============================================================================
+
+const outputRoot = window.OUTPUT_ROOT;
   let allChats = [];
   let currentChat = null;
   let msgList = [];
@@ -35,7 +43,11 @@
   }
   const MAX_WINDOW = 150;
 
-  // ---- util ----------------------------------------------------------------
+  // ============================================================================
+  // MODULE: 01_utils_text.js
+  // ============================================================================
+
+// ---- util ----------------------------------------------------------------
 
   const AVATAR_PALETTE = [
     '#00a884',
@@ -528,7 +540,11 @@
     return result;
   }
 
-  const COLLAPSE_CHAR_LIMIT = 750;
+  // ============================================================================
+  // MODULE: 02_utils_ui.js
+  // ============================================================================
+
+const COLLAPSE_CHAR_LIMIT = 750;
   const COLLAPSE_LINE_LIMIT = 15;
   const COLLAPSE_MIN_REMAINDER = 60;
   const COLLAPSE_MIN_LINE_REMAINDER = 2;
@@ -913,7 +929,11 @@
     }
   }
 
-  // ---- load chats ----------------------------------------------------------
+  // ============================================================================
+  // MODULE: 03_navigation.js
+  // ============================================================================
+
+// ---- load chats ----------------------------------------------------------
 
   async function loadChats() {
     if (currentNavTab === 'chats') {
@@ -1362,7 +1382,11 @@
     _startIndexPoll(chat);
   }
 
-  // ---- load messages -------------------------------------------------------
+  // ============================================================================
+  // MODULE: 04_message_window.js
+  // ============================================================================
+
+// ---- load messages -------------------------------------------------------
 
   let loading = false;
   let _loadGen = 0;
@@ -1466,7 +1490,11 @@
     }
   }
 
-  // ---- media grouping -------------------------------------------------------
+  // ============================================================================
+  // MODULE: 05_grouping.js
+  // ============================================================================
+
+// ---- media grouping -------------------------------------------------------
   //
   // Groups consecutive image/video messages from the same sender (within 2 min gaps)
   // into a 2x2 grid bubble. A run must have >= 4 items to qualify.
@@ -1850,8 +1878,11 @@
     showLightbox(group[index]);
   }
 
+  // ============================================================================
+  // MODULE: 06_scroll_engine.js
+  // ============================================================================
 
-  // ---- scroll trigger -------------------------------------------------------
+// ---- scroll trigger -------------------------------------------------------
 
   function setupScrollTrigger() {
     const scroll = document.getElementById('message-scroll');
@@ -1934,7 +1965,11 @@
     return senderEl;
   }
 
-  function renderBubble(unit) {
+  // ============================================================================
+  // MODULE: 07_bubble_render.js
+  // ============================================================================
+
+function renderBubble(unit) {
     if (unit.type === 'group') {
       const group = unit.members;
       const msg = group[0];
@@ -2480,7 +2515,11 @@
     }
   }
 
-  function renderGif(msg) {
+  // ============================================================================
+  // MODULE: 08_bubble_media.js
+  // ============================================================================
+
+function renderGif(msg) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-media msg-gif';
     wrap.setAttribute('tabindex', '0');
@@ -2591,7 +2630,11 @@
 
   const VIDEO_NOTE_RING_CIRCUMFERENCE = 2 * Math.PI * 48;
 
-  function renderVideoNote(msg) {
+  // ============================================================================
+  // MODULE: 09_player_video_notes.js
+  // ============================================================================
+
+function renderVideoNote(msg) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-media msg-video-note';
     wrap.setAttribute('tabindex', '0');
@@ -2847,7 +2890,11 @@
   const MAX_CONCURRENT_DECODES = 3;
   let sharedAudioContext = null;
 
-  function getSharedAudioContext() {
+  // ============================================================================
+  // MODULE: 10_player_voice_notes.js
+  // ============================================================================
+
+function getSharedAudioContext() {
     if (!sharedAudioContext) {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (AudioCtx) {
@@ -3286,7 +3333,11 @@
     return wrap;
   }
 
-  function renderMedia(msg) {
+  // ============================================================================
+  // MODULE: 11_bubble_media_archived.js
+  // ============================================================================
+
+function renderMedia(msg) {
     if (msg.media_type === 'gif') {
       return renderGif(msg);
     }
@@ -3823,7 +3874,11 @@
   let lightboxIndex = 0;
   let lightboxContext = 'gallery'; // 'gallery' | 'chat' — controls pagination + type filtering
 
-  function isLightboxMedia(m) {
+  // ============================================================================
+  // MODULE: 12_lightbox.js
+  // ============================================================================
+
+function isLightboxMedia(m) {
     return m.archive_path && !m.is_missing && (m.media_type === 'image' || m.media_type === 'video' ||
       m.media_type === 'gif' || m.media_type === 'sticker');
   }
@@ -4310,7 +4365,11 @@
     openLightboxAt(lightboxIndex, 0);
   }
 
-  // ---- media gallery -------------------------------------------------------
+  // ============================================================================
+  // MODULE: 13_gallery_virtualization.js
+  // ============================================================================
+
+// ---- media gallery -------------------------------------------------------
 
   const EMPTY_GALLERY_PIX = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>';
   const videoThumbCache = new Map();
@@ -4725,7 +4784,11 @@
     }
   }
 
-  function clearVideoProbeQueue() {
+  // ============================================================================
+  // MODULE: 14_gallery_video_probe.js
+  // ============================================================================
+
+function clearVideoProbeQueue() {
     videoProbeQueue.length = 0;
   }
 
@@ -4883,7 +4946,11 @@
     }
   }
 
-  function closeMediaGallery() {
+  // ============================================================================
+  // MODULE: 15_gallery_audio_and_cards.js
+  // ============================================================================
+
+function closeMediaGallery() {
     archiveViewActive = false;
     archiveLoadingAll = false;
     galleryBackfillGen++;
@@ -5077,7 +5144,11 @@
     }
   }
 
-  function renderGalleryItem(msg) {
+  // ============================================================================
+  // MODULE: 16_gallery_render.js
+  // ============================================================================
+
+function renderGalleryItem(msg) {
     const cell = document.createElement('div');
     cell.className = 'gallery-item';
     cell._msg = msg;
@@ -5546,7 +5617,11 @@
     }
   }
 
-  async function openMediaGallery() {
+  // ============================================================================
+  // MODULE: 17_gallery_filters_and_stream.js
+  // ============================================================================
+
+async function openMediaGallery() {
     if (!currentChat) return;
     closeChatInfo();
     closeChatStarred();
@@ -6164,7 +6239,11 @@
 
   let archiveLoadingAll = false;
 
-  async function _loadAllArchivePages() {
+  // ============================================================================
+  // MODULE: 18_gallery_archive.js
+  // ============================================================================
+
+async function _loadAllArchivePages() {
     if (archiveLoadingAll) return;
     archiveLoadingAll = true;
     let consecutiveErrors = 0;
@@ -6234,7 +6313,11 @@
     document.querySelectorAll('.archive-year').forEach(el => el.classList.remove('open'));
   });
 
-  // ---- sidebar search -------------------------------------------------------
+  // ============================================================================
+  // MODULE: 19_search.js
+  // ============================================================================
+
+// ---- sidebar search -------------------------------------------------------
 
   let searchTimer = null;
   const searchInputEl = document.getElementById('search-input');
@@ -6522,7 +6605,11 @@
     row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
-  // ---- date picker ----------------------------------------------------------
+  // ============================================================================
+  // MODULE: 20_date_picker.js
+  // ============================================================================
+
+// ---- date picker ----------------------------------------------------------
 
   document.getElementById('date-picker-input').max = new Date().toISOString().slice(0, 10);
 
@@ -6895,7 +6982,11 @@
     }
   });
 
-  // ---- chat info panel -------------------------------------------------------
+  // ============================================================================
+  // MODULE: 21_panel_chat_info.js
+  // ============================================================================
+
+// ---- chat info panel -------------------------------------------------------
 
   function _formatBytes(bytes) {
     if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
@@ -7179,7 +7270,11 @@
     }
   });
 
-  // ---- chat starred flyout & count badge -----------------------------------
+  // ============================================================================
+  // MODULE: 22_panel_starred_chat.js
+  // ============================================================================
+
+// ---- chat starred flyout & count badge -----------------------------------
 
   let _starredBadgePollGen = 0;
 
@@ -7345,7 +7440,11 @@
     });
   }
 
-  // ---- pinned message banner -----------------------------------------------
+  // ============================================================================
+  // MODULE: 23_panel_pinned.js
+  // ============================================================================
+
+// ---- pinned message banner -----------------------------------------------
 
   const _RAW_STANZA_ID_RE = /^(?:3EB0[0-9A-Za-z_-]{4,60}|[0-9A-Fa-f]{16,64}|[0-9]{15,20}[-_][0-9]+)$/;
   const _BASE64_TOKEN_RE = /^(?:[A-Za-z0-9+/]{6,}={1,2}|[A-Za-z0-9+/]{16,}={0,2}|C[A-Za-z0-9+/]{6,}={0,2})$/;
@@ -7582,7 +7681,11 @@
     }
   }
 
-  // ---- starred messages sidebar list ---------------------------------------
+  // ============================================================================
+  // MODULE: 24_panel_starred_sidebar.js
+  // ============================================================================
+
+// ---- starred messages sidebar list ---------------------------------------
 
   let _starredList = [];
   let _starredOffset = 0;
@@ -7710,7 +7813,11 @@
     });
   }
 
-  // ---- calls history & inspector -------------------------------------------
+  // ============================================================================
+  // MODULE: 25_calls.js
+  // ============================================================================
+
+// ---- calls history & inspector -------------------------------------------
 
   let _callsList = [];
   let _callsOffset = 0;
@@ -8149,7 +8256,11 @@
     });
   }
 
-  // ---- cross-chat jump engine ----------------------------------------------
+  // ============================================================================
+  // MODULE: 26_jump_engine.js
+  // ============================================================================
+
+// ---- cross-chat jump engine ----------------------------------------------
 
   function showContextJumpBanner(icon, text, onSwitch) {
     const contextBanner = document.getElementById('context-jump-banner');
@@ -8427,7 +8538,11 @@
     }
   }
 
-  // ---- message details popup ------------------------------------------------
+  // ============================================================================
+  // MODULE: 27_modal_message_details.js
+  // ============================================================================
+
+// ---- message details popup ------------------------------------------------
 
   const msgDetailsPopup = document.getElementById('msg-details-popup');
 
@@ -8668,7 +8783,11 @@
     msgDetailsPopup.classList.add('visible');
   }
 
-  // ---- init ----------------------------------------------------------------
+  // ============================================================================
+  // MODULE: 28_settings_and_indexing.js
+  // ============================================================================
+
+// ---- init ----------------------------------------------------------------
 
   let _bulkIndexPollGen = 0;
 
@@ -8812,7 +8931,11 @@
     });
   }
 
-  // ---- map provider chooser modal ------------------------------------------
+  // ============================================================================
+  // MODULE: 29_modal_map.js
+  // ============================================================================
+
+// ---- map provider chooser modal ------------------------------------------
   let activeMapTrigger = null;
 
   function openMapChooser(locData, triggerEl) {
@@ -9002,5 +9125,10 @@
     }
   });
 
-  loadPrefs().then(() => loadChats());
+  // ============================================================================
+  // MODULE: 30_bootstrap.js
+  // ============================================================================
+
+loadPrefs().then(() => loadChats());
+
 })();
