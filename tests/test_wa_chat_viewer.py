@@ -2884,6 +2884,17 @@ class TestIOSReactions:
 
 
 class TestHtmlTemplate:
+    def test_app_js_bundle_is_in_sync_with_modules(self):
+        """Guarantee that app.js on disk is 100% in sync with wab_viewer/chat_viewer/js/*.js."""
+        from wab_viewer.chat_viewer import builder
+
+        expected = builder.assemble_app_js()
+        actual = (builder._OUTPUT_BUNDLE).read_text(encoding="utf-8")
+        assert actual == expected, (
+            "app.js is out of sync with modular sources in wab_viewer/chat_viewer/js/. "
+            "Run 'python -m wab_viewer.chat_viewer.builder' to synchronize."
+        )
+
     def test_all_getElementById_targets_exist_before_script(self):
         """Every getElementById('id') in app.js must refer to an element defined
         in the HTML before the external script tag.  A missing or late-placed
