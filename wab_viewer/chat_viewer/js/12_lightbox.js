@@ -193,7 +193,7 @@ function isLightboxMedia(m) {
   }
 
   function _createLightboxMediaElement(msg) {
-    const src = '/media/' + msg.archive_path;
+    const src = MEDIA + msg.archive_path;
     const mt = msg.media_type;
     let media;
     if ((mt === 'video' || mt === 'gif') && !src.toLowerCase().endsWith('.gif')) {
@@ -220,7 +220,7 @@ function isLightboxMedia(m) {
       const nextMsg = lightboxItems[nextIdx];
       if (nextMsg && !nextMsg.is_missing && (nextMsg.media_type === 'image' || nextMsg.media_type === 'sticker')) {
         const img = new Image();
-        img.src = '/media/' + nextMsg.archive_path;
+        img.src = MEDIA + nextMsg.archive_path;
       }
     }
     const prevIdx = _nextLightboxIndex(index, -1);
@@ -228,7 +228,7 @@ function isLightboxMedia(m) {
       const prevMsg = lightboxItems[prevIdx];
       if (prevMsg && !prevMsg.is_missing && (prevMsg.media_type === 'image' || prevMsg.media_type === 'sticker')) {
         const img = new Image();
-        img.src = '/media/' + prevMsg.archive_path;
+        img.src = MEDIA + prevMsg.archive_path;
       }
     }
   }
@@ -258,7 +258,7 @@ function isLightboxMedia(m) {
         if (!lbVid) {
           lbVid = document.createElement('video');
           lbVid.className = 'lb-live-video';
-          lbVid.src = '/media/' + msg.live_photo_path;
+          lbVid.src = MEDIA + msg.live_photo_path;
           lbVid.autoplay = true;
           lbVid.loop = true;
           lbVid.muted = true;

@@ -91,7 +91,7 @@
 
       let data;
       try {
-        const res = await fetch('/api/message_receipts/' + msgId);
+        const res = await fetch(API + '/message_receipts/' + msgId);
         data = await res.json();
       } catch (_) {
         data = { available: false };
@@ -156,7 +156,7 @@
 
     let data;
     try {
-      const res = await fetch('/api/reaction_details/' + msgId);
+      const res = await fetch(API + '/reaction_details/' + msgId);
       data = await res.json();
     } catch (_) {
       data = { available: false };
@@ -186,7 +186,7 @@
 
     let data;
     try {
-      const res = await fetch('/api/poll_details/' + msgId);
+      const res = await fetch(API + '/poll_details/' + msgId);
       data = await res.json();
     } catch (_) {
       data = { available: false };

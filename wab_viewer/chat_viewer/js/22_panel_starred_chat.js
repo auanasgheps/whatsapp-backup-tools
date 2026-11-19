@@ -15,7 +15,7 @@
     if (!chatId) return;
     const gen = ++_starredBadgePollGen;
     try {
-      const res = await fetch(`/api/chat/${encodeURIComponent(chatId)}/starred?limit=1`);
+      const res = await fetch(`${API}/chat/${encodeURIComponent(chatId)}/starred?limit=1`);
       if (gen !== _starredBadgePollGen || !currentChat || String(currentChat.id) !== String(chatId)) return;
       if (!res.ok) {
         if (btn) btn.classList.remove('has-starred');
@@ -63,7 +63,7 @@
     body.innerHTML = '<div style="color:var(--text-muted);padding:24px;text-align:center"><div class="chat-info-spinner"></div> Loading starred messages…</div>';
 
     try {
-      const res = await fetch(`/api/chat/${encodeURIComponent(currentChat.id)}/starred?limit=100`);
+      const res = await fetch(`${API}/chat/${encodeURIComponent(currentChat.id)}/starred?limit=100`);
       if (!res.ok) {
         body.innerHTML = '<div class="starred-empty"><span class="starred-empty-icon">⚠️</span><span>Failed to load starred messages</span></div>';
         return;

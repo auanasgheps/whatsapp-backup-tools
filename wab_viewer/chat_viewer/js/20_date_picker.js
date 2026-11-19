@@ -305,7 +305,7 @@
       });
       if (ts != null) params.set('ts', ts);
       if (exactMsgId != null) params.set('msg_id', exactMsgId);
-      const res = await fetch('/api/messages/at?' + params, { signal: abortSignal });
+      const res = await fetch(API + '/messages/at?' + params, { signal: abortSignal });
       if (!res.ok) {
         if (gen === _loadGen) {
           showJumpHudError(`Failed to load message (${res.status})`);

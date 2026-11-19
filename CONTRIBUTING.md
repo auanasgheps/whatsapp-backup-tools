@@ -80,6 +80,7 @@ The chat viewer Web UI uses a zero-build, pure Python assembly architecture:
 - **In-Memory Bundle Assembly**: At runtime, Flask serves `/static/app.js` assembled directly in-memory from `wab_viewer/chat_viewer/js/*.js` via `builder.get_bundle_content()`.
 - **Dev-Mode Hot Reloading**: In debug mode (`wab-viewer --verbose`), changes in `js/` take effect immediately without requiring manual builds.
 - **Assembly Verification**: `test_app_js_bundle_assembles_cleanly` in `tests/viewer/test_ui_template.py` validates that all 31 modules assemble into a valid bundle.
+- **Viewer URLs**: build requests to the viewer's own routes from `API` and `MEDIA` (defined in `00_state.js`), never from a bare `'/api'` or `'/media'` string, so the viewer keeps working under `--base-path`. `test_app_js_bundle_has_no_bare_viewer_urls` checks it.
 
 ---
 

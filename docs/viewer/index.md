@@ -37,6 +37,9 @@ wab-viewer ./output --no-browser
 # Rebuild the cache
 wab-viewer ./output --rescan
 
+# Serve under a sub-path behind a reverse proxy (also via WAB_BASE_PATH)
+wab-viewer ./output --base-path /whatsapp
+
 # Enable verbose HTTP request logging (default is error only)
 wab-viewer ./output --verbose
 
@@ -98,7 +101,7 @@ The cache is rebuilt automatically when:
 
 ## Privacy
 
-The server binds to `127.0.0.1` by default — it is not accessible from other machines on your network. No data leaves your machine. To access the viewer from another device on your LAN, pass `--host 0.0.0.0` (make sure your firewall allows the port).
+The server binds to `127.0.0.1` by default — it is not accessible from other machines on your network. No data leaves your machine. To access the viewer from another device on your LAN, pass `--host 0.0.0.0` (make sure your firewall allows the port). Behind a reverse proxy that publishes the viewer under a sub-path, pass that path with `--base-path` (or `WAB_BASE_PATH`): the proxy can forward the prefix as it is or strip it, both work.
 
 ## Troubleshooting
 

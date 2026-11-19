@@ -14,7 +14,7 @@ async function _loadAllArchivePages() {
     try {
       while (archiveViewActive && consecutiveErrors < 3 && !archiveAllLoaded) {
         if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
-        const url = '/api/media?chat_id=' + encodeURIComponent(requestedChatId) +
+        const url = API + '/media?chat_id=' + encodeURIComponent(requestedChatId) +
                     '&chat_type=' + encodeURIComponent(currentChat.type) +
                     '&types=all&archived=1' +
                     (before != null ? '&before=' + before : '');

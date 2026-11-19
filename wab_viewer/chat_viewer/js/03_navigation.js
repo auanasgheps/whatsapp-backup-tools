@@ -4,7 +4,7 @@
     if (currentNavTab === 'chats') {
       document.getElementById('chat-list').innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading Chats…</div>';
     }
-    const res = await fetch('/api/chats');
+    const res = await fetch(API + '/chats');
     allChats = await res.json();
     const hasArchived = allChats.some(c => c.is_archived);
     setTabEnabled('tab-btn-archived', hasArchived, 'Archived', 'No archived chats in this backup');
@@ -47,7 +47,7 @@
     async function poll() {
       if (gen !== _indexPollGen) return;
       try {
-        const r = await fetch('/api/chat-index-status?' + params);
+        const r = await fetch(API + '/chat-index-status?' + params);
         const d = await r.json();
         if (gen !== _indexPollGen) return;
         if (d.status === 'done') {

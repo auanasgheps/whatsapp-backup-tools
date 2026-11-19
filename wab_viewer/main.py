@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import os
 import sqlite3
 import sys
 import threading
@@ -64,6 +65,12 @@ def parse_args():
     )
     p.add_argument("--rescan", action="store_true", help="Force rebuild of the FTS index")
     p.add_argument(
+        "--base-path",
+        default=os.environ.get("WAB_BASE_PATH", ""),
+        help="URL prefix when served behind a reverse proxy under a sub-path, e.g. /whatsapp "
+        "(default: $WAB_BASE_PATH, or the root)",
+    )
+    p.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -95,10 +102,39 @@ def resolve_browser_url(host: str, port: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def create_app(output_root: Path, rescan: bool = False):
+def normalize_base_path(base_path: str | None) -> str:
+    """'/whatsapp/', 'whatsapp' or '/whatsapp' -> '/whatsapp'; '' or '/' -> ''."""
+    base_path = (base_path or "").strip().strip("/")
+    return f"/{base_path}" if base_path else ""
+
+
+class BasePathMiddleware:
+    """
+    Serve the app under a URL prefix: a request for <prefix>/<path> reaches Flask as /<path> with the
+    prefix in SCRIPT_NAME, so url_for() and redirects keep it. Requests without the prefix are served
+    as they are, as without --base-path.
+    """
+
+    def __init__(self, wsgi_app, base_path: str):
+        self.wsgi_app = wsgi_app
+        self.base_path = base_path
+
+    def __call__(self, environ, start_response):
+        path = environ.get("PATH_INFO", "")
+        if path == self.base_path or path.startswith(self.base_path + "/"):
+            environ["SCRIPT_NAME"] = environ.get("SCRIPT_NAME", "") + self.base_path
+            environ["PATH_INFO"] = path[len(self.base_path) :] or "/"
+        return self.wsgi_app(environ, start_response)
+
+
+def create_app(output_root: Path, rescan: bool = False, base_path: str = ""):
     if Flask is None:
         raise ImportError("Flask is not installed. Run: pip install flask")
     app = Flask(__name__)
+    base_path = normalize_base_path(base_path)
+    app.config["BASE_PATH"] = base_path
+    if base_path:
+        app.wsgi_app = BasePathMiddleware(app.wsgi_app, base_path)
 
     archive_db_path = get_archive_db_path(output_root)
     source_type, wa_db_path = _detect_source_db(output_root)
@@ -258,14 +294,15 @@ def main():
 
     print(f"[wab_viewer] Opening archive: {output_root}")
 
-    app = create_app(output_root, rescan=args.rescan)
+    base_path = normalize_base_path(getattr(args, "base_path", ""))
+    app = create_app(output_root, rescan=args.rescan, base_path=base_path)
 
-    url = f"http://{args.host}:{args.port}"
+    url = f"http://{args.host}:{args.port}{base_path}"
     print(f"[wab_viewer] Starting server at {url}")
     print("[wab_viewer] Press Ctrl+C to stop")
 
     if not args.no_browser:
-        browser_url = resolve_browser_url(args.host, args.port)
+        browser_url = resolve_browser_url(args.host, args.port) + base_path
         webbrowser.open(browser_url)
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
