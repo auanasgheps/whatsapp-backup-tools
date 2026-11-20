@@ -74,6 +74,8 @@ def _parse_test_exif(tiff_data: bytes):
             else:
                 val = val_or_off
             tags[tag] = val
+        keys = list(tags.keys())
+        assert keys == sorted(keys), f"IFD tags at offset {offset} not sorted: {keys}"
         return tags
 
     ifd0 = read_ifd(ifd0_offset)
@@ -107,11 +109,15 @@ def test_build_jpeg_exif_app1_roundtrip():
     tiff_payload = seg[10:]
     ifd0, exif = _parse_test_exif(tiff_payload)
 
+    # IFD0 contains DateTime and ExifOffset, strictly sorted
     assert ifd0[0x0132] == dt_str
-    assert ifd0[0x9010] == tz_str
+    assert 0x8769 in ifd0
+    # Exif Sub-IFD contains DateTimeOriginal, DateTimeDigitized, and Exif 2.31 offset tags, strictly sorted
     assert exif[0x9003] == dt_str
     assert exif[0x9004] == dt_str
+    assert exif[0x9010] == tz_str
     assert exif[0x9011] == tz_str
+    assert exif[0x9012] == tz_str
 
 
 def test_inject_jpeg_exif_without_app0():
@@ -688,3 +694,146 @@ def test_set_file_times_windows_creation_time(tmp_path):
     assert abs(st.st_mtime - (ts_ms / 1000.0)) < 2.0
     if sys.platform == "win32":
         assert abs(st.st_ctime - (ts_ms / 1000.0)) < 2.0
+
+
+def test_copy_or_skip_dry_run_stamped_no_false_collision(tmp_path):
+    """Verify dry_run on an archive with stamped files does not falsely report collisions."""
+    import logging
+
+    from wab_archiver import archive_db as arc
+    from wab_archiver import main as wa
+
+    logger = logging.getLogger("test_dry_run_stamped")
+    out = tmp_path / "out"
+    out.mkdir()
+    conn = arc.open_archive_db(str(out))
+    cursor = conn.cursor()
+
+    raw_bytes = _build_minimal_jpeg(with_app0=True)
+    src = tmp_path / "IMG-DRY.jpg"
+    src.write_bytes(raw_bytes)
+    dest_path = out / "IMG-DRY.jpg"
+    ts_ms = 1778416200000
+
+    # 1. Archive real with exif_timestamps=True (modifies dest file on disk)
+    wa._copy_or_skip(
+        str(src),
+        str(dest_path),
+        str(out),
+        "Media/WhatsApp Images/IMG-DRY.jpg",
+        ts_ms,
+        str(out),
+        False,
+        logger,
+        cursor,
+        False,
+        {},
+        True,
+        UTC,
+    )
+    conn.commit()
+    assert dest_path.exists()
+    assert dest_path.read_bytes() != raw_bytes  # Stamped with EXIF!
+
+    # 2. Dry run with cursor provided
+    dry_res = wa._copy_or_skip(
+        str(src),
+        str(dest_path),
+        str(out),
+        "Media/WhatsApp Images/IMG-DRY.jpg",
+        ts_ms,
+        str(out),
+        True,  # dry_run
+        logger,
+        cursor,
+        False,
+        {},
+        True,
+        UTC,
+    )
+    assert dry_res == (0, 1, 0)
+    # Ensure no collision candidate was created
+    assert not (out / "IMG-DRY_1.jpg").exists()
+
+    # 3. Dry run with archived_file_set preloaded
+    archived_set = arc.load_archived_file_set(conn)
+    dry_res_set = wa._copy_or_skip(
+        str(src),
+        str(dest_path),
+        str(out),
+        "Media/WhatsApp Images/IMG-DRY.jpg",
+        ts_ms,
+        str(out),
+        True,  # dry_run
+        logger,
+        None,
+        False,
+        {},
+        True,
+        UTC,
+        archived_set,
+    )
+    assert dry_res_set == (0, 1, 0)
+    conn.close()
+
+
+def test_update_metadata_force_preserves_stamped_status(tmp_path):
+    """Verify update-metadata --force does not demote exif_stamped=1 to 2 for JPEGs."""
+    import argparse
+    import logging
+
+    from wab_archiver import archive_db as arc
+    from wab_archiver import main as wa
+
+    logger = logging.getLogger("test_force_preserve")
+    out = tmp_path / "out"
+    out.mkdir()
+    conn = arc.open_archive_db(str(out))
+    cur = conn.cursor()
+
+    raw_bytes = _build_minimal_jpeg(with_app0=True)
+    img = out / "stamped.jpg"
+    img.write_bytes(raw_bytes)
+    ts_ms = 1778414400000
+
+    arc.record_file_archived(
+        cur, "Media/stamped.jpg", b"hash", "stamped.jpg", len(raw_bytes), 0, ts_ms
+    )
+    conn.commit()
+
+    # Initial run to stamp
+    args = argparse.Namespace(output=str(out), timezone="UTC", force=False, dry_run=False)
+    wa.run_update_metadata_mode(args, logger)
+
+    row = conn.execute(
+        "SELECT exif_stamped FROM archive_copies WHERE archive_path = 'stamped.jpg'"
+    ).fetchone()
+    assert row[0] == 1
+
+    # Force re-evaluation
+    force_args = argparse.Namespace(output=str(out), timezone="UTC", force=True, dry_run=False)
+    wa.run_update_metadata_mode(force_args, logger)
+
+    row_after = conn.execute(
+        "SELECT exif_stamped FROM archive_copies WHERE archive_path = 'stamped.jpg'"
+    ).fetchone()
+    assert row_after[0] == 1  # Preserved as 1, not demoted to 2!
+    conn.close()
+
+
+def test_write_media_timestamp_tmp_cleanup_on_error(tmp_path, monkeypatch):
+    """Verify .tmp file is cleaned up if os.replace fails."""
+    raw_jpeg = _build_minimal_jpeg(with_app0=True)
+    jpeg_path = tmp_path / "fail_replace.jpg"
+    jpeg_path.write_bytes(raw_jpeg)
+    tmp_file = tmp_path / "fail_replace.jpg.tmp"
+
+    def _failing_replace(src, dst):
+        assert os.path.exists(src)
+        raise OSError("Simulated disk/lock failure during replace")
+
+    monkeypatch.setattr(os, "replace", _failing_replace)
+
+    res = metadata_writer.write_media_timestamp(str(jpeg_path), 1778416200000, UTC, False)
+    assert res is False
+    assert not tmp_file.exists()  # .tmp must be removed by finally block!

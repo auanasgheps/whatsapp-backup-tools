@@ -62,10 +62,10 @@ def build_jpeg_exif_app1(dt_str: str, tz_offset_str: str | None) -> bytes:
     - IFD0:
         0x0132 (DateTime)
         0x8769 (ExifOffset)
-        0x9010 (OffsetTime - if tz_offset_str is provided)
     - Exif Sub-IFD:
         0x9003 (DateTimeOriginal)
         0x9004 (DateTimeDigitized)
+        0x9010 (OffsetTime - if tz_offset_str is provided, Exif 2.31)
         0x9011 (OffsetTimeOriginal - if tz_offset_str is provided)
         0x9012 (OffsetTimeDigitized - if tz_offset_str is provided)
     """
@@ -73,42 +73,43 @@ def build_jpeg_exif_app1(dt_str: str, tz_offset_str: str | None) -> bytes:
     dt_bytes = dt_str.encode("ascii") + b"\x00"  # 20 bytes
 
     has_tz = tz_offset_str is not None
-    # 7 bytes for string + 1 null terminator = 8 bytes (aligned to 2-byte boundary)
+    # 6 bytes for "+HH:MM" + 1 null terminator = 7 bytes; pad to 8 bytes for 2-byte word boundary
     tz_bytes = (tz_offset_str.encode("ascii") + b"\x00") if has_tz else b""
+    if has_tz and len(tz_bytes) % 2 != 0:
+        tz_bytes += b"\x00"
 
     # TIFF Header (8 bytes): "II" + magic 42 (0x002A) + IFD0 offset (8)
     header = b"II\x2a\x00\x08\x00\x00\x00"
 
-    num_ifd0 = 3 if has_tz else 2
+    num_ifd0 = 2
     ifd0_size = 2 + num_ifd0 * 12 + 4
     exif_ifd_offset = 8 + ifd0_size
 
-    num_exif = 4 if has_tz else 2
+    num_exif = 5 if has_tz else 2
     exif_ifd_size = 2 + num_exif * 12 + 4
     data_offset = exif_ifd_offset + exif_ifd_size
 
     dt_offset = data_offset
     tz_offset = data_offset + len(dt_bytes)
 
-    # Build IFD0
+    # Build IFD0 (strictly ascending numerical tag order: 0x0132 < 0x8769)
     ifd0 = struct.pack(endian + "H", num_ifd0)
     # Tag 0x0132: DateTime, ASCII (2), count 20
     ifd0 += struct.pack(endian + "HHI I", 0x0132, 2, 20, dt_offset)
-    if has_tz and tz_offset_str is not None:
-        # Tag 0x9010: OffsetTime, ASCII (2), count len(tz_offset_str) + 1
-        ifd0 += struct.pack(endian + "HHI I", 0x9010, 2, len(tz_offset_str) + 1, tz_offset)
     # Tag 0x8769: ExifOffset, LONG (4), count 1, value = exif_ifd_offset
     ifd0 += struct.pack(endian + "HHI I", 0x8769, 4, 1, exif_ifd_offset)
     # Next IFD offset: 0
     ifd0 += struct.pack(endian + "I", 0)
 
-    # Build Exif Sub-IFD
+    # Build Exif Sub-IFD (strictly ascending tag order: 0x9003 < 0x9004 < 0x9010 < 0x9011 < 0x9012)
     exif = struct.pack(endian + "H", num_exif)
     # Tag 0x9003: DateTimeOriginal, ASCII (2), count 20
     exif += struct.pack(endian + "HHI I", 0x9003, 2, 20, dt_offset)
     # Tag 0x9004: DateTimeDigitized, ASCII (2), count 20
     exif += struct.pack(endian + "HHI I", 0x9004, 2, 20, dt_offset)
     if has_tz and tz_offset_str is not None:
+        # Tag 0x9010: OffsetTime (Exif 2.31 Table 7 Exif-specific IFD)
+        exif += struct.pack(endian + "HHI I", 0x9010, 2, len(tz_offset_str) + 1, tz_offset)
         # Tag 0x9011: OffsetTimeOriginal
         exif += struct.pack(endian + "HHI I", 0x9011, 2, len(tz_offset_str) + 1, tz_offset)
         # Tag 0x9012: OffsetTimeDigitized
@@ -267,12 +268,8 @@ def inject_jpeg_exif(data: bytes, dt_str: str, tz_offset_str: str | None) -> byt
         elif marker == 0xE1:  # APP1
             payload = data[pos + 4 : seg_end]
             if payload.startswith(b"Exif\x00\x00"):
-                tiff_bytes = payload[6:]
-                # If image already has a valid camera capture date or orientation tag, preserve it!
-                if has_valid_camera_datetime(tiff_bytes) or has_orientation_tag(tiff_bytes):
-                    return None
-                # If it's a minimal or empty EXIF segment without orientation or capture date,
-                # do not mutate complex existing TIFF in pure-Python; preserve safely.
+                # If image already contains an EXIF segment (original camera capture date,
+                # orientation tag, or previously stamped), preserve existing TIFF safely.
                 return None
         elif marker == 0xDA:  # SOS (Start of Scan - image entropy begins)
             break
@@ -447,10 +444,17 @@ def write_media_timestamp(
 
             tmp_path = dest_path + ".tmp"
             lp_tmp = ensure_long_path(tmp_path)
-            with open(lp_tmp, "wb") as f:
-                f.write(modified)
-            os.replace(lp_tmp, lp_dest)
-            return True
+            try:
+                with open(lp_tmp, "wb") as f:
+                    f.write(modified)
+                os.replace(lp_tmp, lp_dest)
+                return True
+            finally:
+                if os.path.exists(lp_tmp):
+                    try:
+                        os.remove(lp_tmp)
+                    except OSError:
+                        pass
         except PermissionError as e:
             logger.debug(f"Permission denied modifying EXIF on {dest_path}: {e}")
             return False
