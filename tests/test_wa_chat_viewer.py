@@ -13797,6 +13797,7 @@ class TestTrack3FeaturePanes:
         assert "#chat-menu-btn" in css
         assert ".chat-menu-dropdown" in css
         assert ".chat-menu-item" in css
+        assert "#chat-starred-btn.has-starred" in css
         assert ".chat-info-card" in css
         assert ".chat-info-card-title" in css
 
@@ -13806,6 +13807,7 @@ class TestTrack3FeaturePanes:
         assert "openChatMenu" in js
         assert "closeChatMenu" in js
         assert "toggleChatMenu" in js
+        assert "has-starred" in js
 
     def test_pulsing_glow_animations(self, app_and_tmp):
         """Pulsing gold and emerald glow keyframes must be present in app.css."""

@@ -2406,6 +2406,15 @@
     #chat-info-btn {
       /* Menu items in overflow dropdown */
     }
+    #chat-starred-btn.has-starred .chat-menu-item-icon,
+    #chat-starred-btn.has-starred:hover .chat-menu-item-icon,
+    #chat-starred-btn.has-starred:focus-visible .chat-menu-item-icon {
+      color: var(--star-color, #eab308);
+    }
+    #chat-starred-btn.has-starred .chat-menu-item-icon polygon {
+      fill: var(--star-color, #eab308);
+      stroke: var(--star-color, #eab308);
+    }
 
     #media-btn {
       background: none; border: none;

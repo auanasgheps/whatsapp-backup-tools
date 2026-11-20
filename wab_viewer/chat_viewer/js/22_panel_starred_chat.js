@@ -3,26 +3,33 @@
   let _starredBadgePollGen = 0;
 
   async function updateChatStarredBadge(chatId) {
+    const btn = document.getElementById('chat-starred-btn');
     const badge = document.getElementById('chat-starred-badge');
-    if (!badge) return;
+    if (badge) {
+      badge.textContent = '';
+      badge.style.display = 'none';
+    }
+    if (btn) {
+      btn.classList.remove('has-starred');
+    }
+    if (!chatId) return;
     const gen = ++_starredBadgePollGen;
     try {
       const res = await fetch(`/api/chat/${encodeURIComponent(chatId)}/starred?limit=1`);
       if (gen !== _starredBadgePollGen || !currentChat || String(currentChat.id) !== String(chatId)) return;
       if (!res.ok) {
-        badge.style.display = 'none';
+        if (btn) btn.classList.remove('has-starred');
         return;
       }
       const data = await res.json();
       const count = data.count || 0;
-      if (count > 0) {
-        badge.textContent = count > 99 ? '99+' : String(count);
-        badge.style.display = 'inline-flex';
-      } else {
-        badge.style.display = 'none';
+      if (btn) {
+        btn.classList.toggle('has-starred', count > 0);
       }
     } catch {
-      if (gen === _starredBadgePollGen) badge.style.display = 'none';
+      if (gen === _starredBadgePollGen && btn) {
+        btn.classList.remove('has-starred');
+      }
     }
   }
 
@@ -63,8 +70,13 @@
       }
       const data = await res.json();
       const messages = data.messages || [];
+      const count = data.count || messages.length;
       if (headerCount) {
-        headerCount.textContent = String(data.count || messages.length);
+        headerCount.textContent = String(count);
+      }
+      const triggerBtn = document.getElementById('chat-starred-btn');
+      if (triggerBtn) {
+        triggerBtn.classList.toggle('has-starred', count > 0);
       }
 
       if (messages.length === 0) {
