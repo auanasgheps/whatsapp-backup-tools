@@ -32,6 +32,24 @@ def test_convert_obj_walks_nested_structures():
     }
 
 
+def test_convert_obj_keeps_paths_and_urls():
+    # Archive folders keep the original characters: a converted path would point to a missing file.
+    data = {
+        "chat_name": "Trip \ue11c",
+        "archive_path": "Groups/Trip \ue11c/2014/IMG.jpg",
+        "original_path": "Media/\ue11c.jpg",
+        "link_url": "https://example.com/\ue11c",
+        "items": [{"sender_name": "\ue404", "live_photo_path": "Groups/Trip \ue11c/x.mov"}],
+    }
+    assert convert_obj(data) == {
+        "chat_name": "Trip \U0001f480",
+        "archive_path": "Groups/Trip \ue11c/2014/IMG.jpg",
+        "original_path": "Media/\ue11c.jpg",
+        "link_url": "https://example.com/\ue11c",
+        "items": [{"sender_name": "\U0001f601", "live_photo_path": "Groups/Trip \ue11c/x.mov"}],
+    }
+
+
 def test_api_returns_unicode_emoji(tmp_path):
     wa_conn = make_android_db(tmp_path / "msgstore.db")
     archive_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
