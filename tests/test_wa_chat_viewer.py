@@ -8420,6 +8420,17 @@ class TestStickerSupport:
         assert "Loading all items" in js
         assert "allMediaStreamLoaded = true" in js
 
+    def test_gallery_link_viewport_hydration_and_stream_consolidation(self):
+        """Gallery link cards must use tight viewport-bound hydration, avoid forced layout thrashing,
+        retain thumbnails on scroll-out, and maintain single-stream pagination."""
+        js = _get_app_js()
+        assert "galleryLinkObserver" in js
+        assert "rootMargin: '40px 0px 40px 0px'" in js
+        assert ':not([data-type="link"])' in js
+        assert "activeTypes.size === 1 && activeTypes.has('link')" in js
+        assert "linksLoadingMore || linksAllLoaded" in js
+        assert "galleryLoadingMore || linksLoadingMore" in js
+
     def test_android_gif_classification_and_gallery(self, tmp_path):
         """Android GIFs (message_type 13, WhatsApp Animated Gifs folder, GIF- prefix, or gif_attribution)
         are classified as 'gif', suppress raw media_name, and are correctly isolated in gallery queries."""
@@ -10201,6 +10212,83 @@ class TestPollSupport:
         res2 = client2.get("/api/thumbnail/1")
         assert res2.status_code == 200
         assert res2.data == fake_png
+
+    def test_link_thumbnail_fast_fail_android(self, tmp_path):
+        """Link messages on Android fast-fail with 404 without cascading to media/reply joins."""
+        out_dir = tmp_path / "android_fast_fail"
+        out_dir.mkdir()
+        db_dir = out_dir / "Whatsapp Databases"
+        db_dir.mkdir()
+        conn = sqlite3.connect(db_dir / "msgstore.db")
+        conn.execute("CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT)")
+        conn.execute("CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER)")
+        conn.execute(
+            "CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER, from_me INTEGER, timestamp INTEGER, message_type INTEGER, text_data TEXT, key_id TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE message_thumbnail (message_row_id INTEGER PRIMARY KEY, thumbnail BLOB)"
+        )
+        conn.execute(
+            "CREATE TABLE message_quoted_text (message_row_id INTEGER PRIMARY KEY, thumbnail BLOB)"
+        )
+        conn.execute("INSERT INTO jid VALUES (1, 'user', 'user@s.whatsapp.net')")
+        conn.execute("INSERT INTO chat VALUES (1, 1)")
+        # Message 1: text/link message (message_type = 0) with no thumbnail
+        conn.execute("INSERT INTO message VALUES (1, 1, 0, 1000, 0, 'https://example.com', 'K1')")
+        # Message 2: text/link message with thumbnail in message_quoted_text
+        fake_jpeg = b"\xff\xd8\xff" + b"\x00" * 20 + b"\xff\xd9"
+        conn.execute("INSERT INTO message VALUES (2, 1, 0, 2000, 0, 'https://example.org', 'K2')")
+        conn.execute("INSERT INTO message_quoted_text VALUES (2, ?)", (fake_jpeg,))
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(out_dir, rescan=True)
+        client = app.test_client()
+        res1 = client.get("/api/thumbnail/1")
+        assert res1.status_code == 404
+        res2 = client.get("/api/thumbnail/2")
+        assert res2.status_code == 200
+        assert res2.data == fake_jpeg
+
+    def test_link_thumbnail_fast_fail_ios(self, tmp_path):
+        """Link messages on iOS fast-fail with 404 without scanning the entire chat session for replies."""
+        out_dir = tmp_path / "ios_fast_fail"
+        out_dir.mkdir()
+        conn = sqlite3.connect(out_dir / "ChatStorage.sqlite")
+        conn.execute(
+            "CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZXMPPTHUMBPATH TEXT, ZMEDIALOCALPATH TEXT, ZFILESIZE INTEGER, ZASPECTRATIO FLOAT, ZMOVIEDURATION INTEGER, ZTITLE TEXT, ZMETADATA BLOB)"
+        )
+        conn.execute(
+            "CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMEDIAITEM INTEGER, ZISFROMME INTEGER, ZMESSAGEDATE FLOAT, ZMESSAGETYPE INTEGER, ZTEXT TEXT, ZFROMJID TEXT, ZSTANZAID TEXT, ZPUSHNAME TEXT, ZGROUPMEMBER INTEGER, ZPARENTMESSAGE INTEGER)"
+        )
+        conn.execute("CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT)")
+        conn.execute("CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT)")
+        conn.execute("INSERT INTO ZWACHATSESSION VALUES (1, '123@s.whatsapp.net', 'Alice', NULL)")
+        # Message 1: link message (ZMESSAGETYPE = 7) with no thumbnail
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (1, 1, NULL, 0, 1000.0, 7, 'https://example.com', '123@s.whatsapp.net', 'S1', 'Alice', NULL, NULL)"
+        )
+        # Message 2: link message with metadata thumbnail
+        fake_jpeg = b"\xff\xd8\xff" + b"\x00" * 30 + b"\xff\xd9"
+        conn.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (2, NULL, NULL, 0, 1.0, 0, NULL, ?)", (fake_jpeg,)
+        )
+        conn.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (2, 1, 2, 0, 2000.0, 7, 'https://example.org', '123@s.whatsapp.net', 'S2', 'Alice', NULL, NULL)"
+        )
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(out_dir, rescan=True)
+        client = app.test_client()
+        res1 = client.get("/api/thumbnail/1")
+        assert res1.status_code == 404
+        res2 = client.get("/api/thumbnail/2")
+        assert res2.status_code == 200
+        assert res2.data == fake_jpeg
 
 
 class TestIncrementViewerMessages:

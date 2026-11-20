@@ -159,7 +159,7 @@
       gallerySentinel.style.height = '1px';
       grid.appendChild(gallerySentinel);
       galleryObserver = new IntersectionObserver(entries => {
-        if (entries[0].isIntersecting && !galleryLoadingMore && galleryScrollDirection === 'down') {
+        if (entries[0].isIntersecting && !galleryLoadingMore && !linksLoadingMore && galleryScrollDirection === 'down') {
           if (activeTypes.size === 1 && activeTypes.has('link')) {
             _loadMoreLinks();
           } else {
@@ -633,9 +633,13 @@
     }
 
     const gen = ++galleryBackfillGen;
-    _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen);
-    if (activeTypes.has('link')) {
-      _checkGalleryLoadMore();
+    if (activeTypes.size === 1 && activeTypes.has('link')) {
+      _loadMoreLinks();
+    } else {
+      _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen);
+      if (activeTypes.has('link')) {
+        _checkGalleryLoadMore();
+      }
     }
     if (archiveViewActive) {
       _loadAllArchivePages();

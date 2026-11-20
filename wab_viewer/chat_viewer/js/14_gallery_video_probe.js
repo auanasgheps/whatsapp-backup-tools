@@ -135,6 +135,7 @@ function clearVideoProbeQueue() {
     } else if (mt === 'link') {
       img.src = src;
       img.onerror = () => {
+        delete cell.dataset.src;
         const box = cell.querySelector('.gallery-rich-link-media');
         if (box) box.innerHTML = '<span class="gallery-rich-link-fallback-icon">🔗</span>';
       };
@@ -145,8 +146,11 @@ function clearVideoProbeQueue() {
     if (cell.dataset.hydrated !== 'true') {
       return;
     }
-    cell.dataset.hydrated = 'false';
     const mt = cell.dataset.type;
+    if (mt === 'link') {
+      return;
+    }
+    cell.dataset.hydrated = 'false';
     const img = cell.querySelector('.gallery-thumb');
     if (!img) {
       return;
