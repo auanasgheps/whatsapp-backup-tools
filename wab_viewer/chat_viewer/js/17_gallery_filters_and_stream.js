@@ -1,13 +1,88 @@
-async function openMediaGallery() {
+  const GALLERY_STAT_PILL_TYPES = [
+    { key: 'total', type: null, label: 'items' },
+    { key: 'image', type: 'image', label: 'images' },
+    { key: 'video', type: 'video', label: 'videos' },
+    { key: 'voice', type: 'voice', label: 'voice notes' },
+    { key: 'audio', type: 'audio', label: 'audio' },
+    { key: 'gif', type: 'gif', label: 'GIFs' },
+    { key: 'sticker', type: 'sticker', label: 'stickers' },
+    { key: 'document', type: 'document', label: 'documents' },
+    { key: 'link', type: 'link', label: 'links' },
+    { key: 'vcard', type: 'vcard', label: 'contacts' },
+  ];
+
+  function _renderSkeletonStatPills() {
+    const stats = document.getElementById('media-gallery-stats');
+    if (!stats) return;
+    stats.innerHTML = '';
+    for (const item of GALLERY_STAT_PILL_TYPES) {
+      const pill = _makeStatPill(item.key, '--', item.type, 0);
+      pill.classList.add('is-loading');
+      stats.appendChild(pill);
+    }
+    _syncStatPills();
+  }
+
+  function _hydrateStatPills(counts) {
+    if (!counts) return;
+    currentGalleryStats = counts;
+    const stats = document.getElementById('media-gallery-stats');
+    if (!stats) return;
+
+    const plurals = { voice: 'voice notes', audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links', vcard: 'contacts', total: 'items' };
+    const singulars = { voice: 'voice note', vcard: 'contact', total: 'item' };
+    const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
+    const totalMissing = Object.values(counts.by_type || {}).reduce((acc, d) => acc + (d.missing || 0), 0);
+
+    // Update 'total' pill
+    let totalPill = stats.querySelector('.gallery-stat[data-type="total"]');
+    if (!totalPill) {
+      totalPill = _makeStatPill('total', counts.total, null, totalMissing);
+      stats.prepend(totalPill);
+    } else {
+      const ms = totalMissing ? ` <span class="gallery-stat-missing">(${totalMissing} missing)</span>` : '';
+      const displayLabel = counts.total === 1 ? 'item' : 'items';
+      totalPill.innerHTML = `<strong>${counts.total}</strong> ${displayLabel}${ms}`;
+      totalPill.classList.remove('is-loading');
+      totalPill.style.display = '';
+    }
+
+    // Update each type pill
+    for (const t of typeOrder) {
+      const d = counts.by_type?.[t];
+      const count = d?.count || 0;
+      const missing = d?.missing || 0;
+      let pill = stats.querySelector(`.gallery-stat[data-type="${t}"]`);
+      if (count === 0 && !activeTypes.has(t)) {
+        if (pill) pill.style.display = 'none';
+        continue;
+      }
+      if (!pill) {
+        pill = _makeStatPill(t, count, t, missing);
+        stats.appendChild(pill);
+      } else {
+        const displayLabel = count === 1 ? (singulars[t] || t) : (plurals[t] || t + 's');
+        const ms = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
+        pill.innerHTML = `<strong>${count}</strong> ${displayLabel}${ms}`;
+        pill.classList.remove('is-loading');
+        pill.style.display = '';
+      }
+    }
+
+    _syncStatPills();
+    _syncGalleryNotices();
+  }
+
+  async function openMediaGallery() {
     if (!currentChat) return;
     closeChatInfo();
     closeChatStarred();
     const grid = document.getElementById('media-gallery-grid');
-    const stats = document.getElementById('media-gallery-stats');
     const switcher = document.getElementById('media-view-switcher');
 
     const gen = ++galleryOpenGen;
     const requestedChatId = currentChat.id;
+    const requestedChatType = currentChat.type;
 
     if (gallerySessionAbortController) {
       gallerySessionAbortController.abort();
@@ -39,7 +114,6 @@ async function openMediaGallery() {
       currentChat.display_name ? `Media — ${currentChat.display_name}` : 'Media';
 
     grid.innerHTML = '<div class="gallery-filter-loading gallery-initial-loading"><span class="gallery-filter-spinner"></span><span>Loading media…</span></div>';
-    stats.innerHTML = '';
     document.getElementById('media-gallery').classList.add('open');
 
     // reset pagination state
@@ -57,14 +131,25 @@ async function openMediaGallery() {
     linksAllLoaded = false;
     linksLoadingMore = false;
 
+    // Render skeleton pills immediately or hydrate from cache
+    const cacheKey = `${requestedChatId}:${requestedChatType}`;
+    const cachedCounts = galleryCountsCache.get(cacheKey);
+    if (cachedCounts) {
+      currentGalleryStats = cachedCounts;
+      _hydrateStatPills(cachedCounts);
+    } else {
+      _renderSkeletonStatPills();
+    }
+
     try {
       const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
-      const qs = 'chat_id=' + encodeURIComponent(currentChat.id) + '&chat_type=' + encodeURIComponent(currentChat.type);
+      const qs = 'chat_id=' + encodeURIComponent(requestedChatId) + '&chat_type=' + encodeURIComponent(requestedChatType);
 
       // Optimistically default to images + videos (filtering out any DEFAULT_DESELECTED_TYPES)
       activeTypes = new Set(['image', 'video'].filter(t => !DEFAULT_DESELECTED_TYPES.has(t)));
       defaultActiveTypes = new Set(activeTypes);
       isDefaultView = true;
+      _syncStatPills();
 
       grid.innerHTML = '';
 
@@ -88,11 +173,31 @@ async function openMediaGallery() {
       getGalleryMediaObserver();
 
       // Initiate count aggregation in background without blocking initial media render
-      const countPromise = fetch('/api/media/count?' + qs, { signal: sessionController.signal })
+      fetch('/api/media/count?' + qs, { signal: sessionController.signal })
         .then(r => r.ok ? r.json() : null)
+        .then(counts => {
+          if (!counts) return;
+          if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
+          if (!document.getElementById('media-gallery').classList.contains('open')) return;
+          galleryCountsCache.set(cacheKey, counts);
+          _hydrateStatPills(counts);
+
+          // If chat has no images or videos and user hasn't switched filter, switch to first available type
+          const hasImagesOrVideos = (counts.by_type?.['image']?.count || 0) + (counts.by_type?.['video']?.count || 0) > 0;
+          if (!hasImagesOrVideos && counts.total > 0 && isDefaultView) {
+            const firstAvailable = typeOrder.find(t => counts.by_type?.[t]?.count > 0);
+            if (firstAvailable) {
+              activeTypes = new Set([firstAvailable]);
+              defaultActiveTypes = new Set([firstAvailable]);
+              _syncStatPills();
+              _loadGalleryPage(null);
+            }
+          } else if (counts.total === 0 && !currentGalleryItems.length && !sessionController.signal.aborted) {
+            grid.innerHTML = '<div class="gallery-empty-notice">No media in this chat.</div>';
+          }
+        })
         .catch(err => {
           if (err.name !== 'AbortError') console.error('Failed to fetch media count:', err);
-          return null;
         });
 
       // Render page 1 immediately
@@ -101,41 +206,12 @@ async function openMediaGallery() {
       if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
       if (!document.getElementById('media-gallery').classList.contains('open')) return;
 
-      // Handle counts when ready
-      const counts = await countPromise;
-      if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
-      if (!document.getElementById('media-gallery').classList.contains('open')) return;
-
-      if (counts) {
-        currentGalleryStats = counts;
-        stats.innerHTML = '';
-        if (counts.total) {
-          const totalMissing = Object.values(counts.by_type || {}).reduce((acc, d) => acc + (d.missing || 0), 0);
-          stats.appendChild(_makeStatPill('total', counts.total, null, totalMissing));
-          for (const t of typeOrder) {
-            const d = counts.by_type[t];
-            if (!d) continue;
-            stats.appendChild(_makeStatPill(t, d.count, t, d.missing));
-          }
-
-          // If chat has no images or videos, switch to first available type
-          const hasImagesOrVideos = (counts.by_type['image']?.count || 0) + (counts.by_type['video']?.count || 0) > 0;
-          if (!hasImagesOrVideos && counts.total > 0) {
-            const firstAvailable = typeOrder.find(t => counts.by_type[t]?.count > 0);
-            if (firstAvailable) {
-              activeTypes = new Set([firstAvailable]);
-              defaultActiveTypes = new Set([firstAvailable]);
-              _syncStatPills();
-              await _loadGalleryPage(null);
-            }
-          } else {
-            _syncStatPills();
-          }
-        }
-      }
-
       if (!currentGalleryItems.length && !sessionController.signal.aborted) {
-        grid.innerHTML = '<div class="gallery-empty-notice">No media in this chat.</div>';
+        if (currentGalleryStats && currentGalleryStats.total === 0) {
+          grid.innerHTML = '<div class="gallery-empty-notice">No media in this chat.</div>';
+        } else if (!currentGalleryStats) {
+          grid.innerHTML = '<div class="gallery-filter-loading"><span class="gallery-filter-spinner"></span><span>Checking media…</span></div>';
+        }
         return;
       }
     } catch (err) {
@@ -157,7 +233,12 @@ async function openMediaGallery() {
     if (!statsEl) return;
     const pills = statsEl.querySelectorAll('.gallery-stat');
     if (!isLoading) {
-      pills.forEach(p => p.classList.remove('is-loading'));
+      pills.forEach(p => {
+        const strong = p.querySelector('strong');
+        if (!strong || strong.textContent !== '--') {
+          p.classList.remove('is-loading');
+        }
+      });
       return;
     }
     const currentType = activeTypes.size === 1 ? [...activeTypes][0] : (activeTypes.size === 0 ? 'total' : null);
@@ -167,7 +248,10 @@ async function openMediaGallery() {
       } else if (!currentType && activeTypes.has(p.dataset.type)) {
         p.classList.add('is-loading');
       } else {
-        p.classList.remove('is-loading');
+        const strong = p.querySelector('strong');
+        if (!strong || strong.textContent !== '--') {
+          p.classList.remove('is-loading');
+        }
       }
     });
   }
@@ -209,7 +293,7 @@ async function openMediaGallery() {
                       (activeTypes.size === 1 && activeTypes.has('link') && linksAllLoaded) ||
                       (totalExpected > 0 && visibleCount >= totalExpected);
 
-    if ((totalExpected === 0 && type) || (isAllDone && visibleCount === 0)) {
+    if ((currentGalleryStats && totalExpected === 0 && type) || (isAllDone && visibleCount === 0)) {
       const notice = document.createElement('div');
       notice.className = 'gallery-empty-notice';
       notice.textContent = type ? `No ${typeLabel} in this chat.` : 'No media in this chat.';
