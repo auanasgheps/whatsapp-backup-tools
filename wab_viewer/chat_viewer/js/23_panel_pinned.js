@@ -97,7 +97,7 @@
     const gen = ++_pinnedBannerPollGen;
     try {
       const params = new URLSearchParams({ chat_type: chatType });
-      const res = await fetch(`/api/chat/${encodeURIComponent(chatId)}/pinned?` + params);
+      const res = await fetch(`${API}/chat/${encodeURIComponent(chatId)}/pinned?` + params);
       if (gen !== _pinnedBannerPollGen || !currentChat || String(currentChat.id) !== String(chatId)) return;
       if (!res.ok) {
         banner.style.display = 'none';

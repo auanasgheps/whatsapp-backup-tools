@@ -371,7 +371,7 @@ const COLLAPSE_CHAR_LIMIT = 750;
     const callsBtn = document.getElementById('tab-btn-calls');
     if (!callsBtn) return;
     try {
-      const res = await fetch('/api/calls?limit=1');
+      const res = await fetch(API + '/calls?limit=1');
       if (!res.ok) {
         throw new Error(`Server returned HTTP ${res.status} when checking calls availability`);
       }

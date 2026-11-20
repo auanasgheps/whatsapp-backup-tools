@@ -126,7 +126,7 @@
         msg_id: messageId,
         limit: 50
       });
-      const res = await fetch('/api/messages/at?' + params, { signal: abortSignal });
+      const res = await fetch(API + '/messages/at?' + params, { signal: abortSignal });
       if (!res.ok) {
         throw new Error(`Server returned HTTP ${res.status} when loading messages at msg_id ${messageId}`);
       }
@@ -215,7 +215,7 @@
         ts: timestampMs,
         limit: 50
       });
-      const res = await fetch('/api/messages/at?' + params, { signal: abortSignal });
+      const res = await fetch(API + '/messages/at?' + params, { signal: abortSignal });
       if (!res.ok) {
         throw new Error(`Server returned HTTP ${res.status} when loading messages at timestamp ${timestampMs}`);
       }

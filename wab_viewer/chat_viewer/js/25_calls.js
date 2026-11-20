@@ -55,7 +55,7 @@
       });
       if (q) params.set('q', q);
 
-      const res = await fetch(`/api/calls?${params}`);
+      const res = await fetch(`${API}/calls?${params}`);
       if (!res.ok) {
         throw new Error(`Server returned HTTP ${res.status} when fetching calls`);
       }

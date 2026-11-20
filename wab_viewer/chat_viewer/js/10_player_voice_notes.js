@@ -136,7 +136,7 @@ function getSharedAudioContext() {
     const audio = document.createElement('audio');
     audio.preload = 'metadata';
     if (hasAudioFile) {
-      audio.src = '/media/' + msg.archive_path;
+      audio.src = MEDIA + msg.archive_path;
     }
 
     let savedRate = parseFloat(sessionStorage.getItem('wa_voice_playback_rate') || '1') || 1;
@@ -214,7 +214,7 @@ function getSharedAudioContext() {
     if (Array.isArray(precomputedWave) && precomputedWave.length > 0) {
       applyWaveformHeights(precomputedWave);
     } else if (hasAudioFile) {
-      const srcUrl = '/media/' + msg.archive_path;
+      const srcUrl = MEDIA + msg.archive_path;
       if (waveformCache.has(srcUrl)) {
         applyWaveformHeights(waveformCache.get(srcUrl));
       } else {

@@ -88,7 +88,7 @@ async function openMediaGallery() {
       getGalleryMediaObserver();
 
       // Initiate count aggregation in background without blocking initial media render
-      const countPromise = fetch('/api/media/count?' + qs, { signal: sessionController.signal })
+      const countPromise = fetch(API + '/media/count?' + qs, { signal: sessionController.signal })
         .then(r => r.ok ? r.json() : null)
         .catch(err => {
           if (err.name !== 'AbortError') console.error('Failed to fetch media count:', err);
@@ -253,7 +253,7 @@ async function openMediaGallery() {
       const typesParam = activeTypes.size > 0
         ? '&types=' + encodeURIComponent([...activeTypes].join(','))
         : '&types=all';
-      const url = '/api/media?chat_id=' + encodeURIComponent(currentChat.id) +
+      const url = API + '/media?chat_id=' + encodeURIComponent(currentChat.id) +
                   '&chat_type=' + encodeURIComponent(currentChat.type) +
                   typesParam +
                   (before != null ? '&before=' + before : '');

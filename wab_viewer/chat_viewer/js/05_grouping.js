@@ -283,7 +283,7 @@
       // Build a lightweight media element (no caption, no reactions in grid)
       const wrap = document.createElement('div');
       wrap.className = 'msg-media';
-      const src = '/media/' + msg.archive_path;
+      const src = MEDIA + msg.archive_path;
       const mt = msg.media_type;
 
       if (mt === 'image' || mt === 'sticker') {
