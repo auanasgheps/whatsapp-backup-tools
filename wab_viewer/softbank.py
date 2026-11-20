@@ -494,12 +494,23 @@ def convert(text: str) -> str:
     return text.translate(SOFTBANK_TO_UNICODE)
 
 
+# Keys whose values point at files or URLs: the archive folders keep the original characters (a group
+# called "Trip \ue11c" lives in Groups/Trip \ue11c/), so converting them would break every media URL.
+_UNTOUCHED_KEY_SUFFIXES = ("path", "url", "dir", "folder")
+
+
 def convert_obj(obj):
-    """convert() applied to every string inside a JSON-like structure (dicts, lists, tuples)."""
+    """convert() applied to every string inside a JSON-like structure (dicts, lists, tuples), except
+    the values of keys that name files, folders or URLs."""
     if isinstance(obj, str):
         return convert(obj)
     if isinstance(obj, dict):
-        return {key: convert_obj(value) for key, value in obj.items()}
+        return {
+            key: value
+            if isinstance(key, str) and key.lower().endswith(_UNTOUCHED_KEY_SUFFIXES)
+            else convert_obj(value)
+            for key, value in obj.items()
+        }
     if isinstance(obj, (list, tuple)):
         return [convert_obj(value) for value in obj]
     return obj
