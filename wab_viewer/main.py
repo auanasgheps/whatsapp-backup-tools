@@ -45,6 +45,7 @@ from .queries.sql_builder import (
     build_viewer_queries,
     detect_schema_capabilities,
 )
+from .softbank import SoftbankEmojiJSONProvider
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -132,6 +133,7 @@ def create_app(output_root: Path, rescan: bool = False):
             source_type = None
 
     app.config["SCHEMA_ALERT"] = schema_alert
+    app.json = SoftbankEmojiJSONProvider(app)
 
     if source_type is None:
         print(
