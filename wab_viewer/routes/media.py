@@ -758,6 +758,17 @@ def api_thumbnail(msg_id):
 
     thumb_bytes = None
     if ctx.source_type == "android":
+        android_msg_type = None
+        try:
+            m_type_row = conn.execute(
+                "SELECT message_type FROM message WHERE _id = ?",
+                (msg_id_val,),
+            ).fetchone()
+            if m_type_row:
+                android_msg_type = m_type_row[0]
+        except sqlite3.OperationalError:
+            pass
+
         if ctx.caps.has_message_thumbnail:
             row = conn.execute(
                 "SELECT thumbnail FROM message_thumbnail WHERE message_row_id = ?",
@@ -766,17 +777,44 @@ def api_thumbnail(msg_id):
             if row and row["thumbnail"]:
                 thumb_bytes = row["thumbnail"]
 
-        if not thumb_bytes:
-            has_mm = False
+        if not thumb_bytes and android_msg_type in (0, None) and ctx.caps.has_message_quoted_text:
             try:
-                has_mm = bool(
+                row = conn.execute(
+                    "SELECT thumbnail FROM message_quoted_text WHERE message_row_id = ?",
+                    (msg_id_val,),
+                ).fetchone()
+                if row and row["thumbnail"]:
+                    thumb_bytes = row["thumbnail"]
+            except sqlite3.OperationalError:
+                pass
+
+        has_mq = False
+        if not thumb_bytes:
+            try:
+                has_mq = bool(
                     conn.execute(
-                        "SELECT 1 FROM message_media WHERE message_row_id = ? LIMIT 1",
+                        "SELECT 1 FROM message_quoted WHERE message_row_id = ? LIMIT 1",
                         (msg_id_val,),
                     ).fetchone()
                 )
             except sqlite3.OperationalError:
                 pass
+
+        if not thumb_bytes and android_msg_type in (0, None) and not has_mq:
+            return _fail_thumb_404(ctx, msg_id)
+
+        if not thumb_bytes:
+            has_mm = False
+            if android_msg_type not in (0, None):
+                try:
+                    has_mm = bool(
+                        conn.execute(
+                            "SELECT 1 FROM message_media WHERE message_row_id = ? LIMIT 1",
+                            (msg_id_val,),
+                        ).fetchone()
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
             if has_mm and ctx.caps.has_media_hash_thumbnail and ctx.caps.has_mm_file_hash:
                 row = conn.execute(
@@ -790,18 +828,6 @@ def api_thumbnail(msg_id):
                 ).fetchone()
                 if row and row["thumbnail"]:
                     thumb_bytes = row["thumbnail"]
-
-            has_mq = False
-            if not thumb_bytes:
-                try:
-                    has_mq = bool(
-                        conn.execute(
-                            "SELECT 1 FROM message_quoted WHERE message_row_id = ? LIMIT 1",
-                            (msg_id_val,),
-                        ).fetchone()
-                    )
-                except sqlite3.OperationalError:
-                    pass
 
             if not thumb_bytes and has_mq:
                 if ctx.caps.has_message_quoted_media:
@@ -925,6 +951,17 @@ def api_thumbnail(msg_id):
                         if row and row["thumbnail"]:
                             thumb_bytes = row["thumbnail"]
     elif ctx.source_type == "ios":
+        ios_msg_type = None
+        try:
+            m_type_row = conn.execute(
+                "SELECT ZMESSAGETYPE FROM ZWAMESSAGE WHERE Z_PK = ?",
+                (msg_id_val,),
+            ).fetchone()
+            if m_type_row:
+                ios_msg_type = m_type_row[0]
+        except sqlite3.OperationalError:
+            pass
+
         thumb_cols = []
         if "ZXMPPTHUMBPATH" in ctx.caps.mi_cols:
             thumb_cols.append("mi.ZXMPPTHUMBPATH")
@@ -1032,6 +1069,9 @@ def api_thumbnail(msg_id):
                         eoi_idx = blob.find(b"\xff\xd9", jpeg_idx)
                         if eoi_idx != -1:
                             thumb_bytes = blob[jpeg_idx : eoi_idx + 2]
+            if not thumb_bytes and ios_msg_type in (0, 7, None):
+                return _fail_thumb_404(ctx, msg_id)
+
             if not thumb_bytes:
                 try:
                     # 1. Check if another message replied to this message via ZPARENTMESSAGE

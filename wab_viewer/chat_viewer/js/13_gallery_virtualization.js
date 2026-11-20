@@ -82,7 +82,7 @@
       if (grid) {
         galleryLinkObserver = new IntersectionObserver(handleMediaIntersection, {
           root: grid,
-          rootMargin: '150px 0px 150px 0px',
+          rootMargin: '40px 0px 40px 0px',
         });
       }
     }
@@ -152,7 +152,7 @@
     const grid = document.getElementById('media-gallery-grid');
     if (!grid) return;
     const gRect = grid.getBoundingClientRect();
-    const cells = grid.querySelectorAll('.gallery-item[data-hydrated="false"]:not(.type-hidden)');
+    const cells = grid.querySelectorAll('.gallery-item[data-hydrated="false"]:not(.type-hidden):not([data-type="link"])');
     for (const cell of cells) {
       const r = cell.getBoundingClientRect();
       if (r.bottom >= gRect.top - 200 && r.top <= gRect.bottom + 600) {
@@ -240,6 +240,10 @@
     const grid = document.getElementById('media-gallery-grid');
     if (!grid) return;
 
+    if (activeTypes.size === 1 && activeTypes.has('link')) {
+      return;
+    }
+
     const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
     if (typesAllLoaded.has(typesKey)) return;
     if (activeTypes.size === 0 && galleryAllLoaded) return;
@@ -319,7 +323,11 @@
     if (galleryScrollDirection === 'up') return;
 
     if (activeTypes.size === 1 && activeTypes.has('link')) {
-      _loadMoreLinks();
+      if (linksLoadingMore || linksAllLoaded) return;
+      const distFromBottom = grid.scrollHeight - (grid.scrollTop + grid.clientHeight);
+      if (distFromBottom <= 800 || grid.scrollHeight <= grid.clientHeight) {
+        _loadMoreLinks();
+      }
       return;
     }
 
@@ -367,7 +375,7 @@
       lastGalleryScrollTop = currentScrollTop;
     }
 
-    if (galleryLoadingMore) {
+    if (galleryLoadingMore || linksLoadingMore) {
       galleryPendingScrollCheck = true;
     } else {
       _checkGalleryLoadMore();
