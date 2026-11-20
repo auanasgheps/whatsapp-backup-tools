@@ -685,9 +685,24 @@ def _copy_or_skip(
     Copy or hardlink src to dest, handling dry-run, dedup, and collision.
     Returns (copied, skipped, warnings) deltas.
     """
+    lp_dest = db.ensure_long_path(dest_path)
     if dry_run:
-        if os.path.exists(dest_path) and find_identical_variant(dest_path, file_md5(src)):
-            return CopyResult(0, 1, 0, 0)
+        if os.path.exists(lp_dest):
+            src_hash = file_md5(src)
+            rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
+            if archived_file_set is not None and (file_path, rel, src_hash) in archived_file_set:
+                return CopyResult(0, 1, 0, 0)
+            if (
+                cursor is not None
+                and cursor.execute(
+                    "SELECT 1 FROM archive_copies ac JOIN files f ON f.original_path = ac.original_path "
+                    "WHERE ac.original_path = ? AND ac.archive_path = ? AND f.md5 = ?",
+                    (file_path, rel, src_hash),
+                ).fetchone()
+            ):
+                return CopyResult(0, 1, 0, 0)
+            if find_identical_variant(dest_path, src_hash):
+                return CopyResult(0, 1, 0, 0)
         resolved = resolve_unique_dest(dest_path, src, logger)
         if resolved is None:
             return CopyResult(0, 1, 0, 0)
@@ -701,9 +716,10 @@ def _copy_or_skip(
         logger.info(f"[DRY RUN] Would copy: {src} -> {resolved}")
         return CopyResult(1, 0, 0, 0)
 
-    if os.path.exists(dest_path):
+    if os.path.exists(lp_dest):
         src_hash = file_md5(src)
         dest_path = find_identical_variant(dest_path, src_hash) or dest_path
+        lp_dest = db.ensure_long_path(dest_path)
         rel = os.path.relpath(dest_path, output_root).replace(os.sep, "/")
         if archived_file_set is not None and (file_path, rel, src_hash) in archived_file_set:
             resolved = None
@@ -722,13 +738,13 @@ def _copy_or_skip(
             if archived_file_set is not None:
                 archived_file_set.add((file_path, rel, src_hash))
             if cursor is not None:
-                is_hardlink_val = 1 if os.stat(dest_path).st_nlink > 1 else 0
+                is_hardlink_val = 1 if os.stat(lp_dest).st_nlink > 1 else 0
                 archive_db.record_file_archived(
                     cursor,
                     file_path,
                     src_hash,
                     rel,
-                    os.path.getsize(dest_path),
+                    os.path.getsize(lp_dest),
                     is_hardlink_val,
                     timestamp,
                 )
@@ -1751,7 +1767,12 @@ def run_update_metadata_mode(args: argparse.Namespace, logger: logging.Logger) -
                         archive_db.mark_metadata_stamped(cursor, archive_path, 1)
                     else:
                         stats["skipped"] += 1
-                        archive_db.mark_metadata_stamped(cursor, archive_path, 2)
+                        # Protect previously stamped files (1) from being demoted to skipped (2) on --force
+                        cursor.execute(
+                            "UPDATE archive_copies SET exif_stamped = 2 "
+                            "WHERE archive_path = ? AND exif_stamped != 1",
+                            (archive_path,),
+                        )
                 except Exception as e:
                     logger.warning(f"Error injecting metadata on {archive_path}: {e}")
                     stats["errors"] += 1
