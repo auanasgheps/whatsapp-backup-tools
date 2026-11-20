@@ -10,6 +10,7 @@
   let archiveViewActive = false;
   let currentGalleryItems = [];
   let currentGalleryStats = null;
+  const galleryCountsCache = new Map();
   let activeTypes = new Set();   // empty = show all; populated = show only those types
   let defaultActiveTypes = new Set();  // restored when deselecting a secondary type or sticker
   let isDefaultView = true;

@@ -472,7 +472,7 @@ def api_media_count():
             WHERE {chat_pred}
               AND (m.message_type IS NULL OR m.message_type = 0)
               AND m.text_data IS NOT NULL
-              AND (INSTR(LOWER(m.text_data), 'http://') > 0 OR INSTR(LOWER(m.text_data), 'https://') > 0)
+              AND (m.text_data LIKE '%http://%' OR m.text_data LIKE '%https://%')
         """
     else:
         chat_pred, chat_params = _ios_chat_filter(chat_id)
@@ -520,7 +520,7 @@ def api_media_count():
                 OR (
                     (m.ZMESSAGETYPE IS NULL OR m.ZMESSAGETYPE = 0)
                     AND m.ZTEXT IS NOT NULL
-                    AND (INSTR(LOWER(m.ZTEXT), 'http://') > 0 OR INSTR(LOWER(m.ZTEXT), 'https://') > 0)
+                    AND (m.ZTEXT LIKE '%http://%' OR m.ZTEXT LIKE '%https://%')
                 )
               )
         """
@@ -553,30 +553,40 @@ def api_media_count():
     pres = ctx.get_preserved()
     if pres is not None:
         try:
-            pres_rows = _query_preserved_messages(
-                pres,
-                chat_id=chat_id,
-                chat_type=chat_type,
-                before=None,
-                after=None,
-                before_inclusive=False,
-                after_inclusive=False,
-                limit=100000,
-            )
-            for pr in pres_rows:
-                pt = pr.get("media_type")
+            type_clause = " AND chat_type = ?" if chat_type else ""
+            type_params = [chat_type] if chat_type else []
+            sql_pres = f"""
+                SELECT
+                    media_type,
+                    CASE
+                        WHEN media_type = 'audio' AND (
+                            LOWER(COALESCE(archive_path, original_path, '')) LIKE '%voice notes%'
+                            OR LOWER(COALESCE(archive_path, original_path, '')) LIKE '%.opus'
+                        ) THEN 1
+                        ELSE 0
+                    END AS is_vn,
+                    CASE WHEN archive_path IS NOT NULL AND archive_path != '' THEN 1 ELSE 0 END AS is_arch,
+                    COALESCE(is_view_once, 0) AS is_vo,
+                    COUNT(*) as cnt
+                FROM preserved_messages
+                WHERE chat_id = ?{type_clause}
+                GROUP BY media_type, is_vn, is_arch, is_vo
+            """
+            for pr in pres.execute(sql_pres, [chat_id] + type_params).fetchall():
+                pt = pr[0]
                 if pt in _NON_GALLERY_TYPES:
                     continue
                 if pt in ("image", "video", "audio", "gif", "sticker", "document", "vcard", "link"):
-                    effective_pt = "voice" if (pt == "audio" and pr.get("is_voice_note")) else pt
+                    effective_pt = "voice" if (pt == "audio" and pr[1]) else pt
+                    is_arch = pr[2]
+                    is_vo = pr[3]
+                    cnt = pr[4]
                     by_type.setdefault(effective_pt, {"count": 0, "missing": 0})
-                    by_type[effective_pt]["count"] += 1
-                    if pr.get("archive_path"):
-                        archived += 1
-                    elif effective_pt not in ("link", "text", "vcard") and not pr.get(
-                        "is_view_once"
-                    ):
-                        by_type[effective_pt]["missing"] += 1
+                    by_type[effective_pt]["count"] += cnt
+                    if is_arch:
+                        archived += cnt
+                    elif effective_pt not in ("link", "text", "vcard") and not is_vo:
+                        by_type[effective_pt]["missing"] += cnt
         except Exception:
             pass
 

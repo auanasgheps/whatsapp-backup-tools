@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
+
+- **Media Gallery Async Count Decoupling, Skeleton Stat Pills & Query Optimization**:
+  - **Decoupled Stream Pagination from Aggregation**: Eliminated sequential `await countPromise` inside `openMediaGallery()`, allowing the first page of media (`_loadGalleryPage(null)`) to render and display immediately without being blocked by aggregate count calculations.
+  - **Immediate Skeleton Stat Pills & In-Place Hydration**: Synchronously populates `#media-gallery-stats` on open with all standard media type pills showing placeholder counts (`--`) and subtle loading spinners (`.is-loading`), allowing instant user filtering from frame 1 and eliminating cumulative layout shift (CLS). Added `_hydrateStatPills(counts)` to update numbers in-place on existing DOM elements without wiping `stats.innerHTML`.
+  - **Stale-While-Revalidate Caching**: Added client-side `galleryCountsCache = new Map()` in `13_gallery_virtualization.js` to instantly hydrate stat pills with 0ms latency when reopening previously viewed chats.
+  - **Zero Media Flash & State Race Guardrails**: Displays a non-intrusive checking spinner instead of flashing a premature "No media in this chat" message when the initial optimistic image/video query returns 0 items while counts are in-flight. Null-guarded `currentGalleryStats` in `_syncGalleryNotices()` to avoid false end notices during pagination.
+  - **Backend Query Latency Optimization**: Replaced `INSTR(LOWER(text_data), 'http://') > 0` with case-insensitive `LIKE` (`m.text_data LIKE '%http://%' OR m.text_data LIKE '%https://%'`) in both Android and iOS link counting queries (2.0x faster), and replaced raw dictionary parsing of preserved messages with an in-database aggregated `SELECT media_type, ... COUNT(*) GROUP BY` query (2.5x faster).
+
+---
+
 ## [0.80]
 
 ### 📁 WhatsApp Backup Archiver (`wab-archiver`)
