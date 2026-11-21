@@ -51,6 +51,7 @@ def api_media():
     chat_type = request.args.get("chat_type", "")
     before = request.args.get("before")
     types_raw = request.args.get("types")
+    is_archived_only = request.args.get("archived") == "1"
     conn = ctx.get_wa()
     if conn is None:
         return jsonify([])
@@ -195,20 +196,22 @@ def api_media():
     id_col = "m._id" if ctx.source_type == "android" else "m.Z_PK"
 
     rows: list[dict] = []
-    curr_before = int(before) if before else None
+    curr_before = int(before) if (before is not None and before != "") else None
     seen_ids: set = set()
     while len(rows) < GALLERY_PAGE_SIZE:
-        batch_ts_clause = f"AND {ts_col} < ?" if curr_before else ""
+        batch_ts_clause = f"AND {ts_col} < ?" if curr_before is not None else ""
         batch_params = list(chat_params)
-        if curr_before:
+        if curr_before is not None:
             batch_params.append(curr_before)
         needed = GALLERY_PAGE_SIZE - len(rows)
         batch_limit = max(needed, GALLERY_PAGE_SIZE)
 
+        archived_clause = "AND ac.archive_path IS NOT NULL" if is_archived_only else ""
+
         # Stage 1: Fast candidate ID selection (scans indexed table with limit)
         stage1_sql = f"""
             {id_select}
-            WHERE {chat_pred} {extra} {hd_dedup_clause} AND ({cand_pred}) {batch_ts_clause}
+            WHERE {chat_pred} {extra} {hd_dedup_clause} {archived_clause} AND ({cand_pred}) {batch_ts_clause}
             ORDER BY {ts_col} DESC
             LIMIT ?
         """
@@ -219,12 +222,15 @@ def api_media():
 
         # Stage 2: Targeted hydration of selected IDs with full joins
         ph = ", ".join("?" for _ in cand_ids)
+        stage2_type_filter = (
+            f"({type_filter}) AND archive_path IS NOT NULL" if is_archived_only else type_filter
+        )
         stage2_sql = f"""
             SELECT * FROM (
                 {select}
                 WHERE {id_col} IN ({ph})
             )
-            WHERE {type_filter}
+            WHERE {stage2_type_filter}
             ORDER BY timestamp_ms DESC
         """
         raw_rows = [dict(r) for r in conn.execute(stage2_sql, cand_ids + type_params).fetchall()]
@@ -268,6 +274,8 @@ def api_media():
             )
             filtered_pres = []
             for pr in pres_rows:
+                if is_archived_only and not pr.get("archive_path"):
+                    continue
                 pt = pr.get("media_type")
                 if pt in _NON_GALLERY_TYPES:
                     continue
@@ -298,6 +306,9 @@ def api_media():
                 )
         except Exception:
             pass
+
+    if is_archived_only:
+        rows = [r for r in rows if r.get("archive_path")]
 
     for r in rows:
         r.pop("audio_waveform", None)

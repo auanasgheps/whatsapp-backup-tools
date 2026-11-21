@@ -9,6 +9,8 @@
   let archiveMediaObserver = null;
   let archiveViewActive = false;
   let currentGalleryItems = [];
+  let currentArchiveItems = [];
+  let archiveAllLoaded = false;
   let currentGalleryStats = null;
   const galleryCountsCache = new Map();
   let activeTypes = new Set();   // empty = show all; populated = show only those types

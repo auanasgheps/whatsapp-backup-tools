@@ -118,6 +118,8 @@
 
     // reset pagination state
     currentGalleryItems = [];
+    currentArchiveItems = [];
+    archiveAllLoaded = false;
     currentGalleryStats = null;
     lightboxItems = [];
     activeTypes = new Set();
@@ -314,7 +316,9 @@
     const gen = galleryOpenGen;
     const requestedChatId = currentChat ? currentChat.id : null;
     galleryLoadingMore = true;
-    _setStatPillsLoading(true);
+    if (!archiveViewActive) {
+      _setStatPillsLoading(true);
+    }
     const grid = document.getElementById('media-gallery-grid');
 
     const controller = new AbortController();
@@ -357,9 +361,9 @@
       }
       currentGalleryItems.push(...items);
 
-      _insertGalleryGridBatch(grid, items);
-
-      if (archiveViewActive) {
+      if (!archiveViewActive) {
+        _insertGalleryGridBatch(grid, items);
+      } else {
         _appendToArchiveView(items, activeArchiveDir());
       }
       _syncMonthHeaders();
@@ -381,7 +385,9 @@
       if (gen === galleryOpenGen && document.getElementById('media-gallery').classList.contains('open')) {
         _syncGalleryNotices();
       }
-      scheduleVisibleVideoExtraction();
+      if (!archiveViewActive) {
+        scheduleVisibleVideoExtraction();
+      }
 
       // Resolve fast scrolling race condition: if still near bottom going down, continue loading
       if (grid && galleryScrollDirection === 'down' && !typesAllLoaded.has(typesKey)) {
@@ -483,8 +489,8 @@
         scheduleVisibleVideoExtraction();
         _syncGalleryNotices();
         if (archiveViewActive) {
-          buildArchiveView(currentGalleryItems, activeArchiveDir());
-          _loadAllArchivePages();
+          buildArchiveView(currentArchiveItems, activeArchiveDir());
+          if (!archiveAllLoaded) _loadAllArchivePages();
         }
         return;
       } else {
@@ -498,8 +504,8 @@
           scheduleVisibleVideoExtraction();
           _syncGalleryNotices();
           if (archiveViewActive) {
-            buildArchiveView(currentGalleryItems, activeArchiveDir());
-            _loadAllArchivePages();
+            buildArchiveView(currentArchiveItems, activeArchiveDir());
+            if (!archiveAllLoaded) _loadAllArchivePages();
           }
           return;
         }
@@ -520,7 +526,7 @@
 
         if (archiveViewActive) {
           const tree = document.getElementById('media-archive-tree');
-          if (tree) {
+          if (tree && !currentArchiveItems.length) {
             tree.innerHTML = '<div class="gallery-filter-loading"><span class="gallery-filter-spinner"></span><span>Loading all items…</span></div>';
           }
         }
@@ -552,8 +558,8 @@
           allMediaStreamLoaded = true;
           streamHasFilteredTail = false;
           if (archiveViewActive) {
-            buildArchiveView(currentGalleryItems, activeArchiveDir());
-            _loadAllArchivePages();
+            buildArchiveView(currentArchiveItems, activeArchiveDir());
+            if (!archiveAllLoaded) _loadAllArchivePages();
           }
           _syncMonthHeaders();
           _syncGalleryNotices();
@@ -612,7 +618,7 @@
     _syncStatPills();
     scheduleVisibleVideoExtraction();
 
-    if (grid) {
+    if (grid && !archiveViewActive) {
       grid.querySelectorAll('.gallery-filter-loading, .gallery-scroll-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
       if (type !== null && activeTypes.size === 1) {
         const hasMatchingInGrid = Boolean(grid.querySelector(`.gallery-item[data-type="${type}"]:not(.type-hidden), .gallery-link-card[data-type="${type}"]:not(.type-hidden)`));
@@ -635,14 +641,16 @@
     const gen = ++galleryBackfillGen;
     if (activeTypes.size === 1 && activeTypes.has('link')) {
       _loadMoreLinks();
-    } else {
+    } else if (!archiveViewActive) {
       _ensureMediaLoadedForViewport(targetTs, anchorEl, anchorTopBefore, gen);
       if (activeTypes.has('link')) {
         _checkGalleryLoadMore();
       }
     }
     if (archiveViewActive) {
-      _loadAllArchivePages();
+      if (!archiveAllLoaded) {
+        _loadAllArchivePages();
+      }
     }
   }
 
