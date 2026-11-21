@@ -160,7 +160,7 @@
   }
 
   function archiveSegments(archivePath) {
-    const parts = archivePath.split('/');
+    const parts = (archivePath || '').replace(/\\/g, '/').split('/');
     // Contacts/<name>/<year>/Sent|Received/<file>  → parts[0]='Contacts'
     // Groups/<name>/<year>/<file>                  → parts[0]='Groups'
     if (parts[0] === 'Groups') return { year: parts[2], direction: null };
@@ -207,7 +207,7 @@
       (direction === null || archiveSegments(m.archive_path).direction === direction));
 
     const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
-    const isDone = (activeTypes.size === 0 && galleryAllLoaded) || typesAllLoaded.has(typesKey);
+    const isDone = archiveAllLoaded || (activeTypes.size === 0 && galleryAllLoaded) || typesAllLoaded.has(typesKey);
 
     if (!filtered.length) {
       tree.innerHTML = isDone
