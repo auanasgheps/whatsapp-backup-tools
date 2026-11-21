@@ -9,6 +9,7 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 import base64
 import os
 import sqlite3
+import sys
 import time
 
 import pytest
@@ -40,6 +41,26 @@ _make_receipt_blob = make_receipt_blob
 _make_compact_receipt_blob = make_compact_receipt_blob
 _make_zreceipt_blob_with_reactions = make_zreceipt_blob_with_reactions
 _make_ios_reaction_blob = make_ios_reaction_blob
+
+
+def _link_dir(src, dst):
+    """Create a directory symlink or junction from dst pointing to src.
+
+    Returns True if successfully created, False if platform privileges prevent it.
+    """
+    try:
+        if sys.platform == "win32":
+            import _winapi
+
+            try:
+                _winapi.CreateJunction(str(src), str(dst))
+                return True
+            except OSError:
+                pass
+        dst.symlink_to(src, target_is_directory=True)
+        return True
+    except OSError:
+        return False
 
 
 class TestFlaskRoutes:
@@ -220,6 +241,67 @@ class TestFlaskRoutes:
         client, tmp = app_and_tmp
         resp = client.get("/media/../wa_media_archiver.py")
         assert resp.status_code == 403
+
+    def test_media_served_from_symlinked_folder(self, app_and_tmp, tmp_path_factory):
+        # Contacts/ kept on another disk and linked into the archive: its files must be served.
+        client, tmp = app_and_tmp
+        elsewhere = tmp_path_factory.mktemp("other_disk")
+        (elsewhere / "Alice").mkdir()
+        (elsewhere / "Alice" / "IMG.jpg").write_bytes(b"photo")
+        if not _link_dir(elsewhere, tmp / "Contacts"):
+            pytest.skip("Cannot create directory symlink or junction on this environment")
+        resp = client.get("/media/Contacts/Alice/IMG.jpg")
+        assert resp.status_code == 200
+        assert resp.data == b"photo"
+
+    def test_media_served_from_symlinked_groups_folder(self, app_and_tmp, tmp_path_factory):
+        # Groups/ kept on another disk and linked into the archive: its files must be served.
+        client, tmp = app_and_tmp
+        elsewhere = tmp_path_factory.mktemp("other_disk_groups")
+        (elsewhere / "Family").mkdir()
+        (elsewhere / "Family" / "VID.mp4").write_bytes(b"video_bytes")
+        if not _link_dir(elsewhere, tmp / "Groups"):
+            pytest.skip("Cannot create directory symlink or junction on this environment")
+        resp = client.get("/media/Groups/Family/VID.mp4")
+        assert resp.status_code == 200
+        assert resp.data == b"video_bytes"
+
+    def test_media_403_for_traversal_next_to_symlinked_folder(self, app_and_tmp, tmp_path_factory):
+        client, tmp = app_and_tmp
+        elsewhere = tmp_path_factory.mktemp("other_disk")
+        (elsewhere / "secret.txt").write_bytes(b"secret")
+        if not _link_dir(elsewhere, tmp / "Contacts"):
+            pytest.skip("Cannot create directory symlink or junction on this environment")
+        assert client.get("/media/Contacts/../../secret.txt").status_code == 403
+
+    def test_media_403_for_arbitrary_unwhitelisted_symlink(self, app_and_tmp, tmp_path_factory):
+        # Arbitrary symlink pointing outside archive (not Contacts or Groups) must be rejected
+        client, tmp = app_and_tmp
+        elsewhere = tmp_path_factory.mktemp("other_disk")
+        (elsewhere / "secret.txt").write_bytes(b"secret")
+        if not _link_dir(elsewhere, tmp / "evil_folder"):
+            pytest.skip("Cannot create directory symlink or junction on this environment")
+        assert client.get("/media/evil_folder/secret.txt").status_code == 403
+
+    def test_media_404_for_directory_path(self, app_and_tmp, tmp_path_factory):
+        # Requesting a directory path instead of a file must return 404, not unhandled 500
+        client, tmp = app_and_tmp
+        elsewhere = tmp_path_factory.mktemp("other_disk")
+        (elsewhere / "Alice").mkdir()
+        if not _link_dir(elsewhere, tmp / "Contacts"):
+            pytest.skip("Cannot create directory symlink or junction on this environment")
+        assert client.get("/media/Contacts").status_code == 404
+        assert client.get("/media/Contacts/Alice").status_code == 404
+
+    def test_media_range_request_through_symlink(self, app_and_tmp, tmp_path_factory):
+        client, tmp = app_and_tmp
+        elsewhere = tmp_path_factory.mktemp("other_disk")
+        (elsewhere / "test.mp4").write_bytes(b"0123456789ABCDEF")
+        if not _link_dir(elsewhere, tmp / "Contacts"):
+            pytest.skip("Cannot create directory symlink or junction on this environment")
+        resp = client.get("/media/Contacts/test.mp4", headers={"Range": "bytes=4-9"})
+        assert resp.status_code == 206
+        assert resp.data == b"456789"
 
     def test_media_range_request_returns_slice(self, app_and_tmp):
         client, tmp = app_and_tmp

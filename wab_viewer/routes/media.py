@@ -21,7 +21,12 @@ from flask import (
 )
 
 from ..chat_viewer.template import HTML_TEMPLATE
-from ..context import get_version, get_viewer_context
+from ..context import (
+    _ALLOWED_MEDIA_CONTAINERS,
+    _discover_allowed_media_roots,
+    get_version,
+    get_viewer_context,
+)
 from ..db_cache import GALLERY_PAGE_SIZE
 from ..hydration import (
     _hydrate_link_preview_rows,
@@ -612,11 +617,23 @@ def serve_media(p):
     ctx = get_viewer_context()
     try:
         safe = (ctx.output_root / p).resolve()
-        root = ctx.output_root.resolve()
-        safe.relative_to(root)
+        allowed_roots = getattr(ctx, "allowed_media_roots", None)
+        if allowed_roots is None:
+            allowed_roots = _discover_allowed_media_roots(ctx.output_root)
+            ctx.allowed_media_roots = allowed_roots
+
+        if not any(safe.is_relative_to(root) for root in allowed_roots):
+            first_part = Path(p).parts[0] if Path(p).parts else ""
+            if first_part in _ALLOWED_MEDIA_CONTAINERS:
+                allowed_roots = _discover_allowed_media_roots(ctx.output_root)
+                ctx.allowed_media_roots = allowed_roots
+                if not any(safe.is_relative_to(root) for root in allowed_roots):
+                    return "Forbidden", 403
+            else:
+                return "Forbidden", 403
     except (OSError, ValueError):
         return "Forbidden", 403
-    if not safe.exists():
+    if not safe.is_file():
         return "Not found", 404
 
     range_hdr = request.headers.get("Range")
