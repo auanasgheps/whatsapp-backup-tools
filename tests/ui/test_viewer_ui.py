@@ -2521,7 +2521,7 @@ def test_android_starred_message_click_preserves_tab_and_loads_context(
     import threading
     import urllib.request
 
-    from tests.test_wa_chat_viewer import make_android_db, make_archive_db
+    from tests.conftest import make_android_db, make_archive_db
     from wab_viewer.main import create_app
 
     from .cdp_driver import find_free_port, launch_browser_session
