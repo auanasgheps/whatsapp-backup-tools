@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import zipfile
 
-from tests.test_increment_merger import (
+from tests.merger.conftest import (
     _build_edit_wmi,
     _build_image_wmi,
     _build_pin_wmi,
@@ -250,7 +250,7 @@ def _build_reaction_wmi_with_participant(
     timestamp: int,
     participant: str | None,
 ) -> bytes:
-    from tests.test_increment_merger import _build_field
+    from tests.merger.conftest import _build_field
 
     target_key = (
         _build_field(1, 2, remote_jid.encode("utf-8"))
