@@ -546,6 +546,24 @@ class TestFlaskRoutes:
         resp = client.get("/media/../wa_media_archiver.py")
         assert resp.status_code == 403
 
+    def test_media_served_from_symlinked_folder(self, app_and_tmp, tmp_path_factory):
+        # Contacts/ kept on another disk and linked into the archive: its files must be served.
+        client, tmp = app_and_tmp
+        elsewhere = tmp_path_factory.mktemp("other_disk")
+        (elsewhere / "Alice").mkdir()
+        (elsewhere / "Alice" / "IMG.jpg").write_bytes(b"photo")
+        (tmp / "Contacts").symlink_to(elsewhere, target_is_directory=True)
+        resp = client.get("/media/Contacts/Alice/IMG.jpg")
+        assert resp.status_code == 200
+        assert resp.data == b"photo"
+
+    def test_media_403_for_traversal_next_to_symlinked_folder(self, app_and_tmp, tmp_path_factory):
+        client, tmp = app_and_tmp
+        elsewhere = tmp_path_factory.mktemp("other_disk")
+        (elsewhere / "secret.txt").write_bytes(b"secret")
+        (tmp / "Contacts").symlink_to(elsewhere, target_is_directory=True)
+        assert client.get("/media/Contacts/../../secret.txt").status_code == 403
+
     def test_media_range_request_returns_slice(self, app_and_tmp):
         client, tmp = app_and_tmp
         # Write a known file into the archive root
