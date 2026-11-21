@@ -138,6 +138,38 @@ class QuerySet:
     ios_media_id_select: str | None = None
 
 
+_ALLOWED_MEDIA_CONTAINERS = ("Contacts", "Groups")
+
+
+def _discover_allowed_media_roots(output_root: Path) -> list[Path]:
+    """Discover canonical roots authorized to serve media files.
+
+    Includes the archive root and any whitelisted media container (Contacts, Groups)
+    that is symlinked or junctioned to external storage.
+    """
+    try:
+        resolved_root = output_root.resolve()
+        roots = [resolved_root]
+    except (OSError, ValueError):
+        return [output_root]
+
+    for container_name in _ALLOWED_MEDIA_CONTAINERS:
+        container_path = output_root / container_name
+        try:
+            if container_path.is_dir():
+                target = container_path.resolve()
+                if (
+                    not target.is_relative_to(resolved_root)
+                    and target != target.parent
+                    and target != Path(target.anchor)
+                ):
+                    roots.append(target)
+        except (OSError, ValueError):
+            continue
+
+    return roots
+
+
 class ViewerContext:
     """Encapsulates all per-app database connections, locks, capabilities, and SQL queries."""
 
@@ -176,6 +208,7 @@ class ViewerContext:
         self.ios_contact_chats_cache: tuple[dict[str, str], dict[str, str]] | None = None
         self.thumbnail_404_cache: set[str] = set()
         self.media_counts_cache: dict[tuple[str, str], dict] = {}
+        self.allowed_media_roots: list[Path] = _discover_allowed_media_roots(output_root)
 
     def get_wa(self) -> sqlite3.Connection | None:
         """Return thread-local SQLite connection to the WhatsApp source DB with ancillary attaches."""
