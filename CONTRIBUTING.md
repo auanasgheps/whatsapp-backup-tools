@@ -37,8 +37,24 @@ Before submitting a pull request, ensure all tests and lint checks pass:
 
 ### 1. Run the test suite
 
+The test suite is organized into modular packages matching the project architecture:
+
 ```bash
+# Run the entire test suite
 pytest tests/ -v
+
+# Run targeted package suites
+pytest tests/viewer/         # Web Viewer routes, hydration, and UI
+pytest tests/archiver/       # WhatsApp Archiver CLI, ADB, and copy engine
+pytest tests/merger/         # Increment delta replay and protobuf decoding
+pytest tests/preservation/   # Preserved messages and two-phase diff engine
+pytest tests/common/         # Shared validators and metadata writers
+pytest tests/e2e/            # Multi-scenario and multi-cycle simulation
+
+# Run using domain markers
+pytest -m "viewer and not slow"
+pytest -m archiver
+pytest -m merger
 ```
 
 ### 2. Lint and format checks
@@ -63,7 +79,7 @@ The chat viewer Web UI uses a zero-build, pure Python assembly architecture:
 - **Source of Truth**: Modular JavaScript source files live in `wab_viewer/chat_viewer/js/`. There is no static `app.js` file on disk.
 - **In-Memory Bundle Assembly**: At runtime, Flask serves `/static/app.js` assembled directly in-memory from `wab_viewer/chat_viewer/js/*.js` via `builder.get_bundle_content()`.
 - **Dev-Mode Hot Reloading**: In debug mode (`wab-viewer --verbose`), changes in `js/` take effect immediately without requiring manual builds.
-- **Assembly Verification**: `test_app_js_bundle_assembles_cleanly` in `tests/test_wa_chat_viewer.py` validates that all 31 modules assemble into a valid bundle.
+- **Assembly Verification**: `test_app_js_bundle_assembles_cleanly` in `tests/viewer/test_ui_template.py` validates that all 31 modules assemble into a valid bundle.
 
 ---
 
