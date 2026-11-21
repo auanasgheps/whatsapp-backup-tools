@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
+- **External Storage Media Serving via Whitelisted Symlinks & Junctions** (PR #16):
+  - Added support for offloading media folders (`Contacts/` and `Groups/`) to external drives or secondary volumes and linking them into the archive directory.
+  - Implemented authorized root whitelisting in `ViewerContext` (`_discover_allowed_media_roots`), discovering external targets for `Contacts` and `Groups` while rejecting unauthorized or root-level symlinks.
+  - Enforced canonical path containment (`safe.is_relative_to(root)`) in `serve_media` to prevent directory traversal, with `safe.is_file()` guards returning clean 404s for directory requests.
+  - Added cross-platform test coverage for Linux/macOS symlinks and Windows NTFS Directory Junctions.
+  - Contributed by @Piero-93.
+
 - **Media Gallery Async Count Decoupling, Skeleton Stat Pills & Query Optimization**:
   - **Decoupled Stream Pagination from Aggregation**: Eliminated sequential `await countPromise` inside `openMediaGallery()`, allowing the first page of media (`_loadGalleryPage(null)`) to render and display immediately without being blocked by aggregate count calculations.
   - **Immediate Skeleton Stat Pills & In-Place Hydration**: Synchronously populates `#media-gallery-stats` on open with all standard media type pills showing placeholder counts (`--`) and subtle loading spinners (`.is-loading`), allowing instant user filtering from frame 1 and eliminating cumulative layout shift (CLS). Added `_hydrateStatPills(counts)` to update numbers in-place on existing DOM elements without wiping `stats.innerHTML`.
