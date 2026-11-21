@@ -55,6 +55,23 @@ On first run (or with `--rescan`), the viewer builds a cache DB (`.wa_chat_viewe
 
 The source WhatsApp database (`msgstore.db` or `ChatStorage.sqlite`) is strictly required for the viewer to launch and resolve chat messages and media paths.
 
+### Storing Media on External Storage (Symlinks & Junctions)
+
+If you have a large archive and prefer to keep heavy media folders (`Contacts/` and `Groups/`) on an external drive or secondary disk while keeping database files on your main drive, you can link them into your archive folder:
+
+- **Linux & macOS (Symbolic Links)**:
+  ```bash
+  ln -s /path/to/external/Contacts /path/to/archive/Contacts
+  ln -s /path/to/external/Groups /path/to/archive/Groups
+  ```
+- **Windows (NTFS Directory Junctions - no admin rights required)**:
+  ```cmd
+  mklink /J "C:\path\to\archive\Contacts" "D:\WhatsApp\Contacts"
+  mklink /J "C:\path\to\archive\Groups" "D:\WhatsApp\Groups"
+  ```
+
+`wab-viewer` automatically recognizes whitelisted `Contacts/` and `Groups/` links and serves full-size photos, videos, and audio securely from external storage.
+
 ## Features
 
 - **Sidebar** — all contacts and groups listed with message counts and last activity time
