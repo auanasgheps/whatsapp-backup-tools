@@ -2690,7 +2690,7 @@
       margin: auto;
       aspect-ratio: 1 / 1;
       border: 2px solid var(--accent);
-      overflow: hidden;
+      overflow: visible;
       justify-self: center;
       align-self: center;
     }
@@ -2706,7 +2706,7 @@
     }
     .gallery-ptv-badge {
       position: absolute;
-      bottom: 6px;
+      top: 6px;
       left: 6px;
       background: rgba(0, 0, 0, 0.65);
       color: #fff;
@@ -2717,7 +2717,10 @@
       align-items: center;
       justify-content: center;
       pointer-events: none;
-      z-index: 2;
+      z-index: 5;
+    }
+    .gallery-item.is-video-note .gallery-goto {
+      z-index: 5;
     }
     .gallery-video-thumb--err { object-fit: none; opacity: 0.3; }
     .gallery-video-thumb--err::before { content: '▶'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 32px; opacity: 0.7; }
@@ -2946,7 +2949,7 @@
       background: rgba(0,0,0,0.6); color: #fff; border: none;
       border-radius: 4px; font-size: 11px; padding: 2px 5px; cursor: pointer;
       opacity: 0; transition: opacity 0.15s; margin: 0;
-      z-index: 3;
+      z-index: 5;
     }
     .gallery-item:hover .gallery-goto { opacity: 1; }
     .gallery-goto:disabled {
