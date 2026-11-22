@@ -53,6 +53,9 @@ You can run the archiver using command-line arguments or via a convenient `confi
 - **Command-Line Arguments & Recipes**:
   Specify options directly on the terminal. See the **[Command Reference](command-reference.md)** for the full flag specification and **[Recipes & Workflows](recipes.md)** for practical examples.
 
+> 💡 **Tip — Cloud Photo Galleries (Google Photos, Immich, Apple Photos):**  
+> If you plan to sync or upload your archive to cloud photo managers, consider enabling `--exif-timestamps` (or `exif_timestamps = true` in `config.toml`) so message dates are stamped directly into media headers for proper chronological timeline indexing.
+
 ---
 
 ### Step 3: Always Run a Dry Run First
@@ -111,16 +114,19 @@ When finished, your output folder will be structured as follows:
 Review the generated CSV audit reports to identify any media files that were missing from device storage or duplicate files skipped.
 
 > 💡 **Photo Library & Cloud Sync (Google Photos, Immich, Apple Photos):**
-> By default, the archiver sets filesystem modification dates (`mtime`). However, cloud galleries and photo managers prioritize embedded metadata tags (`DateTimeOriginal` for photos, `mvhd` creation time for MP4 videos).
+> By default, the archiver sets filesystem modification dates (`mtime`). However, cloud galleries prioritize embedded metadata tags (`DateTimeOriginal` for JPEG photos, `mvhd` creation time for MP4/MOV/3GP/M4A media).
 > 
-> Pass `--exif-timestamps` (or set `exif_timestamps = true` in `config.toml`) to write message timestamps directly into media metadata headers without re-compression. Pre-existing camera capture timestamps and orientation are safely preserved.
+> Pass `--exif-timestamps` (or set `exif_timestamps = true` in `config.toml`) to inject message timestamps directly into media metadata headers without re-compression:
+> - **Zero Re-compression**: Loss-free header injection; pixel data and video streams are never transcoded.
+> - **Original Photos Protected**: Existing camera capture dates and orientation tags are strictly preserved.
+> - **Timezone Aware**: Pair with `--timezone <Region/City>` to embed exact UTC offsets (`OffsetTimeOriginal`).
 >
 > 🔄 **Already have an existing archive without metadata?**  
-> You do not need to delete or re-import your media. Run the dedicated updater directly on your output folder:
+> You do not need to re-import or connect your device. Backfill your archive in seconds:
 > ```bash
-> wab-archiver update-metadata -o /path/to/output
+> wab-archiver update-metadata -o /path/to/output --timezone Europe/Berlin
 > ```
-> This scans `.wa_media_archiver.db` and injects missing EXIF tags and container creation dates in-place in seconds, without needing the phone, ADB, or backup files. See the [Command Reference](command-reference.md#subcommand-update-metadata) or [Recipes](recipes.md#5-retroactively-backfill-metadata-on-existing-archives-update-metadata) for options like `--dry-run` and `--timezone`.
+> See the [Command Reference](command-reference.md#subcommand-update-metadata) or [Recipes](recipes.md#5-retroactively-backfill-metadata-on-existing-archives-update-metadata) for full details.
 
 ---
 
