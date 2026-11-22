@@ -1278,7 +1278,9 @@ class TestApiMedia:
 
         assert ".gallery-item.is-video-note" in css
         assert "border-radius: 50%" in css
+        assert "overflow: visible" in css
         assert ".gallery-ptv-badge" in css
+        assert "top: 6px" in css
         assert ".lb-video-note" in css
         assert "is-video-note" in js
         assert "gallery-ptv-badge" in js
