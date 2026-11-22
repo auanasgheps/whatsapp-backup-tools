@@ -689,11 +689,21 @@ def _query_ios_starred(
         if (has_gm and "ZGROUPMEMBER" in msg_cols)
         else "NULL AS member_jid"
     )
-    resolved_push_col = (
-        "COALESCE(pp_member.ZPUSHNAME, pp_from.ZPUSHNAME) AS resolved_push_name"
-        if has_pp
-        else "NULL AS resolved_push_name"
-    )
+    if has_pp:
+        has_pp_mem = bool(pp_member_join)
+        has_pp_from = bool(pp_from_join)
+        if has_pp_mem and has_pp_from:
+            resolved_push_col = (
+                "COALESCE(pp_member.ZPUSHNAME, pp_from.ZPUSHNAME) AS resolved_push_name"
+            )
+        elif has_pp_mem:
+            resolved_push_col = "pp_member.ZPUSHNAME AS resolved_push_name"
+        elif has_pp_from:
+            resolved_push_col = "pp_from.ZPUSHNAME AS resolved_push_name"
+        else:
+            resolved_push_col = "NULL AS resolved_push_name"
+    else:
+        resolved_push_col = "NULL AS resolved_push_name"
 
     where_clauses = ["m.ZSTARRED = 1"]
     params: list = []
@@ -1486,11 +1496,21 @@ def _query_ios_pinned(
         if (has_gm and "ZGROUPMEMBER" in zwa_cols)
         else "NULL AS member_jid"
     )
-    resolved_push_col = (
-        "COALESCE(pp_member.ZPUSHNAME, pp_from.ZPUSHNAME) AS resolved_push_name"
-        if has_pp
-        else "NULL AS resolved_push_name"
-    )
+    if has_pp:
+        has_pp_mem = bool(pp_member_join)
+        has_pp_from = bool(pp_from_join)
+        if has_pp_mem and has_pp_from:
+            resolved_push_col = (
+                "COALESCE(pp_member.ZPUSHNAME, pp_from.ZPUSHNAME) AS resolved_push_name"
+            )
+        elif has_pp_mem:
+            resolved_push_col = "pp_member.ZPUSHNAME AS resolved_push_name"
+        elif has_pp_from:
+            resolved_push_col = "pp_from.ZPUSHNAME AS resolved_push_name"
+        else:
+            resolved_push_col = "NULL AS resolved_push_name"
+    else:
+        resolved_push_col = "NULL AS resolved_push_name"
 
     def _query_ios_msg_rows(where_sql: str, params: list | tuple) -> list[dict]:
         sql = f"""
