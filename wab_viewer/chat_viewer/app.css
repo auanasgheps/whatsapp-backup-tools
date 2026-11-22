@@ -2689,8 +2689,8 @@
       height: 104px;
       margin: auto;
       aspect-ratio: 1 / 1;
-      border: 2px solid var(--accent);
-      overflow: visible;
+      border: 2px solid var(--accent) !important;
+      overflow: visible !important;
       justify-self: center;
       align-self: center;
     }
