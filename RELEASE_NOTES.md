@@ -46,6 +46,7 @@ We have reached parity with major Whatsapp features, while work continues on min
 
 #### ⚡ Improvements
 - **Faster Incremental Checks & Audio Container Support**: Smarter, faster checks when archiving new media avoid accidental file renames and add timestamp embedding support for `.m4a` audio recordings.
+- **Modular Automated Test Suite**: Reorganized the automated test suite into modular, component-focused suites with fast category markers, speeding up testing and ensuring maximum reliability across backup extractions and incremental merges.
 - **Android Mention Tracking in Incremental Backups**: Captures and tracks group mentions from incremental Android backup files when merging them into your archive.
 
 ---
@@ -81,6 +82,7 @@ We have reached parity with major Whatsapp features, while work continues on min
 - **Media Gallery Centered Loading & Navigation**: Opening the media gallery is now smoother, featuring centered loading indicators, seamless chat switching without glitches, and fast preview loading for shared links as you scroll.
 - **Media Gallery Filtering & High-Speed Loading**: The media gallery is significantly faster and easier to explore. You can now view photos and videos together or filter down to specific categories (Photos, Videos, Voice notes, Audio, Documents, Links, Stickers, and Contacts) with instant visual updates, smooth scrolling, and helpful end-of-results notices.
 - **Modernized UI Shell & Navigation Bar**: A refreshed navigation bar with four clear tabs (Chats, Calls, Starred, Archived), an updated header, and full keyboard navigation support.
+- **Modular Backend Architecture**: Reorganized the viewer backend into dedicated domain modules and query handlers, improving system stability, memory isolation, and overall responsiveness across large archives.
 - **Rich Media Cards in Starred & Pinned Views**: Starred and pinned previews now show rich visual snippets—such as photo thumbnails, video lengths, voice note badges, and document icons—rather than plain text placeholders.
 - **Time Gap Jump Indicators**: When jumping to a moment from call history or a starred message, a helpful banner tells you how far apart the nearest message was if no messages were sent on that exact day.
 - **Android Accelerated Call History Matching in Chats**: Looking up voice and video calls in chat timelines is now instantaneous, skipping unnecessary database queries for conversations without call records.
