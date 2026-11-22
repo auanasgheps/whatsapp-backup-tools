@@ -173,3 +173,60 @@ def make_ios_reaction_blob(entries: list) -> bytes:
         field7 += ld(1, entry)
     top_tag = (7 << 3) | 2
     return encode_varint(top_tag) + encode_varint(len(field7)) + field7
+
+
+def build_context_info(
+    stanza_id: str = "",
+    participant: str = "",
+    quoted_msg_bytes: bytes | None = None,
+    mentioned_jids: list[str] | None = None,
+    thumbnail: bytes | None = None,
+) -> bytes:
+    """Build a synthetic ContextInfo protobuf payload."""
+    ctx = b""
+    if stanza_id:
+        ctx += build_field(1, 2, stanza_id.encode("utf-8"))
+    if participant:
+        ctx += build_field(2, 2, participant.encode("utf-8"))
+    if quoted_msg_bytes is not None:
+        ctx += build_field(3, 2, quoted_msg_bytes)
+    if thumbnail:
+        ctx += build_field(16, 2, thumbnail)
+    if mentioned_jids:
+        for jid in mentioned_jids:
+            ctx += build_field(15, 2, jid.encode("utf-8"))
+    return ctx
+
+
+def build_ios_poll_blob(
+    question: str,
+    options: list[str],
+    selectable_count: int = 0,
+    votes: list[dict] | None = None,
+) -> bytes:
+    """Build a synthetic iOS ZRECEIPTINFO poll blob (field 8)."""
+    poll_inner = b""
+    if question:
+        poll_inner += build_field(2, 2, question.encode("utf-8"))
+    for opt in options:
+        opt_payload = build_field(1, 2, opt.encode("utf-8"))
+        poll_inner += build_field(3, 2, opt_payload)
+    if selectable_count > 0:
+        poll_inner += build_field(4, 0, selectable_count)
+
+    if votes:
+        for v in votes:
+            v_payload = b""
+            for idx in v.get("option_indices", []):
+                v_payload += build_field(1, 0, idx)
+            if v.get("client_ts"):
+                v_payload += build_field(2, 0, v["client_ts"])
+            if v.get("stanza_id"):
+                v_payload += build_field(3, 2, v["stanza_id"].encode("utf-8"))
+            if v.get("voter_jid"):
+                v_payload += build_field(4, 2, v["voter_jid"].encode("utf-8"))
+            if v.get("server_ts"):
+                v_payload += build_field(5, 0, v["server_ts"])
+            poll_inner += build_field(5, 2, v_payload)
+
+    return build_field(8, 2, poll_inner)

@@ -702,3 +702,313 @@ def test_malformed_wire_jid_safe_fallback(tmp_path):
     assert rx_row[0] == -1
     assert rx_row[1] == "👍"
     conn.close()
+
+
+def test_decode_wmi_edited_messages_across_media_types():
+    """Verify decode_wmi correctly decodes protocol edit messages across all media types."""
+    target_key = _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(
+        3, 2, b"TARGET_KEY_001"
+    )
+
+    # 1. Edited Contact (tag 4)
+    vcard_payload = b"BEGIN:VCARD\nFN:Edited Name\nEND:VCARD"
+    ct_inner = _build_field(1, 2, b"Edited Name") + _build_field(2, 2, vcard_payload)
+    edited_msg_ct = _build_field(4, 2, ct_inner)
+    proto_ct = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)  # 14 = edit
+        + _build_field(14, 2, edited_msg_ct)
+    )
+    wmi_ct = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_CT_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_ct))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_ct = increment_merger.decode_wmi(wmi_ct)
+    assert dec_ct["edit_info"] is not None
+    assert dec_ct["edit_info"]["target_key_id"] == "TARGET_KEY_001"
+    assert dec_ct["edit_info"]["message_type"] == 4
+    assert dec_ct["edit_info"]["new_text"] == "Edited Name"
+    assert dec_ct["edit_info"]["vcard"] == "BEGIN:VCARD\nFN:Edited Name\nEND:VCARD"
+
+    # 2. Edited Location (tag 5)
+    loc_inner = (
+        _build_field(1, 1, struct.pack("<d", 41.9028))
+        + _build_field(2, 1, struct.pack("<d", 12.4964))
+        + _build_field(3, 2, b"Colosseum")
+        + _build_field(4, 2, b"Piazza del Colosseo")
+    )
+    edited_msg_loc = _build_field(5, 2, loc_inner)
+    proto_loc = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(14, 2, edited_msg_loc)
+    )
+    wmi_loc = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_LOC_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_loc))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_loc = increment_merger.decode_wmi(wmi_loc)
+    assert dec_loc["edit_info"] is not None
+    assert dec_loc["edit_info"]["message_type"] == 5
+    assert dec_loc["edit_info"]["location_info"]["place_name"] == "Colosseum"
+    assert abs(dec_loc["edit_info"]["location_info"]["latitude"] - 41.9028) < 1e-4
+
+    # 3. Edited Extended Text (tag 6)
+    ext_inner = _build_field(1, 2, b"Updated text after edit")
+    edited_msg_ext = _build_field(6, 2, ext_inner)
+    proto_ext = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(14, 2, edited_msg_ext)
+    )
+    wmi_ext = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_EXT_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_ext))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_ext = increment_merger.decode_wmi(wmi_ext)
+    assert dec_ext["edit_info"] is not None
+    assert dec_ext["edit_info"]["message_type"] == 0
+    assert dec_ext["edit_info"]["new_text"] == "Updated text after edit"
+
+    # 4. Edited Document (tag 7)
+    doc_inner = (
+        _build_field(1, 2, b"https://example.com/doc.enc")
+        + _build_field(2, 2, b"application/pdf")
+        + _build_field(3, 2, b"Updated Specs")
+        + _build_field(4, 2, b"\xdd" * 32)
+        + _build_field(5, 0, 78900)
+        + _build_field(8, 2, b"specs_v2.pdf")
+    )
+    edited_msg_doc = _build_field(7, 2, doc_inner)
+    proto_doc = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(14, 2, edited_msg_doc)
+    )
+    wmi_doc = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_DOC_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_doc))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_doc = increment_merger.decode_wmi(wmi_doc)
+    assert dec_doc["edit_info"] is not None
+    assert dec_doc["edit_info"]["message_type"] == 9
+    assert dec_doc["edit_info"]["new_text"] == "Updated Specs"
+    assert dec_doc["edit_info"]["media_info"]["file_size"] == 78900
+
+    # 5. Edited Audio (tag 8) with Waveform
+    aud_inner = (
+        _build_field(2, 2, b"audio/ogg")
+        + _build_field(4, 0, 12345)
+        + _build_field(19, 2, b"\x01\x02\x03\x04")
+    )
+    edited_msg_aud = _build_field(8, 2, aud_inner)
+    proto_aud = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(14, 2, edited_msg_aud)
+    )
+    wmi_aud = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_AUD_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_aud))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_aud = increment_merger.decode_wmi(wmi_aud)
+    assert dec_aud["edit_info"] is not None
+    assert dec_aud["edit_info"]["message_type"] == 2
+    assert dec_aud["edit_info"]["media_info"]["waveform"] == b"\x01\x02\x03\x04"
+
+    # 6. Edited Video (tag 9)
+    vid_inner = (
+        _build_field(2, 2, b"video/mp4")
+        + _build_field(4, 0, 654321)
+        + _build_field(7, 2, b"Edited video caption")
+    )
+    edited_msg_vid = _build_field(9, 2, vid_inner)
+    proto_vid = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(14, 2, edited_msg_vid)
+    )
+    wmi_vid = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_VID_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_vid))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_vid = increment_merger.decode_wmi(wmi_vid)
+    assert dec_vid["edit_info"] is not None
+    assert dec_vid["edit_info"]["message_type"] == 3
+    assert dec_vid["edit_info"]["new_text"] == "Edited video caption"
+
+    # 7. Edited Sticker (tag 20)
+    stk_inner = _build_field(5, 2, b"image/webp") + _build_field(9, 0, 12000)
+    edited_msg_stk = _build_field(20, 2, stk_inner)
+    proto_stk = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(14, 2, edited_msg_stk)
+    )
+    wmi_stk = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_STK_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_stk))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_stk = increment_merger.decode_wmi(wmi_stk)
+    assert dec_stk["edit_info"] is not None
+    assert dec_stk["edit_info"]["message_type"] == 20
+    assert dec_stk["edit_info"]["media_info"]["mime_type"] == "image/webp"
+
+    # 8. Edited Poll (tag 64 with tag 3 options)
+    opt1 = _build_field(1, 2, b"Option Alpha")
+    opt2 = _build_field(1, 2, b"Option Beta")
+    poll_inner = (
+        _build_field(2, 2, b"Edited Poll Question")
+        + _build_field(3, 2, opt1)
+        + _build_field(3, 2, opt2)
+        + _build_field(4, 0, 1)
+    )
+    edited_msg_poll = _build_field(64, 2, poll_inner)
+    proto_poll = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(14, 2, edited_msg_poll)
+    )
+    wmi_poll = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_POLL_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_poll))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_poll = increment_merger.decode_wmi(wmi_poll)
+    assert dec_poll["edit_info"] is not None
+    assert dec_poll["edit_info"]["message_type"] == 66
+    assert dec_poll["edit_info"]["new_text"] == "Edited Poll Question"
+    assert dec_poll["edit_info"]["poll_info"]["name"] == "Edited Poll Question"
+    assert dec_poll["edit_info"]["poll_info"]["options"] == ["Option Alpha", "Option Beta"]
+
+
+def test_decode_wmi_buttons_and_interactive_messages():
+    """Verify decode_wmi extracts text from buttonsMessage (tag 42) and interactiveMessage (tag 45)."""
+    # Tag 42: buttonsMessage with contentText (tag 6)
+    btn_inner = _build_field(6, 2, b"Please select an option:")
+    wmi_btn = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, b"BTN_KEY"),
+        )
+        + _build_field(2, 2, _build_field(42, 2, btn_inner))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec_btn = increment_merger.decode_wmi(wmi_btn)
+    assert dec_btn["message_type"] == 0
+    assert dec_btn["text_data"] == "Please select an option:"
+
+    # Tag 45: interactiveMessage with body (tag 1) -> text (tag 1)
+    body_inner = _build_field(1, 2, b"Interactive menu body text")
+    im_inner = _build_field(1, 2, body_inner)
+    wmi_im = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 0)
+            + _build_field(3, 2, b"IM_KEY"),
+        )
+        + _build_field(2, 2, _build_field(45, 2, im_inner))
+        + _build_field(3, 0, 1729000200)
+    )
+    dec_im = increment_merger.decode_wmi(wmi_im)
+    assert dec_im["message_type"] == 0
+    assert dec_im["text_data"] == "Interactive menu body text"
+
+
+def test_decode_wmi_edited_poll_tag1_tag2_layout():
+    """Verify decode_wmi handles edited poll with tag 1 question and tag 2 options."""
+    target_key = _build_field(1, 2, b"5550100@s.whatsapp.net") + _build_field(
+        3, 2, b"POLL_TARGET_KEY"
+    )
+    opt_a = _build_field(1, 2, b"Choice A")
+    opt_b = _build_field(1, 2, b"Choice B")
+    poll_inner = (
+        _build_field(1, 2, b"Alternative Poll Question")
+        + _build_field(2, 2, opt_a)
+        + _build_field(2, 2, opt_b)
+        + _build_field(3, 0, 1)  # selectable_count
+    )
+    edited_msg_poll = _build_field(64, 2, poll_inner)
+    proto_poll = (
+        _build_field(1, 2, target_key)
+        + _build_field(2, 0, 14)
+        + _build_field(14, 2, edited_msg_poll)
+    )
+    wmi_poll = (
+        _build_field(
+            1,
+            2,
+            _build_field(1, 2, b"5550100@s.whatsapp.net")
+            + _build_field(2, 0, 1)
+            + _build_field(3, 2, b"EDIT_POLL2_KEY"),
+        )
+        + _build_field(2, 2, _build_field(12, 2, proto_poll))
+        + _build_field(3, 0, 1729000100)
+    )
+    dec = increment_merger.decode_wmi(wmi_poll)
+    assert dec["edit_info"] is not None
+    assert dec["edit_info"]["message_type"] == 66
+    assert dec["edit_info"]["new_text"] == "Alternative Poll Question"
+    assert dec["edit_info"]["poll_info"]["name"] == "Alternative Poll Question"
+    assert dec["edit_info"]["poll_info"]["options"] == ["Choice A", "Choice B"]
+    assert dec["edit_info"]["poll_info"]["selectable_options_count"] == 1
