@@ -431,12 +431,15 @@ def _ensure_ios_diff_indexes(conn: sqlite3.Connection) -> None:
     """Ensure indexes on ZSTANZAID and fallback columns exist for fast diff performance."""
     with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pres_cur_stanza ON ZWAMESSAGE(ZSTANZAID)")
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pres_old_stanza ON old_db.ZWAMESSAGE(ZSTANZAID)"
+            "CREATE INDEX IF NOT EXISTS old_db.idx_pres_old_stanza ON ZWAMESSAGE(ZSTANZAID)"
         )
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pres_cur_fallback ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE, ZISFROMME)"
         )
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pres_cur_revoked ON ZWAMESSAGE(ZSTANZAID) WHERE ZMESSAGETYPE = 14"
         )
