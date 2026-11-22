@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Zero Media Flash & State Race Guardrails**: Displays a non-intrusive checking spinner instead of flashing a premature "No media in this chat" message when the initial optimistic image/video query returns 0 items while counts are in-flight. Null-guarded `currentGalleryStats` in `_syncGalleryNotices()` to avoid false end notices during pagination.
   - **Backend Query Latency Optimization**: Replaced `INSTR(LOWER(text_data), 'http://') > 0` with case-insensitive `LIKE` (`m.text_data LIKE '%http://%' OR m.text_data LIKE '%https://%'`) in both Android and iOS link counting queries (2.0x faster), and replaced raw dictionary parsing of preserved messages with an in-database aggregated `SELECT media_type, ... COUNT(*) GROUP BY` query (2.5x faster).
 
+### 🧪 Test Suite & Project Architecture
+
+- **Modular Test Suite & Domain Markers**:
+  - Decomposed ~48,000 lines across 1,202 tests from monolithic test files (`test_wa_chat_viewer.py`, `test_wa_media_archiver.py`, `test_increment_merger.py`, `test_preservation.py`) into clean, package-aligned directories:
+    - `tests/fixtures/`: pure-Python synthetic Protobuf and wire format factory (`protobuf_factory.py`).
+    - `tests/common/`: cross-cutting schema and metadata validator suites (`test_schema_validator.py`, `test_metadata_writer.py`, `test_cross_platform_parity.py`, `test_group_mentions.py`).
+    - `tests/e2e/`: multi-scenario and multi-cycle simulation suites (`test_e2e_archiver_simulation.py`, `test_increment_multi_cycle.py`).
+    - `tests/viewer/`: 12 cohesive modules decomposing viewer route handlers, query execution, and UI template rendering.
+    - `tests/archiver/`: 10 cohesive modules decomposing CLI arguments, source ingestion, ADB extraction, and copy engine logic.
+    - `tests/merger/`: 5 cohesive modules decomposing protobuf wire decoding, add-ons resolution, entity lifecycles, and message replay.
+    - `tests/preservation/`: 4 cohesive modules decomposing database schemas, two-phase diff engines (Android and iOS), and lifecycle orchestration.
+  - Configured granular domain markers in `pytest.ini` (`archiver`, `viewer`, `merger`, `preservation`, `e2e`, `unit`, `slow`, etc.) enabling fast, targeted test execution.
+  - Updated `CONTRIBUTING.md` with package-aligned test guidelines, execution commands, and marker usage.
+
 ---
 
 ## [0.80]
