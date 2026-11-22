@@ -49,9 +49,9 @@ You can run the archiver using command-line arguments or via a convenient `confi
   ```bash
   wab-archiver config generate
   ```
-  Rename `example-config.toml` to `config.toml`, fill in your paths, and run simply with `wab-archiver archive`.
-- **Command-Line Arguments**:
-  Specify options directly on the terminal. See the **[Command Reference & Config File](command-reference.md)** for all available options, flags, and examples.
+  Rename `example-config.toml` to `config.toml`, fill in your paths, and run simply with `wab-archiver archive`. See the **[Configuration Guide](configuration.md)** for all options and discovery rules.
+- **Command-Line Arguments & Recipes**:
+  Specify options directly on the terminal. See the **[Command Reference](command-reference.md)** for the full flag specification and **[Recipes & Workflows](recipes.md)** for practical examples.
 
 ---
 
@@ -120,7 +120,7 @@ Review the generated CSV audit reports to identify any media files that were mis
 > ```bash
 > wab-archiver update-metadata -o /path/to/output
 > ```
-> This scans `.wa_media_archiver.db` and injects missing EXIF tags and container creation dates in-place in seconds, without needing the phone, ADB, or backup files. See the [Command Reference](command-reference.md#update-metadata) for options like `--dry-run` and `--timezone`.
+> This scans `.wa_media_archiver.db` and injects missing EXIF tags and container creation dates in-place in seconds, without needing the phone, ADB, or backup files. See the [Command Reference](command-reference.md#subcommand-update-metadata) or [Recipes](recipes.md#5-retroactively-backfill-metadata-on-existing-archives-update-metadata) for options like `--dry-run` and `--timezone`.
 
 ---
 
@@ -142,4 +142,6 @@ See the **[WhatsApp Backup Viewer Guide](../viewer/index.md)** for timeline brow
 - **Next**: Choose your platform guide:
   - 🤖 **[Android Setup Guide](setup-android.md)**
   - 🍎 **[iOS Setup Guide](setup-ios.md)**
-  - 📖 **[Command Reference & Config File](command-reference.md)**
+  - 📖 **[CLI Command Reference](command-reference.md)**
+  - ⚙️ **[Configuration Guide](configuration.md)**
+  - 💡 **[CLI Recipes & Workflows](recipes.md)**

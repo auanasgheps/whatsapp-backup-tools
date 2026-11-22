@@ -196,7 +196,7 @@ Follow the step-by-step guide for your device to extract your database and sync 
 
 ### Step 3: Archive & View
 
-You can run the archiver using command-line arguments as shown below, or simplify recurring runs by using a configuration file (`config.toml`). See the [Command Reference & Config File Guide](docs/archiver/command-reference.md) for details.
+You can run the archiver using command-line arguments as shown below, or simplify recurring runs by using a configuration file (`config.toml`). See the [Command Reference](docs/archiver/command-reference.md) and [Configuration Guide](docs/archiver/configuration.md) for details.
 
 #### 1. Run the Archiver
 Run a preview (`--dry-run`) first to verify your paths and encryption key:
@@ -224,7 +224,7 @@ Once the dry run completes without errors, remove `--dry-run` to create your arc
 
 > 💡 On Windows, replace the line continuation `\` with `` ` `` (PowerShell) or `^` (cmd.exe).  
 > 💡 **Paths with spaces:** If your folder paths contain spaces, remember to enclose them in quotes (e.g. `"/path/to/my folder"`).  
-> 💡 **Tip:** Avoid repeating long terminal commands by generating a settings file with `wab-archiver config generate`. See [Configuration Files](docs/archiver/command-reference.md).
+> 💡 **Tip:** Avoid repeating long terminal commands by generating a settings file with `wab-archiver config generate`. See [Configuration Files](docs/archiver/configuration.md).
 
 #### 2. Open the Local Chat Viewer
 Point `wab-viewer` to your archive folder:

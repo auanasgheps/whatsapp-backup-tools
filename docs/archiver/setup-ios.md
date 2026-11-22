@@ -1,4 +1,4 @@
-[← Back to Archiver Overview](index.md) • [Main Readme](../../README.md)
+[← Back to Archiver Overview](index.md) • [CLI Reference](command-reference.md) • [Configuration](configuration.md) • [Recipes](recipes.md) • [Main Readme](../../README.md)
 
 # iOS Setup
 
@@ -119,6 +119,6 @@ wab-archiver archive \
 
 Now that your iOS backup is configured:
 
-1. 📖 Review the **[Command Reference & Config File](command-reference.md)** for advanced options (filtering by date, deduplication, deleted messages preservation).
+1. 📖 Review the **[Command Reference](command-reference.md)** and **[Recipes](recipes.md)** for advanced options (filtering by date, deduplication, deleted messages preservation).
 2. 🧪 Run your command with `--dry-run` to preview the media organization and message count.
 3. 🌐 Launch the **[WhatsApp Backup Viewer](../viewer/index.md)** to browse your conversations with full iOS receipts, reactions, and polls.

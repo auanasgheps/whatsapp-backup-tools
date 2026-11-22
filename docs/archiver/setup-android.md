@@ -1,4 +1,4 @@
-[← Back to Archiver Overview](index.md) • [Main Readme](../../README.md)
+[← Back to Archiver Overview](index.md) • [CLI Reference](command-reference.md) • [Configuration](configuration.md) • [Recipes](recipes.md) • [Main Readme](../../README.md)
 
 # Android Setup
 
@@ -241,7 +241,7 @@ If your exported contacts do not match your chats, or WhatsApp contacts appear t
 
 Now that you have your Android backup, media folder, and contacts ready:
 
-1. 📖 Review the **[Command Reference & Config File](command-reference.md)** to configure your run.
+1. 📖 Review the **[Command Reference](command-reference.md)** or **[Configuration Guide](configuration.md)** to configure your run.
 2. 🧪 Run your command with `--dry-run` to preview the archive before copying files.
 3. 🌐 Once archived, launch the **[WhatsApp Backup Viewer](../viewer/index.md)** to browse your chats.
 
