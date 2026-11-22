@@ -10,7 +10,6 @@ import base64
 import os
 import sqlite3
 import time
-from pathlib import Path
 
 from tests.conftest import (
     make_android_db,
@@ -27,6 +26,7 @@ from tests.fixtures.protobuf_factory import (
     make_zreceipt_blob_with_reactions,
 )
 from tests.viewer.conftest import (
+    _get_app_css,
     _get_app_js,
 )
 from wab_viewer import main as viewer
@@ -566,8 +566,7 @@ class TestPollSupport:
     def test_poll_frontend_badge_wording_and_star(self):
         """Verify poll badge uses descriptive wording without action verbs and winner star is defined."""
         js_content = _get_app_js()
-        css_path = Path(viewer.__file__).parent / "chat_viewer" / "app.css"
-        css_content = css_path.read_text(encoding="utf-8")
+        css_content = _get_app_css()
 
         # Badge wording must describe without an action verb
         assert "Multiple choice" in js_content

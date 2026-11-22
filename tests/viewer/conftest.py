@@ -20,6 +20,12 @@ def _get_app_js() -> str:
     return builder.assemble_app_js()
 
 
+def _get_app_css() -> str:
+    from wab_viewer.chat_viewer import builder
+
+    return builder.assemble_app_css()
+
+
 def make_cache_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.executescript(viewer_db_cache.CACHE_SCHEMA)

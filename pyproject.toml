@@ -66,7 +66,7 @@ build-backend = "setuptools.build_meta"
 include = ["shared*", "wab_archiver*", "wab_viewer*"]
 
 [tool.setuptools.package-data]
-"wab_viewer.chat_viewer" = ["*.css", "*.svg", "js/*.js"]
+"wab_viewer.chat_viewer" = ["*.svg", "pico.min.css", "css/*.css", "js/*.js"]
 
 [tool.ruff]
 target-version = "py311"

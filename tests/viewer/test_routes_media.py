@@ -8,7 +8,6 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import os
 import sqlite3
-from pathlib import Path
 
 import pytest
 from tests.conftest import (
@@ -25,6 +24,7 @@ from tests.fixtures.protobuf_factory import (
     make_zreceipt_blob_with_reactions,
 )
 from tests.viewer.conftest import (
+    _get_app_css,
     _get_app_js,
     seed_android_db_with_media,
 )
@@ -1255,8 +1255,7 @@ class TestApiMedia:
 
     def test_gallery_missing_media_card_css_and_warning_badge(self):
         """Gallery missing media cards must use the warning badge, yellow icon, and blurred DB thumbnail."""
-        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
-        css = css_path.read_text(encoding="utf-8")
+        css = _get_app_css()
         js = _get_app_js()
 
         assert ".gallery-item.is-missing" in css
@@ -1272,8 +1271,7 @@ class TestApiMedia:
 
     def test_gallery_video_note_circular_styling_and_lightbox(self):
         """Video notes (PTV) must enforce 1:1 circular round preview in gallery and lightbox."""
-        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
-        css = css_path.read_text(encoding="utf-8")
+        css = _get_app_css()
         js = _get_app_js()
 
         assert ".gallery-item.is-video-note" in css
@@ -1289,8 +1287,7 @@ class TestApiMedia:
 
     def test_chat_missing_media_fallback_and_grid_styling(self):
         """Chat view and media grid must dynamically fallback to renderMissingMedia on error."""
-        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
-        css = css_path.read_text(encoding="utf-8")
+        css = _get_app_css()
         js = _get_app_js()
 
         assert ".media-grid-cell .media-missing-card" in css

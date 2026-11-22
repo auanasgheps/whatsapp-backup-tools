@@ -14,7 +14,6 @@ from flask import (
     Response,
     current_app,
     jsonify,
-    make_response,
     render_template_string,
     request,
     send_from_directory,
@@ -1192,7 +1191,10 @@ def api_thumbnail(msg_id):
 
 @bp.route("/static/app.css")
 def serve_app_css():
-    resp = make_response(send_from_directory(_CHAT_VIEWER_DIR, "app.css"))
+    from ..chat_viewer import builder
+
+    css_code = builder.get_css_bundle_content(current_app.debug)
+    resp = Response(css_code, mimetype="text/css")
     resp.headers["Cache-Control"] = "no-cache, must-revalidate"
     return resp
 

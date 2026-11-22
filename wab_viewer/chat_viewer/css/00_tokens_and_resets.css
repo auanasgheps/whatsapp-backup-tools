@@ -1,0 +1,127 @@
+    /* ---- theme tokens ---- */
+    :root {
+      --bg: #111b21;
+      --surface: #1f2c33;
+      --surface2: #2a3942;
+      --bubble-in: #202c33;
+      --bubble-out: #005c4b;
+      --bubble-in-text: #e9edef;
+      --bubble-out-text: #e9edef;
+      --bubble-meta: rgba(241, 242, 245, 0.88);
+      --bubble-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+      --text: #e9edef;
+      --text-muted: #8696a0;
+      --accent: #00a884;
+      --bubble-action: #53bdeb;
+      --bubble-action-sent: #7ae8c8;
+      --border: #222d34;
+      --preserved-bg: rgba(234, 179, 8, 0.15);
+      --preserved-text: #eab308;
+      --preserved-border: rgba(234, 179, 8, 0.35);
+      --star-color: #eab308;
+      --call-missed: #f87171;
+      --call-answered-bg: rgba(0, 168, 132, 0.18);
+      --call-missed-bg: rgba(248, 113, 113, 0.18);
+      --call-out-bg: rgba(255, 255, 255, 0.14);
+      --call-pres-bg: rgba(234, 179, 8, 0.18);
+      --sidebar-scale: 1;
+      --sidebar-w: calc(clamp(300px, 24vw, 460px) * var(--sidebar-scale));
+      --font-size: 15px;
+      --media-w-land: 320px;
+      --media-w-port: 260px;
+      --media-grid-size: var(--media-w-land);
+      --video-note-size: 216px;
+      --video-note-size-enlarged: 360px;
+      --media-stage-bg: rgba(0, 0, 0, 0.24);
+      --thumb-shimmer-highlight: rgba(255, 255, 255, 0.08);
+      /* Group participant name palette (WhatsApp Android high-contrast 10-color) */
+      --sender-color-0: #ff8fb4;
+      --sender-color-1: #73caf0;
+      --sender-color-2: #ffdb94;
+      --sender-color-3: #bcabff;
+      --sender-color-4: #6cd1c6;
+      --sender-color-5: #fdac91;
+      --sender-color-6: #76b8fe;
+      --sender-color-7: #e0b69c;
+      --sender-color-8: #fa99a4;
+      --sender-color-9: #4bdf76;
+    }
+
+    [data-font-size="small"] {
+      --sidebar-scale: 0.90;
+      --media-w-land: 280px;
+      --media-w-port: 230px;
+      --media-grid-size: 280px;
+      --video-note-size: 192px;
+      --video-note-size-enlarged: 320px;
+    }
+    [data-font-size="medium"] {
+      --sidebar-scale: 1.00;
+      --media-w-land: 320px;
+      --media-w-port: 260px;
+      --media-grid-size: 320px;
+      --video-note-size: 216px;
+      --video-note-size-enlarged: 360px;
+    }
+    [data-font-size="large"] {
+      --sidebar-scale: 1.15;
+      --media-w-land: 360px;
+      --media-w-port: 295px;
+      --media-grid-size: 360px;
+      --video-note-size: 244px;
+      --video-note-size-enlarged: 400px;
+    }
+
+    [data-theme="light"] {
+      --bg: #f0f2f5;
+      --surface: #ffffff;
+      --surface2: #e9edef;
+      --bubble-in: #ffffff;
+      --bubble-out: #d9fdd3;
+      --bubble-in-text: #111b21;
+      --bubble-out-text: #111b21;
+      --bubble-meta: rgba(17, 27, 33, 0.65);
+      --bubble-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13), 0 1px 2px rgba(11, 20, 26, 0.08);
+      --text: #111b21;
+      --text-muted: #54656f;
+      --accent: #008069;
+      --bubble-action: #027eb5;
+      --bubble-action-sent: #006653;
+      --border: #d1d7db;
+      --preserved-bg: #fef9c3;
+      --preserved-text: #854d0e;
+      --preserved-border: #facc15;
+      --star-color: #ca8a04;
+      --call-missed: #dc2626;
+      --call-answered-bg: rgba(0, 128, 105, 0.14);
+      --call-missed-bg: rgba(220, 38, 38, 0.12);
+      --call-out-bg: rgba(17, 27, 33, 0.08);
+      --call-pres-bg: #fef3c7;
+      --media-stage-bg: rgba(17, 27, 33, 0.06);
+      --thumb-shimmer-highlight: rgba(255, 255, 255, 0.65);
+      --sender-color-0: #bc285d;
+      --sender-color-1: #0372a4;
+      --sender-color-2: #855d29;
+      --sender-color-3: #533fc7;
+      --sender-color-4: #03776d;
+      --sender-color-5: #af4c2b;
+      --sender-color-6: #025ab7;
+      --sender-color-7: #704931;
+      --sender-color-8: #b80531;
+      --sender-color-9: #18744a;
+    }
+
+    /* ---- Pico overrides: reset opinionated defaults that break our layout ---- */
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      background: var(--bg) !important;
+      color: var(--text) !important;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      padding: 0 !important;
+      margin: 0;
+    }
+    h1, h2, h3, h4, h5, h6, p { margin: 0; padding: 0; }
+    button { font-family: inherit; }
+    /* Pico adds padding to body > header/footer/main; we don't use those */
+

@@ -27,6 +27,7 @@ from tests.fixtures.protobuf_factory import (
     make_zreceipt_blob_with_reactions,
 )
 from tests.viewer.conftest import (
+    _get_app_css,
     _get_app_js,
 )
 from wab_viewer import main as viewer
@@ -51,6 +52,31 @@ class TestHtmlTemplate:
         assert js.startswith("// WhatsApp Backup Tools - Web Viewer Application Bundle")
         assert js.strip().endswith("})();")
         assert len(js) > 300000
+
+    def test_app_css_bundle_assembles_cleanly(self):
+        """Guarantee that builder.assemble_app_css() cleanly concatenates all 18 modules."""
+        from wab_viewer.chat_viewer import builder
+
+        css = builder.assemble_app_css()
+        assert css.startswith("/* WhatsApp Backup Tools - Web Viewer Stylesheet Bundle */")
+        assert len(css) > 100000
+        for mod in builder.CSS_MODULE_ORDER:
+            assert f"/* MODULE: {mod} */" in css
+
+    def test_css_modules_integrity_and_line_limits(self):
+        """Ensure all CSS modules exist, match CSS_MODULE_ORDER, and remain under 600 lines."""
+        from wab_viewer.chat_viewer import builder
+
+        css_dir = builder._CSS_DIR
+        actual_files = sorted(f.name for f in css_dir.glob("*.css"))
+        expected_files = sorted(builder.CSS_MODULE_ORDER)
+        assert actual_files == expected_files, (
+            f"CSS directory mismatch. In dir: {actual_files}, In CSS_MODULE_ORDER: {expected_files}"
+        )
+        for mod in builder.CSS_MODULE_ORDER:
+            fpath = css_dir / mod
+            line_count = len(fpath.read_text(encoding="utf-8").splitlines())
+            assert line_count <= 600, f"Module {mod} exceeds 600-line budget: {line_count} lines"
 
     def test_all_getElementById_targets_exist_before_script(self):
         """Every getElementById('id') in app.js must refer to an element defined
@@ -93,8 +119,7 @@ class TestHtmlTemplate:
     def test_msg_media_aspect_ratio_preservation_css(self):
         """Orientation-locked media boxes must scale with Display scale tokens, clamp aspect ratios,
         keep inline video/stickers uncropped, and contain captions/quotes within media width."""
-        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
-        css = css_path.read_text(encoding="utf-8")
+        css = _get_app_css()
         tpl_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "template.py"
         tpl = tpl_path.read_text(encoding="utf-8")
 
@@ -139,8 +164,7 @@ class TestHtmlTemplate:
     def test_lightbox_smooth_transition_implemented(self):
         """Lightbox must provide persistent stage transitions, directional motion, and preloading."""
         script = _get_app_js()
-        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
-        css = css_path.read_text(encoding="utf-8")
+        css = _get_app_css()
 
         assert "lb-stage" in script, "Lightbox must use .lb-stage container for media transitions"
         assert "_transitionLightboxMedia" in script, "Smooth transition coordinator must be present"
@@ -176,8 +200,7 @@ class TestReactionsFrontendLayout:
     def test_reactions_css_corner_alignment(self):
         """Reactions must be anchored on the receiver's corner:
         sent (from-me) -> right, recv (from-them) -> left."""
-        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
-        css = css_path.read_text(encoding="utf-8")
+        css = _get_app_css()
 
         sent_match = re.search(r"\.msg-row\.sent\s+\.msg-reactions\s*\{([^}]+)\}", css)
         assert sent_match, ".msg-row.sent .msg-reactions rule missing in app.css"
@@ -189,8 +212,7 @@ class TestReactionsFrontendLayout:
 
     def test_reactions_css_no_split_badge(self):
         """app.css must not contain opposite-corner split rules (rx-badge-2)."""
-        css_path = Path(_ROOT) / "wab_viewer" / "chat_viewer" / "app.css"
-        css = css_path.read_text(encoding="utf-8")
+        css = _get_app_css()
         assert "rx-badge-2" not in css, "Obsolete rx-badge-2 rule still found in app.css"
 
     def test_reactions_js_no_split_logic(self):

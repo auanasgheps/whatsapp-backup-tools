@@ -9,7 +9,6 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 import os
 import sqlite3
 import time
-from pathlib import Path
 
 from tests.conftest import (
     make_android_db,
@@ -26,6 +25,7 @@ from tests.fixtures.protobuf_factory import (
     make_zreceipt_blob_with_reactions,
 )
 from tests.viewer.conftest import (
+    _get_app_css,
     _get_app_js,
     _seed_android_db_large,
 )
@@ -860,8 +860,7 @@ class TestEditedMessages:
 
     def test_frontend_assets_include_msg_edited(self):
         js_content = _get_app_js()
-        css_path = Path(viewer.__file__).parent / "chat_viewer" / "app.css"
-        css_content = css_path.read_text(encoding="utf-8")
+        css_content = _get_app_css()
         assert "msg-edited" in js_content
         assert "msg-edited" in css_content
 
