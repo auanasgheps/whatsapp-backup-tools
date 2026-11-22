@@ -99,9 +99,46 @@ The cache is rebuilt automatically when:
 - You pass `--rescan`
 - The number of rows in `archive_copies` differs from the number of messages in the cache
 
-## Privacy
+## Privacy & Network Access
 
-The server binds to `127.0.0.1` by default — it is not accessible from other machines on your network. No data leaves your machine. To access the viewer from another device on your LAN, pass `--host 0.0.0.0` (make sure your firewall allows the port). Behind a reverse proxy that publishes the viewer under a sub-path, pass that path with `--base-path` (or `WAB_BASE_PATH`): the proxy can forward the prefix as it is or strip it, both work.
+The server binds to `127.0.0.1` by default — it is not accessible from other machines on your network. No data leaves your machine. To access the viewer from another device on your LAN, pass `--host 0.0.0.0` (make sure your firewall allows the port).
+
+### Reverse Proxy & Sub-Path Hosting
+
+When hosting the viewer behind a reverse proxy (such as Nginx, Traefik, or Caddy) under a sub-path (for example, `https://my-server.local/whatsapp/`), specify the URL prefix using `--base-path` or the `WAB_BASE_PATH` environment variable:
+
+```bash
+# Via command-line argument
+wab-viewer ./output --base-path /whatsapp
+
+# Or via environment variable
+export WAB_BASE_PATH=/whatsapp
+wab-viewer ./output
+```
+
+The viewer's WSGI middleware adapts `SCRIPT_NAME` and `PATH_INFO` automatically, so your reverse proxy can either forward the path prefix as-is or strip it before proxying.
+
+#### Example Nginx Configuration
+
+```nginx
+location /whatsapp/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+#### Example Caddy Configuration
+
+```caddy
+handle_path /whatsapp/* {
+    reverse_proxy 127.0.0.1:5000
+}
+```
+
+> ⚠️ **Security Notice**: `wab-viewer` does not include built-in user authentication. When exposing the viewer over your local network or via a reverse proxy, ensure access is restricted (e.g. using HTTP Basic Auth, Authelia, Authentik, Cloudflare Access, or a VPN).
 
 ## Troubleshooting
 

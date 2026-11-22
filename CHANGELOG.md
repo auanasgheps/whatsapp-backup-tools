@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
+- **Sub-Path & Reverse Proxy Hosting (`--base-path` / `WAB_BASE_PATH`)** (PR #17):
+  - Added `--base-path` CLI flag and `WAB_BASE_PATH` environment variable to serve the chat viewer under custom URL prefixes (e.g. `https://host/whatsapp/`) behind reverse proxies.
+  - Implemented `BasePathMiddleware` handling standard WSGI `SCRIPT_NAME` / `PATH_INFO` rewrites, seamlessly supporting both prefix-preserving and prefix-stripping reverse proxies.
+  - Migrated frontend asset links, API fetches, and media URLs across all 31 chat viewer JavaScript modules to dynamic `API` / `MEDIA` endpoints rooted in `window.BASE_PATH`.
+  - Added regression test `test_app_js_bundle_has_no_bare_viewer_urls` and test suite `tests/viewer/test_routes_base_path.py` asserting sub-path routing and bundle compliance.
+  - Contributed by @Piero-93.
+
 - **External Storage Media Serving via Whitelisted Symlinks & Junctions** (PR #16):
   - Added support for offloading media folders (`Contacts/` and `Groups/`) to external drives or secondary volumes and linking them into the archive directory.
   - Implemented authorized root whitelisting in `ViewerContext` (`_discover_allowed_media_roots`), discovering external targets for `Contacts` and `Groups` while rejecting unauthorized or root-level symlinks.
