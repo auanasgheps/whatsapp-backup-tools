@@ -28,6 +28,8 @@
   function _spinner() {
     const s = document.createElement('span');
     s.className = 'chat-info-spinner';
+    s.setAttribute('role', 'status');
+    s.setAttribute('aria-label', 'Loading');
     return s;
   }
 
@@ -86,7 +88,7 @@
 
     // Show loading skeleton
     const loadingRow = document.createElement('div');
-    loadingRow.className = 'chat-info-row';
+    loadingRow.className = 'chat-info-loading';
     loadingRow.appendChild(_spinner());
     details.appendChild(loadingRow);
 

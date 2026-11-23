@@ -303,13 +303,23 @@
       color: var(--text-muted);
       padding: 2px 0;
     }
+    .chat-info-loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 40px 16px;
+      width: 100%;
+      box-sizing: border-box;
+    }
     .chat-info-spinner {
       display: inline-block;
-      width: 12px;
-      height: 12px;
-      border: 2px solid var(--border);
+      width: 24px;
+      height: 24px;
+      border: 2.5px solid var(--border);
       border-top-color: var(--accent);
       border-radius: 50%;
       animation: spin 0.7s linear infinite;
+      box-sizing: border-box;
+      vertical-align: middle;
     }
 

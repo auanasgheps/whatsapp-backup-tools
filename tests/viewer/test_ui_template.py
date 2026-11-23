@@ -458,6 +458,8 @@ class TestTrack3FeaturePanes:
         assert ".chat-info-avatar" in css
         assert ".chat-info-name" in css
         assert ".chat-info-phone" in css
+        assert ".chat-info-loading" in css
+        assert ".chat-info-spinner" in css
 
     def test_chat_menu_and_info_card_elements(self, app_and_tmp):
         """Chat 3-dot overflow menu and info card container elements must be present."""
