@@ -313,7 +313,7 @@
         const vid = document.createElement('video');
         vid.controls = (mt === 'video');
         vid.preload = 'metadata';
-        vid.src = src;
+        vid.src = src.includes('#') ? src : `${src}#t=0.001`;
         const handleGridVideoError = () => {
           msg.is_missing = 1;
           const missingCard = renderMissingMedia(msg);
@@ -343,14 +343,12 @@
           wrap.appendChild(badgeWrap);
         }
         vid.addEventListener('click', () => showLightboxForGroup(group, idx));
+        vid.addEventListener('loadedmetadata', () => {
+          if (vid.currentTime === 0) {
+            vid.currentTime = 0.001;
+          }
+        }, { once: true });
         vid.addEventListener('loadeddata', () => {
-          if (vid.dataset.posterCaptured || !vid.videoWidth || !vid.videoHeight) return;
-          vid.dataset.posterCaptured = '1';
-          const canvas = document.createElement('canvas');
-          canvas.width = vid.videoWidth;
-          canvas.height = vid.videoHeight;
-          canvas.getContext('2d').drawImage(vid, 0, 0);
-          vid.poster = canvas.toDataURL('image/jpeg', 0.8);
           const scroll = document.getElementById('message-scroll');
           if (scroll && isUserAtBottom) {
             suppressScroll = true;

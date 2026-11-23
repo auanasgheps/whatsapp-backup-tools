@@ -116,8 +116,8 @@ function renderMedia(msg) {
       _applyMediaOrientationBox(wrap, ratio);
       const vid = document.createElement('video');
       vid.controls = true;
-      vid.preload = 'none';
-      vid.src = src;
+      vid.preload = 'metadata';
+      vid.src = src.includes('#') ? src : `${src}#t=0.001`;
       wrap.appendChild(vid);
       const handleVideoError = () => {
         msg.is_missing = 1;
@@ -140,31 +140,21 @@ function renderMedia(msg) {
         }
       };
       vid.addEventListener('error', handleVideoError, { once: true });
-      // extract first frame as poster so the bubble isn't blank before playback
-      const probe = document.createElement('video');
-      probe.src = src;
-      probe.muted = true;
-      probe.preload = 'metadata';
-      probe.addEventListener('loadeddata', () => {
-        if (ratio <= 0 && probe.videoWidth > 0 && probe.videoHeight > 0) {
-          _applyMediaOrientationBox(wrap, probe.videoWidth / probe.videoHeight);
+      vid.addEventListener('loadedmetadata', () => {
+        if (ratio <= 0 && vid.videoWidth > 0 && vid.videoHeight > 0) {
+          _applyMediaOrientationBox(wrap, vid.videoWidth / vid.videoHeight);
         }
-        const canvas = document.createElement('canvas');
-        canvas.width = probe.videoWidth;
-        canvas.height = probe.videoHeight;
-        canvas.getContext('2d').drawImage(probe, 0, 0);
-        vid.poster = canvas.toDataURL('image/jpeg', 0.8);
-        probe.src = '';
+        if (vid.currentTime === 0) {
+          vid.currentTime = 0.001;
+        }
+      }, { once: true });
+      vid.addEventListener('loadeddata', () => {
         const scroll = document.getElementById('message-scroll');
         if (scroll && isUserAtBottom) {
           suppressScroll = true;
           scroll.scrollTop = scroll.scrollHeight;
           suppressScroll = false;
         }
-      }, { once: true });
-      probe.addEventListener('error', () => {
-        probe.src = '';
-        handleVideoError();
       }, { once: true });
     } else if (mt === 'audio') {
       if (isVoiceNote(msg)) {
