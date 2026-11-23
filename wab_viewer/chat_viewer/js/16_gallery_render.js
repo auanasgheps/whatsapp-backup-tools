@@ -413,7 +413,8 @@ function renderGalleryItem(msg) {
         }
       }
 
-      grid.insertBefore(fragment, gallerySentinel || null);
+      const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+      grid.insertBefore(fragment, sentinel);
     } else {
       // Interleaved items fallback
       for (const msg of items) {
@@ -460,7 +461,8 @@ function renderGalleryItem(msg) {
       monthHdr.textContent = fmtMonthHeader(msg.timestamp_ms);
       const olderHdr = [...grid.querySelectorAll('.gallery-month-header')]
         .find(el => parseInt(el.dataset.month, 10) < mk);
-      grid.insertBefore(monthHdr, olderHdr || gallerySentinel || null);
+      const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+      grid.insertBefore(monthHdr, olderHdr || sentinel);
     }
 
     const cell = renderGalleryItem(msg);
@@ -471,8 +473,9 @@ function renderGalleryItem(msg) {
       cell.classList.add('type-hidden');
     }
 
+    const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
     const nextSection = [...grid.querySelectorAll('.gallery-month-header')]
-      .find(el => parseInt(el.dataset.month, 10) < mk) || gallerySentinel || null;
+      .find(el => parseInt(el.dataset.month, 10) < mk) || sentinel;
 
     let insertBeforeEl = nextSection;
     let curr = monthHdr.nextElementSibling;

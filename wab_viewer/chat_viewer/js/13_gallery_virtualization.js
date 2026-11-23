@@ -187,7 +187,8 @@
         scrollLoader = document.createElement('div');
         scrollLoader.className = 'gallery-scroll-loading';
         scrollLoader.innerHTML = '<span class="gallery-filter-spinner"></span><span>Loading older links…</span>';
-        grid.insertBefore(scrollLoader, gallerySentinel || null);
+        const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+        grid.insertBefore(scrollLoader, sentinel);
       }
     }
 

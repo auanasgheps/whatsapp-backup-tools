@@ -245,6 +245,16 @@ class TestReactionsFrontendLayout:
         assert "monthHdr.dataset.month = String(mk);" in js
         assert "cell.dataset.ts = String(msg.timestamp_ms" in js
 
+    def test_gallery_link_only_chat_initial_load_and_caching(self):
+        """When opening a chat without images or videos, the gallery must switch to first available type (e.g. links)
+        without getting stuck on checking media or dropping link loading."""
+        js = _get_app_js()
+        assert "targetAvailable === 'link'" in js
+        assert "_loadMoreLinks();" in js
+        assert "gallery-checking-loading" in js
+        assert "gallerySentinel && gallerySentinel.parentNode === grid" in js
+        assert "cachedHasImagesOrVideos" in js
+
 
 class TestTrack2UIShell:
     @pytest.fixture

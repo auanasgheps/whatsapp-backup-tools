@@ -31,7 +31,7 @@
 
     const plurals = { voice: 'voice notes', audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links', vcard: 'contacts', total: 'items' };
     const singulars = { voice: 'voice note', vcard: 'contact', total: 'item' };
-    const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
+    const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'link', 'vcard'];
     const totalMissing = Object.values(counts.by_type || {}).reduce((acc, d) => acc + (d.missing || 0), 0);
 
     // Update 'total' pill
@@ -136,6 +136,24 @@
     // Render skeleton pills immediately or hydrate from cache
     const cacheKey = `${requestedChatId}:${requestedChatType}`;
     const cachedCounts = galleryCountsCache.get(cacheKey);
+
+    const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'link', 'vcard'];
+    const cachedHasImagesOrVideos = cachedCounts
+      ? (cachedCounts.by_type?.['image']?.count || 0) + (cachedCounts.by_type?.['video']?.count || 0) > 0
+      : null;
+
+    if (cachedCounts && !cachedHasImagesOrVideos && cachedCounts.total > 0) {
+      // Chat has no images or videos, but has secondary objects (links, docs, etc.)
+      const firstAvailable = typeOrder.find(t => cachedCounts.by_type?.[t]?.count > 0);
+      activeTypes = firstAvailable ? new Set([firstAvailable]) : new Set();
+      defaultActiveTypes = new Set(activeTypes);
+    } else {
+      // Optimistically default to images + videos (filtering out any DEFAULT_DESELECTED_TYPES)
+      activeTypes = new Set(['image', 'video'].filter(t => !DEFAULT_DESELECTED_TYPES.has(t)));
+      defaultActiveTypes = new Set(activeTypes);
+    }
+    isDefaultView = true;
+
     if (cachedCounts) {
       currentGalleryStats = cachedCounts;
       _hydrateStatPills(cachedCounts);
@@ -144,14 +162,7 @@
     }
 
     try {
-      const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'vcard', 'link'];
       const qs = 'chat_id=' + encodeURIComponent(requestedChatId) + '&chat_type=' + encodeURIComponent(requestedChatType);
-
-      // Optimistically default to images + videos (filtering out any DEFAULT_DESELECTED_TYPES)
-      activeTypes = new Set(['image', 'video'].filter(t => !DEFAULT_DESELECTED_TYPES.has(t)));
-      defaultActiveTypes = new Set(activeTypes);
-      isDefaultView = true;
-      _syncStatPills();
 
       grid.innerHTML = '';
 
@@ -181,40 +192,104 @@
           if (!counts) return;
           if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
           if (!document.getElementById('media-gallery').classList.contains('open')) return;
+
+          const hasImagesOrVideos = (counts.by_type?.['image']?.count || 0) + (counts.by_type?.['video']?.count || 0) > 0;
+          let switchedToFirstAvailable = false;
+          let targetAvailable = null;
+
+          if (!hasImagesOrVideos && counts.total > 0 && isDefaultView) {
+            targetAvailable = typeOrder.find(t => counts.by_type?.[t]?.count > 0);
+            if (targetAvailable && (!activeTypes.has(targetAvailable) || (targetAvailable === 'link' && !grid.querySelector('.gallery-item[data-type="link"]')))) {
+              activeTypes = new Set([targetAvailable]);
+              defaultActiveTypes = new Set([targetAvailable]);
+              switchedToFirstAvailable = true;
+            }
+          }
+
           galleryCountsCache.set(cacheKey, counts);
           _hydrateStatPills(counts);
 
-          // If chat has no images or videos and user hasn't switched filter, switch to first available type
-          const hasImagesOrVideos = (counts.by_type?.['image']?.count || 0) + (counts.by_type?.['video']?.count || 0) > 0;
-          if (!hasImagesOrVideos && counts.total > 0 && isDefaultView) {
-            const firstAvailable = typeOrder.find(t => counts.by_type?.[t]?.count > 0);
-            if (firstAvailable) {
-              activeTypes = new Set([firstAvailable]);
-              defaultActiveTypes = new Set([firstAvailable]);
-              _syncStatPills();
+          // Clear any initial checking media loader
+          grid.querySelectorAll('.gallery-checking-loading').forEach(el => el.remove());
+
+          if (switchedToFirstAvailable && targetAvailable) {
+            if (galleryCurrentAbortController) {
+              galleryCurrentAbortController.abort();
+              galleryCurrentAbortController = null;
+            }
+            galleryLoadingMore = false;
+
+            grid.querySelectorAll('.gallery-filter-loading').forEach(el => el.remove());
+
+            if (targetAvailable === 'link') {
+              const loader = document.createElement('div');
+              loader.className = 'gallery-filter-loading';
+              loader.innerHTML = '<span class="gallery-filter-spinner"></span><span>Loading links…</span>';
+              const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+              grid.insertBefore(loader, sentinel);
+              _loadMoreLinks();
+            } else {
               _loadGalleryPage(null);
             }
           } else if (counts.total === 0 && !currentGalleryItems.length && !sessionController.signal.aborted) {
-            grid.innerHTML = '<div class="gallery-empty-notice">No media in this chat.</div>';
+            grid.querySelectorAll('.gallery-filter-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
+            const notice = document.createElement('div');
+            notice.className = 'gallery-empty-notice';
+            notice.textContent = 'No media in this chat.';
+            const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+            grid.insertBefore(notice, sentinel);
           }
         })
         .catch(err => {
           if (err.name !== 'AbortError') console.error('Failed to fetch media count:', err);
         });
 
-      // Render page 1 immediately
-      await _loadGalleryPage(null);
+      if (cachedCounts && cachedCounts.total === 0) {
+        const notice = document.createElement('div');
+        notice.className = 'gallery-empty-notice';
+        notice.textContent = 'No media in this chat.';
+        const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+        grid.insertBefore(notice, sentinel);
+        return;
+      }
+
+      if (activeTypes.size === 1 && activeTypes.has('link')) {
+        const loader = document.createElement('div');
+        loader.className = 'gallery-filter-loading';
+        loader.innerHTML = '<span class="gallery-filter-spinner"></span><span>Loading links…</span>';
+        const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+        grid.insertBefore(loader, sentinel);
+        _loadMoreLinks();
+      } else {
+        await _loadGalleryPage(null);
+      }
 
       if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
       if (!document.getElementById('media-gallery').classList.contains('open')) return;
 
+      if (activeTypes.size === 1 && activeTypes.has('link')) {
+        return;
+      }
+
       if (!currentGalleryItems.length && !sessionController.signal.aborted) {
         if (currentGalleryStats && currentGalleryStats.total === 0) {
-          grid.innerHTML = '<div class="gallery-empty-notice">No media in this chat.</div>';
-        } else if (!currentGalleryStats) {
-          grid.innerHTML = '<div class="gallery-filter-loading"><span class="gallery-filter-spinner"></span><span>Checking media…</span></div>';
+          grid.querySelectorAll('.gallery-filter-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
+          const notice = document.createElement('div');
+          notice.className = 'gallery-empty-notice';
+          notice.textContent = 'No media in this chat.';
+          const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+          grid.insertBefore(notice, sentinel);
+          return;
+        } else if (!currentGalleryStats && (activeTypes.has('image') || activeTypes.has('video'))) {
+          if (!grid.querySelector('.gallery-filter-loading')) {
+            const loader = document.createElement('div');
+            loader.className = 'gallery-filter-loading gallery-checking-loading';
+            loader.innerHTML = '<span class="gallery-filter-spinner"></span><span>Checking media…</span>';
+            const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+            grid.insertBefore(loader, sentinel);
+          }
+          return;
         }
-        return;
       }
     } catch (err) {
       if (err.name === 'AbortError' || sessionController.signal.aborted) {
@@ -222,7 +297,12 @@
       }
       if (gen !== galleryOpenGen || !currentChat || currentChat.id !== requestedChatId) return;
       console.error('Failed to load media gallery:', err);
-      grid.innerHTML = '<div class="gallery-empty-notice">Failed to load media gallery.</div>';
+      grid.querySelectorAll('.gallery-filter-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
+      const notice = document.createElement('div');
+      notice.className = 'gallery-empty-notice';
+      notice.textContent = 'Failed to load media gallery.';
+      const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+      grid.insertBefore(notice, sentinel);
       return;
     }
     if (gen !== galleryOpenGen || !document.getElementById('media-gallery').classList.contains('open')) return;
@@ -267,7 +347,11 @@
 
     const typesKey = activeTypes.size > 0 ? [...activeTypes].sort().join(',') : 'all';
     const type = activeTypes.size === 1 ? [...activeTypes][0] : null;
-    const typeLabel = type ? (MEDIA_TYPE_PLURALS[type] || type + 's') : 'media';
+    const typeLabel = type
+      ? (MEDIA_TYPE_PLURALS[type] || type + 's')
+      : (activeTypes.size > 0
+          ? [...activeTypes].map(t => MEDIA_TYPE_PLURALS[t] || t + 's').join(' or ')
+          : 'media');
 
     let totalExpected = 0;
     if (currentGalleryStats) {
@@ -295,16 +379,24 @@
                       (activeTypes.size === 1 && activeTypes.has('link') && linksAllLoaded) ||
                       (totalExpected > 0 && visibleCount >= totalExpected);
 
-    if ((currentGalleryStats && totalExpected === 0 && type) || (isAllDone && visibleCount === 0)) {
+    const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+
+    if (!currentGalleryStats && visibleCount === 0) {
+      return;
+    }
+
+    if ((currentGalleryStats && totalExpected === 0 && activeTypes.size > 0) || (isAllDone && visibleCount === 0)) {
       const notice = document.createElement('div');
       notice.className = 'gallery-empty-notice';
-      notice.textContent = type ? `No ${typeLabel} in this chat.` : 'No media in this chat.';
-      grid.insertBefore(notice, gallerySentinel || null);
+      notice.textContent = (currentGalleryStats && currentGalleryStats.total === 0)
+        ? 'No media in this chat.'
+        : `No ${typeLabel} in this chat.`;
+      grid.insertBefore(notice, sentinel);
     } else if (isAllDone && visibleCount > 0) {
       const notice = document.createElement('div');
       notice.className = 'gallery-end-notice';
       notice.textContent = `All ${visibleCount} ${typeLabel} loaded`;
-      grid.insertBefore(notice, gallerySentinel || null);
+      grid.insertBefore(notice, sentinel);
     }
   }
 
@@ -333,7 +425,8 @@
         const typeKey = activeTypes.size === 1 ? [...activeTypes][0] : 'total';
         const typePlural = MEDIA_TYPE_PLURALS[typeKey] || 'media';
         scrollLoader.innerHTML = `<span class="gallery-filter-spinner"></span><span>Loading older ${typePlural}…</span>`;
-        grid.insertBefore(scrollLoader, gallerySentinel || null);
+        const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+        grid.insertBefore(scrollLoader, sentinel);
       }
     }
 
@@ -378,7 +471,7 @@
         galleryCurrentAbortController = null;
       }
       if (scrollLoader) scrollLoader.remove();
-      const filterLoader = grid ? grid.querySelector('.gallery-filter-loading') : null;
+      const filterLoader = grid ? grid.querySelector('.gallery-filter-loading:not(.gallery-checking-loading)') : null;
       if (filterLoader) filterLoader.remove();
       _setStatPillsLoading(false);
       galleryLoadingMore = false;
@@ -628,7 +721,8 @@
           const loader = document.createElement('div');
           loader.className = 'gallery-filter-loading';
           loader.innerHTML = `<span class="gallery-filter-spinner"></span><span>Loading ${typeName}…</span>`;
-          grid.insertBefore(loader, gallerySentinel || null);
+          const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
+          grid.insertBefore(loader, sentinel);
           _setStatPillsLoading(true);
         } else {
           _syncGalleryNotices();
