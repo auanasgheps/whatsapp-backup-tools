@@ -1003,7 +1003,10 @@ class TestEnumerateRemoteBackupFiles:
         with patch("wab_archiver.adb_extractor._run_adb", return_value=mock_res):
             base, incs = adb.enumerate_remote_backup_files(business=False, logger=logger)
 
-        assert base == "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Databases/msgstore.db.crypt15"
+        assert (
+            base
+            == "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Databases/msgstore.db.crypt15"
+        )
         assert len(incs) == 2
         assert incs[0].endswith("msgstore-increment-1.db.crypt15")
         assert incs[1].endswith("msgstore-increment-2.db.crypt15")
@@ -1498,4 +1501,3 @@ class TestPullMediaAdvancedScenarios:
         assert skipped == 0
         assert conflicts == []
         conn.close()
-
