@@ -2,7 +2,7 @@
 
 Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, focusing on expanded Viewer features, interactive audio playback, media timestamping, and general UI/UX refinements.
 
-Brace yourselves: This update introduces a lot of stuff! 
+Brace yourselves: This update introduces many new features!
 
 Call History, Archived chats, Starred bookmarks, the ability to see pinned messages, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, voice message waveforms, retroactively backfillable photo and video timestamps, and theme-adaptive group sender colors.
 
