@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/viewer_dark_1_shots_so.jpeg" alt="WhatsApp Backup Tools Viewer Hero" width="100%"/>
+  <img src="docs/images/viewer_dark_1_shots_so.jpg" alt="WhatsApp Backup Tools Viewer Hero" width="100%"/>
 </p>
 
 > **⚡️ 100% Local & Private** — No cloud accounts, no telemetry, no data leaves your machine. Full native support for **Android & iOS** backups on Windows, macOS, and Linux.
