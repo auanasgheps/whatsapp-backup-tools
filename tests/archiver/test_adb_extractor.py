@@ -426,6 +426,11 @@ class TestRunAdb:
                 adb._run_adb(["adb", "test"], logger)
         assert mock_run.call_count == adb._ADB_RETRIES + 1
 
+    def test_exhausted_loop_fallback(self, logger):
+        with patch("wab_archiver.adb_extractor._ADB_RETRIES", -1):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb._run_adb(["adb", "test"], logger)
+
 
 class TestClassifyAdbError:
     def test_path_not_found(self):
@@ -561,6 +566,7 @@ class TestPullMedia:
         assert pulled == 0
         assert skipped == 0
         assert conflicts == []
+        conn.close()
 
     def test_already_done_file_skipped(self, tmp_path, logger):
         conn = self._make_conn(tmp_path)
@@ -580,6 +586,7 @@ class TestPullMedia:
         assert pulled == 0
         assert skipped == 1
         assert conflicts == []
+        conn.close()
 
     def test_new_file_pulled_marks_done(self, tmp_path, logger):
         conn = self._make_conn(tmp_path)
@@ -610,6 +617,7 @@ class TestPullMedia:
         assert skipped == 0
         assert conflicts == []
         assert remote_path in arc.get_adb_done_paths(conn, "serial-1")
+        conn.close()
 
     def test_target_paths_filters_unmatched_files(self, tmp_path, logger):
         conn = self._make_conn(tmp_path)
@@ -884,3 +892,610 @@ class TestPrepareInputAdb:
         ):
             platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
         assert contacts == {"39012345": "Alice"}
+
+
+class TestInteractivePromptsAndServerLifecycle:
+    def test_confirm_restart_prompt_eof_and_interrupt(self):
+        with patch("sys.stdin.isatty", return_value=True):
+            with patch("builtins.input", side_effect=EOFError):
+                assert adb._confirm_restart_prompt("Prompt: ") is False
+            with patch("builtins.input", side_effect=KeyboardInterrupt):
+                assert adb._confirm_restart_prompt("Prompt: ") is False
+
+    def test_prompt_user_to_continue_non_tty_and_exceptions(self):
+        with patch("sys.stdin.isatty", return_value=False):
+            assert adb._prompt_user_to_continue("Prompt: ") is False
+        with patch("sys.stdin.isatty", return_value=True):
+            with patch("builtins.input", side_effect=EOFError):
+                assert adb._prompt_user_to_continue("Prompt: ") is False
+            with patch("builtins.input", side_effect=KeyboardInterrupt):
+                assert adb._prompt_user_to_continue("Prompt: ") is False
+            with patch("builtins.input", return_value=""):
+                assert adb._prompt_user_to_continue("Prompt: ") is True
+
+    def test_restart_adb_server_handles_errors(self, logger):
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, "adb kill-server"),
+            ),
+            patch("wab_archiver.adb_extractor.time.sleep") as mock_sleep,
+            patch.object(logger, "warning") as mock_warn,
+        ):
+            adb._restart_adb_server(logger)
+            mock_sleep.assert_called_once_with(2)
+            mock_warn.assert_called_once()
+            assert "adb kill-server" in mock_warn.call_args[0][0]
+
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("adb kill-server", 120),
+            ),
+            patch("wab_archiver.adb_extractor.time.sleep"),
+            patch.object(logger, "warning") as mock_warn,
+        ):
+            adb._restart_adb_server(logger)
+            mock_warn.assert_called_once()
+
+
+class TestDeviceConnectedAdditionalStates:
+    def test_sideload_and_bootloader_modes(self, logger):
+        for state in ("sideload", "bootloader"):
+            output = f"List of devices attached\nDEV123\t{state}\n"
+            r = MagicMock(stdout=output.encode())
+            with (
+                patch("wab_archiver.adb_extractor.subprocess.run", return_value=r),
+                patch.object(logger, "error") as mock_err,
+            ):
+                assert adb.check_device_connected(logger) is False
+                assert f"'{state}' mode" in mock_err.call_args[0][0]
+
+    def test_unexpected_state(self, logger):
+        output = "List of devices attached\nDEV123\tauthorizing\n"
+        r = MagicMock(stdout=output.encode())
+        with (
+            patch("wab_archiver.adb_extractor.subprocess.run", return_value=r),
+            patch.object(logger, "error") as mock_err,
+        ):
+            assert adb.check_device_connected(logger) is False
+            assert "unexpected state 'authorizing'" in mock_err.call_args[0][0]
+
+
+class TestPullMsgstoreErrorDiagnostics:
+    def test_pull_msgstore_device_offline_message(self, logger, tmp_path):
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=subprocess.CalledProcessError(
+                    1, "adb", stderr=b"error: device offline"
+                ),
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb.pull_msgstore(str(tmp_path), logger=logger)
+            assert "disconnected or went offline" in mock_err.call_args[0][0]
+
+    def test_pull_msgstore_generic_adb_failure_message(self, logger, tmp_path):
+        with (
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=subprocess.CalledProcessError(
+                    1, "adb", stderr=b"unexpected adb transport failure"
+                ),
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb.pull_msgstore(str(tmp_path), logger=logger)
+            assert "ADB pull failed" in mock_err.call_args[0][0]
+
+
+class TestEnumerateRemoteBackupFiles:
+    def test_standard_base_and_increments(self, logger):
+        stdout = (
+            b"msgstore.db.crypt15\n"
+            b"msgstore-increment-1.db.crypt15\n"
+            b"msgstore-increment-2.db.crypt15\n"
+        )
+        mock_res = MagicMock(returncode=0, stdout=stdout)
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=mock_res):
+            base, incs = adb.enumerate_remote_backup_files(business=False, logger=logger)
+
+        assert base == "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Databases/msgstore.db.crypt15"
+        assert len(incs) == 2
+        assert incs[0].endswith("msgstore-increment-1.db.crypt15")
+        assert incs[1].endswith("msgstore-increment-2.db.crypt15")
+
+    def test_business_path_selection(self, logger):
+        stdout = b"msgstore.db.crypt15\n"
+        mock_res = MagicMock(returncode=0, stdout=stdout)
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=mock_res) as mock_run:
+            base, incs = adb.enumerate_remote_backup_files(business=True, logger=logger)
+
+        assert "com.whatsapp.w4b" in base
+        cmd = mock_run.call_args[0][0]
+        assert "com.whatsapp.w4b" in cmd[2]
+
+    def test_rotated_base_fallback_when_unrotated_absent(self, logger):
+        stdout = (
+            b"msgstore-2024-01-01.1.db.crypt15\n"
+            b"msgstore-2024-02-01.1.db.crypt15\n"
+            b"msgstore-increment-1.db.crypt15\n"
+        )
+        mock_res = MagicMock(returncode=0, stdout=stdout)
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=mock_res):
+            base, incs = adb.enumerate_remote_backup_files(business=False, logger=logger)
+
+        assert base.endswith("msgstore-2024-02-01.1.db.crypt15")
+
+    def test_active_increments_filtering(self, logger):
+        # 1 active unrotated increment and 1 duplicate/tagged increment of same ID
+        stdout = (
+            b"\n"
+            b"msgstore.db.crypt15\n"
+            b"msgstore-increment-1.db.crypt15\n"
+            b"msgstore-increment-1-20240101.db.crypt15\n"
+        )
+        mock_res = MagicMock(returncode=0, stdout=stdout)
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=mock_res):
+            base, incs = adb.enumerate_remote_backup_files(business=False, logger=logger)
+
+        assert base.endswith("msgstore.db.crypt15")
+        assert len(incs) == 1
+        assert incs[0].endswith("msgstore-increment-1.db.crypt15")
+
+    def test_no_base_file_found_warns(self, logger):
+        stdout = b"unrelated.txt\n"
+        mock_res = MagicMock(returncode=0, stdout=stdout)
+        with (
+            patch("wab_archiver.adb_extractor._run_adb", return_value=mock_res),
+            patch.object(logger, "warning") as mock_warn,
+        ):
+            base, incs = adb.enumerate_remote_backup_files(business=False, logger=logger)
+
+        assert base is None
+        assert incs == []
+        assert "Base msgstore backup not found" in mock_warn.call_args[0][0]
+
+    def test_shell_listing_failure_warns_and_returns_empty(self, logger):
+        with (
+            patch(
+                "wab_archiver.adb_extractor._run_adb",
+                side_effect=subprocess.CalledProcessError(1, "adb"),
+            ),
+            patch.object(logger, "warning") as mock_warn,
+        ):
+            base, incs = adb.enumerate_remote_backup_files(business=False, logger=logger)
+
+        assert base is None
+        assert incs == []
+        assert "Failed to list remote backups" in mock_warn.call_args[0][0]
+
+
+class TestPullMsgstoreAndIncrements:
+    def test_base_remote_none_falls_back_to_pull_msgstore(self, tmp_path, logger):
+        staging_dir = str(tmp_path / "stage")
+        with (
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_backup_files",
+                return_value=(None, []),
+            ),
+            patch(
+                "wab_archiver.adb_extractor.pull_msgstore",
+                return_value=os.path.join(staging_dir, "msgstore.db.crypt15"),
+            ) as mock_pull_base,
+        ):
+            base, incs = adb.pull_msgstore_and_increments(staging_dir, False, logger)
+
+        assert base == os.path.join(staging_dir, "msgstore.db.crypt15")
+        assert incs == []
+        mock_pull_base.assert_called_once_with(staging_dir, False, logger)
+
+    def test_pull_base_and_increments_success(self, tmp_path, logger):
+        staging_dir = str(tmp_path / "stage")
+        remote_base = "/storage/Databases/msgstore.db.crypt15"
+        remote_incs = [
+            "/storage/Databases/msgstore-increment-1.db.crypt15",
+            "/storage/Databases/msgstore-increment-2.db.crypt15",
+        ]
+
+        with (
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_backup_files",
+                return_value=(remote_base, remote_incs),
+            ),
+            patch("wab_archiver.adb_extractor.subprocess.run") as mock_run,
+        ):
+            base, incs = adb.pull_msgstore_and_increments(staging_dir, False, logger)
+
+        assert base == os.path.join(staging_dir, "msgstore.db.crypt15")
+        assert len(incs) == 2
+        assert mock_run.call_count == 3
+
+    def test_pull_base_failure_raises(self, tmp_path, logger):
+        staging_dir = str(tmp_path / "stage")
+        remote_base = "/storage/Databases/msgstore.db.crypt15"
+
+        with (
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_backup_files",
+                return_value=(remote_base, []),
+            ),
+            patch(
+                "wab_archiver.adb_extractor.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, "adb", stderr=b"permission denied"),
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb.pull_msgstore_and_increments(staging_dir, False, logger)
+            assert "Failed to pull base backup" in mock_err.call_args[0][0]
+
+    def test_pull_increment_failure_raises(self, tmp_path, logger):
+        staging_dir = str(tmp_path / "stage")
+        remote_base = "/storage/Databases/msgstore.db.crypt15"
+        remote_incs = ["/storage/Databases/msgstore-increment-1.db.crypt15"]
+
+        def _fake_run(cmd, check=True, stderr=None):
+            if cmd[2] == remote_incs[0]:
+                raise subprocess.CalledProcessError(1, cmd, stderr=b"increment pull failed")
+            return MagicMock(returncode=0)
+
+        with (
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_backup_files",
+                return_value=(remote_base, remote_incs),
+            ),
+            patch("wab_archiver.adb_extractor.subprocess.run", side_effect=_fake_run),
+            patch.object(logger, "error") as mock_err,
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                adb.pull_msgstore_and_increments(staging_dir, False, logger)
+            assert "Failed to pull increment" in mock_err.call_args[0][0]
+
+
+class TestEnumerateRemoteFilesEdgeCases:
+    def test_skips_no_such_file_and_empty_lines(self, logger):
+        stdout = b"\n   \n/storage/WA/Media/missing: No such file or directory\n/storage/WA/Media/img.jpg\t500\n"
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert entries == [("/storage/WA/Media/img.jpg", 500)]
+
+    def test_skips_invalid_size_integer(self, logger):
+        stdout = b"/storage/WA/Media/img.jpg\tnot_a_number\n/storage/WA/Media/valid.jpg\t250\n"
+        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+            entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
+        assert entries == [("/storage/WA/Media/valid.jpg", 250)]
+
+
+class TestPullMediaAdvancedScenarios:
+    def test_cleans_partial_files_from_previous_run(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/partial_old.jpg"
+        stage_dir = str(tmp_path / "stage")
+        local_path = adb._staging_path(remote_path, adb._WA_MEDIA_ROOT, stage_dir)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(b"partial_bytes")
+
+        arc.upsert_adb_pull_state(conn, remote_path, serial, "partial")
+        assert os.path.exists(local_path)
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch("wab_archiver.adb_extractor.enumerate_remote_files", return_value=[]),
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert not os.path.exists(local_path)
+        assert arc.get_adb_partial_paths(conn, serial) == []
+        conn.close()
+
+    def test_prefilter_exact_hash_match_marks_done(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/img_match.jpg"
+        stage_dir = str(tmp_path / "stage")
+        md5_bytes = bytes.fromhex("11" * 16)
+
+        conn.execute(
+            "INSERT INTO files (original_path, md5, size) VALUES (?, ?, ?)",
+            ("Media/WhatsApp Images/img_match.jpg", md5_bytes, 1024),
+        )
+        conn.commit()
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 1024)],
+            ),
+            patch("wab_archiver.adb_extractor._remote_md5", return_value=md5_bytes),
+            patch("wab_archiver.adb_extractor._run_adb") as mock_run,
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert pulled == 0
+        assert skipped == 1
+        assert conflicts == []
+        assert remote_path in arc.get_adb_done_paths(conn, serial)
+        mock_run.assert_not_called()
+        conn.close()
+
+    def test_prefilter_content_conflict_logged_and_skipped(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/img_conflict.jpg"
+        stage_dir = str(tmp_path / "stage")
+        archived_md5 = bytes.fromhex("11" * 16)
+        remote_md5 = bytes.fromhex("22" * 16)
+
+        conn.execute(
+            "INSERT INTO files (original_path, md5, size) VALUES (?, ?, ?)",
+            ("Media/WhatsApp Images/img_conflict.jpg", archived_md5, 1024),
+        )
+        conn.commit()
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 1024)],
+            ),
+            patch("wab_archiver.adb_extractor._remote_md5", return_value=remote_md5),
+            patch("wab_archiver.adb_extractor._run_adb") as mock_run,
+            patch.object(logger, "warning") as mock_warn,
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert pulled == 0
+        assert skipped == 0
+        assert len(conflicts) == 1
+        assert conflicts[0]["remote_path"] == remote_path
+        assert conflicts[0]["remote_md5"] == remote_md5.hex()
+        assert conflicts[0]["archived_md5"] == archived_md5.hex()
+        mock_run.assert_not_called()
+        assert any("CONFLICT" in str(c) for c in mock_warn.call_args_list)
+        conn.close()
+
+    def test_prefilter_size_mismatch_triggers_pull(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/img_diff_size.jpg"
+        stage_dir = str(tmp_path / "stage")
+        local_path = adb._staging_path(remote_path, adb._WA_MEDIA_ROOT, stage_dir)
+        archived_md5 = bytes.fromhex("11" * 16)
+
+        conn.execute(
+            "INSERT INTO files (original_path, md5, size) VALUES (?, ?, ?)",
+            ("Media/WhatsApp Images/img_diff_size.jpg", archived_md5, 1024),
+        )
+        conn.commit()
+
+        def _fake_run_adb(cmd, logger):
+            if cmd[1] == "pull":
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, "wb") as f:
+                    f.write(b"\x00" * 2048)
+            return MagicMock(returncode=0)
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 2048)],
+            ),
+            patch("wab_archiver.adb_extractor._remote_md5") as mock_md5,
+            patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb),
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        mock_md5.assert_not_called()
+        assert pulled == 1
+        assert remote_path in arc.get_adb_done_paths(conn, serial)
+        conn.close()
+
+    def test_prefilter_remote_md5_exception_falls_back_to_pull(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/img_md5_err.jpg"
+        stage_dir = str(tmp_path / "stage")
+        local_path = adb._staging_path(remote_path, adb._WA_MEDIA_ROOT, stage_dir)
+        archived_md5 = bytes.fromhex("11" * 16)
+
+        conn.execute(
+            "INSERT INTO files (original_path, md5, size) VALUES (?, ?, ?)",
+            ("Media/WhatsApp Images/img_md5_err.jpg", archived_md5, 1024),
+        )
+        conn.commit()
+
+        def _fake_run_adb(cmd, logger):
+            if cmd[1] == "pull":
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, "wb") as f:
+                    f.write(b"\x00" * 1024)
+            return MagicMock(returncode=0)
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 1024)],
+            ),
+            patch("wab_archiver.adb_extractor._remote_md5", side_effect=RuntimeError("hash error")),
+            patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb),
+            patch.object(logger, "warning") as mock_warn,
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert pulled == 1
+        assert any("Could not hash remote file" in str(c) for c in mock_warn.call_args_list)
+        assert remote_path in arc.get_adb_done_paths(conn, serial)
+        conn.close()
+
+    def test_pull_keyboard_interrupt_preserves_partial_state(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/interrupt.jpg"
+        stage_dir = str(tmp_path / "stage")
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 1024)],
+            ),
+            patch("wab_archiver.adb_extractor._run_adb", side_effect=KeyboardInterrupt),
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert remote_path in arc.get_adb_partial_paths(conn, serial)
+        conn.close()
+
+    def test_pull_device_offline_raises_runtime_error(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/offline.jpg"
+        stage_dir = str(tmp_path / "stage")
+        err = subprocess.CalledProcessError(1, "adb", stderr=b"error: device offline")
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 1024)],
+            ),
+            patch("wab_archiver.adb_extractor._run_adb", side_effect=err),
+        ):
+            with pytest.raises(RuntimeError) as exc_info:
+                adb.pull_media(stage_dir, False, conn, logger, None)
+            assert "Device disconnected during pull" in str(exc_info.value)
+
+        assert remote_path in arc.get_adb_partial_paths(conn, serial)
+        conn.close()
+
+    def test_pull_generic_failure_continues_loop(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        p1 = adb._WA_MEDIA_ROOT + "/WhatsApp Images/fail.jpg"
+        p2 = adb._WA_MEDIA_ROOT + "/WhatsApp Images/success.jpg"
+        stage_dir = str(tmp_path / "stage")
+        local_p2 = adb._staging_path(p2, adb._WA_MEDIA_ROOT, stage_dir)
+
+        def _fake_run_adb(cmd, logger):
+            if cmd[2] == p1:
+                raise subprocess.CalledProcessError(1, cmd, stderr=b"Permission denied")
+            if cmd[2] == p2:
+                os.makedirs(os.path.dirname(local_p2), exist_ok=True)
+                with open(local_p2, "wb") as f:
+                    f.write(b"\x00" * 500)
+            return MagicMock(returncode=0)
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(p1, 500), (p2, 500)],
+            ),
+            patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb),
+            patch.object(logger, "error") as mock_err,
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert pulled == 1
+        assert p1 in arc.get_adb_partial_paths(conn, serial)
+        assert p2 in arc.get_adb_done_paths(conn, serial)
+        assert any("Failed to pull" in str(c) for c in mock_err.call_args_list)
+        conn.close()
+
+    def test_pull_missing_local_file_after_success(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/vanished.jpg"
+        stage_dir = str(tmp_path / "stage")
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 1024)],
+            ),
+            patch(
+                "wab_archiver.adb_extractor._run_adb",
+                return_value=MagicMock(returncode=0),
+            ),
+            patch.object(logger, "error") as mock_err,
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert pulled == 0
+        assert remote_path in arc.get_adb_partial_paths(conn, serial)
+        assert any("file not found locally" in str(c) for c in mock_err.call_args_list)
+        conn.close()
+
+    def test_pull_truncated_file_marked_partial(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/truncated.jpg"
+        stage_dir = str(tmp_path / "stage")
+        local_path = adb._staging_path(remote_path, adb._WA_MEDIA_ROOT, stage_dir)
+
+        def _fake_run_adb(cmd, logger):
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            with open(local_path, "wb") as f:
+                f.write(b"SHORT")  # 5 bytes instead of 100
+            return MagicMock(returncode=0)
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 100)],
+            ),
+            patch("wab_archiver.adb_extractor._run_adb", side_effect=_fake_run_adb),
+            patch.object(logger, "warning") as mock_warn,
+        ):
+            pulled, skipped, conflicts = adb.pull_media(stage_dir, False, conn, logger, None)
+
+        assert pulled == 0
+        assert remote_path in arc.get_adb_partial_paths(conn, serial)
+        assert any("Pulled file is truncated" in str(c) for c in mock_warn.call_args_list)
+        conn.close()
+
+    def test_target_paths_filter_no_matches_returns_zeros(self, tmp_path, logger):
+        conn = arc.open_archive_db(str(tmp_path))
+        serial = "DEV_SYNTH_01"
+        remote_path = adb._WA_MEDIA_ROOT + "/WhatsApp Images/unmatched.jpg"
+        stage_dir = str(tmp_path / "stage")
+
+        with (
+            patch("wab_archiver.adb_extractor.get_device_serial", return_value=serial),
+            patch("wab_archiver.adb_extractor.probe_md5_binary", return_value="md5sum"),
+            patch(
+                "wab_archiver.adb_extractor.enumerate_remote_files",
+                return_value=[(remote_path, 100)],
+            ),
+        ):
+            pulled, skipped, conflicts = adb.pull_media(
+                stage_dir, False, conn, logger, {"Media/WhatsApp Images/other.jpg"}
+            )
+
+        assert pulled == 0
+        assert skipped == 0
+        assert conflicts == []
+        conn.close()
+
