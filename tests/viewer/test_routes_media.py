@@ -471,6 +471,38 @@ class TestApiMedia:
         assert data["by_type"]["link"]["count"] == 2
         assert data["by_type"]["link"]["missing"] == 0  # links cannot be missing
 
+    def test_media_count_vcard_contacts(self, tmp_path):
+        """/api/media/count classifies message_type 4 and 14 as vcard and not document even with media_name."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path_db = tmp_path / ".wa_media_archiver.db"
+        wa_conn = make_android_db(wa_path)
+        archive_conn = make_archive_db(archive_path_db)
+        seed_android_db(wa_conn, archive_conn)
+
+        wa_conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, timestamp, text_data, message_type) "
+            "VALUES (101, 10, 1, 1700000006000, 'BEGIN:VCARD...', 4)"
+        )
+        wa_conn.execute(
+            "INSERT INTO message_media (message_row_id, file_path, media_name) "
+            "VALUES (101, NULL, 'Alice.vcf')"
+        )
+        wa_conn.commit()
+        wa_conn.close()
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/media/count?chat_id=123456789&chat_type=contact")
+            data = resp.get_json()
+
+        assert "vcard" in data["by_type"]
+        assert data["by_type"]["vcard"]["count"] == 1
+        assert data["by_type"]["vcard"]["missing"] == 0
+        assert "document" not in data["by_type"]
+
     def test_ios_api_media_all_types_with_mdi_table(self, tmp_path):
         """/api/media with types=all on iOS with ZWAMESSAGEDATAITEM table executes stage1_sql without column error."""
         wa_path = tmp_path / "ChatStorage.sqlite"

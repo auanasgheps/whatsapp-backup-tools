@@ -53,10 +53,6 @@
       const count = d?.count || 0;
       const missing = d?.missing || 0;
       let pill = stats.querySelector(`.gallery-stat[data-type="${t}"]`);
-      if (count === 0 && !activeTypes.has(t)) {
-        if (pill) pill.style.display = 'none';
-        continue;
-      }
       if (!pill) {
         pill = _makeStatPill(t, count, t, missing);
         stats.appendChild(pill);
@@ -65,6 +61,10 @@
         const ms = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
         pill.innerHTML = `<strong>${count}</strong> ${displayLabel}${ms}`;
         pill.classList.remove('is-loading');
+      }
+      if (count === 0 && !activeTypes.has(t)) {
+        pill.style.display = 'none';
+      } else {
         pill.style.display = '';
       }
     }
@@ -716,6 +716,13 @@
       if (archiveViewActive && t !== 'total' && SECONDARY_TYPES.has(t)) {
         pill.style.display = 'none';
         return;
+      }
+      if (currentGalleryStats && t !== 'total') {
+        const count = currentGalleryStats.by_type?.[t]?.count || 0;
+        if (count === 0 && !activeTypes.has(t)) {
+          pill.style.display = 'none';
+          return;
+        }
       }
       pill.style.display = '';
       if (t === 'total') {

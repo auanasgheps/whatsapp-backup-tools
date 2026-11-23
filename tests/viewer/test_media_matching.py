@@ -1071,6 +1071,14 @@ class TestStickerSupport:
         assert "pill.classList.toggle('active', activeTypes.has(t))" in js
         assert "pill.classList.toggle('dimmed', !activeTypes.has(t))" in js
 
+    def test_gallery_zero_count_stat_pills_hidden_and_not_loading(self):
+        """app.js must hide hydrated stat pills with count=0 and remove .is-loading,
+        ensuring zero-count pills (e.g. contacts) don't spin indefinitely."""
+        js = _get_app_js()
+        assert "currentGalleryStats && t !== 'total'" in js
+        assert "count === 0 && !activeTypes.has(t)" in js
+        assert "pill.classList.remove('is-loading')" in js
+
     def test_gallery_total_pill_switching_initiates_unified_stream_and_avoids_stale_window_leakage(
         self,
     ):

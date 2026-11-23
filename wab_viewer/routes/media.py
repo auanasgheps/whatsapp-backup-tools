@@ -463,8 +463,8 @@ def api_media_count():
                     WHEN {ctx.queries.android_gif_cond} THEN 'gif'
                     WHEN m.message_type IN (3, 28, 43, 81) THEN 'video'
                     WHEN m.message_type = 20 THEN 'sticker'
-                    WHEN m.message_type = 9 OR (mm.file_path IS NULL AND mm.media_name IS NOT NULL AND mm.media_name != '') THEN 'document'
                     WHEN m.message_type IN (4, 14) THEN 'vcard'
+                    WHEN m.message_type = 9 OR (mm.file_path IS NULL AND mm.media_name IS NOT NULL AND mm.media_name != '') THEN 'document'
                     WHEN m.message_type IN (2, 82) THEN
                         CASE WHEN {android_voice_cond} THEN 'voice' ELSE 'audio' END
                     ELSE 'other'
