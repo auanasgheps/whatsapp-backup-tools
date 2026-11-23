@@ -287,7 +287,7 @@ class TestPullContacts:
     def test_filters_whatsapp_lines(self, logger, tmp_path):
         raw = (
             "Row: 0 display_name=Alice, data1=391234567890@s.whatsapp.net\n"
-            "Row: 1 display_name=Bob, data1=bob@gmail.com\n"
+            "Row: 1 display_name=Bob, data1=bob@example.com\n"
             "Row: 2 display_name=Carol, data1=390987654321@s.whatsapp.net\n"
         )
         mock_result = MagicMock()
@@ -297,14 +297,14 @@ class TestPullContacts:
 
         content = open(dest, encoding="utf-8").read()
         assert "@s.whatsapp.net" in content
-        assert "bob@gmail.com" not in content
+        assert "bob@example.com" not in content
         assert content.count("@s.whatsapp.net") == 2
 
     def test_retains_phone_and_whatsapp_lines(self, logger, tmp_path):
         raw = (
             "Row: 0 display_name=Alice, data1=391234567890@s.whatsapp.net, "
             "data4=NULL, mimetype=vnd.android.cursor.item/vnd.com.whatsapp.profile\n"
-            "Row: 1 display_name=Bob, data1=bob@gmail.com, "
+            "Row: 1 display_name=Bob, data1=bob@example.com, "
             "data4=NULL, mimetype=vnd.android.cursor.item/email_v2\n"
             "Row: 2 display_name=Carol, data1=+15551234567, "
             "data4=+15551234567, mimetype=vnd.android.cursor.item/phone_v2\n"
@@ -317,7 +317,7 @@ class TestPullContacts:
         content = open(dest, encoding="utf-8").read()
         assert "Alice" in content
         assert "Carol" in content
-        assert "bob@gmail.com" not in content
+        assert "bob@example.com" not in content
 
     def test_failure_raises(self, logger, tmp_path):
         with patch(
