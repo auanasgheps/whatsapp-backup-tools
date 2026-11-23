@@ -16,20 +16,19 @@ Also many thanks to the first external contributor, @Piero-93!
 
 > 🖥️ **New Look and feel**:
 > The UI/UX of the Viewer has been significantly expanded. Introducing chats avatars, navigation menu for Chats, Calls, Starred Messages and Archived Messages. A new chat submenu has been added added to not clutter the chat bar.  
-![New UI](/docs/images/release-notes/image2.png)
-
+<img src="/docs/images/release-notes/image2.png" alt="New UI" width="80%" />
 
 > 📞 **Call History**:
 > Browse your complete voice and video call logs directly within the viewer. A new Call side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that brings you straight to that exact point in time. Calls are also displayed directly into chat timelines as chronological call bubbles.
-![Calls](/docs/images/release-notes/image3.png)
+<img src="/docs/images/release-notes/image3.png" alt="Calls" width="80%" />
 
 > ⭐ **Starred Messages & Bookmarks**:
 > Quickly view your saved and starred messages from the dedicated Starred tab or from an in-chat slide-out panel. Tapping any starred message jumps straight to that message in the conversation with a glowing golden highlight.
-![Starred Messages](/docs/images/release-notes/image4.png)
+<img src="/docs/images/release-notes/image4.png" alt="Starred Messages" width="80%" />
 
 > 🎙️ **Voice Message Waveforms & Audio Player**:
 > Voice notes now look and feel authentic with interactive sound waveforms, adjustable playback speeds (1x to 2x), and a circular play/pause button. Tap or drag anywhere on the waveform to scrub forward and backward.
-![Voice Message](/docs/images/release-notes/image1.png)
+<img src="/docs/images/release-notes/image1.png" alt="Voice Messages" width="30%" />
 
 > 🏷️ **Photo & Video Timestamp Embedding**:
 > Save original WhatsApp message dates directly into your photos and videos (`--exif-timestamps`), or update existing archives with the new `wab-archiver update-metadata` command. Cloud photo apps like Google Photos, Apple Photos, and Immich will now organize your archived media in the correct order.
