@@ -59,6 +59,7 @@ CSS_MODULE_ORDER = [
     "15_drawers_chat_info_starred.css",
     "16_alerts_and_highlights.css",
     "17_calls.css",
+    "18_phone_layout.css",
 ]
 
 _CACHED_BUNDLE: str | None = None

@@ -4,6 +4,9 @@ const outputRoot = window.OUTPUT_ROOT;
   const BASE_PATH = window.BASE_PATH || '';
   const API = BASE_PATH + '/api';
   const MEDIA = BASE_PATH + '/media/';
+  // Below this width the list and the open chat are two levels (phone layout). Same breakpoint as the
+  // max-width: 600px blocks in css/, including 18_phone_layout.css.
+  const PHONE_LAYOUT_QUERY = '(max-width: 600px)';
   let allChats = [];
   let currentChat = null;
   let msgList = [];

@@ -91,6 +91,7 @@ HTML_TEMPLATE = (
 
     <div id="chat-pane">
       <div id="chat-header" style="display:none;">
+        <button id="chat-back-btn" class="pane-back-btn" type="button" title="Back" aria-label="Back"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
         <div id="chat-header-info" tabindex="0" title="Click to view chat info" aria-label="Chat details">
           <div id="chat-header-avatar" class="chat-header-avatar" aria-hidden="true"></div>
           <div class="chat-header-meta">
@@ -187,6 +188,7 @@ HTML_TEMPLATE = (
 
       <!-- Call Inspector Detail Card -->
       <div id="pane-call-inspector" class="call-inspector-pane" style="display:none;" role="region" aria-label="Call details">
+        <button id="call-back-btn" class="pane-back-btn" type="button" title="Back to calls" aria-label="Back to calls"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
         <div class="call-inspector-card">
           <div class="call-inspect-header">
             <div id="call-inspect-avatar" class="call-inspect-avatar">AW</div>

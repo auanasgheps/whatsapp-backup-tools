@@ -158,6 +158,110 @@
     matches.forEach(chat => list.appendChild(_createChatListItem(chat)));
   }
 
+  // ---- phone layout: list and pane as two levels -------------------------------
+
+  // On phones (see 18_phone_layout.css) only one of the two is visible: the sidebar list, or the pane with
+  // the open chat or call details (body.pane-open). Opening the pane on a phone adds a history entry, so the
+  // browser back gesture returns to the list instead of leaving the page. The entry and the class always go
+  // together: the entry is only removed by going back, which also closes the pane.
+  const phoneLayout = window.matchMedia(PHONE_LAYOUT_QUERY);
+
+  function _paneHistoryEntry() {
+    return !!(history.state && history.state.wabPane);
+  }
+
+  function _keyboardFocus() {
+    const el = document.activeElement;
+    return !!el && el !== document.body && el.matches(':focus-visible');
+  }
+
+  function showDetailPane() {
+    if (document.body.classList.contains('pane-open')) return;
+    const fromKeyboard = _keyboardFocus();
+    document.body.classList.add('pane-open');
+    if (!phoneLayout.matches) return;
+    if (!_paneHistoryEntry()) history.pushState({ wabPane: true }, '');
+    // Keyboard users would be left on an element that is now hidden: take them to the back button.
+    // Not after a tap, where focusing it would only draw a focus ring.
+    if (fromKeyboard) {
+      const backBtn = Array.from(document.querySelectorAll('.pane-back-btn')).find(b => b.offsetParent !== null);
+      if (backBtn) backBtn.focus({ preventScroll: true });
+    }
+  }
+
+  function showListPane() {
+    if (!document.body.classList.contains('pane-open')) return;
+    const fromKeyboard = _keyboardFocus();
+    document.body.classList.remove('pane-open');
+    if (!phoneLayout.matches) return;
+    if (document.activeElement && document.activeElement.closest('#chat-pane')) document.activeElement.blur();
+    // Back on the list from the keyboard: focus the item that was open, when it can take focus (call items can).
+    const active = document.querySelector('#chat-list .active');
+    if (fromKeyboard && active && active.tabIndex >= 0) active.focus({ preventScroll: true });
+  }
+
+  // Closing the pane from the page (back button, Escape, a tab of the bottom bar) also drops its history entry.
+  let _ownBackPending = false;
+
+  function closeDetailPane() {
+    showListPane();
+    if (_paneHistoryEntry()) {
+      _ownBackPending = true;
+      history.back();
+    }
+  }
+
+  // The topmost layer opened over the pane, with the function that closes it. Back closes that first.
+  function _closeTopPaneOverlay() {
+    const lb = document.getElementById('img-lightbox');
+    if (lb && !lb.classList.contains('is-closing')) { _closeLb(); return true; }
+    const layers = [
+      ['msg-details-popup', 'visible', hideMsgDetails],
+      ['map-chooser-modal', 'open', closeMapChooser],
+      ['chat-menu-dropdown', 'open', closeChatMenu],
+      ['chat-starred-drawer', 'open', closeChatStarred],
+      ['chat-info-panel', 'open', closeChatInfo],
+      ['media-gallery', 'open', closeMediaGallery],
+    ];
+    for (const [id, cls, close] of layers) {
+      const el = document.getElementById(id);
+      if (el && el.classList.contains(cls)) { close(); return true; }
+    }
+    return false;
+  }
+
+  document.querySelectorAll('.pane-back-btn').forEach(btn => {
+    btn.addEventListener('click', closeDetailPane);
+  });
+
+  window.addEventListener('popstate', () => {
+    if (_ownBackPending) {
+      // Our own history.back() from closeDetailPane(). If a chat was opened again before it landed, the
+      // pane found the old entry still there and did not add one: add it now.
+      _ownBackPending = false;
+      if (document.body.classList.contains('pane-open') && phoneLayout.matches) history.pushState({ wabPane: true }, '');
+      return;
+    }
+    if (!document.body.classList.contains('pane-open')) return;
+    if (phoneLayout.matches && _closeTopPaneOverlay()) {
+      // The pane stays open: put its entry back for the next back gesture.
+      history.pushState({ wabPane: true }, '');
+      return;
+    }
+    showListPane();
+  });
+
+  // Rotating or resizing across the breakpoint: a pane opened on a wide screen gets its entry when the
+  // screen becomes a phone one. Going wide keeps the entry, so rotating back does not add another.
+  phoneLayout.addEventListener('change', () => {
+    if (phoneLayout.matches && document.body.classList.contains('pane-open') && !_paneHistoryEntry()) {
+      history.pushState({ wabPane: true }, '');
+    }
+  });
+
+  // A reload starts on the list: an entry left by the previous page would make the next back a no-op.
+  if (_paneHistoryEntry()) history.replaceState(null, '');
+
   // ---- bottom navigation bar -----------------------------------------------
 
   let currentNavTab = 'chats';
@@ -296,7 +400,10 @@
       btn.addEventListener('click', () => {
         if (btn.classList.contains('disabled') || btn.disabled) return;
         const tab = btn.dataset.tab;
-        if (tab) switchNavTab(tab);
+        if (tab) {
+          closeDetailPane();
+          switchNavTab(tab);
+        }
       });
       btn.addEventListener('keydown', e => {
         const enabledBtns = tabBtns.filter(b => !b.classList.contains('disabled') && !b.disabled);
@@ -317,7 +424,10 @@
           const targetBtn = enabledBtns[targetIdx];
           targetBtn.focus();
           const tab = targetBtn.dataset.tab;
-          if (tab) switchNavTab(tab);
+          if (tab) {
+            closeDetailPane();
+            switchNavTab(tab);
+          }
         }
       });
     });
@@ -326,6 +436,7 @@
   // ---- select chat ---------------------------------------------------------
 
   function _prepareChatPane(chat, isJumping) {
+    showDetailPane();
     closeChatInfo();
     closeChatStarred();
     closeChatMenu();

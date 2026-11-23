@@ -10,10 +10,12 @@ Validates the complete web interface lifecycle in a real headless browser using 
 - Revoked (deleted) messages tombstones and suppressions
 - View-once status pills, badges, and media preview isolation
 - Chat list sidebar previews for revoked and view-once messages
+- Phone layout: chat list and chat as two levels, with back navigation
 """
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -323,6 +325,318 @@ def test_theme_toggle_tokens(browser: CDPSession, screenshot_dir: Path) -> None:
     assert len(dark_theme["bgToken"]) > 0
 
     browser.capture_screenshot(screenshot_dir / "theme_dark.png", 5.0)
+
+
+_PHONE_STATE_JS = """
+(() => {
+    const w = id => {
+        const el = document.getElementById(id);
+        return el ? Math.round(el.getBoundingClientRect().width) : -1;
+    };
+    const open = id => {
+        const el = document.getElementById(id);
+        return !!el && (el.classList.contains('open') || el.classList.contains('visible'));
+    };
+    const lb = document.getElementById('img-lightbox');
+    return {
+        sidebar: w('sidebar'),
+        pane: w('chat-pane'),
+        header: w('header'),
+        chatBack: w('chat-back-btn'),
+        callBack: w('call-back-btn'),
+        viewport: window.innerWidth,
+        paneOpen: document.body.classList.contains('pane-open'),
+        paneEntry: !!(history.state && history.state.wabPane),
+        focus: document.activeElement ? document.activeElement.id : '',
+        focusClass: document.activeElement ? String(document.activeElement.className) : '',
+        lightbox: !!lb && !lb.classList.contains('is-closing'),
+        gallery: open('media-gallery'),
+        info: open('chat-info-panel'),
+        tab: document.querySelector('#sidebar-bottom-bar .tab-btn.active')?.dataset.tab || '',
+    };
+})()
+"""
+
+
+def _phone_step(browser: CDPSession, action: str, until: str, timeout: float = 8.0) -> dict:
+    """Run ``action`` in the page, wait until the JS expression ``until`` holds, return the layout state."""
+    done = browser.evaluate(
+        f"""
+        (async () => {{
+            {action};
+            for (let i = 0; i < 120; i++) {{
+                if ({until}) return true;
+                await new Promise(r => setTimeout(r, 50));
+            }}
+            return false;
+        }})()
+        """,
+        timeout,
+    )
+    assert done is True, f"timed out waiting for: {until}"
+    time.sleep(0.1)  # a stray popstate or animation would show up in the state read below
+    return browser.evaluate(_PHONE_STATE_JS, 5.0)
+
+
+def _set_viewport(browser: CDPSession, msg_id: int, width: int | None) -> None:
+    if width is None:
+        browser.ws.send_json(
+            {"id": msg_id, "method": "Emulation.clearDeviceMetricsOverride", "params": {}}
+        )
+    else:
+        params = {"width": width, "height": 860, "deviceScaleFactor": 2, "mobile": width <= 600}
+        browser.ws.send_json(
+            {"id": msg_id, "method": "Emulation.setDeviceMetricsOverride", "params": params}
+        )
+    time.sleep(0.3)
+
+
+def _press_enter(browser: CDPSession, msg_id: int) -> None:
+    """A real Enter key press, which (unlike a scripted click) makes the focused element focus-visible."""
+    for n, kind in enumerate(("keyDown", "keyUp")):
+        params = {"type": kind, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13}
+        if kind == "keyDown":
+            params["text"] = "\r"
+        browser.ws.send_json(
+            {"id": msg_id + n, "method": "Input.dispatchKeyEvent", "params": params}
+        )
+    time.sleep(0.2)
+
+
+_PANE_OPEN = "document.body.classList.contains('pane-open')"
+_PANE_CLOSED = "!document.body.classList.contains('pane-open')"
+_TAP_FOODIES = (
+    "[...document.querySelectorAll('#chat-list .chat-item')]"
+    ".find(el => el.querySelector('.chat-name')?.textContent.includes('Weekend Coffee & Foodies')).click()"
+)
+_TAP_GROUP = "document.querySelector('#chat-list .chat-item[data-type=\"group\"]').click()"
+
+
+def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> None:
+    """On a phone-sized viewport the chat list and the chat are two levels, with back navigation."""
+    open_group_chat_in_browser(browser, 15.0)
+    _set_viewport(browser, 8811, 412)
+
+    try:
+        # 1. Start from the list (a chat opened on the wide screen leaves the class set)
+        state = _phone_step(
+            browser, "document.getElementById('chat-back-btn').click()", _PANE_CLOSED
+        )
+        assert state["sidebar"] == state["viewport"]
+        assert state["pane"] == 0
+        assert state["paneEntry"] is False
+        browser.capture_screenshot(screenshot_dir / "phone_layout_list.png", 5.0)
+
+        # 2. Opening a chat shows only the chat, with the back button focused and its own history entry
+        state = _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        assert state["pane"] == state["viewport"]
+        assert state["sidebar"] == 0
+        assert state["header"] == 0
+        assert state["chatBack"] > 0
+        assert state["paneEntry"] is True
+        assert state["focus"] != "chat-back-btn"  # after a tap, no focus ring on the back button
+        browser.capture_screenshot(screenshot_dir / "phone_layout_chat.png", 5.0)
+
+        # 3. The browser back gesture returns to the list and consumes the entry
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        assert state["sidebar"] == state["viewport"]
+        assert state["paneEntry"] is False
+
+        # 4. The same chat opens again, and the back button returns to the list too
+        state = _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        assert state["paneEntry"] is True
+        state = _phone_step(
+            browser, "document.getElementById('chat-back-btn').click()", _PANE_CLOSED
+        )
+        assert state["paneEntry"] is False
+
+        # 5. Escape is back as well
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        state = _phone_step(
+            browser,
+            "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))",
+            _PANE_CLOSED,
+        )
+        assert state["paneEntry"] is False
+
+        # 6. Back closes what is open over the chat first: lightbox, then gallery, then the chat
+        _phone_step(browser, _TAP_FOODIES, _PANE_OPEN)
+        _phone_step(
+            browser,
+            "document.getElementById('media-btn').click()",
+            "document.querySelector('#media-gallery.open #media-gallery-grid .gallery-item[data-type=\"image\"]')",
+        )
+        state = _phone_step(
+            browser,
+            "document.querySelector('#media-gallery-grid .gallery-item[data-type=\"image\"] img').click()",
+            "document.getElementById('img-lightbox')",
+        )
+        assert state["lightbox"] is True
+        browser.capture_screenshot(screenshot_dir / "phone_layout_lightbox.png", 5.0)
+        state = _phone_step(browser, "history.back()", "!document.getElementById('img-lightbox')")
+        assert state["gallery"] is True
+        assert state["paneOpen"] is True
+        assert state["paneEntry"] is True
+        state = _phone_step(
+            browser,
+            "history.back()",
+            "!document.getElementById('media-gallery').classList.contains('open')",
+        )
+        assert state["paneOpen"] is True
+        assert state["paneEntry"] is True
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        assert state["paneEntry"] is False
+
+        # 7. The chat info drawer closes on back the same way
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        _phone_step(
+            browser,
+            "document.getElementById('chat-info-btn').click()",
+            "document.getElementById('chat-info-panel').classList.contains('open')",
+        )
+        state = _phone_step(
+            browser,
+            "history.back()",
+            "!document.getElementById('chat-info-panel').classList.contains('open')",
+        )
+        assert state["paneOpen"] is True
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        assert state["paneEntry"] is False
+
+        # 8. A tab of the bottom bar closes the open chat and its entry
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        state = _phone_step(
+            browser, "document.getElementById('tab-btn-starred').click()", _PANE_CLOSED
+        )
+        assert state["tab"] == "starred"
+        assert state["paneEntry"] is False
+        state = _phone_step(
+            browser,
+            "document.getElementById('tab-btn-chats').click()",
+            "document.querySelector('#chat-list .chat-item')",
+        )
+        assert state["tab"] == "chats"
+
+        # 9. A call's details are a second level too, with their own back button above the card
+        fake_calls = {
+            "calls": [
+                {
+                    "id": 990001,
+                    "caller_name": "Phone Layout Test",
+                    "caller_phone": "+10000000000",
+                    "timestamp": 1700000000,
+                    "timestamp_ms": 1700000000000,
+                    "duration": 75,
+                    "call_type": "incoming",
+                    "outcome": "answered",
+                    "from_me": False,
+                    "is_video": False,
+                    "is_group": False,
+                    "data_transferred": 0,
+                    "chat_id": None,
+                }
+            ],
+            "has_more": False,
+        }
+        browser.evaluate(
+            f"""
+            (() => {{
+                window.__wabRealFetch = window.fetch;
+                // The demo archive may have no calls, which disables the tab: enable it for the fake list
+                const callsTab = document.getElementById('tab-btn-calls');
+                window.__wabCallsTabDisabled = callsTab.classList.contains('disabled');
+                callsTab.classList.remove('disabled');
+                window.fetch = (url, opts) => String(url).includes('/api/calls')
+                    ? Promise.resolve(new Response({json.dumps(json.dumps(fake_calls))}, {{ headers: {{ 'Content-Type': 'application/json' }} }}))
+                    : window.__wabRealFetch(url, opts);
+            }})()
+            """,
+            5.0,
+        )
+        _phone_step(
+            browser,
+            "document.getElementById('tab-btn-calls').click()",
+            "document.querySelector('#chat-list .call-item')",
+        )
+        # Opened from the keyboard: focus moves to the back button, and back to the call afterwards
+        browser.evaluate("document.querySelector('#chat-list .call-item').focus()", 5.0)
+        _press_enter(browser, 8820)
+        state = _phone_step(browser, "", _PANE_OPEN)
+        assert state["callBack"] > 0
+        assert state["chatBack"] == 0
+        assert state["paneEntry"] is True
+        assert state["focus"] == "call-back-btn"
+        overlap = browser.evaluate(
+            """
+            (() => {
+                const b = document.getElementById('call-back-btn').getBoundingClientRect();
+                const c = document.querySelector('#pane-call-inspector .call-inspector-card').getBoundingClientRect();
+                return { backTop: b.top, backBottom: b.bottom, cardTop: c.top };
+            })()
+            """,
+            5.0,
+        )
+        assert overlap["backTop"] >= 0
+        assert overlap["cardTop"] >= overlap["backBottom"]
+        browser.capture_screenshot(screenshot_dir / "phone_layout_call.png", 5.0)
+        _press_enter(browser, 8822)
+        state = _phone_step(browser, "", _PANE_CLOSED)
+        assert state["paneEntry"] is False
+        assert (
+            "call-item" in state["focusClass"]
+        )  # back on the list, focus returns to the call that was open
+        _phone_step(
+            browser,
+            "document.getElementById('tab-btn-chats').click()",
+            "document.querySelector('#chat-list .chat-item')",
+        )
+
+        # 10. Rotating to a wide screen keeps the chat and its entry; back on the phone, no second entry
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        _set_viewport(browser, 8813, 1000)
+        state = browser.evaluate(_PHONE_STATE_JS, 5.0)
+        assert state["chatBack"] == 0
+        assert state["sidebar"] > 0
+        assert state["pane"] > 0
+        assert state["paneEntry"] is True
+        _set_viewport(browser, 8814, 412)
+        state = browser.evaluate(_PHONE_STATE_JS, 5.0)
+        assert state["paneOpen"] is True
+        assert state["pane"] == state["viewport"]
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        assert state["paneEntry"] is False
+
+        # 11. A chat opened on a wide screen gets its entry when the screen becomes a phone one
+        _set_viewport(browser, 8815, 1000)
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        assert browser.evaluate(_PHONE_STATE_JS, 5.0)["paneEntry"] is False
+        _set_viewport(browser, 8816, 412)
+        state = browser.evaluate(_PHONE_STATE_JS, 5.0)
+        assert state["paneEntry"] is True
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        assert state["sidebar"] == state["viewport"]
+    finally:
+        browser.evaluate(
+            """
+            (() => {
+                if (window.__wabRealFetch) { window.fetch = window.__wabRealFetch; delete window.__wabRealFetch; }
+                if (window.__wabCallsTabDisabled) document.getElementById('tab-btn-calls').classList.add('disabled');
+                delete window.__wabCallsTabDisabled;
+                if (document.body.classList.contains('pane-open')) document.getElementById('chat-back-btn').click();
+                if (!document.getElementById('tab-btn-chats').classList.contains('active')) {
+                    document.getElementById('tab-btn-chats').click();
+                }
+            })()
+            """,
+            5.0,
+        )
+        _set_viewport(browser, 8812, None)
+
+    # 12. On a wide screen the back buttons stay hidden and both levels are side by side
+    state = browser.evaluate(_PHONE_STATE_JS, 5.0)
+    assert state["chatBack"] == 0
+    assert state["callBack"] == 0
+    assert state["sidebar"] > 0
 
 
 def test_settings_scrollable_on_small_viewport(browser: CDPSession, screenshot_dir: Path) -> None:

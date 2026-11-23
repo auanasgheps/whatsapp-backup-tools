@@ -54,7 +54,7 @@ class TestHtmlTemplate:
         assert len(js) > 300000
 
     def test_app_css_bundle_assembles_cleanly(self):
-        """Guarantee that builder.assemble_app_css() cleanly concatenates all 18 modules."""
+        """Guarantee that builder.assemble_app_css() cleanly concatenates all 19 modules."""
         from wab_viewer.chat_viewer import builder
 
         css = builder.assemble_app_css()
