@@ -43,11 +43,6 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 
 > ⚠️ **These tools are designed to run on a backup copy of your WhatsApp data — never on live device files.** The archiver always makes a copy of your data.
 
-
-<p align="center">
-  <img src="docs/images/group-demo-1.gif" alt="WhatsApp Backup Viewer Demo" width="100%" />
-</p>
-
 ---
 
 ## Table of Contents
@@ -77,23 +72,49 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 ### WhatsApp Backup Archiver
 Organise and preserve your WhatsApp media in a clean, human-readable structure.
 
+#### 🗂️ Organization & Metadata Stamping
 - **Structured & Human-Readable**: Organises media into `Contacts/` and `Groups/` sorted by year and `Sent/Received`, with original WhatsApp message timestamps preserved.
-- **Android Incremental Backup Merging**: Discovers, decrypts, and sequentially merges Android incremental backups (`msgstore-increment*.db.crypt14/15`) with full entity resolution for reactions, polls, pins, locations, and edits.
-- **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
-- **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate/missing media CSV audit reports.
-- **Deleted Message & Chat Preservation**: Seamlessly retains messages and chats deleted from your phone or revoked by senders across backup cycles (`-P`/`--preserve-deleted`), including call logs, interactive polls, shared locations, and progressive edit history.
-- **Cross-Platform Support**: Works with both Android (no root required) and iOS (via device backups), with optional restore mode to reconstruct Android media layouts.
 - **EXIF & Container Metadata Writing**: Optionally writes original WhatsApp message timestamps directly into image EXIF metadata and MP4/M4A video/audio headers so third-party photo managers (Google Photos, Immich, Apple Photos) index media on chronological timelines. Includes a dedicated `update-metadata` command to retroactively backfill existing archives in-place.
 - **Supported Media**: Images, Videos, Audio, Voice notes, Video messages, Animated GIFs, Documents, Stickers, and Contact cards (.vcf).
+
+#### ⚡ Ingestion & Incremental Merging
+- **Android Incremental Backup Merging**: Discovers, decrypts, and sequentially merges Android incremental backups (`msgstore-increment*.db.crypt14/15`) with full entity resolution for reactions, polls, pins, locations, and edits.
+- **Cross-Platform Extraction**: Works with both Android (no root required; USB ADB mode supported) and iOS (via local device backups), with optional restore mode to reconstruct Android media layouts.
+- **Smart Identity Tracking**: Automatically detects contact renames, phone number migrations, and groups with identical names across runs.
+
+#### 🛡️ Safety & Preservation
+- **Deleted Message & Chat Preservation**: Seamlessly retains messages and chats deleted from your phone or revoked by senders across backup cycles (`-P`/`--preserve-deleted`), including call logs, interactive polls, shared locations, and progressive edit history.
+- **Safe & Incremental Runs**: Skips identical files, never overwrites existing media, merges multiple backup roots (`--wa-root`), and exports duplicate, missing, and conflicting media CSV audit reports.
 
 ### WhatsApp Backup Viewer
 Explore and search your archived chats through a local web UI replicating WhatsApp Web.
 
-- **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, customizable font size, and regional date formats.
-- **Rich Chat Timeline**: Chronological chat history with interactive polls, reactions, quoted replies, progressive edit history disclosure, revoked message tombstones, view-once badges, and delivery/read receipts.
+<p align="center">
+  <img src="docs/images/group-demo-1.gif" alt="WhatsApp Backup Viewer Demo" width="100%" />
+</p>
+
+#### 🖥️ WhatsApp Web Experience & Navigation
+- **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, contact avatars, customizable font size, and regional date formats.
+- **Dedicated Navigation Tabs**: Browse **Chats**, **Call History**, **Starred Bookmarks**, and **Archived Chats** from the sidebar, with tab-aware search and instant keyboard shortcuts (`Ctrl+K` / `/`).
+- **Full-Text & Contextual Search**: Search across all chats or within a single conversation, jump directly to matches, or jump to specific dates with the date picker.
+
+#### 💬 Rich Timeline & Interactive Messaging
+- **In-Chat Call Bubbles**: Voice and video calls rendered chronologically in chat timelines with call duration, status, and 1-click jump to context.
 - **Interactive WhatsApp Polls**: Native poll cards with option percentages, checkmarks, and an interactive "View votes" popup detailing voter identities.
-- **In-Browser Media Player & Gallery**: Stream video and voice notes with seeking, open photos in a lightbox, and explore chat media via thumbnail grid or folder tree.
-- **Full-Text Search & Navigation**: Search across all chats or within a single conversation, jump directly to matches, or jump to specific dates with the date picker.
+- **Pinned Messages Banner Strip**: Authentic banner strip beneath the chat header to cycle through pinned messages and jump directly to them with emerald highlights.
+- **Progressive Edit History**: Inspect original text and edit timestamps for modified messages.
+- **Interactive Mentions & Sender Colors**: Group `@mentions` styled as badges opening 1-to-1 chats, with theme-adaptive participant sender colors.
+- **Collapsible Long Messages**: Neatly trimmed long text and media captions with a "Read More" toggle.
+
+#### 🎙️ Media, Voice Waveforms & Video Notes
+- **Voice Message Waveforms**: Authentic sound waveforms with tap/drag scrubbing, adjustable playback speeds (`1x` to `2x`), and duration badges.
+- **Circular Video Notes**: Signature circular push-to-video player with live countdown rings.
+- **In-Browser Gallery & Lightbox**: Stream videos/audio, open photos in a full-screen lightbox with pan/zoom, and explore categorized media (photos, videos, audio, voice notes, documents, stickers).
+
+#### 🛡️ Privacy & Flexible Deployment
+- **100% Local & Offline**: All databases and assets run locally; no external network requests or analytics.
+- **Sub-Path & Reverse Proxy Hosting**: Serve under custom base URLs (e.g. `/whatsapp`) behind Nginx, Traefik, or Caddy via `--base-path`.
+- **External Storage Support**: Whitelisted symlinks and Windows NTFS Directory Junctions to keep heavy media folders on secondary hard drives.
 
 ---
 
@@ -183,23 +204,43 @@ pip install whatsapp-backup-tools
 
 ### Step 2: Get the Files from Your Phone
 
-Follow the step-by-step guide for your device to extract your database and sync your media:
+Choose your platform for a step-by-step extraction walkthrough:
 
-- 🤖 **[Android Setup Guide](docs/archiver/setup-android.md)**:
-  - Turn on End-to-End Encrypted Backup in WhatsApp and note your 64-digit key.
-  - Sync your media folder automatically over USB via ADB (`--from-adb`) or use Syncthing.
-- 🍏 **[iOS / iPhone Setup Guide](docs/archiver/setup-ios.md)**:
-  - Turn off in-app WhatsApp encrypted backup.
-  - Create a local device backup on your computer with Finder (macOS) or Apple Devices / iTunes (Windows).
+| 🤖 Android | 🍏 iOS / iPhone |
+| :--- | :--- |
+| **[Open Android Setup Guide →](docs/archiver/setup-android.md)** | **[Open iOS Setup Guide →](docs/archiver/setup-ios.md)** |
+| • **E2E Encrypted Backup**: **Enabled** (save 64-digit key)<br>• **Media Sync**: Pull automatically over USB (`--from-adb`) or via Syncthing<br>• **Root**: *Not required* | • **In-App E2E Backup**: **Disabled**<br>• **Backup Source**: Local backup via Finder (macOS) or Apple Devices / iTunes (Windows)<br>• **Type**: *Standard unencrypted backup* |
 
 ---
 
 ### Step 3: Archive & View
 
-You can run the archiver using command-line arguments as shown below, or simplify recurring runs by using a configuration file (`config.toml`). See the [Command Reference](docs/archiver/command-reference.md) and [Configuration Guide](docs/archiver/configuration.md) for details.
+The simplest and recommended way to archive your data is using a configuration file (`config.toml`), which avoids entering long terminal paths on every run.
 
-#### 1. Run the Archiver
-Run a preview (`--dry-run`) first to verify your paths and encryption key:
+#### 1. Generate & Fill Your Configuration
+Generate a starter configuration template in your current folder:
+
+```bash
+wab-archiver config generate
+```
+
+Open `example-config.toml`, enter your settings (destination path, backup source, and encryption key or iOS backup path), and save it as `config.toml`. See the [Configuration Guide](docs/archiver/configuration.md) for full descriptions of all options.
+
+#### 2. Run the Archiver
+Run a preview (`--dry-run`) first to verify your configuration and paths:
+
+```bash
+wab-archiver archive --dry-run
+```
+
+Once the dry run completes without errors, remove `--dry-run` to create your archive:
+
+```bash
+wab-archiver archive
+```
+
+<details>
+<summary><b>Prefer running directly via command line without a config file?</b></summary>
 
 **Android example:**
 ```bash
@@ -220,13 +261,19 @@ wab-archiver archive \
   --dry-run
 ```
 
-Once the dry run completes without errors, remove `--dry-run` to create your archive!
+> 💡 On Windows, replace the line continuation `\` with `` ` `` (PowerShell) or `^` (cmd.exe). Remember to enclose paths containing spaces in quotes.
+</details>
 
-> 💡 On Windows, replace the line continuation `\` with `` ` `` (PowerShell) or `^` (cmd.exe).  
-> 💡 **Paths with spaces:** If your folder paths contain spaces, remember to enclose them in quotes (e.g. `"/path/to/my folder"`).  
-> 💡 **Tip:** Avoid repeating long terminal commands by generating a settings file with `wab-archiver config generate`. See [Configuration Files](docs/archiver/configuration.md).
+<details>
+<summary><b>Already have an archive and only want to add EXIF timestamps?</b></summary>
 
-#### 2. Open the Local Chat Viewer
+To retroactively backfill original WhatsApp timestamps into your photos and videos without re-extracting:
+```bash
+wab-archiver update-metadata "/path/to/my-archive"
+```
+</details>
+
+#### 3. Open the Local Chat Viewer
 Point `wab-viewer` to your archive folder:
 
 ```bash
@@ -273,8 +320,9 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 - **Recent Android link previews and media thumbnails may be missing until the next full backup.** To save space and mobile data, WhatsApp's daily incremental backups only save message text and details, leaving out image previews. Once WhatsApp completes its next full base backup on your phone (typically created every 5 to 7 days, or when manually triggering a backup in WhatsApp settings), those missing previews will appear in your archive after running the archiver again. Because this tool runs 100% locally and offline, it never connects to WhatsApp servers to download missing previews.
 ### Viewer
 
-- **Timeline scope**: Call history logs are not rendered in the chat timeline.
-- See [viewer known limitations](docs/viewer/index.md#known-limitations) for full details on profile push names, receipts, and platform variations.
+- **Profile pictures are not displayed**: Local WhatsApp backups do not store contact avatars (requires live WhatsApp connection or unbacked-up sandbox databases).
+- **Unsaved contact push names on Android require root**: Friendly push names for unsaved numbers reside in private application storage (`wa.db`), excluded from backups. Unsaved numbers display their international phone number.
+- See [viewer known limitations](docs/viewer/index.md#known-limitations) for full technical details on receipts and incremental preview caches.
 
 ---
 
@@ -304,7 +352,7 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 Handling personal communication archives requires high standards for data integrity and privacy. This project is built on three core engineering pillars:
 
-- **Strict Verification**: Over **990 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
+- **Strict Verification**: Over **1,000 unit, integration, and UI tests** validate everything from multi-root media deduplication to SQLite transaction safety.
 - **Domain Rigor**: Deep reverse-engineering of proprietary WhatsApp artifacts across both mobile operating systems (cryptographic pipelines, protobuf varints, and auxiliary databases), cross-checked against established open-source implementations to ensure structural accuracy.
 - **Developed with AI**: Modern AI coding tools were leveraged as pair programmers to accelerate implementation and broaden test coverage, strictly guided by human architectural design and verified against automated CI suites.
 
