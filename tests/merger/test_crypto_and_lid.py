@@ -306,3 +306,59 @@ class TestPostRestoreLidMigration:
         assert rcpt_res[0] == pri_jid_id
 
         conn.close()
+
+    def test_migrate_restored_backup_to_lid_consolidates_split_chats(self) -> None:
+        """Verify Step B consolidates messages from shadow LID chat into primary phone chat."""
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cur.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, device INTEGER DEFAULT 0, raw_string TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER PRIMARY KEY, jid_row_id INTEGER NOT NULL);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER NOT NULL, account_jid_row_id INTEGER, hidden INTEGER DEFAULT 0);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_row_id INTEGER NOT NULL, text_data TEXT);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY AUTOINCREMENT, message_row_id INTEGER, chat_row_id INTEGER NOT NULL);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_row_id INTEGER NOT NULL, parent_message_chat_row_id INTEGER NOT NULL);
+        """)
+
+        cur.execute(
+            "INSERT INTO jid VALUES (1, '5550100', 's.whatsapp.net', 0, '5550100@s.whatsapp.net')"
+        )
+        cur.execute("INSERT INTO jid VALUES (2, '9990100', 'lid', 0, '9990100@lid')")
+        cur.execute("INSERT INTO jid_map VALUES (2, 1)")
+
+        cur.execute("INSERT INTO chat (_id, jid_row_id, account_jid_row_id) VALUES (100, 1, NULL)")
+        cur.execute("INSERT INTO chat (_id, jid_row_id, account_jid_row_id) VALUES (200, 2, NULL)")
+
+        cur.execute(
+            "INSERT INTO message (chat_row_id, text_data) VALUES (100, 'Message in phone chat')"
+        )
+        cur.execute(
+            "INSERT INTO message (chat_row_id, text_data) VALUES (200, 'Message in LID shadow chat')"
+        )
+        lid_msg_id = cur.lastrowid
+        cur.execute(
+            "INSERT INTO message_media (message_row_id, chat_row_id) VALUES (?, 200)", (lid_msg_id,)
+        )
+        cur.execute(
+            "INSERT INTO message_quoted (chat_row_id, parent_message_chat_row_id) VALUES (200, 200)"
+        )
+        conn.commit()
+
+        increment_merger.migrate_restored_backup_to_lid(conn, logger)
+        conn.commit()
+
+        assert cur.execute("SELECT hidden FROM chat WHERE _id = 200").fetchone()[0] == 1
+        assert cur.execute("SELECT hidden FROM chat WHERE _id = 100").fetchone()[0] == 0
+        c100 = cur.execute("SELECT account_jid_row_id FROM chat WHERE _id = 100").fetchone()
+        assert c100 is not None
+        assert c100[0] == 2
+
+        msg_chats = [r[0] for r in cur.execute("SELECT chat_row_id FROM message").fetchall()]
+        assert msg_chats == [100, 100]
+        media_chat = cur.execute("SELECT chat_row_id FROM message_media").fetchone()[0]
+        assert media_chat == 100
+        q_chats = cur.execute(
+            "SELECT chat_row_id, parent_message_chat_row_id FROM message_quoted"
+        ).fetchone()
+        assert q_chats == (100, 100)
+        conn.close()

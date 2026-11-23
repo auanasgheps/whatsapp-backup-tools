@@ -12,6 +12,9 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 logger = logging.getLogger(__name__)
 
 from tests.fixtures.protobuf_factory import (
+    build_audio_wmi,
+    build_context_info,
+    build_extended_text_wmi,
     build_field,
     build_history_sync_frame,
     build_image_wmi,
@@ -2057,4 +2060,232 @@ def test_apply_messages_bin_intra_increment_edited_media_fallback(mock_db, tmp_p
     assert edit_info is not None
     assert edit_info[0] == "ABSENT_TARGET_KEY"
     assert edit_info[1] == 1729000700000
+    conn.close()
+
+
+def test_apply_messages_bin_audio_waveform(mock_db, tmp_path):
+    """Verify apply_messages_bin populates audio_data with waveform BLOB."""
+    waveform_bytes = b"\x10\x20\x30\x40\x50\x60"
+    wmi_audio = build_audio_wmi(
+        "5550100@s.whatsapp.net",
+        "AUDIO_REPLAY_1",
+        "audio/ogg; codecs=opus",
+        b"H" * 32,
+        4096,
+        waveform_bytes,
+        1,
+        0,
+        1729000800,
+    )
+    bin_path = str(tmp_path / "audio_waveform.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_audio)) + wmi_audio)
+
+    conn = sqlite3.connect(mock_db)
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, {})
+    conn.commit()
+
+    assert inserted == 1
+    row = conn.execute(
+        "SELECT a.waveform FROM audio_data a JOIN message m ON m._id = a.message_row_id WHERE m.key_id = 'AUDIO_REPLAY_1'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == waveform_bytes
+    conn.close()
+
+
+def test_apply_messages_bin_link_preview_metadata(mock_db, tmp_path):
+    """Verify apply_messages_bin populates message_text and message_thumbnail for link previews."""
+    thumb_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIFsynthetic_thumb"
+    wmi_lp = build_extended_text_wmi(
+        "5550100@s.whatsapp.net",
+        "LP_REPLAY_1",
+        "Check this: https://example.com/item",
+        "https://example.com/item",
+        "Synthetic Item Title",
+        "Synthetic Item Description",
+        thumb_bytes,
+        b"K" * 32,
+        0,
+        1729000810,
+    )
+    bin_path = str(tmp_path / "link_preview.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_lp)) + wmi_lp)
+
+    conn = sqlite3.connect(mock_db)
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, {})
+    conn.commit()
+
+    assert inserted == 1
+    text_row = conn.execute(
+        "SELECT t.page_title, t.description, t.url FROM message_text t JOIN message m ON m._id = t.message_row_id WHERE m.key_id = 'LP_REPLAY_1'"
+    ).fetchone()
+    assert text_row is not None
+    assert text_row[0] == "Synthetic Item Title"
+    assert text_row[1] == "Synthetic Item Description"
+    assert text_row[2] == "https://example.com/item"
+
+    thumb_row = conn.execute(
+        "SELECT th.thumbnail FROM message_thumbnail th JOIN message m ON m._id = th.message_row_id WHERE m.key_id = 'LP_REPLAY_1'"
+    ).fetchone()
+    assert thumb_row is not None
+    assert thumb_row[0] == thumb_bytes
+    conn.close()
+
+
+def test_apply_messages_bin_quoted_location(mock_db, tmp_path):
+    """Verify apply_messages_bin populates message_quoted_location for quoted location messages."""
+    lat_bytes = struct.pack("<d", 37.7749)
+    lng_bytes = struct.pack("<d", -122.4194)
+    loc_payload = (
+        build_field(1, 2, lat_bytes)
+        + build_field(2, 2, lng_bytes)
+        + build_field(3, 2, b"San Francisco HQ")
+        + build_field(4, 2, b"Market Street, CA")
+        + build_field(5, 2, b"https://maps.example.com/sf")
+    )
+    q_loc = build_field(5, 2, loc_payload)
+    ctx_bytes = build_context_info(stanza_id="STZ_ORIG_LOC", quoted_msg_bytes=q_loc)
+
+    key_bytes = (
+        build_field(1, 2, b"5550100@s.whatsapp.net")
+        + build_field(2, 0, 0)
+        + build_field(3, 2, b"REPLY_LOC_KEY")
+    )
+    txt_payload = build_field(1, 2, b"See you at the HQ!") + build_field(17, 2, ctx_bytes)
+    wmi_reply = (
+        build_field(1, 2, key_bytes)
+        + build_field(2, 2, build_field(6, 2, txt_payload))
+        + build_field(3, 0, 1729000820)
+    )
+
+    bin_path = str(tmp_path / "quoted_location.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_reply)) + wmi_reply)
+
+    conn = sqlite3.connect(mock_db)
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, {})
+    conn.commit()
+
+    assert inserted == 1
+    q_row = conn.execute(
+        "SELECT ql.place_name, ql.place_address, ql.latitude, ql.longitude "
+        "FROM message_quoted_location ql "
+        "JOIN message m ON m._id = ql.message_row_id "
+        "WHERE m.key_id = 'REPLY_LOC_KEY'"
+    ).fetchone()
+    assert q_row is not None
+    assert q_row[0] == "San Francisco HQ"
+    assert q_row[1] == "Market Street, CA"
+    assert abs(q_row[2] - 37.7749) < 0.0001
+    assert abs(q_row[3] - (-122.4194)) < 0.0001
+    conn.close()
+
+
+def test_apply_messages_bin_quoted_vcard(mock_db, tmp_path):
+    """Verify apply_messages_bin populates message_quoted_vcard for quoted contact messages."""
+    synthetic_vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:5550155\nEND:VCARD"
+    contact_payload = build_field(1, 2, b"Alice Smith") + build_field(
+        2, 2, synthetic_vcard.encode("utf-8")
+    )
+    q_contact = build_field(4, 2, contact_payload)
+    ctx_bytes = build_context_info(stanza_id="STZ_ORIG_CONTACT", quoted_msg_bytes=q_contact)
+
+    key_bytes = (
+        build_field(1, 2, b"5550100@s.whatsapp.net")
+        + build_field(2, 0, 0)
+        + build_field(3, 2, b"REPLY_VCARD_KEY")
+    )
+    txt_payload = build_field(1, 2, b"Thanks for the contact!") + build_field(17, 2, ctx_bytes)
+    wmi_reply = (
+        build_field(1, 2, key_bytes)
+        + build_field(2, 2, build_field(6, 2, txt_payload))
+        + build_field(3, 0, 1729000830)
+    )
+
+    bin_path = str(tmp_path / "quoted_vcard.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_reply)) + wmi_reply)
+
+    conn = sqlite3.connect(mock_db)
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, {})
+    conn.commit()
+
+    assert inserted == 1
+    qv_row = conn.execute(
+        "SELECT qv.vcard FROM message_quoted_vcard qv "
+        "JOIN message m ON m._id = qv.message_row_id "
+        "WHERE m.key_id = 'REPLY_VCARD_KEY'"
+    ).fetchone()
+    assert qv_row is not None
+    assert qv_row[0] == synthetic_vcard
+    conn.close()
+
+
+def test_apply_messages_bin_message_mentions(mock_db, tmp_path):
+    """Verify apply_messages_bin populates message_mentions table for mentioned JIDs in group chats."""
+    ctx_bytes = build_context_info(
+        stanza_id="STZ_MENTION_MSG",
+        mentioned_jids=["5550100@s.whatsapp.net", "5550199@s.whatsapp.net"],
+    )
+    key_bytes = (
+        build_field(1, 2, b"120363000000000000@g.us")
+        + build_field(2, 0, 0)
+        + build_field(3, 2, b"GRP_MENTION_KEY")
+    )
+    txt_payload = build_field(1, 2, b"Hello @5550100 and @5550199") + build_field(17, 2, ctx_bytes)
+    wmi_mention = (
+        build_field(1, 2, key_bytes)
+        + build_field(2, 2, build_field(6, 2, txt_payload))
+        + build_field(3, 0, 1729000840)
+        + build_field(21, 2, b"5550100@s.whatsapp.net")
+    )
+
+    bin_path = str(tmp_path / "mentions.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_mention)) + wmi_mention)
+
+    conn = sqlite3.connect(mock_db)
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, {})
+    conn.commit()
+
+    assert inserted == 1
+    mention_rows = conn.execute(
+        "SELECT j.raw_string FROM message_mentions mm "
+        "JOIN message m ON m._id = mm.message_row_id "
+        "JOIN jid j ON j._id = mm.jid_row_id "
+        "WHERE m.key_id = 'GRP_MENTION_KEY' "
+        "ORDER BY j.raw_string ASC"
+    ).fetchall()
+    assert len(mention_rows) == 2
+    assert mention_rows[0][0] == "5550100@s.whatsapp.net"
+    assert mention_rows[1][0] == "5550199@s.whatsapp.net"
+    conn.close()
+
+
+def test_apply_messages_bin_intra_batch_duplicate_replacement(mock_db, tmp_path):
+    """Verify apply_messages_bin replaces earlier message when duplicate key arrives in same batch."""
+    wmi_first = build_text_wmi(
+        "5550100@s.whatsapp.net", "DUP_STANZA_KEY_1", "Draft text initial", 0, 1729000850
+    )
+    wmi_second = build_text_wmi(
+        "5550100@s.whatsapp.net", "DUP_STANZA_KEY_1", "Final text updated", 0, 1729000860
+    )
+
+    bin_path = str(tmp_path / "intra_dup.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_first)) + wmi_first)
+        f.write(encode_varint(len(wmi_second)) + wmi_second)
+
+    conn = sqlite3.connect(mock_db)
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, {})
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT text_data, timestamp FROM message WHERE key_id = 'DUP_STANZA_KEY_1'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "Final text updated"
+    assert rows[0][1] == 1729000850000
     conn.close()

@@ -15,10 +15,14 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 logger = logging.getLogger(__name__)
 
 from tests.fixtures.protobuf_factory import (
+    build_audio_wmi,
+    build_contact_wmi,
+    build_document_wmi,
     build_field,
     build_history_sync_frame,
     build_image_wmi,
     build_text_wmi,
+    build_view_once_v2_wmi,
     encode_varint,
 )
 from tests.merger.conftest import (
@@ -1012,3 +1016,106 @@ def test_decode_wmi_edited_poll_tag1_tag2_layout():
     assert dec["edit_info"]["poll_info"]["name"] == "Alternative Poll Question"
     assert dec["edit_info"]["poll_info"]["options"] == ["Choice A", "Choice B"]
     assert dec["edit_info"]["poll_info"]["selectable_options_count"] == 1
+
+
+def test_decode_wmi_view_once_v2_tag59():
+    """Verify decode_wmi extracts view-once v2 (tag 59) container messages."""
+    inner_img = (
+        build_field(1, 2, b"https://example.com/vo.enc")
+        + build_field(2, 2, b"image/jpeg")
+        + build_field(3, 2, b"Secret photo")
+        + build_field(4, 2, b"H" * 32)
+        + build_field(5, 0, 1024)
+    )
+    wmi_bytes = build_view_once_v2_wmi(
+        "5550100@s.whatsapp.net",
+        "VO_V2_KEY_1",
+        build_field(3, 2, inner_img),
+        0,
+        1729000300,
+    )
+    dec = increment_merger.decode_wmi(wmi_bytes)
+    assert dec["is_view_once"] == 1
+    assert dec["message_type"] == 42
+    assert dec["text_data"] == "Secret photo"
+
+
+def test_decode_wmi_contact_vcard_tag4():
+    """Verify decode_wmi extracts contact vCards from tag 4."""
+    synthetic_vcard = (
+        "BEGIN:VCARD\nVERSION:3.0\nFN:Synthetic User\nTEL;TYPE=CELL:5550199\nEND:VCARD"
+    )
+    wmi_bytes = build_contact_wmi(
+        "5550100@s.whatsapp.net",
+        "VCARD_KEY_1",
+        "Synthetic User",
+        synthetic_vcard,
+        0,
+        1729000350,
+    )
+    dec = increment_merger.decode_wmi(wmi_bytes)
+    assert dec["message_type"] == 4
+    assert dec["text_data"] == "Synthetic User"
+    assert dec["vcard"] == synthetic_vcard
+
+
+def test_decode_wmi_document_metadata_tag7():
+    """Verify decode_wmi extracts document titles, page counts, and filenames."""
+    wmi_bytes = build_document_wmi(
+        "5550100@s.whatsapp.net",
+        "DOC_KEY_1",
+        "Synthetic Specification",
+        15,
+        "spec_v1.pdf",
+        "application/pdf",
+        20480,
+        1,
+        1729000400,
+    )
+    dec = increment_merger.decode_wmi(wmi_bytes)
+    assert dec["message_type"] == 9
+    assert dec["media_info"] is not None
+    assert dec["media_info"]["media_name"] == "spec_v1.pdf"
+    assert dec["media_info"]["file_size"] == 20480
+    assert dec["text_data"] == "Synthetic Specification"
+
+
+def test_decode_wmi_audio_waveform():
+    """Verify decode_wmi extracts audio waveform bytes and PTT indicators."""
+    dummy_waveform = b"\x00\x0f\x1e\x2d\x3c\x4b\x5a\x69"
+    wmi_bytes = build_audio_wmi(
+        "5550100@s.whatsapp.net",
+        "AUDIO_KEY_1",
+        "audio/ogg; codecs=opus",
+        b"A" * 32,
+        4096,
+        dummy_waveform,
+        1,
+        0,
+        1729000450,
+    )
+    dec = increment_merger.decode_wmi(wmi_bytes)
+    assert dec["message_type"] == 2
+    assert dec["media_info"] is not None
+    assert dec["media_info"]["media_type"] == "audio"
+    assert dec["media_info"]["ptt"] is True
+    assert dec["media_info"]["waveform"] == dummy_waveform
+
+
+def test_extract_messages_from_proto_frame_corrupt_boundaries():
+    """Verify extract_messages_from_proto_frame gracefully skips corrupt sub-frames."""
+    valid_wmi = build_text_wmi(
+        "5550100@s.whatsapp.net", "CORRUPT_TEST_1", "Valid msg", 0, 1729000500
+    )
+    hsm_valid = build_field(1, 2, valid_wmi)
+    hsm_corrupt = b"\xff\xff\xff"
+    conv_bytes = (
+        build_field(1, 2, b"5550100@s.whatsapp.net")
+        + build_field(2, 2, hsm_valid)
+        + build_field(2, 2, hsm_corrupt)
+    )
+    hs_bytes = build_field(2, 2, conv_bytes)
+
+    msgs = increment_merger.extract_messages_from_proto_frame(hs_bytes)
+    assert len(msgs) == 1
+    assert msgs[0]["key_id"] == "CORRUPT_TEST_1"

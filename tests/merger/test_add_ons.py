@@ -1818,3 +1818,129 @@ def test_step6b_phantom_cleanup_preserves_add_on_parents(mock_db, tmp_path):
     assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 9002").fetchone()[0] == 1
     assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 9003").fetchone()[0] == 1
     conn.close()
+
+
+def test_apply_embedded_reactions_sender_fallback(tmp_path):
+    """Verify apply_embedded_reactions falls back to sender_jid_row_id = -1 on malformed sender JID."""
+    conn = _make_two_pass_test_db(tmp_path / "test_rx_fallback.db")
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data) "
+        "VALUES (10, 1, 0, 'PARENT_RX_KEY', 1, 1729000000000, 0, 'Hello world')"
+    )
+    conn.commit()
+
+    rx_record = increment_merger.ReactionRecord(
+        target_key_id="PARENT_RX_KEY",
+        target_remote_jid="5550100@s.whatsapp.net",
+        target_from_me=0,
+        reaction_key_id="RX_KEY_1",
+        reactor_jid=":::invalid:::jid:::",
+        emoji="👍",
+        sender_ts=1729000010000,
+        is_revocation=False,
+        unread=0,
+    )
+
+    schema_cache = {}
+    jid_cache = {}
+    increment_merger.apply_embedded_reactions(
+        conn, 10, 1, True, [rx_record], schema_cache, logger, jid_cache
+    )
+    conn.commit()
+
+    row = cur.execute(
+        "SELECT sender_jid_row_id, message_add_on_type FROM message_add_on WHERE parent_message_row_id = 10"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == -1
+    conn.close()
+
+
+def test_apply_poll_vote_option_sha256_fallback(tmp_path):
+    """Verify apply_embedded_poll_votes matches option text when hashes are passed or names are hashed."""
+    conn = _make_two_pass_test_db(tmp_path / "test_poll_fallback.db")
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data) "
+        "VALUES (20, 1, 0, 'POLL_MSG_KEY', 1, 1729000000000, 66, 'Poll Question')"
+    )
+    cur.execute(
+        "INSERT INTO message_poll_option (_id, message_row_id, option_name, option_sha256, vote_total) "
+        "VALUES (1, 20, 'Option A', NULL, 0)"
+    )
+    conn.commit()
+
+    h_opt = hashlib.sha256(b"Option A").digest()
+    raw_vote = {
+        "poll_key_id": "POLL_MSG_KEY",
+        "sender_ts": 1729000020000,
+        "participant": "5550100@s.whatsapp.net",
+        "from_me": 0,
+        "selected_option_hashes": [h_opt],
+    }
+    schema_cache = {}
+    jid_cache = {}
+    increment_merger.apply_embedded_poll_votes(
+        conn, 20, [raw_vote], schema_cache, logger, 1, False, jid_cache
+    )
+    conn.commit()
+
+    opt_row = cur.execute("SELECT vote_total FROM message_poll_option WHERE _id = 1").fetchone()
+    assert opt_row is not None
+    assert opt_row[0] == 1
+    conn.close()
+
+
+def test_apply_poll_vote_with_lid_account_jid(tmp_path):
+    """Verify apply_poll_vote resolves creator and voter JID via chat.account_jid_row_id."""
+    conn = _make_two_pass_test_db(tmp_path / "test_poll_lid.db")
+    cur = conn.cursor()
+    cur.execute("ALTER TABLE chat ADD COLUMN account_jid_row_id INTEGER")
+    cur.execute(
+        "INSERT INTO jid (user, server, raw_string) VALUES ('9990100', 'lid', '9990100@lid')"
+    )
+    lid_jid_id = cur.lastrowid
+    cur.execute("UPDATE chat SET account_jid_row_id = ? WHERE _id = 1", (lid_jid_id,))
+
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data) "
+        "VALUES (30, 1, 1, 'POLL_LID_PARENT', 1, 1729000000000, 66, 'Team Lunch')"
+    )
+    cur.execute(
+        "INSERT INTO message_poll_option (_id, message_row_id, option_name, option_sha256, vote_total) "
+        "VALUES (1, 30, 'Pizza', ?, 0)",
+        (hashlib.sha256(b"Pizza").digest(),),
+    )
+    cur.execute(
+        "INSERT INTO message_secret (message_row_id, message_secret) VALUES (30, ?)",
+        (b"S" * 32,),
+    )
+    conn.commit()
+
+    vote_record = {
+        "poll_key_id": "POLL_LID_PARENT",
+        "sender_timestamp_ms": 1729000030000,
+        "enc_payload": b"dummy_enc",
+        "enc_iv": b"dummy_iv",
+    }
+    schema_cache = {}
+    increment_merger.apply_poll_vote(
+        conn,
+        vote_record,
+        None,
+        1,
+        1729000030,
+        {},
+        schema_cache,
+        logger,
+        "VOTE_STANZA_KEY_1",
+        1,
+    )
+    conn.commit()
+
+    row = cur.execute(
+        "SELECT _id FROM message_add_on WHERE key_id = 'VOTE_STANZA_KEY_1'"
+    ).fetchone()
+    assert row is not None
+    conn.close()

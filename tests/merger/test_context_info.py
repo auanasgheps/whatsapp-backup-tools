@@ -251,3 +251,33 @@ class TestContextInfoExtraction:
         res_nested = increment_merger.extract_context_info({17: [(2, outer_ctx)]})
         assert res_nested is not None
         assert "5550300@s.whatsapp.net" in res_nested["quoted_mentioned_jids"]
+
+    def test_context_info_nested_tags_49_60_64_93_111(self) -> None:
+        """Verify extraction of quoted message nested inside container tags 49, 60, 64, 93, 111."""
+        inner_poll = build_field(2, 2, b"Weekend trip destination?")
+        wrapper_49 = build_field(49, 2, inner_poll)
+        sub_1 = build_field(1, 2, wrapper_49)
+        q_msg = build_field(64, 2, sub_1)
+
+        ctx_bytes = build_context_info(stanza_id="STZ_WRAPPER_64", quoted_msg_bytes=q_msg)
+        res = increment_merger.extract_context_info({17: [(2, ctx_bytes)]})
+        assert res is not None
+        assert res["message_type"] == 66
+        assert res["quoted_text"] == "Weekend trip destination?"
+
+    def test_context_info_mentioned_jids_deduplication(self) -> None:
+        """Verify that duplicate mentioned JIDs inside quotes are deduplicated preserving order."""
+        inner_quote_ctx = (
+            build_field(1, 2, b"STZ_INNER_DUP")
+            + build_field(15, 2, b"5550100@s.whatsapp.net")
+            + build_field(15, 2, b"5550200@s.whatsapp.net")
+            + build_field(15, 2, b"5550100@s.whatsapp.net")
+        )
+        quoted_ext_msg = build_field(
+            6, 2, build_field(1, 2, b"Quote text") + build_field(17, 2, inner_quote_ctx)
+        )
+        outer_ctx = build_context_info(stanza_id="STZ_OUTER", quoted_msg_bytes=quoted_ext_msg)
+
+        res = increment_merger.extract_context_info({17: [(2, outer_ctx)]})
+        assert res is not None
+        assert res["quoted_mentioned_jids"] == ["5550100@s.whatsapp.net", "5550200@s.whatsapp.net"]

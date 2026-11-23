@@ -230,3 +230,140 @@ def build_ios_poll_blob(
             poll_inner += build_field(5, 2, v_payload)
 
     return build_field(8, 2, poll_inner)
+
+
+def build_contact_wmi(
+    remote_jid: str,
+    key_id: str,
+    display_name: str,
+    vcard: str,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    """Construct a minimal synthetic contact vCard WMI frame."""
+    key_bytes = (
+        build_field(1, 2, remote_jid.encode("utf-8"))
+        + build_field(2, 0, from_me)
+        + build_field(3, 2, key_id.encode("utf-8"))
+    )
+    contact_bytes = build_field(1, 2, display_name.encode("utf-8")) + build_field(
+        2, 2, vcard.encode("utf-8")
+    )
+    msg_bytes = build_field(4, 2, contact_bytes)
+    return (
+        build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
+    )
+
+
+def build_document_wmi(
+    remote_jid: str,
+    key_id: str,
+    title: str,
+    page_count: int,
+    file_name: str,
+    mimetype: str,
+    file_size: int,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    """Construct a minimal synthetic document WMI frame."""
+    key_bytes = (
+        build_field(1, 2, remote_jid.encode("utf-8"))
+        + build_field(2, 0, from_me)
+        + build_field(3, 2, key_id.encode("utf-8"))
+    )
+    doc_bytes = (
+        build_field(1, 2, b"https://example.com/doc.enc")
+        + build_field(2, 2, mimetype.encode("utf-8"))
+        + build_field(3, 2, title.encode("utf-8"))
+        + build_field(4, 2, b"D" * 32)
+        + build_field(5, 0, file_size)
+        + build_field(8, 2, file_name.encode("utf-8"))
+    )
+    msg_bytes = build_field(7, 2, doc_bytes)
+    return (
+        build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
+    )
+
+
+def build_audio_wmi(
+    remote_jid: str,
+    key_id: str,
+    mimetype: str,
+    file_sha256: bytes,
+    file_length: int,
+    waveform: bytes,
+    is_ptt: int,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    """Construct a minimal synthetic audio/PTT WMI frame."""
+    key_bytes = (
+        build_field(1, 2, remote_jid.encode("utf-8"))
+        + build_field(2, 0, from_me)
+        + build_field(3, 2, key_id.encode("utf-8"))
+    )
+    aud_bytes = (
+        build_field(1, 2, b"https://example.com/audio.enc")
+        + build_field(2, 2, mimetype.encode("utf-8"))
+        + build_field(3, 2, file_sha256)
+        + build_field(4, 0, file_length)
+        + build_field(6, 0, is_ptt)
+        + build_field(19, 2, waveform)
+    )
+    msg_bytes = build_field(8, 2, aud_bytes)
+    return (
+        build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
+    )
+
+
+def build_extended_text_wmi(
+    remote_jid: str,
+    key_id: str,
+    text: str,
+    matched_text: str,
+    title: str,
+    description: str,
+    jpeg_thumbnail: bytes,
+    media_key: bytes,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    """Construct a synthetic extended text link preview WMI frame."""
+    key_bytes = (
+        build_field(1, 2, remote_jid.encode("utf-8"))
+        + build_field(2, 0, from_me)
+        + build_field(3, 2, key_id.encode("utf-8"))
+    )
+    ext_bytes = (
+        build_field(1, 2, text.encode("utf-8"))
+        + build_field(2, 2, matched_text.encode("utf-8"))
+        + build_field(5, 2, description.encode("utf-8"))
+        + build_field(6, 2, title.encode("utf-8"))
+        + build_field(16, 2, jpeg_thumbnail)
+        + build_field(22, 2, media_key)
+    )
+    msg_bytes = build_field(6, 2, ext_bytes)
+    return (
+        build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
+    )
+
+
+def build_view_once_v2_wmi(
+    remote_jid: str,
+    key_id: str,
+    inner_msg_bytes: bytes,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    """Construct a view-once v2 (tag 59) WMI frame."""
+    key_bytes = (
+        build_field(1, 2, remote_jid.encode("utf-8"))
+        + build_field(2, 0, from_me)
+        + build_field(3, 2, key_id.encode("utf-8"))
+    )
+    vo_container = build_field(1, 2, inner_msg_bytes)
+    msg_bytes = build_field(59, 2, vo_container)
+    return (
+        build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
+    )

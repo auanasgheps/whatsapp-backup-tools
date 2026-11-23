@@ -67,6 +67,62 @@ def mock_db(tmp_path):
             key TEXT UNIQUE NOT NULL,
             value TEXT
         );
+        CREATE TABLE audio_data (
+            message_row_id INTEGER PRIMARY KEY,
+            waveform BLOB
+        );
+        CREATE TABLE message_text (
+            message_row_id INTEGER PRIMARY KEY,
+            description TEXT,
+            page_title TEXT,
+            url TEXT,
+            preview_type INTEGER
+        );
+        CREATE TABLE message_thumbnail (
+            message_row_id INTEGER PRIMARY KEY,
+            thumbnail BLOB
+        );
+        CREATE TABLE message_quoted (
+            message_row_id INTEGER PRIMARY KEY,
+            chat_row_id INTEGER NOT NULL,
+            parent_message_chat_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            key_id TEXT NOT NULL,
+            sender_jid_row_id INTEGER,
+            timestamp INTEGER,
+            message_type INTEGER,
+            text_data TEXT
+        );
+        CREATE TABLE message_quoted_location (
+            message_row_id INTEGER PRIMARY KEY,
+            latitude REAL,
+            longitude REAL,
+            place_name TEXT,
+            place_address TEXT
+        );
+        CREATE TABLE message_quoted_vcard (
+            message_row_id INTEGER PRIMARY KEY,
+            vcard TEXT
+        );
+        CREATE TABLE message_mentions (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            jid_row_id INTEGER NOT NULL
+        );
+        CREATE TABLE message_location (
+            message_row_id INTEGER PRIMARY KEY,
+            chat_row_id INTEGER,
+            latitude REAL,
+            longitude REAL,
+            place_name TEXT,
+            place_address TEXT,
+            url TEXT,
+            live_location_share_duration INTEGER
+        );
+        CREATE TABLE message_vcard (
+            message_row_id INTEGER PRIMARY KEY,
+            vcard TEXT
+        );
 
         INSERT INTO jid (user, server, raw_string) VALUES ('5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
         INSERT INTO chat (jid_row_id, subject) VALUES (1, NULL);

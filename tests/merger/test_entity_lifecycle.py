@@ -1491,3 +1491,119 @@ def test_apply_message_deletions_resolves_order_id_from_proto_frame(mock_db, tmp
     assert deleted == 1
     assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 5000").fetchone()[0] == 0
     conn.close()
+
+
+def test_verify_message_deletion_candidates_protects_recent_addons(mock_db, tmp_path):
+    """Verify apply_message_deletions protects messages with active poll/edit updates in current increment."""
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (6000, 1, 0, 'ACTIVE_POLL_KEY', 1729000100000, 66, 'Poll Active')"
+    )
+    conn.commit()
+
+    poll_inner = build_field(1, 2, b"Poll Active") + build_field(2, 2, build_field(1, 2, b"Opt A"))
+    wmi_key = (
+        build_field(1, 2, b"5550100@s.whatsapp.net")
+        + build_field(2, 0, 0)
+        + build_field(3, 2, b"ACTIVE_POLL_KEY")
+    )
+    wmi_poll = (
+        build_field(1, 2, wmi_key)
+        + build_field(2, 2, build_field(49, 2, poll_inner))
+        + build_field(3, 0, 1729000100)
+    )
+    hsm = build_field(1, 2, wmi_poll) + build_field(2, 0, 77777)
+    conv = build_field(1, 2, b"5550100@s.whatsapp.net") + build_field(2, 2, hsm)
+    hs = build_field(2, 2, conv)
+    frame = encode_varint(len(hs)) + hs
+
+    bin_path = str(tmp_path / "messages_active_poll.bin")
+    with open(bin_path, "wb") as f:
+        f.write(frame)
+
+    del_json = tmp_path / "deletedMessages_active.json"
+    del_json.write_text(json.dumps({"deleted_ids": [77777]}), encoding="utf-8")
+
+    schema_cache = {}
+    deleted = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, schema_cache, 1729000200000, 100000, 0, bin_path, None
+    )
+    conn.commit()
+
+    assert deleted == 0
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 6000").fetchone()[0] == 1
+    conn.close()
+
+
+def test_verify_message_deletion_audit_logging(mock_db):
+    """Verify verify_message_deletion_candidates records rejection audit details."""
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (7001, 1, 0, 'FUTURE_KEY', 1729050000000, 0, 'Future message')"
+    )
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (7002, 1, 0, '', 1729000000000, 0, 'Empty key')"
+    )
+    conn.commit()
+
+    schema_cache = {}
+    verified_ids, audit_records = increment_merger.verify_message_deletion_candidates(
+        conn,
+        [999999, 7001, 7002],
+        1729000000000,
+        10000,
+        logger,
+        schema_cache,
+        None,
+    )
+
+    assert len(verified_ids) == 0
+    reasons = {rec.msg_id: rec.rejection_reason for rec in audit_records}
+    assert reasons[999999] == "ROW_NOT_FOUND"
+    assert reasons[7001] == "TIME_PARADOX"
+    assert reasons[7002] == "INVALID_KEY"
+    conn.close()
+
+
+def test_apply_message_deletions_preservation_engine_snapshot(mock_db, tmp_path):
+    """Verify apply_message_deletions preserves messages before executing cascade deletions."""
+    from wab_archiver.preservation import get_preserved_db_path
+
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+        "VALUES (8000, 1, 0, 'PRESERVE_DEL_KEY', 1729000000000, 0, 'To be preserved and deleted')"
+    )
+    conn.commit()
+
+    del_json = tmp_path / "deletedMessages_pres.json"
+    del_json.write_text(json.dumps({"deleted_ids": [8000]}), encoding="utf-8")
+
+    out_root = str(tmp_path / "output_preservation")
+    os.makedirs(out_root, exist_ok=True)
+
+    schema_cache = {}
+    deleted = increment_merger.apply_message_deletions(
+        conn, str(del_json), logger, schema_cache, 1729000100000, 10000, 0, None, out_root
+    )
+    conn.commit()
+
+    assert deleted == 1
+    assert cur.execute("SELECT COUNT(*) FROM message WHERE _id = 8000").fetchone()[0] == 0
+
+    pres_db_path = get_preserved_db_path(out_root)
+    assert os.path.isfile(pres_db_path)
+    p_conn = sqlite3.connect(pres_db_path)
+    p_row = p_conn.execute(
+        "SELECT stanza_id, text_body FROM preserved_messages WHERE stanza_id = 'PRESERVE_DEL_KEY'"
+    ).fetchone()
+    assert p_row is not None
+    assert p_row[1] == "To be preserved and deleted"
+    p_conn.close()
+    conn.close()

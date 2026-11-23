@@ -951,3 +951,37 @@ def test_merge_increments_atomic_staging_rollback(mock_db, tmp_path):
     with open(output_db, "rb") as f:
         final_bytes = f.read()
     assert final_bytes == initial_bytes
+
+
+def test_merge_increments_legacy_jid_schema_detection(tmp_path):
+    """Verify merge_increments handles legacy JID tables lacking raw_string column."""
+    db_path = tmp_path / "legacy_msgstore.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT NOT NULL, server TEXT NOT NULL);
+        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER NOT NULL);
+        CREATE TABLE message (_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL, key_id TEXT NOT NULL, sender_jid_row_id INTEGER, timestamp INTEGER NOT NULL, message_type INTEGER NOT NULL, text_data TEXT);
+        CREATE TABLE props (key TEXT UNIQUE NOT NULL, value TEXT);
+        INSERT INTO jid (user, server) VALUES ('5550100', 's.whatsapp.net');
+        INSERT INTO chat (jid_row_id) VALUES (1);
+    """)
+    conn.commit()
+    conn.close()
+
+    output_db = str(tmp_path / "legacy_output.db")
+    staging_dir = str(tmp_path / "staging_legacy")
+    shutil.copy2(str(db_path), output_db)
+
+    increment_merger.merge_increments(
+        str(db_path),
+        [],
+        None,
+        output_db,
+        staging_dir,
+        logger,
+        None,
+    )
+    assert os.path.exists(output_db)
+    chk_conn = sqlite3.connect(output_db)
+    assert chk_conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    chk_conn.close()
