@@ -1607,3 +1607,155 @@ def test_apply_message_deletions_preservation_engine_snapshot(mock_db, tmp_path)
     assert p_row[1] == "To be preserved and deleted"
     p_conn.close()
     conn.close()
+
+
+def test_apply_entity_modifications_rows_wrapper_format(mock_db, tmp_path):
+    """Verify apply_entity_modifications parses data wrapping records in a 'rows' key."""
+    conn = sqlite3.connect(mock_db)
+    mod_json = tmp_path / "props_rows.json"
+    mod_json.write_text(
+        json.dumps({"rows": [{"key": "wrapped_prop", "value": "wrapped_value"}]}),
+        encoding="utf-8",
+    )
+
+    count = increment_merger.apply_entity_modifications(conn, "props", str(mod_json), logger, None)
+    conn.commit()
+
+    assert count == 1
+    val = conn.execute("SELECT value FROM props WHERE key = 'wrapped_prop'").fetchone()[0]
+    assert val == "wrapped_value"
+    conn.close()
+
+
+def test_apply_entity_modifications_single_dict_format(mock_db, tmp_path):
+    """Verify apply_entity_modifications parses a bare single dict."""
+    conn = sqlite3.connect(mock_db)
+    mod_json = tmp_path / "props_single.json"
+    mod_json.write_text(
+        json.dumps({"key": "bare_dict_key", "value": "bare_val"}),
+        encoding="utf-8",
+    )
+
+    count = increment_merger.apply_entity_modifications(conn, "props", str(mod_json), logger, None)
+    conn.commit()
+
+    assert count == 1
+    val = conn.execute("SELECT value FROM props WHERE key = 'bare_dict_key'").fetchone()[0]
+    assert val == "bare_val"
+    conn.close()
+
+
+def test_apply_entity_modifications_unknown_table_returns_zero(mock_db, tmp_path):
+    """Verify apply_entity_modifications gracefully returns 0 for non-existent target tables."""
+    conn = sqlite3.connect(mock_db)
+    mod_json = tmp_path / "ghost_table.json"
+    mod_json.write_text(json.dumps([{"col": "val"}]), encoding="utf-8")
+
+    count = increment_merger.apply_entity_modifications(
+        conn, "ghost_table", str(mod_json), logger, None
+    )
+    assert count == 0
+    conn.close()
+
+
+def test_apply_entity_modifications_jid_map_remapping(mock_db, tmp_path):
+    """Verify apply_entity_modifications remaps lid_row_id and jid_row_id via jid_id_map."""
+    conn = sqlite3.connect(mock_db)
+    mod_json = tmp_path / "jid_map_mod.json"
+    mod_json.write_text(
+        json.dumps([{"jid_row_id": 10, "lid_row_id": 20}]),
+        encoding="utf-8",
+    )
+
+    jid_id_map = {10: 100, 20: 200}
+    count = increment_merger.apply_entity_modifications(
+        conn, "jid_map", str(mod_json), logger, jid_id_map
+    )
+    conn.commit()
+
+    assert count == 1
+    row = conn.execute(
+        "SELECT jid_row_id, lid_row_id FROM jid_map WHERE jid_row_id = 100"
+    ).fetchone()
+    assert row is not None
+    assert row[1] == 200
+    conn.close()
+
+
+def test_apply_entity_modifications_lid_display_name_remapping(mock_db, tmp_path):
+    """Verify apply_entity_modifications remaps lid_row_id for lid_display_name."""
+    conn = sqlite3.connect(mock_db)
+    mod_json = tmp_path / "lid_name_mod.json"
+    mod_json.write_text(
+        json.dumps([{"lid_row_id": 50, "display_name": "Synthetic Contact"}]),
+        encoding="utf-8",
+    )
+
+    jid_id_map = {50: 500}
+    count = increment_merger.apply_entity_modifications(
+        conn, "lid_display_name", str(mod_json), logger, jid_id_map
+    )
+    conn.commit()
+
+    assert count == 1
+    row = conn.execute(
+        "SELECT display_name FROM lid_display_name WHERE lid_row_id = 500"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "Synthetic Contact"
+    conn.close()
+
+
+def test_apply_entity_modifications_group_participant_user_upsert(mock_db, tmp_path):
+    """Verify apply_entity_modifications inserts new participant and updates existing with mapped IDs."""
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    # Pre-insert participant
+    cur.execute(
+        "INSERT INTO group_participant_user (_id, group_jid_row_id, user_jid_row_id, admin) VALUES (1, 100, 200, 0)"
+    )
+    conn.commit()
+
+    # Incoming: modify existing (10 -> 100, 20 -> 200 to admin 1) and insert new (10 -> 100, 30 -> 300)
+    mod_json = tmp_path / "group_part_mod.json"
+    mod_json.write_text(
+        json.dumps(
+            [
+                {"group_jid_row_id": 10, "user_jid_row_id": 20, "admin": 1},
+                {"group_jid_row_id": 10, "user_jid_row_id": 30, "admin": 0},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    jid_id_map = {10: 100, 20: 200, 30: 300}
+    count = increment_merger.apply_entity_modifications(
+        conn, "group_participant_user", str(mod_json), logger, jid_id_map
+    )
+    conn.commit()
+
+    assert count == 2
+    admin_status = conn.execute(
+        "SELECT admin FROM group_participant_user WHERE group_jid_row_id = 100 AND user_jid_row_id = 200"
+    ).fetchone()[0]
+    assert admin_status == 1
+
+    new_part = conn.execute(
+        "SELECT admin FROM group_participant_user WHERE group_jid_row_id = 100 AND user_jid_row_id = 300"
+    ).fetchone()
+    assert new_part is not None
+    assert new_part[0] == 0
+    conn.close()
+
+
+def test_apply_entity_deletions_missing_table_returns_zero(mock_db, tmp_path):
+    """Verify apply_entity_deletions returns 0 if table does not exist or has no rows."""
+    conn = sqlite3.connect(mock_db)
+    del_json = tmp_path / "ghost_del.json"
+    del_json.write_text(json.dumps({"deleted_ids": [1, 2]}), encoding="utf-8")
+
+    count = increment_merger.apply_entity_deletions(
+        conn, "non_existent_table", str(del_json), logger, {}
+    )
+    assert count == 0
+    conn.close()

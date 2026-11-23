@@ -985,3 +985,118 @@ def test_merge_increments_legacy_jid_schema_detection(tmp_path):
     chk_conn = sqlite3.connect(output_db)
     assert chk_conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     chk_conn.close()
+
+
+def test_resolve_or_create_chat_lid_links_account_jid(tmp_path):
+    """Verify resolve_or_create_chat links account_jid_row_id when finding phone chat via lid_display_name."""
+    db_path = tmp_path / "chat_resolve.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT NOT NULL, server TEXT NOT NULL, raw_string TEXT);
+        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER NOT NULL, account_jid_row_id INTEGER, hidden INTEGER DEFAULT 0);
+        CREATE TABLE lid_display_name (lid_row_id INTEGER PRIMARY KEY, display_name TEXT);
+
+        -- Existing phone JID (1) and chat (10)
+        INSERT INTO jid (user, server, raw_string) VALUES ('15550123', 's.whatsapp.net', '15550123@s.whatsapp.net');
+        INSERT INTO chat (_id, jid_row_id, account_jid_row_id) VALUES (10, 1, NULL);
+
+        -- Incoming LID JID (2)
+        INSERT INTO jid (user, server, raw_string) VALUES ('9990123', 'lid', '9990123@lid');
+        -- Display name mapping LID to phone digits
+        INSERT INTO lid_display_name (lid_row_id, display_name) VALUES (2, '+1 555-0123');
+    """)
+    conn.commit()
+
+    chat_id = increment_merger.resolve_or_create_chat(conn, 2, logger, {})
+    conn.commit()
+
+    assert chat_id == 10
+    updated_account = conn.execute("SELECT account_jid_row_id FROM chat WHERE _id = 10").fetchone()[
+        0
+    ]
+    assert updated_account == 2
+    conn.close()
+
+
+def test_resolve_or_create_chat_phone_via_jid_map(tmp_path):
+    """Verify resolve_or_create_chat resolves phone JID to chat via jid_map account_jid_row_id."""
+    db_path = tmp_path / "chat_resolve_map.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT NOT NULL, server TEXT NOT NULL, raw_string TEXT);
+        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER NOT NULL, account_jid_row_id INTEGER, hidden INTEGER DEFAULT 0);
+        CREATE TABLE jid_map (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER NOT NULL, lid_row_id INTEGER NOT NULL);
+
+        INSERT INTO jid (user, server, raw_string) VALUES ('5550999', 's.whatsapp.net', '5550999@s.whatsapp.net');
+        INSERT INTO jid (user, server, raw_string) VALUES ('9990999', 'lid', '9990999@lid');
+
+        -- Chat keyed to LID JID (2)
+        INSERT INTO chat (_id, jid_row_id, account_jid_row_id) VALUES (25, 2, NULL);
+        -- jid_map links phone (1) to LID (2)
+        INSERT INTO jid_map (jid_row_id, lid_row_id) VALUES (1, 2);
+    """)
+    conn.commit()
+
+    chat_id = increment_merger.resolve_or_create_chat(conn, 1, logger, {})
+    conn.commit()
+
+    assert chat_id == 25
+    conn.close()
+
+
+def test_merge_increments_invalidates_viewer_cache(tmp_path):
+    """Verify merge_increments purges recent_messages and reactions_cache in viewer database."""
+    base_db = tmp_path / "msgstore.db"
+    conn = sqlite3.connect(str(base_db))
+    conn.executescript("""
+        CREATE TABLE jid (_id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT NOT NULL, server TEXT NOT NULL, raw_string TEXT);
+        CREATE TABLE chat (_id INTEGER PRIMARY KEY AUTOINCREMENT, jid_row_id INTEGER NOT NULL);
+        CREATE TABLE message (_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL, key_id TEXT NOT NULL, sender_jid_row_id INTEGER, timestamp INTEGER NOT NULL, message_type INTEGER NOT NULL, text_data TEXT);
+        CREATE TABLE props (key TEXT UNIQUE NOT NULL, value TEXT);
+        INSERT INTO jid (user, server, raw_string) VALUES ('5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
+        INSERT INTO chat (jid_row_id) VALUES (1);
+    """)
+    conn.commit()
+    conn.close()
+
+    out_dir = tmp_path / "output_viewer"
+    out_dir.mkdir()
+    out_db = str(out_dir / "msgstore.db")
+
+    # Create companion archive.db with cache tables in the output directory
+    archive_db = out_dir / "archive.db"
+    a_conn = sqlite3.connect(str(archive_db))
+    a_conn.executescript("""
+        CREATE TABLE recent_messages (message_id INTEGER PRIMARY KEY, preview TEXT);
+        CREATE TABLE reactions_cache (reaction_id INTEGER PRIMARY KEY, emoji TEXT);
+        INSERT INTO recent_messages VALUES (1, 'Old cached preview');
+        INSERT INTO reactions_cache VALUES (1, '👍');
+    """)
+    a_conn.commit()
+    a_conn.close()
+
+    # Create valid synthetic increment 1 ZIP
+    inc1 = tmp_path / "msgstore-increment-1.db.crypt15"
+    with zipfile.ZipFile(str(inc1), "w") as z:
+        z.writestr("header.json", json.dumps({"creation_date": 1729000100000}))
+
+    staging_dir = str(tmp_path / "staging_cache")
+
+    increment_merger.merge_increments(
+        str(base_db),
+        [str(inc1)],
+        None,
+        out_db,
+        staging_dir,
+        logger,
+        None,
+    )
+
+    # Check that archive.db cache tables were emptied
+    chk_a_conn = sqlite3.connect(str(archive_db))
+    r_count = chk_a_conn.execute("SELECT COUNT(*) FROM recent_messages").fetchone()[0]
+    react_count = chk_a_conn.execute("SELECT COUNT(*) FROM reactions_cache").fetchone()[0]
+    chk_a_conn.close()
+
+    assert r_count == 0
+    assert react_count == 0

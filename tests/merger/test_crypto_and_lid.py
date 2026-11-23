@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -362,3 +363,118 @@ class TestPostRestoreLidMigration:
         ).fetchone()
         assert q_chats == (100, 100)
         conn.close()
+
+
+class TestArchiveDecryptionAndUnpack:
+    """Tests for decrypt_increment_archive and unpack_increment_archive."""
+
+    def test_decrypt_increment_archive_success(self, tmp_path) -> None:
+        enc_file = tmp_path / "msgstore-increment-1.crypt15"
+        enc_file.write_bytes(b"SYNTHETIC_ENCRYPTED_HEADER_AND_PAYLOAD")
+
+        dest_zip = tmp_path / "out.zip"
+
+        mock_db_obj = MagicMock()
+        mock_db_obj.decrypt.return_value = b"PK\x03\x04\x00\x00synthetic_zip_content"
+
+        mock_db_factory = MagicMock()
+        mock_db_factory.from_file.return_value = mock_db_obj
+
+        mock_key = MagicMock()
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "wa_crypt_tools": MagicMock(),
+                "wa_crypt_tools.lib": MagicMock(),
+                "wa_crypt_tools.lib.db": MagicMock(),
+                "wa_crypt_tools.lib.db.dbfactory": MagicMock(DatabaseFactory=mock_db_factory),
+            },
+        ):
+            res_path = increment_merger.decrypt_increment_archive(
+                str(enc_file), mock_key, str(dest_zip), logger
+            )
+
+        assert res_path == str(dest_zip)
+        assert os.path.isfile(dest_zip)
+        assert Path(dest_zip).read_bytes().startswith(b"PK\x03\x04")
+
+    def test_decrypt_increment_archive_corrupt_header_raises(self, tmp_path) -> None:
+        enc_file = tmp_path / "corrupt.crypt15"
+        enc_file.write_bytes(b"BAD_HEADER")
+        dest_zip = tmp_path / "out.zip"
+
+        mock_db_factory = MagicMock()
+        mock_db_factory.from_file.return_value = None
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "wa_crypt_tools": MagicMock(),
+                "wa_crypt_tools.lib": MagicMock(),
+                "wa_crypt_tools.lib.db": MagicMock(),
+                "wa_crypt_tools.lib.db.dbfactory": MagicMock(DatabaseFactory=mock_db_factory),
+            },
+        ):
+            with pytest.raises(ValueError, match="Failed to parse encrypted database header"):
+                increment_merger.decrypt_increment_archive(
+                    str(enc_file), MagicMock(), str(dest_zip), logger
+                )
+
+    def test_decrypt_increment_archive_bad_zip_magic_raises(self, tmp_path) -> None:
+        enc_file = tmp_path / "bad_magic.crypt15"
+        enc_file.write_bytes(b"PAYLOAD")
+        dest_zip = tmp_path / "out.zip"
+
+        mock_db_obj = MagicMock()
+        mock_db_obj.decrypt.return_value = b"NOT_A_ZIP_MAGIC"
+
+        mock_db_factory = MagicMock()
+        mock_db_factory.from_file.return_value = mock_db_obj
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "wa_crypt_tools": MagicMock(),
+                "wa_crypt_tools.lib": MagicMock(),
+                "wa_crypt_tools.lib.db": MagicMock(),
+                "wa_crypt_tools.lib.db.dbfactory": MagicMock(DatabaseFactory=mock_db_factory),
+            },
+        ):
+            with pytest.raises(ValueError, match="is not a valid ZIP archive"):
+                increment_merger.decrypt_increment_archive(
+                    str(enc_file), MagicMock(), str(dest_zip), logger
+                )
+
+    def test_unpack_increment_archive_unencrypted_zip(self, tmp_path) -> None:
+        zip_file = tmp_path / "unencrypted.zip"
+        dest_dir = tmp_path / "unpacked"
+
+        with zipfile.ZipFile(str(zip_file), "w") as z:
+            z.writestr("messages.bin", b"SYNTHETIC_MESSAGES_BIN")
+
+        out = increment_merger.unpack_increment_archive(str(zip_file), None, str(dest_dir), logger)
+        assert out == str(dest_dir)
+        assert (dest_dir / "messages.bin").read_bytes() == b"SYNTHETIC_MESSAGES_BIN"
+
+    def test_unpack_increment_archive_encrypted_flow(self, tmp_path) -> None:
+        enc_file = tmp_path / "encrypted.crypt15"
+        enc_file.write_bytes(b"ENCRYPTED_BYTES")
+        dest_dir = tmp_path / "unpacked_enc"
+
+        def fake_decrypt(encrypted_path, e2e_key, dest_zip_path, _log):
+            with zipfile.ZipFile(dest_zip_path, "w") as z:
+                z.writestr("test_file.txt", b"Extracted content")
+            return dest_zip_path
+
+        with patch(
+            "wab_archiver.increment_merger.decrypt_increment_archive", side_effect=fake_decrypt
+        ):
+            out = increment_merger.unpack_increment_archive(
+                str(enc_file), "FAKE_KEY", str(dest_dir), logger
+            )
+
+        assert out == str(dest_dir)
+        assert (dest_dir / "test_file.txt").read_bytes() == b"Extracted content"
+        # Temp zip file must be cleaned up
+        assert not (dest_dir / "_temp_increment.zip").exists()

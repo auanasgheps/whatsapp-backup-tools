@@ -4536,10 +4536,15 @@ def resolve_or_create_chat(
 
         # 3. If phone JID, check if chat exists mapped via jid_map to account_jid_row_id or shadow chat
         if chat_id is None and jid_server == "s.whatsapp.net" and has_jid_map:
+            jm_condition = (
+                "(c.account_jid_row_id = jm.lid_row_id OR c.jid_row_id = jm.lid_row_id)"
+                if has_account_jid
+                else "c.jid_row_id = jm.lid_row_id"
+            )
             cur.execute(
                 f"""
                 SELECT c._id FROM chat c
-                JOIN jid_map jm ON (c.account_jid_row_id = jm.lid_row_id OR c.jid_row_id = jm.lid_row_id)
+                JOIN jid_map jm ON {jm_condition}
                 WHERE jm.jid_row_id = ?
                 {c_order}
                 LIMIT 1
@@ -6110,8 +6115,9 @@ def apply_messages_bin(
             q_ts = key_ts_cache.get(q_stanza_id, 0)
             q_fm = 0
             q_s_id = 0
+            target_mid = None
             cur.execute(
-                "SELECT timestamp, from_me, sender_jid_row_id FROM message WHERE key_id = ?",
+                "SELECT timestamp, from_me, sender_jid_row_id, _id FROM message WHERE key_id = ?",
                 (q_stanza_id,),
             )
             t_row = cur.fetchone()
@@ -6119,7 +6125,7 @@ def apply_messages_bin(
             if not (t_row and t_row[0]) and has_edit_tbl:
                 cur.execute(
                     """
-                    SELECT m.timestamp, m.from_me, m.sender_jid_row_id
+                    SELECT m.timestamp, m.from_me, m.sender_jid_row_id, m._id
                     FROM message m
                     JOIN message_edit_info mei ON mei.message_row_id = m._id
                     WHERE mei.original_key_id = ?
@@ -6133,6 +6139,8 @@ def apply_messages_bin(
                 key_ts_cache[q_stanza_id] = q_ts
                 q_fm = int(t_row[1] or 0)
                 q_s_id = 0 if q_fm == 1 else (int(t_row[2]) if t_row[2] is not None else 0)
+                if len(t_row) > 3 and t_row[3] is not None:
+                    target_mid = int(t_row[3])
             if q_ts:
                 cur.execute(
                     "UPDATE message_quoted SET timestamp = ?, from_me = ?, sender_jid_row_id = ? WHERE message_row_id = ?",

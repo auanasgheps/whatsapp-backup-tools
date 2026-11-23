@@ -6,6 +6,8 @@ and iOS CoreData ZRECEIPTINFO blobs without depending on any external protobuf c
 
 from __future__ import annotations
 
+import struct
+
 
 def encode_varint(value: int) -> bytes:
     """Encode a non-negative integer as a protobuf varint."""
@@ -367,3 +369,99 @@ def build_view_once_v2_wmi(
     return (
         build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
     )
+
+
+def build_live_location_wmi(
+    remote_jid: str,
+    key_id: str,
+    latitude: float,
+    longitude: float,
+    caption: str,
+    duration: int,
+    sequence_number: int,
+    jpeg_thumbnail: bytes,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    """Construct a synthetic live location WMI frame (tag 18)."""
+    lat_bytes = struct.pack("<d", latitude)
+    lng_bytes = struct.pack("<d", longitude)
+    ll_bytes = (
+        build_field(1, 1, lat_bytes)
+        + build_field(2, 1, lng_bytes)
+        + build_field(6, 2, caption.encode("utf-8"))
+        + build_field(7, 0, sequence_number)
+        + build_field(8, 0, duration)
+        + build_field(16, 2, jpeg_thumbnail)
+    )
+    msg_bytes = build_field(18, 2, ll_bytes)
+    key_bytes = (
+        build_field(1, 2, remote_jid.encode("utf-8"))
+        + build_field(2, 0, from_me)
+        + build_field(3, 2, key_id.encode("utf-8"))
+    )
+    return (
+        build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
+    )
+
+
+def build_sticker_wmi(
+    remote_jid: str,
+    key_id: str,
+    url: str,
+    file_sha256: bytes,
+    mimetype: str,
+    file_length: int,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    """Construct a synthetic sticker WMI frame (tag 20)."""
+    stk_bytes = (
+        build_field(1, 2, url.encode("utf-8"))
+        + build_field(2, 2, file_sha256)
+        + build_field(5, 2, mimetype.encode("utf-8"))
+        + build_field(9, 0, file_length)
+    )
+    msg_bytes = build_field(20, 2, stk_bytes)
+    key_bytes = (
+        build_field(1, 2, remote_jid.encode("utf-8"))
+        + build_field(2, 0, from_me)
+        + build_field(3, 2, key_id.encode("utf-8"))
+    )
+    return (
+        build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
+    )
+
+
+def build_contacts_array_wmi(
+    remote_jid: str,
+    key_id: str,
+    display_name: str,
+    from_me: int,
+    timestamp: int,
+) -> bytes:
+    """Construct a synthetic contacts array WMI frame (tag 13)."""
+    ca_bytes = build_field(1, 2, display_name.encode("utf-8"))
+    msg_bytes = build_field(13, 2, ca_bytes)
+    key_bytes = (
+        build_field(1, 2, remote_jid.encode("utf-8"))
+        + build_field(2, 0, from_me)
+        + build_field(3, 2, key_id.encode("utf-8"))
+    )
+    return (
+        build_field(1, 2, key_bytes) + build_field(2, 2, msg_bytes) + build_field(3, 0, timestamp)
+    )
+
+
+def build_history_sync_with_orders(
+    remote_jid: str,
+    items: list[tuple[int, bytes]],
+) -> bytes:
+    """Construct a delimited history sync payload with repeated HistorySyncMsg and order IDs."""
+    hsm_items = b"".join(
+        build_field(2, 2, build_field(1, 2, wmi) + build_field(2, 0, order_id))
+        for order_id, wmi in items
+    )
+    conv_bytes = build_field(1, 2, remote_jid.encode("utf-8")) + hsm_items
+    hs_bytes = build_field(2, 2, conv_bytes)
+    return encode_varint(len(hs_bytes)) + hs_bytes

@@ -17,10 +17,14 @@ logger = logging.getLogger(__name__)
 from tests.fixtures.protobuf_factory import (
     build_audio_wmi,
     build_contact_wmi,
+    build_contacts_array_wmi,
     build_document_wmi,
     build_field,
     build_history_sync_frame,
+    build_history_sync_with_orders,
     build_image_wmi,
+    build_live_location_wmi,
+    build_sticker_wmi,
     build_text_wmi,
     build_view_once_v2_wmi,
     encode_varint,
@@ -1119,3 +1123,102 @@ def test_extract_messages_from_proto_frame_corrupt_boundaries():
     msgs = increment_merger.extract_messages_from_proto_frame(hs_bytes)
     assert len(msgs) == 1
     assert msgs[0]["key_id"] == "CORRUPT_TEST_1"
+
+
+def test_decode_wmi_live_location_tag18():
+    """Verify decode_wmi extracts coordinates, caption, duration, sequence number, and thumbnail."""
+    wmi_bytes = build_live_location_wmi(
+        "5550100@s.whatsapp.net",
+        "LIVE_LOC_KEY_1",
+        37.7749,
+        -122.4194,
+        "Meeting at the park",
+        3600,
+        1,
+        b"\xff\xd8\xff\xe0synthetic_thumb",
+        0,
+        1729000550,
+    )
+    dec = increment_merger.decode_wmi(wmi_bytes)
+    assert dec["message_type"] == 16
+    assert dec["text_data"] == "Meeting at the park"
+    assert dec["location_info"] is not None
+    assert dec["location_info"]["latitude"] == pytest.approx(37.7749)
+    assert dec["location_info"]["longitude"] == pytest.approx(-122.4194)
+    assert dec["location_info"]["duration"] == 3600
+    assert dec["location_info"]["sequence_number"] == 1
+    assert dec["location_info"]["thumbnail"] == b"\xff\xd8\xff\xe0synthetic_thumb"
+
+
+def test_decode_wmi_sticker_tag20():
+    """Verify decode_wmi extracts sticker MIME, URL, hash, and length."""
+    file_hash = b"S" * 32
+    wmi_bytes = build_sticker_wmi(
+        "5550100@s.whatsapp.net",
+        "STICKER_KEY_1",
+        "https://example.com/sticker.webp",
+        file_hash,
+        "image/webp",
+        15360,
+        1,
+        1729000600,
+    )
+    dec = increment_merger.decode_wmi(wmi_bytes)
+    assert dec["message_type"] == 20
+    assert dec["media_info"] is not None
+    assert dec["media_info"]["media_type"] == "sticker"
+    assert dec["media_info"]["mime_type"] == "image/webp"
+    assert dec["media_info"]["file_sha256"] == file_hash
+    assert dec["media_info"]["file_size"] == 15360
+    assert dec["media_info"]["message_url"] == "https://example.com/sticker.webp"
+
+
+def test_decode_wmi_contacts_array_tag13():
+    """Verify decode_wmi extracts contacts array display name."""
+    wmi_bytes = build_contacts_array_wmi(
+        "5550100@s.whatsapp.net",
+        "CONTACTS_ARR_KEY_1",
+        "Synthetic Contacts Group",
+        0,
+        1729000650,
+    )
+    dec = increment_merger.decode_wmi(wmi_bytes)
+    assert dec["message_type"] == 14
+    assert dec["text_data"] == "Synthetic Contacts Group"
+
+
+def test_read_delimited_messages_bin_history_sync_multi_order(tmp_path):
+    """Verify read_delimited_messages_bin reads multi-order HistorySync frames with order_id."""
+    wmi1 = build_text_wmi("5550100@s.whatsapp.net", "ORDERED_1", "Msg 1", 0, 1729000700)
+    wmi2 = build_text_wmi("5550100@s.whatsapp.net", "ORDERED_2", "Msg 2", 1, 1729000710)
+    frame_bytes = build_history_sync_with_orders(
+        "5550100@s.whatsapp.net",
+        [(101, wmi1), (102, wmi2)],
+    )
+
+    bin_path = str(tmp_path / "messages_ordered.bin")
+    with open(bin_path, "wb") as f:
+        f.write(frame_bytes)
+
+    msgs = increment_merger.read_delimited_messages_bin(bin_path)
+    assert len(msgs) == 2
+    assert msgs[0]["key_id"] == "ORDERED_1"
+    assert msgs[0]["order_id"] == 101
+    assert msgs[1]["key_id"] == "ORDERED_2"
+    assert msgs[1]["order_id"] == 102
+
+
+def test_read_delimited_messages_bin_truncated_stream(tmp_path):
+    """Verify read_delimited_messages_bin gracefully terminates on truncated frame payload."""
+    wmi1 = build_text_wmi("5550100@s.whatsapp.net", "TRUNC_1", "First full message", 0, 1729000750)
+    full_frame = encode_varint(len(wmi1)) + wmi1
+    # Add a truncated frame: length header says 100 bytes, but only 5 bytes written
+    bad_header = encode_varint(100) + b"\x01\x02\x03\x04\x05"
+
+    bin_path = str(tmp_path / "truncated.bin")
+    with open(bin_path, "wb") as f:
+        f.write(full_frame + bad_header)
+
+    msgs = increment_merger.read_delimited_messages_bin(bin_path)
+    assert len(msgs) == 1
+    assert msgs[0]["key_id"] == "TRUNC_1"

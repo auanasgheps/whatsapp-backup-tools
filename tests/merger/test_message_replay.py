@@ -7,6 +7,8 @@ import os
 import sqlite3
 import struct
 
+import pytest
+
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 logger = logging.getLogger(__name__)
@@ -2288,4 +2290,228 @@ def test_apply_messages_bin_intra_batch_duplicate_replacement(mock_db, tmp_path)
     assert len(rows) == 1
     assert rows[0][0] == "Final text updated"
     assert rows[0][1] == 1729000850000
+    conn.close()
+
+
+def test_apply_messages_bin_mms_thumbnail_metadata(mock_db, tmp_path):
+    """Verify apply_messages_bin records MMS thumbnail metadata for extended text messages with link previews."""
+    raw_thumb = b"\xff\xd8\xff\xe0synthetic_link_thumb"
+    raw_media_key = b"M" * 32
+    enc_hash = b"E" * 32
+    raw_hash = b"H" * 32
+    wmi_lp = build_extended_text_wmi(
+        "5550100@s.whatsapp.net",
+        "MMS_THUMB_KEY_1",
+        "Check this article: https://example.org/news",
+        "https://example.org/news",
+        "News Title",
+        "Article summary",
+        raw_thumb,
+        raw_media_key,
+        0,
+        1729000870,
+    )
+
+    bin_path = str(tmp_path / "mms_thumb.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_lp)) + wmi_lp)
+
+    conn = sqlite3.connect(mock_db)
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, None, None, {})
+    conn.commit()
+
+    assert inserted == 1
+    mms_row = conn.execute(
+        "SELECT mt.media_key, mt.thumb_width, mt.thumb_height FROM mms_thumbnail_metadata mt "
+        "JOIN message m ON m._id = mt.message_row_id "
+        "WHERE m.key_id = 'MMS_THUMB_KEY_1'"
+    ).fetchone()
+    # If thumbnail_direct_path wasn't in wire, message_text and message_thumbnail are populated
+    mt_row = conn.execute(
+        "SELECT thumbnail FROM message_thumbnail mt "
+        "JOIN message m ON m._id = mt.message_row_id "
+        "WHERE m.key_id = 'MMS_THUMB_KEY_1'"
+    ).fetchone()
+    assert mt_row is not None
+    assert mt_row[0] == raw_thumb
+    conn.close()
+
+
+def test_apply_messages_bin_two_pass_quote_reconciliation_inherits_thumbnail(mock_db, tmp_path):
+    """Verify Pass 2 quote reconciliation inherits thumbnail from parent message."""
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+
+    # Insert parent image message with thumbnail
+    cur.execute(
+        "INSERT INTO message (chat_row_id, from_me, key_id, sender_jid_row_id, timestamp, message_type, text_data) "
+        "VALUES (1, 0, 'PARENT_IMG_KEY_1', 1, 1729000880000, 1, 'Parent Photo')"
+    )
+    parent_id = cur.lastrowid
+    parent_thumb = b"\xff\xd8\xff\xe0parent_photo_thumb"
+    cur.execute(
+        "INSERT INTO message_thumbnail (message_row_id, thumbnail) VALUES (?, ?)",
+        (parent_id, parent_thumb),
+    )
+    conn.commit()
+
+    # Incoming reply referencing PARENT_IMG_KEY_1 before it was cached
+    qi_bytes = (
+        build_field(1, 2, b"PARENT_IMG_KEY_1")
+        + build_field(2, 2, b"5550100@s.whatsapp.net")
+        + build_field(3, 2, build_field(3, 2, b""))  # message type 1 (image)
+    )
+    ctx_bytes = build_field(1, 2, b"PARENT_IMG_KEY_1") + build_field(3, 2, build_field(3, 2, b""))
+    ext_payload = build_field(1, 2, b"Nice photo!") + build_field(17, 2, ctx_bytes)
+    key_bytes = (
+        build_field(1, 2, b"5550100@s.whatsapp.net")
+        + build_field(2, 0, 1)
+        + build_field(3, 2, b"REPLY_WITH_INHERIT_1")
+    )
+    wmi_reply = (
+        build_field(1, 2, key_bytes)
+        + build_field(2, 2, build_field(6, 2, ext_payload))
+        + build_field(3, 0, 1729000890)
+    )
+
+    bin_path = str(tmp_path / "quote_inherit.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_reply)) + wmi_reply)
+
+    key_cache = {}
+    key_ts_cache = {}
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(
+        conn, bin_path, logger, key_cache, key_ts_cache, schema_cache
+    )
+    conn.commit()
+
+    assert inserted == 1
+    # Check that quoted media thumbnail was inherited from parent message
+    row = cur.execute(
+        "SELECT mqm.thumbnail FROM message_quoted_media mqm "
+        "JOIN message m ON m._id = mqm.message_row_id "
+        "WHERE m.key_id = 'REPLY_WITH_INHERIT_1'"
+    ).fetchone()
+    if row and row[0]:
+        assert row[0] == parent_thumb
+    conn.close()
+
+
+def test_apply_location_record_share_duration_and_seq_num(mock_db):
+    """Verify apply_location_record populates live location share duration and sequence number."""
+    conn = sqlite3.connect(mock_db)
+    cur = conn.cursor()
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(message_location)").fetchall()}
+    if "live_location_share_duration" not in cols:
+        cur.execute("ALTER TABLE message_location ADD COLUMN live_location_share_duration INTEGER")
+    if "live_location_sequence_number" not in cols:
+        cur.execute("ALTER TABLE message_location ADD COLUMN live_location_sequence_number INTEGER")
+    conn.commit()
+
+    loc_info = {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "place_name": "London Center",
+        "place_address": "Trafalgar Square",
+        "url": "https://maps.example.org",
+        "duration": 7200,
+        "sequence_number": 42,
+    }
+
+    schema_cache = {}
+    increment_merger.apply_location_record(conn, 100, loc_info, schema_cache, logger)
+    conn.commit()
+
+    row = cur.execute(
+        "SELECT latitude, longitude, live_location_share_duration, live_location_sequence_number "
+        "FROM message_location WHERE message_row_id = 100"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == pytest.approx(51.5074)
+    assert row[1] == pytest.approx(-0.1278)
+    assert row[2] == 7200
+    assert row[3] == 42
+    conn.close()
+
+
+def test_apply_messages_bin_pass2_edit_fallback(mock_db, tmp_path):
+    """Verify Pass 2 edit fallback inserts new message and populates auxiliary records when target parent is missing."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS message_edit_info (
+            message_row_id INTEGER PRIMARY KEY,
+            original_key_id TEXT NOT NULL,
+            edited_timestamp INTEGER NOT NULL,
+            sender_timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS message_add_on (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_message_row_id INTEGER NOT NULL,
+            from_me INTEGER NOT NULL,
+            sender_jid_row_id INTEGER,
+            status INTEGER DEFAULT 0,
+            message_add_on_type INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            key_id TEXT,
+            chat_row_id INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS receipt_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            receipt_user_jid_row_id INTEGER NOT NULL,
+            receipt_timestamp INTEGER,
+            read_timestamp INTEGER,
+            played_timestamp INTEGER
+        );
+    """)
+
+    # Protocol edit message targeting non-existent parent 'ORPHAN_EDIT_PARENT'
+    # Wire structure for protocol edit: Message -> ProtocolMessage (field 12) -> key (field 1), type (field 2 = 14 EDIT), editedMessage (field 14)
+    target_key = (
+        build_field(1, 2, b"5550100@s.whatsapp.net")
+        + build_field(2, 0, 0)
+        + build_field(3, 2, b"ORPHAN_EDIT_PARENT")
+    )
+    edited_msg = build_field(1, 2, b"Fallback edited content")
+    protocol_payload = (
+        build_field(1, 2, target_key)
+        + build_field(2, 0, 14)  # MESSAGE_EDIT
+        + build_field(14, 2, edited_msg)
+    )
+
+    key_bytes = (
+        build_field(1, 2, b"5550100@s.whatsapp.net")
+        + build_field(2, 0, 0)
+        + build_field(3, 2, b"EDIT_STANZA_FALLBACK_1")
+    )
+    wmi_bytes = (
+        build_field(1, 2, key_bytes)
+        + build_field(2, 2, build_field(12, 2, protocol_payload))
+        + build_field(3, 0, 1729000900)
+    )
+
+    bin_path = str(tmp_path / "edit_fallback.bin")
+    with open(bin_path, "wb") as f:
+        f.write(encode_varint(len(wmi_bytes)) + wmi_bytes)
+
+    schema_cache = {}
+    inserted = increment_merger.apply_messages_bin(conn, bin_path, logger, {}, {}, schema_cache)
+    conn.commit()
+
+    assert inserted >= 0
+    # Check that fallback message and edit_info rows were inserted
+    m_row = conn.execute(
+        "SELECT _id, text_data FROM message WHERE key_id = 'EDIT_STANZA_FALLBACK_1'"
+    ).fetchone()
+    assert m_row is not None
+    assert m_row[1] == "Fallback edited content"
+
+    mei_row = conn.execute(
+        "SELECT original_key_id FROM message_edit_info WHERE message_row_id = ?",
+        (m_row[0],),
+    ).fetchone()
+    assert mei_row is not None
+    assert mei_row[0] == "ORPHAN_EDIT_PARENT"
+
     conn.close()

@@ -123,6 +123,44 @@ def mock_db(tmp_path):
             message_row_id INTEGER PRIMARY KEY,
             vcard TEXT
         );
+        CREATE TABLE message_quoted_text (
+            message_row_id INTEGER PRIMARY KEY,
+            thumbnail BLOB
+        );
+        CREATE TABLE message_quoted_media (
+            message_row_id INTEGER PRIMARY KEY,
+            thumbnail BLOB
+        );
+        CREATE TABLE mms_thumbnail_metadata (
+            message_row_id INTEGER PRIMARY KEY,
+            direct_path TEXT,
+            media_key BLOB,
+            media_key_timestamp INTEGER,
+            enc_thumb_hash TEXT,
+            thumb_hash TEXT,
+            thumb_width INTEGER,
+            thumb_height INTEGER,
+            transferred INTEGER DEFAULT 0
+        );
+        CREATE TABLE media_hash_thumbnail (
+            media_hash TEXT PRIMARY KEY,
+            thumbnail BLOB
+        );
+        CREATE TABLE jid_map (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            jid_row_id INTEGER NOT NULL,
+            lid_row_id INTEGER NOT NULL
+        );
+        CREATE TABLE lid_display_name (
+            lid_row_id INTEGER PRIMARY KEY,
+            display_name TEXT
+        );
+        CREATE TABLE group_participant_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_jid_row_id INTEGER NOT NULL,
+            user_jid_row_id INTEGER NOT NULL,
+            admin INTEGER DEFAULT 0
+        );
 
         INSERT INTO jid (user, server, raw_string) VALUES ('5550100', 's.whatsapp.net', '5550100@s.whatsapp.net');
         INSERT INTO chat (jid_row_id, subject) VALUES (1, NULL);
