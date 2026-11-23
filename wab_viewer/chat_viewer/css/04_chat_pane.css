@@ -9,7 +9,7 @@
 
     #chat-header {
       position: relative;
-      z-index: 11;
+      z-index: 15;
       background: var(--surface);
       padding: 8px 16px;
       border-bottom: 1px solid var(--border);
@@ -202,6 +202,7 @@
 
     /* ---- pinned message banner strip ---- */
     #pinned-banner {
+      position: relative;
       height: 40px;
       min-height: 40px;
       max-height: 40px;

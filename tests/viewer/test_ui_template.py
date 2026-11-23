@@ -487,6 +487,16 @@ class TestTrack3FeaturePanes:
         assert ".chat-info-card" in css
         assert ".chat-info-card-title" in css
 
+        # Verify chat header stacking order exceeds pinned banner strip
+        header_match = re.search(r"#chat-header\s*\{[^}]*z-index:\s*(\d+)", css)
+        pinned_match = re.search(r"#pinned-banner\s*\{[^}]*z-index:\s*(\d+)", css)
+        assert header_match and pinned_match, (
+            "Both #chat-header and #pinned-banner must declare z-index"
+        )
+        assert int(header_match.group(1)) > int(pinned_match.group(1)), (
+            "Chat header z-index must exceed pinned banner z-index so dropdown menu renders on top"
+        )
+
         js_resp = client.get("/static/app.js")
         assert js_resp.status_code == 200
         js = js_resp.get_data(as_text=True)
