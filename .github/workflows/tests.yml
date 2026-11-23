@@ -7,12 +7,26 @@ on:
       - 'wab_viewer/chat_viewer/**'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
+      - '!**.png'
+      - '!**.jpg'
+      - '!**.jpeg'
+      - '!**.gif'
+      - '!**.webp'
+      - '!**.ico'
+      - '!**.svg'
   pull_request:
     paths:
       - '**.py'
       - 'wab_viewer/chat_viewer/**'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
+      - '!**.png'
+      - '!**.jpg'
+      - '!**.jpeg'
+      - '!**.gif'
+      - '!**.webp'
+      - '!**.ico'
+      - '!**.svg'
 
 jobs:
   lint:
