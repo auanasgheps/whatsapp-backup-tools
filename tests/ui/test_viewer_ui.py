@@ -4330,3 +4330,145 @@ def test_gallery_video_thumbnail_no_path_leak_and_shimmer(browser: CDPSession) -
     assert video_check["videoCount"] > 0
     assert len(video_check["leakyAlts"]) == 0
     assert video_check["hasShimmerRule"] is True
+
+
+def test_android_pinned_messages_banner_and_bubble_appearance(
+    browser: CDPSession, screenshot_dir: Path
+) -> None:
+    """Verify that Android pinned messages render the top banner, navigate between pins, and show bubble pin icons."""
+    open_chat_by_id(browser, "1", 15.0)
+
+    # 1. Wait for pinned banner to populate
+    banner_info = browser.evaluate(
+        """
+        (async () => {
+            const banner = document.getElementById('pinned-banner');
+            if (!banner) return { found: false };
+
+            for (let i = 0; i < 60; i++) {
+                if (banner.style.display !== 'none') break;
+                await new Promise(r => setTimeout(r, 50));
+            }
+
+            const author = document.getElementById('pinned-banner-author')?.textContent || '';
+            const snippet = document.getElementById('pinned-banner-snippet')?.textContent || '';
+            const count = document.getElementById('pinned-banner-count')?.textContent || '';
+            const nav = document.getElementById('pinned-banner-nav');
+            const navVisible = nav ? nav.style.display !== 'none' : false;
+
+            return {
+                found: true,
+                visible: banner.style.display !== 'none',
+                author,
+                snippet,
+                count,
+                navVisible,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert banner_info["found"] is True
+    assert banner_info["visible"] is True
+    assert "Pinned Message" in banner_info["author"]
+    assert len(banner_info["snippet"]) > 0
+    assert banner_info["navVisible"] is True
+    assert "1 of 2" in banner_info["count"]
+
+    # 2. Cycle to next pinned message
+    cycle_info = browser.evaluate(
+        """
+        (() => {
+            const nextBtn = document.getElementById('pinned-banner-next');
+            if (nextBtn) nextBtn.click();
+            const count = document.getElementById('pinned-banner-count')?.textContent || '';
+            const snippet = document.getElementById('pinned-banner-snippet')?.textContent || '';
+            return { count, snippet };
+        })()
+        """,
+        3.0,
+    )
+    assert "2 of 2" in cycle_info["count"]
+    assert len(cycle_info["snippet"]) > 0
+
+    # 3. Verify message bubble pin icons in scroll window
+    bubble_pin_info = browser.evaluate(
+        """
+        (() => {
+            const pinnedIcons = document.querySelectorAll('.msg-row .msg-pinned-icon');
+            const pinnedRows = [...pinnedIcons].map(icon => icon.closest('.msg-row')?.dataset.msgId);
+            return {
+                iconCount: pinnedIcons.length,
+                pinnedRowIds: pinnedRows,
+            };
+        })()
+        """,
+        3.0,
+    )
+    assert bubble_pin_info["iconCount"] >= 1
+    assert any(rid in ("10", "105") for rid in bubble_pin_info["pinnedRowIds"])
+
+    browser.capture_screenshot(screenshot_dir / "pinned_banner_and_bubble_alpine.png", 5.0)
+
+
+def test_chat_info_duration_calculation_display(browser: CDPSession, screenshot_dir: Path) -> None:
+    """Verify that Chat Info panel calculates and displays the conversation lifetime / duration row."""
+    open_chat_by_id(browser, "1", 15.0)
+
+    # Open Chat Info panel and wait for asynchronous data hydration
+    info_data = browser.evaluate(
+        """
+        (async () => {
+            const infoBtn = document.getElementById('chat-info-btn');
+            if (infoBtn) infoBtn.click();
+
+            const panel = document.getElementById('chat-info-panel');
+            for (let i = 0; i < 40; i++) {
+                if (panel && panel.classList.contains('open')) break;
+                await new Promise(r => setTimeout(r, 50));
+            }
+
+            // Await chat-info-row items to be populated from /api/chat-info
+            let rows = [];
+            for (let i = 0; i < 60; i++) {
+                rows = document.querySelectorAll('#chat-info-body .chat-info-row');
+                if (rows.length >= 2) break;
+                await new Promise(r => setTimeout(r, 50));
+            }
+
+            const data = {};
+            rows.forEach(r => {
+                const label = r.querySelector('.chat-info-label')?.textContent?.trim() || '';
+                const val = r.querySelector('.chat-info-value')?.textContent?.trim() || '';
+                if (label) data[label] = val;
+            });
+
+            return {
+                panelOpen: panel ? panel.classList.contains('open') : false,
+                rows: data,
+            };
+        })()
+        """,
+        5.0,
+    )
+    assert info_data["panelOpen"] is True
+    assert "Conversation since" in info_data["rows"]
+    assert "Duration" in info_data["rows"]
+
+    duration_text = info_data["rows"]["Duration"]
+    assert len(duration_text) > 0
+    assert "NaN" not in duration_text
+    assert any(unit in duration_text for unit in ("day", "month", "year"))
+
+    browser.capture_screenshot(screenshot_dir / "chat_info_duration_alpine.png", 5.0)
+
+    # Close panel
+    browser.evaluate(
+        """
+        (() => {
+            const closeBtn = document.getElementById('chat-info-close');
+            if (closeBtn) closeBtn.click();
+        })()
+        """,
+        2.0,
+    )
