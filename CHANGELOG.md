@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.80]
+
+### 📁 WhatsApp Backup Archiver (`wab-archiver`)
+
+- **EXIF & Container Timestamp Writing**: Added zero-dependency native metadata injection (`--exif-timestamps` / `exif_timestamps = true`) writing message timestamps directly into JPEG APP1 EXIF segments (`DateTimeOriginal`, `DateTimeDigitized`, `DateTime`, `OffsetTimeOriginal`) and QuickTime/MP4 video containers (`mvhd`, `tkhd`, `mdhd` creation and modification timestamps in UTC). Protects camera capture dates, orientation tags, and shared hardlink inodes.
+- **Retroactive Metadata Backfill Subcommand (`update-metadata`)**: Added a dedicated `wab-archiver update-metadata` command to retroactively stamp EXIF and container timestamps on previously archived media without requiring device sources. Tracks injection state via `exif_stamped` in `.wa_media_archiver.db` for instant idempotency, protects hardlink inodes, and restores Windows creation times (`SetFileTime`).
+- **Incremental Collision Shielding & In-Memory Pre-fetch**: Added `load_archived_file_set` to pre-fetch archived media sets into memory during incremental runs, eliminating N+1 SQL queries across large archives, preventing false collision renames, and extending container timestamp patching to `.m4a` audio files.
+- **Group Mention Preservation**: Added support for extracting and preserving group `@mentions` across incremental backups and differential archival passes in `preserved_messages.db` (schema v3), retaining mention metadata and participant associations even when messages are removed from the device.
+- **iOS Call History Discovery & Verification**: Added discovery, staging, and SQLite integrity validation (`PRAGMA quick_check`) for WhatsApp call logs (`CallHistory.sqlite` / `CallHistory.storedata`) from iOS backups across standard and AppDomain paths.
+- **Android Incremental Mention Ingestion**: Extended the delta replay engine to extract Tag 15 `mentionedJid` from Android incremental delta streams and insert participant records into `message_mentions` and `message_quoted_mentions`.
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
@@ -31,52 +40,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added cross-platform test coverage for Linux/macOS symlinks and Windows NTFS Directory Junctions.
   - Contributed by @Piero-93.
 
-- **Media Gallery Async Count Decoupling, Skeleton Stat Pills & Query Optimization**:
-  - **Decoupled Stream Pagination from Aggregation**: Eliminated sequential `await countPromise` inside `openMediaGallery()`, allowing the first page of media (`_loadGalleryPage(null)`) to render and display immediately without being blocked by aggregate count calculations.
-  - **Immediate Skeleton Stat Pills & In-Place Hydration**: Synchronously populates `#media-gallery-stats` on open with all standard media type pills showing placeholder counts (`--`) and subtle loading spinners (`.is-loading`), allowing instant user filtering from frame 1 and eliminating cumulative layout shift (CLS). Added `_hydrateStatPills(counts)` to update numbers in-place on existing DOM elements without wiping `stats.innerHTML`.
-  - **Stale-While-Revalidate Caching**: Added client-side `galleryCountsCache = new Map()` in `13_gallery_virtualization.js` to instantly hydrate stat pills with 0ms latency when reopening previously viewed chats.
-  - **Zero Media Flash & State Race Guardrails**: Displays a non-intrusive checking spinner instead of flashing a premature "No media in this chat" message when the initial optimistic image/video query returns 0 items while counts are in-flight. Null-guarded `currentGalleryStats` in `_syncGalleryNotices()` to avoid false end notices during pagination.
-  - **Backend Query Latency Optimization**: Replaced `INSTR(LOWER(text_data), 'http://') > 0` with case-insensitive `LIKE` (`m.text_data LIKE '%http://%' OR m.text_data LIKE '%https://%'`) in both Android and iOS link counting queries (2.0x faster), and replaced raw dictionary parsing of preserved messages with an in-database aggregated `SELECT media_type, ... COUNT(*) GROUP BY` query (2.5x faster).
-
-### 🧪 Test Suite & Project Architecture
-
-- **Modular Test Suite & Domain Markers**:
-  - Decomposed ~48,000 lines across 1,202 tests from monolithic test files (`test_wa_chat_viewer.py`, `test_wa_media_archiver.py`, `test_increment_merger.py`, `test_preservation.py`) into clean, package-aligned directories:
-    - `tests/fixtures/`: pure-Python synthetic Protobuf and wire format factory (`protobuf_factory.py`).
-    - `tests/common/`: cross-cutting schema and metadata validator suites (`test_schema_validator.py`, `test_metadata_writer.py`, `test_cross_platform_parity.py`, `test_group_mentions.py`).
-    - `tests/e2e/`: multi-scenario and multi-cycle simulation suites (`test_e2e_archiver_simulation.py`, `test_increment_multi_cycle.py`).
-    - `tests/viewer/`: 12 cohesive modules decomposing viewer route handlers, query execution, and UI template rendering.
-    - `tests/archiver/`: 10 cohesive modules decomposing CLI arguments, source ingestion, ADB extraction, and copy engine logic.
-    - `tests/merger/`: 5 cohesive modules decomposing protobuf wire decoding, add-ons resolution, entity lifecycles, and message replay.
-    - `tests/preservation/`: 4 cohesive modules decomposing database schemas, two-phase diff engines (Android and iOS), and lifecycle orchestration.
-  - Configured granular domain markers in `pytest.ini` (`archiver`, `viewer`, `merger`, `preservation`, `e2e`, `unit`, `slow`, etc.) enabling fast, targeted test execution.
-  - Updated `CONTRIBUTING.md` with package-aligned test guidelines, execution commands, and marker usage.
-
----
-
-## [0.80]
-
-### 📁 WhatsApp Backup Archiver (`wab-archiver`)
-
-- **EXIF & Container Timestamp Writing**: Added zero-dependency native metadata injection (`--exif-timestamps` / `exif_timestamps = true`) writing message timestamps directly into JPEG APP1 EXIF segments (`DateTimeOriginal`, `DateTimeDigitized`, `DateTime`, `OffsetTimeOriginal`) and QuickTime/MP4 video containers (`mvhd`, `tkhd`, `mdhd` creation and modification timestamps in UTC). Protects camera capture dates, orientation tags, and shared hardlink inodes.
-- **Retroactive Metadata Backfill Subcommand (`update-metadata`)**: Added a dedicated `wab-archiver update-metadata` command to retroactively stamp EXIF and container timestamps on previously archived media without requiring device sources. Tracks injection state via `exif_stamped` in `.wa_media_archiver.db` for instant idempotency, protects hardlink inodes, and restores Windows creation times (`SetFileTime`).
-- **Incremental Collision Shielding & In-Memory Pre-fetch**: Added `load_archived_file_set` to pre-fetch archived media sets into memory during incremental runs, eliminating N+1 SQL queries across large archives, preventing false collision renames, and extending container timestamp patching to `.m4a` audio files.
-- **Group Mention Preservation**: Added support for extracting and preserving group `@mentions` across incremental backups and differential archival passes in `preserved_messages.db` (schema v3), retaining mention metadata and participant associations even when messages are removed from the device.
-- **iOS Call History Discovery & Verification**: Added discovery, staging, and SQLite integrity validation (`PRAGMA quick_check`) for WhatsApp call logs (`CallHistory.sqlite` / `CallHistory.storedata`) from iOS backups across standard and AppDomain paths.
-- **Android Incremental Mention Ingestion**: Extended the delta replay engine to extract Tag 15 `mentionedJid` from Android incremental delta streams and insert participant records into `message_mentions` and `message_quoted_mentions`.
-
-### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
-
 - **Large Chat Loading Latency & Tail Anchoring Acceleration**:
   - Replaced hardcoded 1,500 ms `requestAnimationFrame` loop in `_pinToBottom` with adaptive image settling in `wab_viewer/chat_viewer/app.js`. Text chats, cached media, and chats with 0 pending images unfreeze and settle in 2 animation frames (~32 ms) instead of waiting 1.5 seconds, while uncached media settles as soon as thumbnails load (typically 80–200 ms).
   - Added connection-level idempotency to `_ensure_jid_map_resolved` via sentinel temporary table `temp._resolution_done` in `wab_viewer/db_cache.py`, preventing repeated mapping rebuilds and dropping warm execution on the same connection from ~2,100 ms to <0.05 ms.
   - Bounded Step 6 direct message scanning in `_ensure_jid_map_resolved` strictly to chats with unresolved LIDs, eliminating unindexed `SCAN m` passes across 1M+ messages and accelerating cold resolution on 682 MB databases from 841 ms down to 6.1 ms with 100% mapping fidelity.
   - Added `_get_call_log_present_jids` process-level call JID caching in `wab_viewer/queries/calls.py`. In `_query_android_chat_calls`, chats without calls bypass SQL joins, participant counting, and caller info resolution, eliminating 800–1,200 ms of latency for >98% of chats.
   - Accelerated cold chat load on 236k-message chats from 5,259 ms to 383 ms (a 13.7x speedup) and warm chat load from 4,200 ms to 20 ms (a 200x speedup).
+
 - **Media Gallery Query & Performance Optimizations**:
   - Implemented Two-Stage Deferred Join Pagination (`/api/media`) by selecting candidate message IDs first via indexed tables in 5–15 ms before hydrating full media joins, accelerating page 1 on 236k-message chats from 6,070 ms to 80 ms (a 75x acceleration).
   - Accelerated media count queries (`/api/media/count`) via direct SQL aggregations and session-level caching (`ViewerContext.media_counts_cache`), dropping count latency from 6,940 ms to 750 ms cold / 0.3 ms cached.
   - Decoupled media count fetching from page rendering so the gallery opens optimistically with default media types and dispatches page 1 requests immediately without waiting for counts.
+
+- **Media Gallery Async Count Decoupling, Skeleton Stat Pills & Query Optimization**:
+  - **Decoupled Stream Pagination from Aggregation**: Eliminated sequential `await countPromise` inside `openMediaGallery()`, allowing the first page of media (`_loadGalleryPage(null)`) to render and display immediately without being blocked by aggregate count calculations.
+  - **Immediate Skeleton Stat Pills & In-Place Hydration**: Synchronously populates `#media-gallery-stats` on open with all standard media type pills showing placeholder counts (`--`) and subtle loading spinners (`.is-loading`), allowing instant user filtering from frame 1 and eliminating cumulative layout shift (CLS). Added `_hydrateStatPills(counts)` to update numbers in-place on existing DOM elements without wiping `stats.innerHTML`.
+  - **Stale-While-Revalidate Caching**: Added client-side `galleryCountsCache = new Map()` in `13_gallery_virtualization.js` to instantly hydrate stat pills with 0ms latency when reopening previously viewed chats.
+  - **Zero Media Flash & State Race Guardrails**: Displays a non-intrusive checking spinner instead of flashing a premature "No media in this chat" message when the initial optimistic image/video query returns 0 items while counts are in-flight. Null-guarded `currentGalleryStats` in `_syncGalleryNotices()` to avoid false end notices during pagination.
+  - **Backend Query Latency Optimization**: Replaced `INSTR(LOWER(text_data), 'http://') > 0` with case-insensitive `LIKE` (`m.text_data LIKE '%http://%' OR m.text_data LIKE '%https://%'`) in both Android and iOS link counting queries (2.0x faster), and replaced raw dictionary parsing of preserved messages with an in-database aggregated `SELECT media_type, ... COUNT(*) GROUP BY` query (2.5x faster).
 
 - **Media Gallery Unified Stream Replay & Stat Filter Synchronicity**: Fixed an issue where switching from default photos+videos to all items ("Total" stat pill) failed to render new media types within the existing window. Reset pagination stream and reloaded page 1 (`types=all`) when toggling from filtered subsets to prevent skipped items, while keeping toggles back to default photos+videos as instantaneous in-memory DOM filters. Preserved archive view header counts on unpopulated past years.
 - **Media Gallery Sparse Grid Row Packing & Layout Stabilization**: Packed grid rows to the top (`align-content: start; grid-auto-rows: min-content`) in `#media-gallery-grid` and pinned the infinite scroll sentinel to span all columns invisibly, eliminating layout distortion in sparse or single-item filtered views.
@@ -108,6 +89,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Android Calls & Starred Privacy LID Resolution**: Automatically resolved privacy Linked Identities (`@lid`) to canonical phone numbers and contact names in Android call logs, starred messages, and chat lists.
 - **Android Pinned & Starred Temp Table Resolution**: Ensured complete initialization of temporary mapping tables (`_contacts_resolved`, `_lid_map_resolved`, `_jid_map_resolved`) for Android pinned and starred queries regardless of prior chat filter execution.
 - **iOS Call History CoreData Joins & Parity**: Mapped CoreData relationships (`Z1CALLEVENTS`, `Z1PARTICIPANTS`) in `CallHistory.sqlite` with privacy LID resolution and archived chat retention.
+
+### 🧪 Test Suite & Project Architecture
+
+- **Modular Test Suite & Domain Markers**:
+  - Decomposed ~48,000 lines across 1,202 tests from monolithic test files (`test_wa_chat_viewer.py`, `test_wa_media_archiver.py`, `test_increment_merger.py`, `test_preservation.py`) into clean, package-aligned directories:
+    - `tests/fixtures/`: pure-Python synthetic Protobuf and wire format factory (`protobuf_factory.py`).
+    - `tests/common/`: cross-cutting schema and metadata validator suites (`test_schema_validator.py`, `test_metadata_writer.py`, `test_cross_platform_parity.py`, `test_group_mentions.py`).
+    - `tests/e2e/`: multi-scenario and multi-cycle simulation suites (`test_e2e_archiver_simulation.py`, `test_increment_multi_cycle.py`).
+    - `tests/viewer/`: 12 cohesive modules decomposing viewer route handlers, query execution, and UI template rendering.
+    - `tests/archiver/`: 10 cohesive modules decomposing CLI arguments, source ingestion, ADB extraction, and copy engine logic.
+    - `tests/merger/`: 5 cohesive modules decomposing protobuf wire decoding, add-ons resolution, entity lifecycles, and message replay.
+    - `tests/preservation/`: 4 cohesive modules decomposing database schemas, two-phase diff engines (Android and iOS), and lifecycle orchestration.
+  - Configured granular domain markers in `pytest.ini` (`archiver`, `viewer`, `merger`, `preservation`, `e2e`, `unit`, `slow`, etc.) enabling fast, targeted test execution.
+  - Updated `CONTRIBUTING.md` with package-aligned test guidelines, execution commands, and marker usage.
 
 ---
 
