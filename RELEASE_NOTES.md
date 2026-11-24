@@ -1,88 +1,140 @@
-# WhatsApp Backup Tools v0.70
+# WhatsApp Backup Tools v0.80
 
-Version 0.70 marks a major milestone for _WhatsApp Backup Tools_, progressing towards a mature suite to handle your archiving needs.
+Version 0.80 brings major enhancements to _WhatsApp Backup Tools_, focusing on expanded Viewer features, interactive audio playback, media timestamping, and general UI/UX refinements.
 
-This update introduces several new features and enhancements: deleted message preservation, Android incremental backup merging, fully featured polls, rich link previews, shared locations with interactive map chooser, missing media thumbnail previews, and comprehensive system event support.
+Brace yourselves: This update introduces many new features!
 
-I also spent significant effort into understanding WhatsApp internal logics. Work is planned to fully support missing features like call history and starred messages.
+A dedicated mobile chat view with fluid slide transitions, Call History, Archived chats, Starred bookmarks, the ability to see pinned messages, interactive group `@mentions` with 1-to-1 chat links, collapsible long messages, circular video notes, voice message waveforms, retroactively backfillable photo and video timestamps, and theme-adaptive group sender colors.
 
-Your feedback is highly appreciated!
+We have reached parity with major WhatsApp features, and work continues on minor features.
+
+Also thanks to the first external contributor @Piero-93!
+
 
 #### **Release highlights:**
 
-> 🛡️ **Message Preservation Across Backups [experimental]**:
-> This feature compares the previous extraction and preserves anything missing in a dedicated database.
-You will be able to preserve deleted messages, revoked "Delete for Everyone" messages, and wholly removed chats, which will be automatically saved into a dedicated preserved history (`preserved_messages.db`), without modifying the actual WhatsApp database. 
-Preserved records are browsable in the web viewer as normal, labeled with the _Preserved_ badge.
-⚠️ This feature is considered experimental as it has been tested only with simple scenarios.
 
-> 📊 **WhatsApp Polls**: Polls on both Android and iOS are now rendered with extended information.
+> 🖥️ **New Look and feel**:
+> The UI/UX of the Viewer has been significantly expanded. Introducing chats avatars, navigation menu for Chats, Calls, Starred Messages and Archived Messages. A new chat submenu has been added to not clutter the chat bar.  
+<img src="docs/images/release-notes/image2.png" alt="New UI" width="60%" />
 
-> 🔗 **Rich Link Previews**: Web links shared in chats now render authentic rich preview cards including the preview thumbnail if available.
+> 📱 **Mobile Chat View & Fluid Navigation**:
+> Browsing backups on your phone now feels just like the native WhatsApp app. On small screens (under 600px), conversations open in a responsive full-screen view with a smooth slide transition, complete with an easy back button and full support for your phone's native swipe-to-go-back gesture. (#20 by @Piero-93)
 
-> 📍 **Shared Locations & Interactive Maps**: View static and live locations with addresses and coordinates, and open them directly in Google Maps, Bing Maps, or OpenStreetMap.
+<p float="left">
+<img src="https://private-user-images.githubusercontent.com/118912376/715990850-21232082-cc2e-4dba-bc73-75039a48f3d2.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3OTU1MjUzMjksIm5iZiI6MTc5NTUyNTAyOSwicGF0aCI6Ii8xMTg5MTIzNzYvNzE1OTkwODUwLTIxMjMyMDgyLWNjMmUtNGRiYS1iYzczLTc1MDM5YTQ4ZjNkMi5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYxMTI0JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MTEyNFQxMjU3MDlaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT00ZWZkNTVjNGIyNTUwNzMzMDllN2M0MjU3ZTQ4YTA5ZGE2MmI0NWIxMzA4MzJmNDAzNDZjZDU0MzliMWUxNDYxJlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.S4ZKJseQBXM9Em1EWMZt28ug8cELfR2yypPlZ8p2Iko" alt="Mobile" width="30%"/>
+<img src="https://private-user-images.githubusercontent.com/118912376/715990853-e9695712-6912-4e32-8939-7f9f33910b03.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3OTU1MjUzMjksIm5iZiI6MTc5NTUyNTAyOSwicGF0aCI6Ii8xMTg5MTIzNzYvNzE1OTkwODUzLWU5Njk1NzEyLTY5MTItNGUzMi04OTM5LTdmOWYzMzkxMGIwMy5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYxMTI0JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MTEyNFQxMjU3MDlaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT1kOTQ5NWNkNDI3YzBkMmU5OTk2MmRmY2Y0NWVhNzc3MTliYmVlNzU1ZGIxNDBmODBjNzk0MTgzZDQwZDAzNjczJlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.RwWYZyjaHlfeNU441NMkt3vC71PdPNUomUv7BFgjCR0" alt="Mobile" width="30%" />
 
-> 🔬 **Engineering for Protocol Fidelity & Long-Term Reliability**:
-> To ensure your archives stand the test of time, significant effort went into deeply mapping WhatsApp's internal database architectures and functionality. This foundation unlocks full fidelity for complex entities, including those not yet implemented.
+> 📞 **Call History**:
+> Browse your complete voice and video call logs directly within the viewer. A new Call side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that brings you straight to that exact point in time. Calls are also displayed directly into chat timelines as chronological call bubbles.
+<img src="docs/images/release-notes/image3.png" alt="New UI" width="60%" />
+
+> ⭐ **Starred Messages & Bookmarks**:
+> Quickly view your saved and starred messages from the dedicated Starred tab or from an in-chat slide-out panel. Tapping any starred message jumps straight to that message in the conversation with a glowing golden highlight.
+<img src="docs/images/release-notes/image4.png" alt="Starred Messages" width="60%" />
+
+> 🎙️ **Voice Message Waveforms & Audio Player**:
+> Voice notes now look and feel authentic with interactive sound waveforms, adjustable playback speeds (1x to 2x), and a circular play/pause button. Tap or drag anywhere on the waveform to scrub forward and backward.
+<img src="docs/images/release-notes/image1.png" alt="Voice Messages" width="30%" />
+
+> 🏷️ **Photo & Video Timestamp Embedding**:
+> Save original WhatsApp message dates directly into your photos and videos (`--exif-timestamps`), or update existing archives with the new `wab-archiver update-metadata` command. Cloud photo apps like Google Photos, Apple Photos, and Immich will now organize your archived media in the correct order.
+
+> 📌 **Pinned Messages Banner Strip**:
+> Conversations with pinned messages now show an authentic banner strip beneath the chat header. Flip through multiple pins, dismiss the banner for your session, or jump straight to any pinned message with an emerald highlight.
+
+> 👥 **Interactive Group Mentions**:
+> Mentions in group chats (`@Alice`, `@Bob`) are now recognized and styled as badges. Clicking a mention opens your 1-to-1 conversation with that person if an archived chat exists.
+
+> 📜 **Collapsible Long Messages & Circular Video Notes**:
+> Long text messages and photo captions are neatly trimmed with a simple "Read More" button to keep your timeline readable. Quick video notes also play in their signature circular player with live countdown rings.
+
+> ⚡ **Supercharged Chat & Gallery Loading**:
+> Conversations with hundreds of thousands of messages now open at least 3 times faster, while the Gallery loads much faster as well. 
 ---
 
 ### 📁 WhatsApp Archiver
 
 #### ✨ New Features
-- **Preserve Deleted Messages**: With the new `-P` / `--preserve-deleted` option, messages that were deleted from your phone between backup runs are safely retained in a preserved history database instead of vanishing from your archive.
-- **Android ADB Connection & Status Troubleshooting**: Instead of displaying a generic checklist of possibilities, the archiver now tells you the exact device status (distinguishing between unplugged phones, multiple connected devices, offline links, and missing host permissions).
-- **Android Incremental Backups**: WhatsApp on Android regularly generates incremental backup packages (`msgstore-increment*.db.crypt15`). The archiver automatically discovers, decrypts, and sequentially merges these increments into your database with full entity support (reactions, polls, chat pins, locations, and edits). Previously, WhatsApp Archiver would only read the full `msgstore.db`, which was not the last backup, causing chats in the Viewer to not be up to date.
-- **Android Reverse Mode Database Restoration**: When restoring media back to your phone, the archiver now automatically restores your latest WhatsApp database (`msgstore.db`).
-- **iOS Selective Media Thumbnail Archiving**: When archiving from iPhone backups, companion `.thumb` preview files are now saved to an isolated `Whatsapp Databases/.thumbnails/` folder and indexed—extracted only when the primary photo or video is missing from disk—keeping user-facing media folders clean while ensuring offline previews remain accessible in the viewer.
+- **EXIF & Video Timestamp Embedding**: Embed WhatsApp message dates directly into your saved photos and videos (via `--exif-timestamps` or in your configuration). Cloud gallery apps like Google Photos, Apple Photos, and Immich can now organize your media chronologically. Your original camera capture details and photo orientations are safely preserved.
+- **Group Mention Preservation**: Group `@mentions` are now preserved across backup extractions and incremental updates, keeping participant mentions intact even if messages were removed from your phone.
+- **Retroactive EXIF & Timestamp Backfill (`update-metadata`)**: Update timestamps on previously saved photos and videos at any time with the new `wab-archiver update-metadata` command. It works directly with your existing archive without needing a phone or backup connection, automatically skips files that were already updated, and ensures Windows file dates match the original messages.
+- **iOS Call History Archiving**: Automatically discovers and archives your WhatsApp voice and video call logs from iPhone backups so you can explore them in the viewer.
 
 #### ⚡ Improvements
-- **Automatic Schema Incompatibility Guidance**: If WhatsApp updates its internal database structure or if an older legacy backup is detected, the archiver displays clear diagnostic explanations and upgrade guidance instead of technical database errors.
-- **Categorized Duplicate Media Reports**: The duplicate media report (`duplicate_media_report.csv`) is now neatly structured into prioritized sections (Photos, Videos, Documents, Audio, GIFs, Stickers, Contacts) with section headers and a dedicated `media_type` column for easy filtering in spreadsheets.
-- **Cleaner Console & Configurable Debug Logging**: File and console logs now default to concise `INFO` output, eliminating clutter. When troubleshooting, a new `-v` / `--debug` flag (or `debug = true` in config) enables full debug traces on demand.
-- **Consolidated Run Summary**: The final run summary banner has been redesigned into clean functional tiers, providing clear metrics for copied, skipped, preserved, missing, and duplicate files without intermediate logging clutter.
-- **Organized Configuration Files**: You can now structure your configuration file using nested sections (such as `[source.android]` or `[options.filtering]`) for cleaner management, with key features pre-set to `true` when uncommented.
-- **Windows Console Unicode Resilience**: Automatically reconfigures console streams to UTF-8 on Windows, preventing display crashes on legacy OEM code pages when logging emojis and status badges.
-- **Android ADB Backup Retrieval Guidance**: If pulling a WhatsApp backup database fails over ADB, the archiver provides direct actionable instructions (such as reminding you to create an End-to-End Encrypted Backup in WhatsApp).
-- **Android Contiguous Incremental Staging & Rollback**: Incremental merging enforces contiguous increment sequences to prevent delta drift and stages all operations in an isolated temporary workspace with fail-safe rollback if an error occurs.
-- **Android Resilient Incremental Merges**: Handled incomplete or truncated backup streams gracefully without aborting earlier valid records, and added auto-detection for database sequence and column variations during merge passes.
-- **iOS Accelerated Media Queries**: Re-engineered iOS media discovery and group queries using unified scans and non-correlated table expressions, accelerating media scanning by over 100x on large backup databases (from 30+ seconds down to milliseconds).
-- **iOS Extended Setup Guidance**: Detailed documentation guides you through backing up iOS devices using macOS Finder, the Apple Devices app on Windows, or iTunes, with troubleshooting tips for permissions, passwords, and WhatsApp Business.
-- **iOS Extraction Logging & Backup Thumbnail Alerts**: Streamlined iOS backup extraction logging by reducing repetitive overwrite notices, and the archiver now informs you when an offline thumbnail was safely retained from the backup database for missing media.
-- **iOS LID Contact Name Resolution**: Automatically resolves modern iOS Linked Identity (`@lid`) accounts to real phone numbers and contact names, preventing duplicate or unmapped contact folders.
-- **iOS Missing Media Reporting**: The missing media report for iOS backups (`missing_media_report.csv`) now cleanly routes to your specified output directory while filtering out non-media system items.
+- **Faster Incremental Checks & Audio Container Support**: Smarter, faster checks when archiving new media avoid accidental file renames and add timestamp embedding support for `.m4a` audio recordings.
+- **Modular Automated Test Suite**: Reorganized the automated test suite into modular, component-focused suites with fast category markers, speeding up testing and ensuring maximum reliability across backup extractions and incremental merges.
+- **Android Mention Tracking in Incremental Backups**: Captures and tracks group mentions from incremental Android backup files when merging them into your archive.
 
 #### 🐛 Bug Fixes
-- **Sticker Categorization in Duplicate Reports**: Categorized `.webp` and `.was` stickers under the dedicated Stickers section at the end of duplicate reports across iOS and Android.
-- **Android Reverse Restore Argument Guard**: Fixed an issue where running reverse restore could fail when network path warnings were evaluated.
-- Minor bug fixes and reliability improvements.
+- **Collision-Renamed Media Retention**: Fixed an issue where media files that had received collision suffixes (e.g. `_1.jpg`) during earlier runs were unnecessarily re-copied on subsequent incremental runs. (#14 by @Piero-93)
+- **Android Incremental Status Receipt Deduplication**: Fixed an issue during incremental Android backup merges where replayed delivery, read, and played status receipts could generate duplicate database entries.
 
 ---
 
 ### 🌐 WhatsApp Viewer
 
 #### ✨ New Features
-- **Exhaustive System & Group Events**: Group events and system notifications—including member additions and removals (with natural phrasing like "Alice, Bob, and Charlie"), group subject/icon changes, admin promotions, disappearing message timer changes, and security codes—are now fully recognized and rendered across Android and iOS.
-- **Preserved & Revoked Message Visibility**: Messages deleted on the phone or revoked via "Delete for Everyone" are clearly labeled with preserved badges and status indicators.
-- **Preserved Chat Browsing**: browse and inspect chats and contacts that only exist in preserved backups, complete with message counts and dates.
-- **Rich Link Previews**: Web links shared in chats now render authentic rich preview cards displaying the page title, description snippet, website domain, and preview thumbnail across Android and iOS backups.
-- **Shared Locations & Interactive Maps**: Location messages (both static location pins and live locations) across Android and iOS are now rendered with location names, addresses, and coordinates. An interactive "Open in Maps" dialog lets you open coordinates directly in Google Maps, Bing Maps, OpenStreetMap, or copy exact coordinates with a single click.
-- **Unavailable Media Cards & Preview Recovery**: When photos, videos, or audio files are missing from your computer or were never downloaded to disk, chat bubbles display dedicated unavailable media cards with media metadata (original filename, file size, dimensions, and playback duration). Low-resolution blurred previews are recovered directly from your backup whenever possible across both platforms.
-- **View-Once Media Badges**: Ephemeral photos and videos are highlighted with View-Once badges so you know which media was originally sent with single-view privacy.
-- **WhatsApp Polls**: Polls on both Android and iOS are now rendered just like in WhatsApp, showing options, vote bars, and who voted for each choice. The "View votes" popup sorts options by highest vote count with a star indicator next to the winning poll choice.
+- **Archived Chats Tab & Navigation**: A dedicated "Archived" tab in the bottom navigation bar lets you browse archived conversations separately from your active inbox, with tab-aware search and instant chat opening.
+- **Audio & Voice Note Gallery Cards**: Voice notes and music tracks are now neatly separated in the Media Gallery with custom cards, duration badges, clean titles, counts, and a built-in audio player.
+- **Avatars in Chat List & Starred Views**: Circular contact avatars with generated initials and distinct colors now appear in active and archived chat lists as well as starred message previews, matching call list styling.
+- **Call History & Call Inspector**: Browse your complete voice and video call logs with dedicated filters (All, Missed, Video), two-line call cards, and a detailed Call Inspector side pane. A "Jump to this Moment in Chat" button navigates directly to the conversation at the time of the call.
+- **Chat Header Overflow Menu**: A clean 3-dot dropdown menu in the chat header neatly tucks away secondary actions (Media Gallery, Starred Messages, Chat Info), keeping the conversation bar uncluttered.
+- **Circular Video Note Player**: Quick video notes now play in an authentic circular bubble with an animated countdown ring, fullscreen viewing, and automatic pausing when you scroll past.
+- **Collapsible Long Messages & Media Captions**: Long text messages and photo captions are neatly trimmed with an easy "Read More" / "Show Less" toggle, keeping your chat timeline clean and readable while preserving formatting and emojis.
+- **Group Sender Name Colors**: Group chat participants now receive distinctive, theme-adaptive sender name colors (matching WhatsApp's palette) across dark and light modes, applied to message headers and quoted reply borders.
+- **Group `@mentions` with 1-to-1 Chat Links**: Mentions in group chats are highlighted as interactive badges. Clicking a mention smoothly opens your 1-to-1 chat with that person if an archived conversation exists.
+- **In-Chat Chronological Call Bubbles**: Voice and video calls are seamlessly woven directly into chat timelines as chronological call bubbles, showing call outcome, duration, and details at a glance.
+- **Lightbox Smooth Slide Transitions**: Browsing photos and videos in full screen is now much smoother, featuring seamless slide animations, instant image pre-loading, improved zoom and pan controls, and automatic skipping of unavailable files.
+- **Mobile Chat View & Navigation**: On mobile phones and narrow screens (up to 600px), conversations open in a responsive two-level view with a smooth slide transition, a header back button, and native swipe-to-go-back gesture support. (#20 by @Piero-93)
+- **Phone Number & Group Description Search**: Searching conversations in the sidebar now matches formatted phone numbers and group descriptions alongside contact and group names.
+- **Pinned Messages Banner Strip & Jump**: Important conversations with pinned messages display an authentic banner strip beneath the chat header. Flip through multiple pins, dismiss the banner for your session, or jump straight to any pinned message with an emerald highlight.
+- **Reverse Proxy & Sub-Path Hosting**: You can now host the viewer under a custom URL prefix (e.g. `https://my-server.local/whatsapp/`) behind reverse proxies like Nginx, Traefik, or Caddy using `--base-path /whatsapp` or the `WAB_BASE_PATH` environment variable. (#17 by @Piero-93)
+- **Starred Messages & Drawer**: Starred messages can be browsed globally via the sidebar "Starred" tab or per-chat via the header slide-out drawer, with a 1-click jump to context.
+- **Tab-Aware Search & Universal Shortcuts**: The search bar dynamically adapts to your active navigation tab—searching messages, call history, starred bookmarks, or archived chats—with instant `Ctrl+K` (or `/`) keyboard shortcuts.
+- **Voice Message Waveforms & Authentic Player**: Voice notes now look and feel like native WhatsApp messages, featuring interactive sound waveforms you can tap or drag to scrub through, adjustable playback speeds (`1x`, `1.2x`, `1.5x`, `2x`), and duration counters.
+- **Android Calls & Starred Identity Resolution**: Matches privacy identifiers in Android call logs and starred messages to actual contact names and phone numbers, ensuring direct links open the right conversation.
+- **iOS Call History & Contact Linking**: Accurately connects call participants, outcomes (incoming, outgoing, missed), and conversation links from iPhone backup records.
+- **iOS Legacy Emoji Conversion**: Converts vintage emoji from early iPhone backups (pre-2015 private-use characters) into modern Unicode emoji so they display properly in messages instead of broken rectangles. (#18 by @Piero-93)
 
 #### ⚡ Improvements
-- **Animated GIF Badges & Click-to-Loop**: Added dedicated GIF badges with click-to-play/pause toggle, automatic looping, and viewport intersection pausing for smoother browser performance.
-- **Grouped Media Grid Scaling**: Multi-image and video message grids now dynamically scale with your text size preferences (Small, Medium, Large) to match standard media card sizing.
-- **Media Gallery Links Tab & Cleaner Grid**: Added a dedicated "Links" tab in the chat media gallery showing all shared URLs with rich preview snippets and paginated streaming. Stickers are now deselected by default in the gallery grid to keep photos and videos front and center.
-- **Navigation HUD Viewport Feedback**: Added a visual navigation toast giving instant feedback when seeking or jumping through long conversations.
-- **Poll Choices Full-Text Search**: Search now indexes both poll questions and individual poll choices/options across both Android and iOS backups.
-- **Quoted Media Reply Thumbnails & Captions**: Quoted replies to photos, videos, and documents now display preview thumbnails directly inside the reply box and preserve original media captions.
-- **Responsive Settings Modal**: The Settings panel now smoothly adapts to small browser windows, split-screen views, and compact laptop screens with internal scrolling and a pinned header so controls remain accessible at any height.
+- **Accelerated Chat Loading for Massive Conversations**: Opening large chats with tens or hundreds of thousands of messages is now many times faster.
+- **Captioned Media Containment & Sizing**: Photos and videos with captions now fit together naturally without awkward extra space or stretched bubbles, nicely framing portrait and landscape media.
+- **Chat Duration & System Message Exclusion**: System notices (such as encryption alerts or group creation notices) are no longer counted toward conversation start dates and chat durations, giving you a true reflection of when you actually talked.
+- **Display Scale Settings**: Adjust the entire viewer interface with a new "Display scale" setting to comfortably size text, sidebars, and media for your screen.
+- **Dual-Theming & Contrast Polish**: Refined colors, better contrast, and subtle shadows across both light and dark modes make messages easier to read in any lighting.
+- **External Media Storage Support**: You can now store your heavy media folders (`Contacts/` and `Groups/`) on a separate hard drive or external disk and link them into your archive (using symlinks on Linux/macOS or Directory Junctions on Windows). Photos, videos, and audio open and stream at full size while keeping your files safe and secure. (co-authored by @Piero-93)
+- **In-Bubble Star & Pin Indicators**: Subtle star (`⭐`) and pin (`📌`) icons sit neatly next to the message time, keeping message cards compact and uncluttered.
+- **Media Gallery Centered Loading & Navigation**: Opening the media gallery is now smoother, featuring centered loading indicators, seamless chat switching without glitches, and fast preview loading for shared links as you scroll.
+- **Media Gallery Filtering & High-Speed Loading**: The media gallery is significantly faster and easier to explore. You can now view photos and videos together or filter down to specific categories (Photos, Videos, Voice notes, Audio, Documents, Links, Stickers, and Contacts) with instant visual updates, smooth scrolling, and helpful end-of-results notices.
+- **Modernized UI Shell & Navigation Bar**: A refreshed navigation bar with four clear tabs (Chats, Calls, Starred, Archived), an updated header, accessible SVG action icons, and full keyboard navigation support.
+- **Modular Backend Architecture**: Reorganized the viewer backend into dedicated domain modules and query handlers, improving system stability, memory isolation, and overall responsiveness across large archives.
+- **Modular Frontend & Zero-Build Stylesheet Delivery**: Reorganized the viewer's interface styles and scripts into clean, component-focused modules assembled directly in memory. This eliminates monolithic asset files, ensures consistent layout behavior, and delivers instant, zero-latency stylesheet loading without external build tools.
+- **Rich Media Cards in Starred & Pinned Views**: Starred and pinned previews now show rich visual snippets—such as photo thumbnails, video lengths, voice note badges, and document icons—rather than plain text placeholders.
+- **Thumbnail Shimmer Loading**: Video bubbles and media gallery cards display a smooth loading shimmer animation while full thumbnails are being generated or loaded in the background.
+- **Time Gap Jump Indicators**: When jumping to a moment from call history or a starred message, a helpful banner tells you how far apart the nearest message was if no messages were sent on that exact day.
+- **iOS High-Performance Message Scrolling**: Significantly faster timeline scrolling and instant message loading for large group chats from iPhone backups.
 
 #### 🐛 Bug Fixes
-- **Background Event & System Message Chat List Isolation**: Contacts with zero exchanged messages no longer appear in your recent chat list due to internal WhatsApp events, and system notices no longer displace conversation previews or re-order recent chats.
-- **Quoted Message Navigation & Jump Stabilization**: Clicking a quoted reply reliably scrolls and jumps directly to the original quoted message with a highlight pulse, smoothly locking onto older photos or offloaded media without drifting from asynchronous image loading.
-- Minor UI polish and rendering fixes.
+- **Animated GIF & Video First-Frame Previews**: WhatsApp animated GIFs and video bubbles now immediately display their authentic first frame instead of a solid black box before playback.
+- **Chat Menu Stacking Above Pinned Banner**: Fixed an issue where the 3-dot chat action menu could open behind the pinned messages banner.
+- **Chat Missing Media Placeholders**: If a photo or video cannot be found on disk, the chat now displays a clean placeholder card with a blurred preview and the file size, rather than a broken image icon.
+- **Contact Card Missing Status**: Shared contact cards are no longer incorrectly flagged as missing media since their contact details are stored directly in your messages.
+- **Document Gallery Count**: Fixed an issue where certain documents were counted twice in the media gallery total.
+- **Gallery All-Media View Switch**: When switching from the default photos and videos view to all media types in the gallery, all newly revealed items (like audio, documents, and stickers) now immediately appear in your view without needing to scroll down first.
+- **Gallery Archive Year Counts**: Yearly totals in the Media Gallery Archive view now stay accurate and display correct item counts even before expanding past years.
+- **Gallery Filter Cross-Category Isolation**: Fixed a visual issue where voice notes, audio files, or links would occasionally remain visible after selecting the Photos or Videos filter.
+- **Gallery Loading in Non-Photo Chats**: Opening the Media Gallery in conversations that only contain links, documents, voice notes, or text now immediately switches to the first available category instead of staying stuck on "Checking media...".
+- **Gallery Sparse Grid Packing**: Fixed an issue where viewing a single audio track or document in the gallery pushed the card down toward the bottom of the window.
+- **Gallery Zero-Count Pill Spinners**: Fixed an issue where filter pills for empty media categories (such as contacts or audio in chats without those items) could show an indefinite loading spinner.
+- **Grouped Media Caption Visibility**: Captions on multi-photo albums from iPhone backups now display correctly on the grouped album card.
+- **Location Pin Gallery Display**: Location shares no longer appear as broken files in the media gallery.
+- **Long Message Emoji Truncation**: Fixed an issue where truncating long messages could cut complex emojis (like flags or family icons) in half.
+- **Massive Archive Chat Loading**: Fixed a potential crash when opening or searching archives containing over 999 active chats or service notices.
+- **Media Gallery Audio Errors**: Fixed an error when playing audio in the media gallery or jumping into chat from a voice note.
+- **Quote Jump Auto-Expansion**: Clicking a quoted reply that refers to a collapsed long message now automatically expands it so you can read the full context.
+- **Thumbnail Cache Reliability**: Improved thumbnail caching so missing preview lookups reset properly across viewer sessions.
+- **iOS Location Message Chat List Crash**: Fixed an issue where an iPhone conversation whose latest message was a shared location caused the chat list to fail to load.
 
 ---
 

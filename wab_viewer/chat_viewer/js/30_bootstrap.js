@@ -1,0 +1,1 @@
+loadPrefs().then(() => loadChats());

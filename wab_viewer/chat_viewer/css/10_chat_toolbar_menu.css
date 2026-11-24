@@ -1,0 +1,165 @@
+    /* ---- chat toolbar & overflow menu ---- */
+    .chat-menu-container {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #chat-menu-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 18px;
+      padding: 0;
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      line-height: 1;
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      transition: background 0.15s, color 0.15s;
+    }
+    #chat-menu-btn:hover,
+    #chat-menu-btn.active {
+      background: var(--surface2);
+      color: var(--text);
+    }
+    #chat-menu-btn svg {
+      display: block;
+      flex-shrink: 0;
+      pointer-events: none;
+    }
+
+    .chat-menu-dropdown {
+      position: absolute;
+      top: calc(100% + 4px);
+      right: 0;
+      width: 190px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 6px 0;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.16);
+      z-index: 100;
+      transform-origin: top right;
+      opacity: 0;
+      transform: scale(0.92) translateY(-6px);
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 140ms cubic-bezier(0.2, 0, 0, 1),
+                  transform 140ms cubic-bezier(0.2, 0, 0, 1),
+                  visibility 140ms;
+    }
+    .chat-menu-dropdown.open {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+      visibility: visible;
+      pointer-events: auto;
+    }
+
+    .chat-menu-item {
+      width: 100%;
+      background: none;
+      border: none;
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 9px 16px;
+      font-size: 13px;
+      font-weight: 400;
+      text-align: left;
+      line-height: 1.3;
+      margin: 0;
+      transition: background 0.12s ease, color 0.12s ease;
+      box-sizing: border-box;
+    }
+    .chat-menu-item:hover,
+    .chat-menu-item:focus-visible {
+      background: var(--surface2);
+      color: var(--text);
+      outline: none;
+    }
+    .chat-menu-item-icon {
+      color: var(--text-muted);
+      flex-shrink: 0;
+      transition: color 0.12s ease;
+    }
+    .chat-menu-item:hover .chat-menu-item-icon,
+    .chat-menu-item:focus-visible .chat-menu-item-icon {
+      color: var(--text);
+    }
+    .chat-menu-item-text {
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .chat-menu-badge,
+    .chat-toolbar-badge {
+      background: var(--accent);
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 700;
+      min-width: 16px;
+      height: 16px;
+      border-radius: 8px;
+      padding: 0 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+      margin-left: auto;
+      pointer-events: none;
+    }
+
+    #chat-starred-btn,
+    #chat-info-btn {
+      /* Menu items in overflow dropdown */
+    }
+    #chat-starred-btn.has-starred .chat-menu-item-icon,
+    #chat-starred-btn.has-starred:hover .chat-menu-item-icon,
+    #chat-starred-btn.has-starred:focus-visible .chat-menu-item-icon {
+      color: var(--star-color, #eab308);
+    }
+    #chat-starred-btn.has-starred .chat-menu-item-icon polygon {
+      fill: var(--star-color, #eab308);
+      stroke: var(--star-color, #eab308);
+    }
+
+    #media-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 18px;
+      padding: 0;
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      line-height: 1;
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      transition: background 0.15s, color 0.15s;
+    }
+    #media-btn:hover,
+    #media-btn.active {
+      background: var(--surface2);
+      color: var(--text);
+    }
+    #media-btn svg {
+      display: block;
+      flex-shrink: 0;
+      pointer-events: none;
+    }
+

@@ -462,7 +462,42 @@ def extract_context_info(payload_fields: dict) -> dict | None:
     ):
         q_thumb = ctx_fields[16][0][1]
 
-    if not stanza_id and not quoted_text and not participant and not q_thumb:
+    mentioned_jids: list[str] = []
+    for entry in ctx_fields.get(15, []):
+        if entry[0] == 2 and isinstance(entry[1], bytes) and entry[1]:
+            jid_s = entry[1].decode("utf-8", errors="replace").strip()
+            if jid_s and "@" in jid_s:
+                mentioned_jids.append(jid_s)
+    mentioned_jids = list(dict.fromkeys(mentioned_jids))
+
+    quoted_mentioned_jids: list[str] = []
+    if 3 in ctx_fields and isinstance(ctx_fields[3][0][1], bytes):
+        raw_q_fields_m = parse_wire_fields(ctx_fields[3][0][1])
+        q_fields_m, _ = unwrap_message_container(raw_q_fields_m, 4)
+        for q_sub_tag in (6, 3, 7, 8, 9, 20, 4, 5, 18, 42, 45, 49, 60, 64, 75, 93, 111):
+            if q_sub_tag in q_fields_m and isinstance(q_fields_m[q_sub_tag][0][1], bytes):
+                try:
+                    qs_f = parse_wire_fields(q_fields_m[q_sub_tag][0][1])
+                    for c_tag in (17, 14, 15):
+                        if c_tag in qs_f and isinstance(qs_f[c_tag][0][1], bytes):
+                            q_ctx = parse_wire_fields(qs_f[c_tag][0][1])
+                            for m_entry in q_ctx.get(15, []):
+                                if m_entry[0] == 2 and isinstance(m_entry[1], bytes) and m_entry[1]:
+                                    qj = m_entry[1].decode("utf-8", errors="replace").strip()
+                                    if qj and "@" in qj:
+                                        quoted_mentioned_jids.append(qj)
+                except (ValueError, Exception):
+                    pass
+    quoted_mentioned_jids = list(dict.fromkeys(quoted_mentioned_jids))
+
+    if (
+        not stanza_id
+        and not quoted_text
+        and not participant
+        and not q_thumb
+        and not mentioned_jids
+        and not quoted_mentioned_jids
+    ):
         return None
 
     return {
@@ -475,6 +510,8 @@ def extract_context_info(payload_fields: dict) -> dict | None:
         "media_info": q_media_info,
         "location_info": q_loc_info,
         "vcard": q_vcard,
+        "mentioned_jids": mentioned_jids,
+        "quoted_mentioned_jids": quoted_mentioned_jids,
     }
 
 
@@ -966,6 +1003,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
             file_sha256 = aud_fields.get(3, [(2, b"")])[0][1] if 3 in aud_fields else b""
             file_length = aud_fields.get(4, [(0, 0)])[0][1] if 4 in aud_fields else 0
             is_ptt = bool(aud_fields.get(6, [(0, 0)])[0][1]) if 6 in aud_fields else False
+            waveform = aud_fields.get(19, [(2, b"")])[0][1] if 19 in aud_fields else None
             media_info = {
                 "mime_type": mimetype,
                 "file_size": file_length,
@@ -974,6 +1012,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                 "message_url": url,
                 "media_type": "audio",
                 "ptt": is_ptt,
+                "waveform": waveform,
             }
 
         # 9: videoMessage
@@ -1182,6 +1221,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                         )
                         file_sha256 = aud_f.get(3, [(2, b"")])[0][1] if 3 in aud_f else b""
                         file_length = aud_f.get(4, [(0, 0)])[0][1] if 4 in aud_f else 0
+                        waveform = aud_f.get(19, [(2, b"")])[0][1] if 19 in aud_f else None
                         media_info = {
                             "mime_type": mimetype,
                             "file_size": file_length,
@@ -1189,6 +1229,7 @@ def decode_wmi(wmi_bytes: bytes) -> dict:
                             "media_name": None,
                             "message_url": url,
                             "media_type": "audio",
+                            "waveform": waveform,
                         }
 
                     # 9: videoMessage
@@ -3614,6 +3655,8 @@ def apply_protocol_record(
                         pass
                 if get_table_columns(conn, "message_media", schema_cache):
                     cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (target_id,))
+                if get_table_columns(conn, "audio_data", schema_cache):
+                    cur.execute("DELETE FROM audio_data WHERE message_row_id = ?", (target_id,))
                 if get_table_columns(conn, "message_text", schema_cache):
                     cur.execute("DELETE FROM message_text WHERE message_row_id = ?", (target_id,))
                 if get_table_columns(conn, "message_thumbnail", schema_cache):
@@ -4065,6 +4108,7 @@ def apply_message_deletions(
     has_vcard = bool(get_table_columns(conn, "message_vcard", schema_cache))
     has_edit = bool(get_table_columns(conn, "message_edit_info", schema_cache))
     has_media = bool(get_table_columns(conn, "message_media", schema_cache))
+    has_audio_data = bool(get_table_columns(conn, "audio_data", schema_cache))
     has_quoted = bool(get_table_columns(conn, "message_quoted", schema_cache))
     has_quoted_media = bool(get_table_columns(conn, "message_quoted_media", schema_cache))
     has_quoted_text = bool(get_table_columns(conn, "message_quoted_text", schema_cache))
@@ -4149,6 +4193,11 @@ def apply_message_deletions(
         if has_media:
             cur.execute(
                 f"DELETE FROM message_media WHERE message_row_id IN ({placeholders})",
+                chunk,
+            )
+        if has_audio_data:
+            cur.execute(
+                f"DELETE FROM audio_data WHERE message_row_id IN ({placeholders})",
                 chunk,
             )
         if has_quoted:
@@ -4487,10 +4536,15 @@ def resolve_or_create_chat(
 
         # 3. If phone JID, check if chat exists mapped via jid_map to account_jid_row_id or shadow chat
         if chat_id is None and jid_server == "s.whatsapp.net" and has_jid_map:
+            jm_condition = (
+                "(c.account_jid_row_id = jm.lid_row_id OR c.jid_row_id = jm.lid_row_id)"
+                if has_account_jid
+                else "c.jid_row_id = jm.lid_row_id"
+            )
             cur.execute(
                 f"""
                 SELECT c._id FROM chat c
-                JOIN jid_map jm ON (c.account_jid_row_id = jm.lid_row_id OR c.jid_row_id = jm.lid_row_id)
+                JOIN jid_map jm ON {jm_condition}
                 WHERE jm.jid_row_id = ?
                 {c_order}
                 LIMIT 1
@@ -4608,6 +4662,7 @@ def apply_messages_bin(
         if schema_cache is not None:
             schema_cache["message_revoked"] = {"exists"} if has_message_revoked_table else set()
 
+    has_audio_data_table = bool(get_table_columns(conn, "audio_data", schema_cache))
     has_mms_thumbnail_metadata = bool(
         get_table_columns(conn, "mms_thumbnail_metadata", schema_cache)
     )
@@ -4760,16 +4815,33 @@ def apply_messages_bin(
                             except ValueError:
                                 continue
                             cur.execute(
-                                "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
-                                "VALUES (?, ?, ?, ?, ?)",
+                                """
+                                UPDATE receipt_user
+                                SET receipt_timestamp = COALESCE(?, receipt_timestamp),
+                                    read_timestamp = COALESCE(?, read_timestamp),
+                                    played_timestamp = COALESCE(?, played_timestamp)
+                                WHERE message_row_id = ? AND receipt_user_jid_row_id = ?
+                                """,
                                 (
-                                    existing_id,
-                                    ur_jid_id,
                                     ur.get("receipt_timestamp"),
                                     ur.get("read_timestamp"),
                                     ur.get("played_timestamp"),
+                                    existing_id,
+                                    ur_jid_id,
                                 ),
                             )
+                            if cur.rowcount == 0:
+                                cur.execute(
+                                    "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
+                                    "VALUES (?, ?, ?, ?, ?)",
+                                    (
+                                        existing_id,
+                                        ur_jid_id,
+                                        ur.get("receipt_timestamp"),
+                                        ur.get("read_timestamp"),
+                                        ur.get("played_timestamp"),
+                                    ),
+                                )
             if msg.get("from_me") and msg.get("status", 0) > 0 and msg.get("key_id"):
                 existing_id = key_cache.get(msg["key_id"]) or find_message_row_id(
                     conn, msg["key_id"], key_cache
@@ -5010,6 +5082,10 @@ def apply_messages_bin(
                     cur.execute("DELETE FROM message_media WHERE message_row_id = ?", (msg_row_id,))
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    cur.execute("DELETE FROM audio_data WHERE message_row_id = ?", (msg_row_id,))
+                except sqlite3.OperationalError:
+                    pass
 
             # Apply poll creation metadata
             if msg.get("poll_info"):
@@ -5049,6 +5125,14 @@ def apply_messages_bin(
                     f"INSERT OR REPLACE INTO message_media ({', '.join(target_media_cols)}) VALUES ({', '.join('?' for _ in target_media_cols)})",
                     [media_row_map[c] for c in target_media_cols],
                 )
+                if has_audio_data_table and media.get("waveform"):
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO audio_data (message_row_id, waveform) VALUES (?, ?)",
+                            (msg_row_id, media["waveform"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
 
             # Update location record if present
             if msg.get("location_info"):
@@ -5169,6 +5253,12 @@ def apply_messages_bin(
                         )
                     except sqlite3.OperationalError:
                         pass
+                    try:
+                        cur.execute(
+                            "DELETE FROM audio_data WHERE message_row_id = ?", (msg_row_id,)
+                        )
+                    except sqlite3.OperationalError:
+                        pass
             elif is_stub and has_message_system_table and msg_row_id and msg["message_type"] == 7:
                 try:
                     cur.execute(
@@ -5213,6 +5303,14 @@ def apply_messages_bin(
                     "transferred": 1,
                 }
                 cur.execute(sql_insert_media, [media_row_map[c] for c in target_media_cols])
+                if has_audio_data_table and media.get("waveform"):
+                    try:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO audio_data (message_row_id, waveform) VALUES (?, ?)",
+                            (msg_row_id, media["waveform"]),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
 
             # Insert location record
             if msg.get("location_info") and msg_row_id:
@@ -5310,9 +5408,15 @@ def apply_messages_bin(
 
             # Insert message_quoted record and rich auxiliary tables
             if msg.get("quoted_info") and msg_row_id:
+                qi = msg["quoted_info"]
+                has_quote_payload = bool(
+                    qi.get("stanza_id")
+                    or qi.get("quoted_text")
+                    or qi.get("participant")
+                    or qi.get("thumbnail")
+                )
                 quoted_cols = get_table_columns(conn, "message_quoted", schema_cache)
-                if quoted_cols:
-                    qi = msg["quoted_info"]
+                if has_quote_payload and quoted_cols:
                     q_part = qi.get("participant", "")
                     if is_group and q_part and qi.get("from_me") != 1:
                         try:
@@ -5477,6 +5581,34 @@ def apply_messages_bin(
                             [mqm_map[c] for c in valid_mqm],
                         )
 
+                for m_tbl, m_key in (
+                    ("message_mentions", "mentioned_jids"),
+                    ("message_quoted_mentions", "quoted_mentioned_jids"),
+                ):
+                    if m_tbl == "message_quoted_mentions" and not has_quote_payload:
+                        continue
+                    m_jids = qi.get(m_key) or []
+                    if not m_jids:
+                        continue
+                    m_cols = get_table_columns(conn, m_tbl, schema_cache)
+                    if {"message_row_id", "jid_row_id"}.issubset(m_cols):
+                        for mj in m_jids:
+                            if not is_valid_jid_string(mj):
+                                continue
+                            try:
+                                mj_id = resolve_or_create_jid(conn, mj, logger, jid_cache)
+                            except (ValueError, Exception):
+                                continue
+                            existing_m = cur.execute(
+                                f"SELECT 1 FROM {m_tbl} WHERE message_row_id = ? AND jid_row_id = ? LIMIT 1",
+                                (msg_row_id, mj_id),
+                            ).fetchone()
+                            if not existing_m:
+                                cur.execute(
+                                    f"INSERT INTO {m_tbl} (message_row_id, jid_row_id) VALUES (?, ?)",
+                                    (msg_row_id, mj_id),
+                                )
+
         # Insert user receipts if present
         if msg.get("user_receipts") and msg_row_id:
             ru_cols = get_table_columns(conn, "receipt_user", schema_cache)
@@ -5494,16 +5626,33 @@ def apply_messages_bin(
                     except ValueError:
                         continue
                     cur.execute(
-                        "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
-                        "VALUES (?, ?, ?, ?, ?)",
+                        """
+                        UPDATE receipt_user
+                        SET receipt_timestamp = COALESCE(?, receipt_timestamp),
+                            read_timestamp = COALESCE(?, read_timestamp),
+                            played_timestamp = COALESCE(?, played_timestamp)
+                        WHERE message_row_id = ? AND receipt_user_jid_row_id = ?
+                        """,
                         (
-                            msg_row_id,
-                            ur_jid_id,
                             ur.get("receipt_timestamp"),
                             ur.get("read_timestamp"),
                             ur.get("played_timestamp"),
+                            msg_row_id,
+                            ur_jid_id,
                         ),
                     )
+                    if cur.rowcount == 0:
+                        cur.execute(
+                            "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (
+                                msg_row_id,
+                                ur_jid_id,
+                                ur.get("receipt_timestamp"),
+                                ur.get("read_timestamp"),
+                                ur.get("played_timestamp"),
+                            ),
+                        )
 
         # Apply embedded reactions from WMI Tag 41 if present
         if msg.get("embedded_reactions") and msg_row_id:
@@ -5688,7 +5837,10 @@ def apply_messages_bin(
                                 for tbl, col in [
                                     ("message_quoted_media", "message_row_id"),
                                     ("message_quoted_text", "message_row_id"),
+                                    ("message_mentions", "message_row_id"),
+                                    ("message_quoted_mentions", "message_row_id"),
                                     ("message_media", "message_row_id"),
+                                    ("audio_data", "message_row_id"),
                                     ("receipt_user", "message_row_id"),
                                     ("message_view_once_media", "message_row_id"),
                                     ("message_secret", "message_row_id"),
@@ -5997,8 +6149,9 @@ def apply_messages_bin(
             q_ts = key_ts_cache.get(q_stanza_id, 0)
             q_fm = 0
             q_s_id = 0
+            target_mid = None
             cur.execute(
-                "SELECT timestamp, from_me, sender_jid_row_id FROM message WHERE key_id = ?",
+                "SELECT timestamp, from_me, sender_jid_row_id, _id FROM message WHERE key_id = ?",
                 (q_stanza_id,),
             )
             t_row = cur.fetchone()
@@ -6006,7 +6159,7 @@ def apply_messages_bin(
             if not (t_row and t_row[0]) and has_edit_tbl:
                 cur.execute(
                     """
-                    SELECT m.timestamp, m.from_me, m.sender_jid_row_id
+                    SELECT m.timestamp, m.from_me, m.sender_jid_row_id, m._id
                     FROM message m
                     JOIN message_edit_info mei ON mei.message_row_id = m._id
                     WHERE mei.original_key_id = ?
@@ -6020,6 +6173,8 @@ def apply_messages_bin(
                 key_ts_cache[q_stanza_id] = q_ts
                 q_fm = int(t_row[1] or 0)
                 q_s_id = 0 if q_fm == 1 else (int(t_row[2]) if t_row[2] is not None else 0)
+                if len(t_row) > 3 and t_row[3] is not None:
+                    target_mid = int(t_row[3])
             if q_ts:
                 cur.execute(
                     "UPDATE message_quoted SET timestamp = ?, from_me = ?, sender_jid_row_id = ? WHERE message_row_id = ?",
@@ -6867,6 +7022,7 @@ def merge_increments(
             )
             tables_to_check = [
                 ("message_media", "message_row_id"),
+                ("audio_data", "message_row_id"),
                 ("message_vcard", "message_row_id"),
                 ("message_location", "message_row_id"),
                 ("message_text", "message_row_id"),

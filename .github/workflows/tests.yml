@@ -4,13 +4,29 @@ on:
   push:
     paths:
       - '**.py'
+      - 'wab_viewer/chat_viewer/**'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
+      - '!**.png'
+      - '!**.jpg'
+      - '!**.jpeg'
+      - '!**.gif'
+      - '!**.webp'
+      - '!**.ico'
+      - '!**.svg'
   pull_request:
     paths:
       - '**.py'
+      - 'wab_viewer/chat_viewer/**'
       - 'pyproject.toml'
       - '.github/workflows/tests.yml'
+      - '!**.png'
+      - '!**.jpg'
+      - '!**.jpeg'
+      - '!**.gif'
+      - '!**.webp'
+      - '!**.ico'
+      - '!**.svg'
 
 jobs:
   lint:
@@ -36,6 +52,7 @@ jobs:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
@@ -52,6 +69,10 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          echo "### Test Coverage Summary (${{ matrix.os }})" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          pytest tests/ -v --cov=wab_archiver --cov=wab_viewer --cov=shared --cov-report=term-missing --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            echo "### Test Coverage Summary" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            pytest tests/ -v --cov=wab_archiver --cov=wab_viewer --cov=shared --cov-report=term-missing --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
+          else
+            pytest tests/ -v
+          fi

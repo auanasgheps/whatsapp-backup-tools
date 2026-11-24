@@ -92,6 +92,8 @@ PRESERVED_SCHEMA_TABLES = """
         action_type                  INTEGER,
         participant_name             TEXT,
         service_metadata             TEXT,
+        mentions                     TEXT,
+        waveform                     BLOB,
         preserved_at                 TEXT NOT NULL,
         preservation_reason          TEXT NOT NULL,
         source_platform              TEXT NOT NULL,
@@ -195,6 +197,11 @@ NEW_V2_MESSAGE_COLUMNS: list[tuple[str, str]] = [
     ("service_metadata", "TEXT"),
 ]
 
+NEW_V3_MESSAGE_COLUMNS: list[tuple[str, str]] = [
+    ("mentions", "TEXT"),
+    ("waveform", "BLOB"),
+]
+
 NEW_V2_CHAT_COLUMNS: list[tuple[str, str]] = [
     ("chat_jid", "TEXT"),
     ("subject", "TEXT"),
@@ -293,6 +300,15 @@ def open_preservation_db(output_root: str) -> sqlite3.Connection:
             """)
 
         conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+
+    if user_ver < 3:
+        existing_msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(preserved_messages)")}
+        for col_name, col_def in NEW_V3_MESSAGE_COLUMNS:
+            if col_name not in existing_msg_cols:
+                conn.execute(f"ALTER TABLE preserved_messages ADD COLUMN {col_name} {col_def}")
+                existing_msg_cols.add(col_name)
+        conn.execute("PRAGMA user_version = 3")
         conn.commit()
 
     conn.executescript(PRESERVED_SCHEMA_INDEXES)
@@ -415,12 +431,15 @@ def _ensure_ios_diff_indexes(conn: sqlite3.Connection) -> None:
     """Ensure indexes on ZSTANZAID and fallback columns exist for fast diff performance."""
     with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pres_cur_stanza ON ZWAMESSAGE(ZSTANZAID)")
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pres_old_stanza ON old_db.ZWAMESSAGE(ZSTANZAID)"
+            "CREATE INDEX IF NOT EXISTS old_db.idx_pres_old_stanza ON ZWAMESSAGE(ZSTANZAID)"
         )
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pres_cur_fallback ON ZWAMESSAGE(ZCHATSESSION, ZMESSAGEDATE, ZISFROMME)"
         )
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pres_cur_revoked ON ZWAMESSAGE(ZSTANZAID) WHERE ZMESSAGETYPE = 14"
         )
@@ -707,6 +726,256 @@ def hydrate_ios_link_previews(
             )
 
 
+def _load_archive_contacts_map(archive_db_path: Path | str | None) -> dict[str, str]:
+    """Load clean_number -> display_name/folder lookup from .wa_media_archiver.db."""
+    contacts: dict[str, str] = {}
+    if not archive_db_path:
+        return contacts
+    p = Path(archive_db_path)
+    if not p.is_file():
+        return contacts
+    try:
+        with contextlib.closing(sqlite3.connect(str(p))) as aconn:
+            for num, dname, folder in aconn.execute(
+                "SELECT number, display_name, folder FROM contacts"
+            ).fetchall():
+                clean = "".join(ch for ch in str(num or "") if ch.isdigit())
+                name = (dname or "").strip() or (folder or "").strip()
+                if clean and name:
+                    contacts[clean] = name
+    except sqlite3.Error:
+        pass
+    return contacts
+
+
+def _is_masked_lid_display(name: str | None) -> bool:
+    """Return True if lid_display_name is privacy-masked with bullet characters."""
+    if not name:
+        return True
+    s = name.strip()
+    return not s or "\u2219" in s or "∙" in s or "•" in s
+
+
+def hydrate_android_mentions_for_preservation(
+    conn: sqlite3.Connection,
+    extracted_rows: list[dict],
+    db_prefix: str,
+    contacts_map: dict[str, str],
+) -> None:
+    """Populate serialized mentions JSON on Android extracted rows before source deletion."""
+    if not extracted_rows:
+        return
+    schema_name = db_prefix.rstrip(".") or "main"
+    tables = {
+        r[0]
+        for r in conn.execute(
+            f"SELECT name FROM {schema_name}.sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "jid" not in tables:
+        return
+    mention_tables = [t for t in ("message_mentions", "message_quoted_mentions") if t in tables]
+    if not mention_tables:
+        return
+
+    has_jid_map = "jid_map" in tables
+    has_ldn = "lid_display_name" in tables
+    jid_cols = {r[1] for r in conn.execute(f"PRAGMA {schema_name}.table_info(jid)").fetchall()}
+    has_server = "server" in jid_cols
+    has_raw = "raw_string" in jid_cols
+
+    jm_join = (
+        f"LEFT JOIN {db_prefix}jid_map jm ON jm.lid_row_id = j._id "
+        f"LEFT JOIN {db_prefix}jid j2 ON j2._id = jm.jid_row_id "
+        if has_jid_map
+        else ""
+    )
+    ldn_join = (
+        f"LEFT JOIN {db_prefix}lid_display_name ldn ON ldn.lid_row_id = j._id " if has_ldn else ""
+    )
+    j_srv = "j.server" if has_server else "''"
+    j_raw = "j.raw_string" if has_raw else "''"
+    j2_usr = "j2.user" if has_jid_map else "NULL"
+    j2_raw = ("j2.raw_string" if has_raw else "''") if has_jid_map else "''"
+    ldn_col = "ldn.display_name" if has_ldn else "NULL"
+
+    m_ids = [int(r["msg_id"]) for r in extracted_rows if r.get("msg_id")]
+    if not m_ids:
+        return
+
+    per_msg: dict[int, dict[str, dict]] = {}
+    for tbl in mention_tables:
+        for i in range(0, len(m_ids), 400):
+            chunk = m_ids[i : i + 400]
+            ph = ",".join("?" * len(chunk))
+            sql = f"""
+                SELECT mm.message_row_id, j.user, {j_srv}, {j_raw}, {j2_usr}, {j2_raw}, {ldn_col}
+                FROM {db_prefix}{tbl} mm
+                JOIN {db_prefix}jid j ON j._id = mm.jid_row_id
+                {jm_join}
+                {ldn_join}
+                WHERE mm.message_row_id IN ({ph})
+            """
+            with contextlib.suppress(sqlite3.OperationalError):
+                for row in conn.execute(sql, chunk).fetchall():
+                    mid = int(row[0])
+                    cu = (row[1] or "").split(":")[0]
+                    if not cu:
+                        continue
+                    c2 = (row[4] or "").split(":")[0]
+                    is_self = (
+                        (row[3] == "lid_me") or (cu == "me") or (row[5] == "lid_me") or (c2 == "me")
+                    )
+                    is_lid = (row[2] == "lid") or (row[3] or "").endswith("@lid")
+                    c_name = contacts_map.get(c2 or cu) or contacts_map.get(cu)
+                    if is_self:
+                        name = "You"
+                    elif c_name:
+                        name = c_name
+                    elif row[6] and not _is_masked_lid_display(row[6]):
+                        name = str(row[6]).strip()
+                    elif c2:
+                        name = f"+{c2}"
+                    elif not is_lid and cu.isdigit():
+                        name = f"+{cu}"
+                    else:
+                        name = f"{cu} (Unknown)"
+                    per_msg.setdefault(mid, {})[cu] = {
+                        "name": name,
+                        "chat_id": None,
+                        "chat_type": None,
+                        "is_self": is_self,
+                    }
+
+    for r in extracted_rows:
+        mid = int(r["msg_id"]) if r.get("msg_id") else 0
+        if mid in per_msg:
+            r["mentions"] = json.dumps(per_msg[mid], ensure_ascii=False, separators=(",", ":"))
+
+
+def _extract_zmetadata_mentions(raw_meta: bytes | None) -> list[str]:
+    """Extract Tag 8 root / Tag 15 (mentionedJid) strings from an iOS ZWAMEDIAITEM.ZMETADATA blob."""
+    if not raw_meta or not isinstance(raw_meta, (bytes, bytearray)):
+        return []
+    data = bytes(raw_meta)
+    jids: list[str] = []
+    offset = 0
+    n = len(data)
+    while offset < n:
+        try:
+            tag, offset = _read_protobuf_varint(data, offset)
+        except ValueError:
+            break
+        field_num = tag >> 3
+        wire_type = tag & 0x07
+        if wire_type == 0:
+            try:
+                _, offset = _read_protobuf_varint(data, offset)
+            except ValueError:
+                break
+        elif wire_type == 2:
+            try:
+                length, offset = _read_protobuf_varint(data, offset)
+            except ValueError:
+                break
+            if length < 0 or offset + length > n:
+                break
+            val = data[offset : offset + length]
+            offset += length
+            if field_num in (8, 15) and val:
+                j = val.decode("utf-8", errors="replace").strip()
+                if j and "@" in j:
+                    jids.append(j)
+        elif wire_type == 1:
+            offset += 8
+        elif wire_type == 5:
+            offset += 4
+        else:
+            break
+    return list(dict.fromkeys(jids))
+
+
+def hydrate_ios_mentions_for_preservation(
+    conn: sqlite3.Connection,
+    extracted_rows: list[dict],
+    old_tables: set[str],
+    mi_cols: set[str],
+    contacts_map: dict[str, str],
+) -> None:
+    """Populate serialized mentions JSON on iOS extracted rows before source deletion."""
+    if not extracted_rows or "ZWAMEDIAITEM" not in old_tables or "ZMETADATA" not in mi_cols:
+        return
+    m_ids = [int(r["msg_id"]) for r in extracted_rows if r.get("msg_id")]
+    if not m_ids:
+        return
+
+    pp_map: dict[str, str] = {}
+    if "ZWAPROFILEPUSHNAME" in old_tables:
+        with contextlib.suppress(sqlite3.OperationalError):
+            for zjid, zpname in conn.execute(
+                "SELECT ZJID, ZPUSHNAME FROM old_db.ZWAPROFILEPUSHNAME WHERE ZPUSHNAME IS NOT NULL AND ZPUSHNAME != ''"
+            ).fetchall():
+                pp_map[str(zjid)] = str(zpname)
+
+    cs_map: dict[str, str] = {}
+    if "ZWACHATSESSION" in old_tables:
+        with contextlib.suppress(sqlite3.OperationalError):
+            for zjid, zpname in conn.execute(
+                "SELECT ZCONTACTJID, ZPARTNERNAME FROM old_db.ZWACHATSESSION WHERE ZCONTACTJID IS NOT NULL AND ZPARTNERNAME IS NOT NULL AND ZPARTNERNAME != ''"
+            ).fetchall():
+                cs_map[str(zjid)] = str(zpname)
+
+    meta_by_mid: dict[int, list[str]] = {}
+    for i in range(0, len(m_ids), 400):
+        chunk = m_ids[i : i + 400]
+        ph = ",".join("?" * len(chunk))
+        with contextlib.suppress(sqlite3.OperationalError):
+            for mid, raw_meta in conn.execute(
+                f"""
+                SELECT m.Z_PK, mi.ZMETADATA
+                FROM old_db.ZWAMESSAGE m
+                JOIN old_db.ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
+                WHERE m.Z_PK IN ({ph}) AND mi.ZMETADATA IS NOT NULL
+                """,
+                chunk,
+            ).fetchall():
+                jids = _extract_zmetadata_mentions(raw_meta)
+                if jids:
+                    meta_by_mid[int(mid)] = jids
+
+    for r in extracted_rows:
+        mid = int(r["msg_id"]) if r.get("msg_id") else 0
+        jids = meta_by_mid.get(mid)
+        if not jids:
+            continue
+        m_dict: dict[str, dict] = {}
+        for jid_str in jids:
+            user_part, _, server = jid_str.partition("@")
+            cu = user_part.split(":")[0]
+            if not cu:
+                continue
+            canon = f"{cu}@{server}" if server else cu
+            is_lid = server == "lid"
+            c_name = contacts_map.get(cu) if not is_lid else None
+            push = pp_map.get(canon) or cs_map.get(canon)
+            if c_name:
+                name = c_name
+            elif push:
+                name = push
+            elif not is_lid and cu.isdigit():
+                name = f"+{cu}"
+            else:
+                name = f"{cu} (Unknown)"
+            m_dict[cu] = {
+                "name": name,
+                "chat_id": None,
+                "chat_type": None,
+                "is_self": False,
+            }
+        if m_dict:
+            r["mentions"] = json.dumps(m_dict, ensure_ascii=False, separators=(",", ":"))
+
+
 def diff_and_extract_android(
     old_db_path: str, new_db_path: str, archive_db_path: str, logger: logging.Logger
 ) -> list[dict]:
@@ -767,6 +1036,8 @@ def diff_and_extract_android(
         has_arch_copies = "archive_copies" in arch_tables
         has_message_text = "message_text" in old_tables
         has_message_thumbnail = "message_thumbnail" in old_tables
+        has_audio_data = "audio_data" in old_tables
+        ad_wave_col = "ad.waveform" if has_audio_data else "NULL"
 
         msg_cols = (
             {r[1] for r in conn.execute("PRAGMA old_db.table_info(message)").fetchall()}
@@ -913,6 +1184,9 @@ def diff_and_extract_android(
         )
         mv_join = (
             "LEFT JOIN old_db.message_vcard mv ON mv.message_row_id = m._id" if has_vcard else ""
+        )
+        ad_join = (
+            "LEFT JOIN old_db.audio_data ad ON ad.message_row_id = m._id" if has_audio_data else ""
         )
         mvom_join = (
             "LEFT JOIN old_db.message_view_once_media mvom ON mvom.message_row_id = m._id"
@@ -1150,6 +1424,7 @@ def diff_and_extract_android(
                 {chat_created_ts_expr} AS _chat_created_ts,
                 {chat_creator_jid_expr} AS _chat_creator_jid,
                 {chat_gjid_expr} AS _chat_group_jid_id,
+                {ad_wave_col} AS waveform,
                 CASE
                     WHEN {is_device_reset} THEN 'device_reset'
                     WHEN NOT EXISTS (
@@ -1180,6 +1455,7 @@ def diff_and_extract_android(
             {con_sq_join}
             {con_mscp_join}
             {ac_join}
+            {ad_join}
             WHERE m._id IN ({{placeholders}})
         """
 
@@ -1257,6 +1533,7 @@ def diff_and_extract_android(
                 {chat_created_ts_expr} AS _chat_created_ts,
                 {chat_creator_jid_expr} AS _chat_creator_jid,
                 {chat_gjid_expr} AS _chat_group_jid_id,
+                {ad_wave_col} AS waveform,
                 CASE
                     WHEN cur.message_type = 64 THEN 'revoked_by_admin'
                     ELSE 'revoked_by_sender'
@@ -1281,6 +1558,7 @@ def diff_and_extract_android(
             {con_sq_join}
             {con_mscp_join}
             {ac_join}
+            {ad_join}
             WHERE m.message_type NOT IN (7, 15, 64)
               AND {android_content_pred}
               AND cur.message_type IN (15, 64)
@@ -1336,6 +1614,7 @@ def diff_and_extract_android(
             if has_add_on and extracted_rows:
                 msg_ids = [r["msg_id"] for r in extracted_rows]
                 chunk_size_rx = 900
+                all_rx_map: dict[int, str] = {}
                 for i in range(0, len(msg_ids), chunk_size_rx):
                     chunk = msg_ids[i : i + chunk_size_rx]
                     ph = ",".join("?" * len(chunk))
@@ -1348,10 +1627,12 @@ def diff_and_extract_android(
                         GROUP BY ao.parent_message_row_id
                     """
                     with contextlib.suppress(sqlite3.OperationalError):
-                        rx_map = dict(conn.execute(rx_sql, chunk).fetchall())
-                        for row in extracted_rows:
-                            if row["msg_id"] in rx_map:
-                                row["reactions"] = rx_map[row["msg_id"]]
+                        all_rx_map.update(dict(conn.execute(rx_sql, chunk).fetchall()))
+
+                if all_rx_map:
+                    for row in extracted_rows:
+                        if row["msg_id"] in all_rx_map:
+                            row["reactions"] = all_rx_map[row["msg_id"]]
 
             # 4. Hydrate interactive poll options and vote counts
             if has_poll_option and extracted_rows:
@@ -1449,12 +1730,17 @@ def diff_and_extract_android(
 
             # 5. Hydrate pinned status and expiry
             if has_pin and has_add_on and extracted_rows:
+                old_ao_cols = {
+                    r[1]
+                    for r in conn.execute("PRAGMA old_db.table_info(message_add_on)").fetchall()
+                }
+                exp_col = "ao.expiry_timestamp" if "expiry_timestamp" in old_ao_cols else "NULL"
                 msg_ids = [r["msg_id"] for r in extracted_rows]
                 for i in range(0, len(msg_ids), 900):
                     chunk = msg_ids[i : i + 900]
                     ph = ",".join("?" * len(chunk))
                     pin_sql = f"""
-                        SELECT ao.parent_message_row_id, pic.pin_in_chat_state, ao.expiry_timestamp
+                        SELECT ao.parent_message_row_id, pic.pin_in_chat_state, {exp_col}
                         FROM old_db.message_add_on ao
                         JOIN old_db.message_add_on_pin_in_chat pic ON pic.message_add_on_row_id = ao._id
                         WHERE ao.parent_message_row_id IN ({ph})
@@ -1536,6 +1822,12 @@ def diff_and_extract_android(
                 "old_db.",
                 has_message_text,
                 has_message_thumbnail,
+            )
+            hydrate_android_mentions_for_preservation(
+                conn,
+                extracted_rows,
+                "old_db.",
+                _load_archive_contacts_map(archive_db_path),
             )
 
             # 8. Hydrate deleted group member roster
@@ -2440,6 +2732,7 @@ def diff_and_extract_ios(
                 {creator_jid_col} AS _chat_creator_jid,
                 m.ZCHATSESSION AS _chat_session_pk,
                 {msg_info_col} AS _msg_info_pk,
+                NULL AS waveform,
                 CASE
                     WHEN {is_device_reset} THEN 'device_reset'
                     WHEN NOT EXISTS (
@@ -2539,6 +2832,7 @@ def diff_and_extract_ios(
                 {creator_jid_col} AS _chat_creator_jid,
                 m.ZCHATSESSION AS _chat_session_pk,
                 {msg_info_col} AS _msg_info_pk,
+                NULL AS waveform,
                 'revoked_by_sender' AS preservation_reason
             FROM old_db.ZWAMESSAGE m
             JOIN ZWAMESSAGE cur ON cur.ZSTANZAID = m.ZSTANZAID
@@ -2685,6 +2979,13 @@ def diff_and_extract_ios(
                 has_arch_copies,
                 archive_root,
                 old_db_dir,
+            )
+            hydrate_ios_mentions_for_preservation(
+                conn,
+                extracted_rows,
+                old_tables,
+                mi_cols,
+                _load_archive_contacts_map(archive_db_path),
             )
 
             progress.finish({"deleted": deleted_count, "revoked": revoked_count})
@@ -2888,7 +3189,7 @@ def record_preserved_messages(
             live_location_share_duration, poll_data, quoted_text, quoted_sender,
             quoted_ts, quoted_stanza_id, quoted_parent_type, reactions, is_edited,
             edited_ts, is_starred, is_pinned, pin_expiry_ts, action_type,
-            participant_name, service_metadata, preserved_at, preservation_reason,
+            participant_name, service_metadata, mentions, waveform, preserved_at, preservation_reason,
             source_platform
         ) VALUES (
             :chat_id, :chat_jid, :chat_type, :stanza_id, :msg_id, :timestamp_ms,
@@ -2899,7 +3200,7 @@ def record_preserved_messages(
             :live_location_share_duration, :poll_data, :quoted_text, :quoted_sender,
             :quoted_ts, :quoted_stanza_id, :quoted_parent_type, :reactions, :is_edited,
             :edited_ts, :is_starred, :is_pinned, :pin_expiry_ts, :action_type,
-            :participant_name, :service_metadata, :preserved_at, :preservation_reason,
+            :participant_name, :service_metadata, :mentions, :waveform, :preserved_at, :preservation_reason,
             :source_platform
         )
     """
@@ -2991,6 +3292,8 @@ def record_preserved_messages(
                     "action_type": r.get("action_type"),
                     "participant_name": r.get("participant_name") or "",
                     "service_metadata": r.get("service_metadata"),
+                    "mentions": r.get("mentions"),
+                    "waveform": bytes(r["waveform"]) if r.get("waveform") else None,
                     "preserved_at": r.get("preserved_at") or now_iso,
                     "preservation_reason": r.get("preservation_reason") or "deleted_on_phone",
                     "source_platform": r.get("source_platform") or platform,
@@ -3630,6 +3933,12 @@ def preserve_incremental_deletions(
         "",
         has_message_text,
         has_message_thumbnail,
+    )
+    hydrate_android_mentions_for_preservation(
+        conn,
+        extracted_rows,
+        "",
+        _load_archive_contacts_map(Path(output_root) / ".wa_media_archiver.db"),
     )
 
     with contextlib.closing(open_preservation_db(output_root)) as pres_conn:

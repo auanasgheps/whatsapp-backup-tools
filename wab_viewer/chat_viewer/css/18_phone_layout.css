@@ -1,0 +1,84 @@
+    /* ---- phone layout ----
+       Up to 600px (the breakpoint of the other max-width: 600px blocks, PHONE_LAYOUT_QUERY in 00_state.js)
+       the chat list and the chat pane become two levels, like the WhatsApp app: the list first, then the
+       open chat (or a call's details) full screen with a back button. body.pane-open is toggled by
+       showDetailPane() / showListPane() in 03_navigation.js. Wider screens are unchanged. */
+    .pane-back-btn { display: none; }
+
+    @media (max-width: 600px) {
+      #sidebar {
+        width: 100%;
+        max-width: none;
+        border-right: 0;
+      }
+
+      #chat-pane {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        background: var(--bg);
+        transform: translateX(100%);
+        visibility: hidden;
+        box-shadow: -4px 0 24px rgba(0, 0, 0, 0.2);
+        transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+                    visibility 0s 0.22s;
+        will-change: transform;
+      }
+
+      body.pane-open #header,
+      body.pane-open #sidebar {
+        visibility: hidden;
+        transition: visibility 0s 0.22s;
+        pointer-events: none;
+        user-select: none;
+      }
+
+      body.pane-open #chat-pane {
+        transform: translateX(0);
+        visibility: visible;
+        transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+                    visibility 0s 0s;
+      }
+
+      .pane-back-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        width: 40px;
+        height: 40px;
+        margin: 0 0 0 -8px;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: none;
+        color: var(--text);
+        cursor: pointer;
+      }
+      .pane-back-btn:focus-visible {
+        outline: none;
+        box-shadow: 0 0 0 2px var(--accent);
+      }
+
+      /* Call details: the back button sits above the card and stays in view while the pane scrolls. */
+      #call-back-btn {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        align-self: flex-start;
+        margin: -16px 0 8px -16px;
+        background: var(--bg);
+      }
+    }
+    @media (max-width: 600px) and (hover: hover) {
+      .pane-back-btn:hover { background: var(--surface2); }
+    }
+    @media (max-width: 600px) and (prefers-reduced-motion: reduce) {
+      #chat-pane {
+        transition: none;
+      }
+      body.pane-open #header,
+      body.pane-open #sidebar {
+        transition: none;
+      }
+    }

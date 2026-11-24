@@ -1,0 +1,228 @@
+    /* ---- app shell ---- */
+    #app { display: flex; flex-direction: column; height: 100vh; }
+
+    #header {
+      background: var(--surface);
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+      min-height: 56px;
+    }
+    #header-brand {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    #header h1 { font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
+    #header .subtitle { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #header .platform-badge { color: var(--accent); font-weight: 600; }
+
+    #settings-btn {
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: var(--text-muted);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      margin: 0;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      flex-shrink: 0;
+    }
+    #settings-btn:hover {
+      background: var(--surface2);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    #settings-btn:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 2px var(--accent);
+    }
+    .settings-btn-label {
+      font-size: 12px;
+      line-height: 1;
+    }
+    @media (max-width: 600px) {
+      .settings-btn-label {
+        display: none;
+      }
+      #settings-btn {
+        padding: 6px 8px;
+      }
+    }
+
+    #body { display: flex; flex: 1; overflow: hidden; }
+
+    /* ---- sidebar ---- */
+    #sidebar {
+      width: var(--sidebar-w);
+      max-width: 42vw;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    #sidebar-filters {
+      display: flex;
+      gap: 4px;
+      padding: 8px 10px 4px;
+      flex-shrink: 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .filter-btn {
+      flex: 1;
+      background: var(--surface2);
+      border: none;
+      border-radius: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 4px 0;
+      margin: 0;
+    }
+    .filter-btn.active { background: var(--accent); color: #fff; }
+    .filter-btn:hover:not(.active) { background: var(--border); color: var(--text); }
+    .filter-btn { transition: background 0.15s, color 0.15s; }
+
+    #search-box {
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      position: relative;
+      flex-shrink: 0;
+    }
+    #search-input {
+      width: 100%;
+      flex: 1;
+      height: 36px;
+      background: var(--surface2);
+      border: none;
+      border-radius: 8px;
+      padding: 8px 32px 8px 12px;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+      margin: 0;
+    }
+    #search-input::-webkit-search-cancel-button,
+    #search-input::-webkit-search-decoration {
+      -webkit-appearance: none;
+      appearance: none;
+      display: none;
+    }
+    #search-input:focus { box-shadow: 0 0 0 2px var(--accent); }
+    #search-clear {
+      position: absolute;
+      right: 18px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      padding: 4px;
+      margin: 0;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      min-height: 0;
+      z-index: 2;
+    }
+    #search-clear:hover { color: var(--text); background: var(--surface); }
+
+    /* ---- sidebar docked bottom navbar ---- */
+    #sidebar-bottom-bar {
+      height: 56px;
+      min-height: 56px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      flex-shrink: 0;
+      padding: 0 4px;
+    }
+    #sidebar-bottom-bar .tab-btn {
+      flex: 1;
+      min-height: 48px;
+      background: none;
+      border: none;
+      border-radius: 8px;
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      padding: 4px 2px;
+      margin: 0;
+      transition: color 0.15s, background 0.15s;
+    }
+    #sidebar-bottom-bar .tab-btn svg {
+      transition: transform 0.15s ease;
+    }
+    #sidebar-bottom-bar .tab-btn span {
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1;
+    }
+    #sidebar-bottom-bar .tab-btn:hover:not(:disabled) {
+      color: var(--text);
+      background: var(--surface2);
+    }
+    #sidebar-bottom-bar .tab-btn.active {
+      color: var(--accent);
+    }
+    #sidebar-bottom-bar .tab-btn.active span {
+      font-weight: 600;
+    }
+    #sidebar-bottom-bar .tab-btn:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 2px var(--accent);
+    }
+    #sidebar-bottom-bar .tab-btn:disabled,
+    #sidebar-bottom-bar .tab-btn.disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+    .sidebar-tab-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 20px;
+      text-align: center;
+      color: var(--text-muted);
+      gap: 6px;
+    }
+    .sidebar-tab-placeholder .placeholder-icon {
+      font-size: 28px;
+      margin-bottom: 4px;
+    }
+    .sidebar-tab-placeholder strong {
+      color: var(--text);
+      font-size: 13px;
+    }
+    .sidebar-tab-placeholder span {
+      font-size: 12px;
+    }
+

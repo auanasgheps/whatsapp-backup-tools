@@ -49,9 +49,12 @@ You can run the archiver using command-line arguments or via a convenient `confi
   ```bash
   wab-archiver config generate
   ```
-  Rename `example-config.toml` to `config.toml`, fill in your paths, and run simply with `wab-archiver archive`.
-- **Command-Line Arguments**:
-  Specify options directly on the terminal. See the **[Command Reference & Config File](command-reference.md)** for all available options, flags, and examples.
+  Rename `example-config.toml` to `config.toml`, fill in your paths, and run simply with `wab-archiver archive`. See the **[Configuration Guide](configuration.md)** for all options and discovery rules.
+- **Command-Line Arguments & Recipes**:
+  Specify options directly on the terminal. See the **[Command Reference](command-reference.md)** for the full flag specification and **[Recipes & Workflows](recipes.md)** for practical examples.
+
+> 💡 **Tip — Cloud Photo Galleries (Google Photos, Immich, Apple Photos):**  
+> If you plan to sync or upload your archive to cloud photo managers, consider enabling `--exif-timestamps` (or `exif_timestamps = true` in `config.toml`) so message dates are stamped directly into media headers for proper chronological timeline indexing.
 
 ---
 
@@ -103,12 +106,29 @@ When finished, your output folder will be structured as follows:
 │       └── 2024/
 ├── Whatsapp Databases/          ← Decrypted SQLite databases saved for viewer
 ├── preserved_messages.db        ← Preserved deleted messages & chats (when using -P)
+├── wab-archiver.log             ← Execution audit log
 ├── missing_media_report.csv     ← Media referenced in chats but missing from storage
 ├── duplicate_media_report.csv   ← Duplicate media files audited
+├── source_conflicts_report.csv  ← Conflicts across multiple backup roots (--wa-root)
 └── .wa_media_archiver.db        ← Archive state database
 ```
 
 Review the generated CSV audit reports to identify any media files that were missing from device storage or duplicate files skipped.
+
+> 💡 **Photo Library & Cloud Sync (Google Photos, Immich, Apple Photos):**
+> By default, the archiver sets filesystem modification dates (`mtime`). However, cloud galleries prioritize embedded metadata tags (`DateTimeOriginal` for JPEG photos, `mvhd` creation time for MP4/MOV/3GP/M4A media).
+> 
+> Pass `--exif-timestamps` (or set `exif_timestamps = true` in `config.toml`) to inject message timestamps directly into media metadata headers without re-compression:
+> - **Zero Re-compression**: Loss-free header injection; pixel data and video streams are never transcoded.
+> - **Original Photos Protected**: Existing camera capture dates and orientation tags are strictly preserved.
+> - **Timezone Aware**: Pair with `--timezone <Region/City>` to embed exact UTC offsets (`OffsetTimeOriginal`).
+>
+> 🔄 **Already have an existing archive without metadata?**  
+> You do not need to re-import or connect your device. Backfill your archive in seconds:
+> ```bash
+> wab-archiver update-metadata -o /path/to/output --timezone Europe/Berlin
+> ```
+> See the [Command Reference](command-reference.md#subcommand-update-metadata) or [Recipes](recipes.md#5-retroactively-backfill-metadata-on-existing-archives-update-metadata) for full details.
 
 ---
 
@@ -130,4 +150,6 @@ See the **[WhatsApp Backup Viewer Guide](../viewer/index.md)** for timeline brow
 - **Next**: Choose your platform guide:
   - 🤖 **[Android Setup Guide](setup-android.md)**
   - 🍎 **[iOS Setup Guide](setup-ios.md)**
-  - 📖 **[Command Reference & Config File](command-reference.md)**
+  - 📖 **[CLI Command Reference](command-reference.md)**
+  - ⚙️ **[Configuration Guide](configuration.md)**
+  - 💡 **[CLI Recipes & Workflows](recipes.md)**

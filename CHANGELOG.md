@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.80]
+
+### 📁 WhatsApp Backup Archiver (`wab-archiver`)
+
+- **EXIF & Container Timestamp Writing**: Added zero-dependency native metadata injection (`--exif-timestamps` / `exif_timestamps = true`) writing message timestamps directly into JPEG APP1 EXIF segments (`DateTimeOriginal`, `DateTimeDigitized`, `DateTime`, `OffsetTimeOriginal`) and QuickTime/MP4 video containers (`mvhd`, `tkhd`, `mdhd` creation and modification timestamps in UTC). Protects camera capture dates, orientation tags, and shared hardlink inodes.
+- **Retroactive Metadata Backfill Subcommand (`update-metadata`)**: Added a dedicated `wab-archiver update-metadata` command to retroactively stamp EXIF and container timestamps on previously archived media without requiring device sources. Tracks injection state via `exif_stamped` in `.wa_media_archiver.db` for instant idempotency, protects hardlink inodes, and restores Windows creation times (`SetFileTime`).
+- **Incremental Collision Shielding & In-Memory Pre-fetch**: Added `load_archived_file_set` to pre-fetch archived media sets into memory during incremental runs, eliminating N+1 SQL queries across large archives, preventing false collision renames, and extending container timestamp patching to `.m4a` audio files.
+- **Group Mention Preservation**: Added support for extracting and preserving group `@mentions` across incremental backups and differential archival passes in `preserved_messages.db` (schema v3), retaining mention metadata and participant associations even when messages are removed from the device.
+- **iOS Call History Discovery & Verification**: Added discovery, staging, and SQLite integrity validation (`PRAGMA quick_check`) for WhatsApp call logs (`CallHistory.sqlite` / `CallHistory.storedata`) from iOS backups across standard and AppDomain paths.
+- **Android Incremental Mention Ingestion**: Extended the delta replay engine to extract Tag 15 `mentionedJid` from Android incremental delta streams and insert participant records into `message_mentions` and `message_quoted_mentions`.
+
+### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
+
+- **Two-Level Phone Layout & Navigation** (PR #20):
+  - Added responsive two-level layout on phones and narrow viewports ($\le 600\text{px}$): full-width chat list first, opening conversations into a dedicated full-screen pane without the main application header.
+  - Implemented smooth hardware-accelerated slide-over transition between list and conversation panes with reduced-motion accessibility support.
+  - Added HTML5 History integration (`pushState` / `popstate`) supporting browser back button and mobile swipe gestures, closing active overlays first before returning to the chat list.
+  - Contributed by @Piero-93.
+
+- **Sub-Path & Reverse Proxy Hosting (`--base-path` / `WAB_BASE_PATH`)** (PR #17):
+  - Added `--base-path` CLI flag and `WAB_BASE_PATH` environment variable to serve the chat viewer under custom URL prefixes (e.g. `https://host/whatsapp/`) behind reverse proxies.
+  - Implemented `BasePathMiddleware` handling standard WSGI `SCRIPT_NAME` / `PATH_INFO` rewrites, seamlessly supporting both prefix-preserving and prefix-stripping reverse proxies.
+  - Migrated frontend asset links, API fetches, and media URLs across all 31 chat viewer JavaScript modules to dynamic `API` / `MEDIA` endpoints rooted in `window.BASE_PATH`.
+  - Added regression test `test_app_js_bundle_has_no_bare_viewer_urls` and test suite `tests/viewer/test_routes_base_path.py` asserting sub-path routing and bundle compliance.
+  - Contributed by @Piero-93.
+
+- **External Storage Media Serving via Whitelisted Symlinks & Junctions** (PR #16):
+  - Added support for offloading media folders (`Contacts/` and `Groups/`) to external drives or secondary volumes and linking them into the archive directory.
+  - Implemented authorized root whitelisting in `ViewerContext` (`_discover_allowed_media_roots`), discovering external targets for `Contacts` and `Groups` while rejecting unauthorized or root-level symlinks.
+  - Enforced canonical path containment (`safe.is_relative_to(root)`) in `serve_media` to prevent directory traversal, with `safe.is_file()` guards returning clean 404s for directory requests.
+  - Added cross-platform test coverage for Linux/macOS symlinks and Windows NTFS Directory Junctions.
+  - Contributed by @Piero-93.
+
+- **Large Chat Loading Latency & Tail Anchoring Acceleration**:
+  - Replaced hardcoded 1,500 ms `requestAnimationFrame` loop in `_pinToBottom` with adaptive image settling in `wab_viewer/chat_viewer/app.js`. Text chats, cached media, and chats with 0 pending images unfreeze and settle in 2 animation frames (~32 ms) instead of waiting 1.5 seconds, while uncached media settles as soon as thumbnails load (typically 80–200 ms).
+  - Added connection-level idempotency to `_ensure_jid_map_resolved` via sentinel temporary table `temp._resolution_done` in `wab_viewer/db_cache.py`, preventing repeated mapping rebuilds and dropping warm execution on the same connection from ~2,100 ms to <0.05 ms.
+  - Bounded Step 6 direct message scanning in `_ensure_jid_map_resolved` strictly to chats with unresolved LIDs, eliminating unindexed `SCAN m` passes across 1M+ messages and accelerating cold resolution on 682 MB databases from 841 ms down to 6.1 ms with 100% mapping fidelity.
+  - Added `_get_call_log_present_jids` process-level call JID caching in `wab_viewer/queries/calls.py`. In `_query_android_chat_calls`, chats without calls bypass SQL joins, participant counting, and caller info resolution, eliminating 800–1,200 ms of latency for >98% of chats.
+  - Accelerated cold chat load on 236k-message chats from 5,259 ms to 383 ms (a 13.7x speedup) and warm chat load from 4,200 ms to 20 ms (a 200x speedup).
+
+- **Media Gallery Query & Performance Optimizations**:
+  - Implemented Two-Stage Deferred Join Pagination (`/api/media`) by selecting candidate message IDs first via indexed tables in 5–15 ms before hydrating full media joins, accelerating page 1 on 236k-message chats from 6,070 ms to 80 ms (a 75x acceleration).
+  - Accelerated media count queries (`/api/media/count`) via direct SQL aggregations and session-level caching (`ViewerContext.media_counts_cache`), dropping count latency from 6,940 ms to 750 ms cold / 0.3 ms cached.
+  - Decoupled media count fetching from page rendering so the gallery opens optimistically with default media types and dispatches page 1 requests immediately without waiting for counts.
+
+- **Media Gallery Async Count Decoupling, Skeleton Stat Pills & Query Optimization**:
+  - **Decoupled Stream Pagination from Aggregation**: Eliminated sequential `await countPromise` inside `openMediaGallery()`, allowing the first page of media (`_loadGalleryPage(null)`) to render and display immediately without being blocked by aggregate count calculations.
+  - **Immediate Skeleton Stat Pills & In-Place Hydration**: Synchronously populates `#media-gallery-stats` on open with all standard media type pills showing placeholder counts (`--`) and subtle loading spinners (`.is-loading`), allowing instant user filtering from frame 1 and eliminating cumulative layout shift (CLS). Added `_hydrateStatPills(counts)` to update numbers in-place on existing DOM elements without wiping `stats.innerHTML`.
+  - **Stale-While-Revalidate Caching**: Added client-side `galleryCountsCache = new Map()` in `13_gallery_virtualization.js` to instantly hydrate stat pills with 0ms latency when reopening previously viewed chats.
+  - **Zero Media Flash & State Race Guardrails**: Displays a non-intrusive checking spinner instead of flashing a premature "No media in this chat" message when the initial optimistic image/video query returns 0 items while counts are in-flight. Null-guarded `currentGalleryStats` in `_syncGalleryNotices()` to avoid false end notices during pagination.
+  - **Backend Query Latency Optimization**: Replaced `INSTR(LOWER(text_data), 'http://') > 0` with case-insensitive `LIKE` (`m.text_data LIKE '%http://%' OR m.text_data LIKE '%https://%'`) in both Android and iOS link counting queries (2.0x faster), and replaced raw dictionary parsing of preserved messages with an in-database aggregated `SELECT media_type, ... COUNT(*) GROUP BY` query (2.5x faster).
+
+- **Media Gallery Unified Stream Replay & Stat Filter Synchronicity**: Fixed an issue where switching from default photos+videos to all items ("Total" stat pill) failed to render new media types within the existing window. Reset pagination stream and reloaded page 1 (`types=all`) when toggling from filtered subsets to prevent skipped items, while keeping toggles back to default photos+videos as instantaneous in-memory DOM filters. Preserved archive view header counts on unpopulated past years.
+- **Media Gallery Sparse Grid Row Packing & Layout Stabilization**: Packed grid rows to the top (`align-content: start; grid-auto-rows: min-content`) in `#media-gallery-grid` and pinned the infinite scroll sentinel to span all columns invisibly, eliminating layout distortion in sparse or single-item filtered views.
+- **Voice Message Waveforms & Audio Player Component**: Implemented interactive 64-bar waveform scrubber and circular player with playback speed toggling (`1x`, `1.2x`, `1.5x`, `2x`). Extracts raw amplitude data from Android `audio_data.waveform` and Protobuf `audioMessage` tags, decodes iOS Opus audio client-side via Web Audio API (`decodeAudioData`), renders flat baseline fallbacks for undecodable audio, and caches waveforms in `recent_messages` and `preserved_messages`.
+- **Dynamic Missing Media Handling in Chat & Media Grids**: Added runtime load error listeners to chat media and album grids, dynamically replacing failed images and videos with authentic `.media-missing-card` placeholders with blurred embedded thumbnail backgrounds, sanitized alt text, and lightbox bypass.
+- **Media Gallery Serialization & Waveform Sanitization**: Sanitized binary waveform BLOBs across `/api/media`, `/api/media/documents`, `/api/media/links`, and `/api/search` to avoid 500 JSON serialization errors, and normalized message payloads in `/api/messages/at` for seamless jump-to-chat navigation.
+- **Media Gallery Multi-Selection**: Re-enabled concurrent selection of images and videos in the media gallery grid with synchronized loading spinners and stat pill states.
+- **Centered Gallery Loading & Race Condition Elimination**: Redesigned initial gallery loading with centered spinners, implemented session generation tracking (`galleryOpenGen`) with `AbortController` cancellation to eliminate stale fetch races, and implemented viewport-driven link preview hydration via `IntersectionObserver`.
+- **Chat Avatars in Chat List & Starred Messages**: Added 42px circular avatars with initials and palette colors in the active and archived chat lists as well as starred message previews.
+- **Lightbox Smooth Directional Transitions & Stage Architecture**: Replaced modal teardown with persistent stage architecture (`.lb-stage`), directional slide/fade transitions, adjacent preloading, stage-aware zoom clamping, and missing media navigation skipping.
+- **Media Caption Collapsing Parity**: Extended long-message collapsing ("Read More" ↔ "Show Less") to media captions across all attachment formats with grapheme cluster preservation.
+- **Chat Duration & System Message Exclusion**: Excluded group creation events, security notifications, and system/service messages from conversation start dates and active chat duration calculations.
+- **Audio & Voice Note Gallery Differentiation**: Differentiated voice notes (PTT) from audio tracks across Android (`message.origin`) and iOS (`ZMEDIAORIGIN`), with dedicated `.gallery-audio-item` cards, duration badges, sanitized titles, distinct stat pills, and an integrated inline audio controller with playback teardown.
+- **Call History & Call Inspector**: Added a dedicated "Calls" tab in the bottom navigation bar powered by `/api/calls`, featuring infinite-scroll list browsing, call type filtering (All, Missed, Video), two-line call cards, and a right-pane Call Inspector with caller metadata and participant breakdown. Includes a contextual "Jump to this Moment in Chat" button with time gap indicators navigating directly to the call timestamp in chat context.
+- **Chronological In-Chat Call Bubbles**: Integrated voice and video call records directly into chat timelines across Android, iOS, and preserved databases as borderless call bubbles showing outcome, duration, and metadata popovers.
+- **Starred Messages & Slide-Over Drawer**: Added global starred message browsing in the sidebar and a per-chat slide-over drawer with real-time toolbar count badges. Clicking any starred card smoothly jumps to the message with a pulsing gold halo animation.
+- **Pinned Messages Banner & De-Referencing**: Added a docked pinned message banner strip beneath the chat header supporting multi-pin cycling (`1 of N`), session-scoped dismissal, and 1-click jumping with a pulsing emerald highlight. De-references target messages to suppress raw stanza IDs and renders rich previews across all media types.
+- **Archived Chats Tab & Navigation**: Added a dedicated "Archived" tab isolating archived conversations from the active chat list, with empty-state messaging and full chat selection support.
+- **Tab-Aware Real-Time Search & Global Shortcuts**: Dynamically routes the search box to server-side full-text search on Chats, instant client-side filtering on Calls and Starred, or archived chat filtering on Archived. Added `/` and `Ctrl+K` / `Cmd+K` global focus shortcuts and `Escape` dismissal chains.
+- **Cross-Platform Group `@mentions` & 1-to-1 Chat Linking**: Parsed and hydrated group `@mentions` across Android (`message_mentions`) and iOS (Protobuf wire Tag 15 in `ZWAMEDIAITEM.ZMETADATA` and quoted `ContextInfo`). Formatted mentions display as styled badges that link directly to active, archived, or preserved 1-to-1 chats with that contact.
+- **Collapsible Long Messages ("Read More" ↔ "Show Less")**: Long text messages exceeding 750 characters or 15 lines are truncated with an accessible two-way toggle, preserving emoji grapheme clusters (ZWJ sequences), formatting, and scroll stability, with automatic expansion on search or quote jumps.
+- **Theme-Adaptive Group Participant Colors**: Assigned consistent 10-color participant palettes (based on WhatsApp's native high-contrast scheme) to group sender headers and quoted reply borders, dynamically adapting across dark and light themes.
+- **Circular Video Note Player (Push-To-Video / PTV)**: Rendered video notes as circular video bubbles with centered play/pause controls, SVG countdown progress rings, remaining time pills, fullscreen lightbox viewing, and automatic viewport pausing.
+- **In-Bubble Metadata Indicators**: Added compact 12px inline SVG icons for starred (`⭐`) and pinned (`📌`) messages within the `.msg-meta` timestamp cluster, maintaining a clean bubble layout without top headers.
+- **Media Gallery Filtering, Performance & Visual Feedback Lifecycle**: Implemented an "All Media" default view with exclusive category pill isolation and clean state machine toggling. Resolved a critical CSS cascade flaw where flex-based audio items, missing media cards, and link cards overrode filter suppression, ensuring strict computed isolation (`display: none !important`) across all categories. Accelerated pagination by 95% via batch DOM fragment construction (`_insertGalleryGridBatch`), replaced layout-thrashing rect checks with instant scroll arithmetic, and auto-pages until viewport scrollbars appear to prevent pagination deadlocks. Added a complete feedback lifecycle including active stat pill spinners (`.gallery-stat.is-loading`), centered category loading indicators (`.gallery-filter-loading`), scroll loaders (`.gallery-scroll-loading`), and end-of-results notices (`.gallery-end-notice`). Excluded static and live locations (`type = 5`, `16`) from gallery streams and counts, unified document query handling (`message_type IN (8, 9)` / `ZMESSAGETYPE = 8`), deduplicated document counts, and ensured unarchived contact cards (`vcard`) are not marked missing.
+- **Captioned Media Containment & Orientation Sizing**: Enforced fixed orientation-clamped media dimensions (landscape vs portrait) with flexible caption containment, preventing wide captions from stretching bubbles or leaving empty space.
+- **Modernized UI Shell & Responsive Layout**: Restructured header with top-right branding, platform badge, and settings button; implemented responsive sidebar scaling bound to viewport and display scale; and elevated chat bubbles with subtle drop shadows.
+- **Modular Backend Architecture & Performance Optimization**: Refactored `wab_viewer/main.py` into modular Blueprints, query builders, and per-instance `ViewerContext` state isolation with scoped thumbnail 404 caching. Accelerated iOS message pagination to scan physical `ZMESSAGEDATE` and `Z_PK` columns directly, eliminating temporary sorting tables on large chats.
+- **Android Calls & Starred Privacy LID Resolution**: Automatically resolved privacy Linked Identities (`@lid`) to canonical phone numbers and contact names in Android call logs, starred messages, and chat lists.
+- **Android Pinned & Starred Temp Table Resolution**: Ensured complete initialization of temporary mapping tables (`_contacts_resolved`, `_lid_map_resolved`, `_jid_map_resolved`) for Android pinned and starred queries regardless of prior chat filter execution.
+- **iOS Call History CoreData Joins & Parity**: Mapped CoreData relationships (`Z1CALLEVENTS`, `Z1PARTICIPANTS`) in `CallHistory.sqlite` with privacy LID resolution and archived chat retention.
+
+### 🧪 Test Suite & Project Architecture
+
+- **Modular Test Suite & Domain Markers**:
+  - Decomposed ~48,000 lines across 1,202 tests from monolithic test files (`test_wa_chat_viewer.py`, `test_wa_media_archiver.py`, `test_increment_merger.py`, `test_preservation.py`) into clean, package-aligned directories:
+    - `tests/fixtures/`: pure-Python synthetic Protobuf and wire format factory (`protobuf_factory.py`).
+    - `tests/common/`: cross-cutting schema and metadata validator suites (`test_schema_validator.py`, `test_metadata_writer.py`, `test_cross_platform_parity.py`, `test_group_mentions.py`).
+    - `tests/e2e/`: multi-scenario and multi-cycle simulation suites (`test_e2e_archiver_simulation.py`, `test_increment_multi_cycle.py`).
+    - `tests/viewer/`: 12 cohesive modules decomposing viewer route handlers, query execution, and UI template rendering.
+    - `tests/archiver/`: 10 cohesive modules decomposing CLI arguments, source ingestion, ADB extraction, and copy engine logic.
+    - `tests/merger/`: 5 cohesive modules decomposing protobuf wire decoding, add-ons resolution, entity lifecycles, and message replay.
+    - `tests/preservation/`: 4 cohesive modules decomposing database schemas, two-phase diff engines (Android and iOS), and lifecycle orchestration.
+  - Configured granular domain markers in `pytest.ini` (`archiver`, `viewer`, `merger`, `preservation`, `e2e`, `unit`, `slow`, etc.) enabling fast, targeted test execution.
+  - Updated `CONTRIBUTING.md` with package-aligned test guidelines, execution commands, and marker usage.
+
+---
+
 ## [0.70]
 
 ### 📁 WhatsApp Backup Archiver (`wab-archiver`)
@@ -21,6 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Exact ADB Status Diagnosis**: Replaced generic connectivity checklist with targeted diagnoses distinguishing between 0 devices detected, multiple attached devices, host permission issues (`no permissions`), offline devices, and unauthorized devices.
 - **Interactive Authorization Recovery Flow**: When an Android device is detected as `unauthorized`, prompts interactive users to optionally restart the ADB server (`adb kill-server`) to re-trigger the on-device "Allow USB debugging?" dialog, re-verifying device readiness automatically.
 - **Precise Database Pull Error Messages**: Replaced generic fallback text on `pull_msgstore` failures with exact guidance based on command output (e.g., reminding users to enable End-to-End Encrypted Backup in WhatsApp settings when backups are missing on the phone).
+- **Android Reverse Restore Argument Guard**: Fixed an issue where running reverse restore could fail when network path warnings were evaluated.
+- **Sticker Categorization in Duplicate Reports**: Categorized `.webp` and `.was` stickers under the dedicated Stickers section at the end of duplicate reports across iOS and Android.
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
@@ -29,6 +130,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Revoked & View-Once Message Support**: Rendered native WhatsApp tombstones (`⃠ This message was deleted`) for revoked messages, status pills (`① Photo · Opened`) for purged view-once media, and overlay badges for preserved media, with database schema v3 migration (`recent_messages.is_view_once`).
 - **Preserved Message & Chat Browsing**: Integrated with `preserved_messages.db` to display preserved chat badges, tooltip metadata, and preserved messages merged into chat timelines and full-text search.
 - **Responsive Settings Modal Adaptability**: Added dynamic height constraints and internal scrolling (`#settings-body`) with a pinned header, ensuring the Settings modal adapts smoothly to small screens, split windows, and low-height viewports without overflowing.
+- **Android Video Notes in Web Viewer**: Android Push-to-Video messages (`message_type = 28`) now reliably render with the authentic circular video note player and preview properly in the recent chat list, matching iOS video notes.
+- **Background Event & System Message Chat List Isolation**: Contacts with zero exchanged messages no longer appear in your recent chat list due to internal WhatsApp events, and system notices no longer displace conversation previews or re-order recent chats.
+- **Clarified Preserved Message & Chat Tooltip Attribution**: Refactored `.msg-preserved` tooltip formatting from ambiguous trailing timestamps to explicit source-first attribution (`Preserved from backup (<date>) • <reason>`), avoiding confusion with device deletion timestamps.
+- **Quoted Message Navigation & Jump Stabilization**: Clicking a quoted reply reliably scrolls and jumps directly to the original quoted message with a highlight pulse, smoothly locking onto older photos or offloaded media without drifting from asynchronous image loading.
 
 ---
 
