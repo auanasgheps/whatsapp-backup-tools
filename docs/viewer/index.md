@@ -79,6 +79,7 @@ If you have a large archive and prefer to keep heavy media folders (`Contacts/` 
 
 - **Sidebar** — all contacts and groups listed with message counts and last activity time
 - **Chat timeline** — messages displayed chronologically (oldest at top, newest at bottom), lazy-loaded as you scroll
+- **Phone layout** — on narrow screens the chat list and the chat open as two levels, like the WhatsApp app: tap a chat to open it full screen, use the back arrow, the browser back gesture or Escape to return to the list (back first closes an open photo, gallery or panel)
 - **Interactive WhatsApp polls** — poll cards rendered with options, vote count bars, percentages, checkmarks, and an interactive "View votes" popup detailing voter identities (Android & iOS)
 - **Revoked & view-once badges** — "This message was deleted" tombstones and View-Once badges for ephemeral media
 - **Full-text & chat list search** — search across chats and messages with instant query matching, displaying formatted international phone numbers for individual contacts, group descriptions (or "Group chat") for groups, and full-text keyword matching across message bodies

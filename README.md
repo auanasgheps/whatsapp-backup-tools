@@ -94,7 +94,7 @@ Explore and search your archived chats through a local web UI replicating WhatsA
 </p>
 
 #### 🖥️ WhatsApp Web Experience & Navigation
-- **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, contact avatars, customizable font size, and regional date formats.
+- **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, contact avatars, customizable font size, and regional date formats. On phones, the chat list and the chat open as two levels like the WhatsApp app, with back navigation.
 - **Dedicated Navigation Tabs**: Browse **Chats**, **Call History**, **Starred Bookmarks**, and **Archived Chats** from the sidebar, with tab-aware search and instant keyboard shortcuts (`Ctrl+K` / `/`).
 - **Full-Text & Contextual Search**: Search across all chats or within a single conversation, jump directly to matches, or jump to specific dates with the date picker.
 

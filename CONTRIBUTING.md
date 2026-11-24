@@ -81,6 +81,7 @@ The chat viewer Web UI uses a zero-build, pure Python assembly architecture:
 - **Dev-Mode Hot Reloading**: In debug mode (`wab-viewer --verbose`), changes in `js/` take effect immediately without requiring manual builds.
 - **Assembly Verification**: `test_app_js_bundle_assembles_cleanly` in `tests/viewer/test_ui_template.py` validates that all 31 modules assemble into a valid bundle.
 - **Viewer URLs**: build requests to the viewer's own routes from `API` and `MEDIA` (defined in `00_state.js`), never from a bare `'/api'` or `'/media'` string, so the viewer keeps working under `--base-path`. `test_app_js_bundle_has_no_bare_viewer_urls` checks it.
+- **Phone Layout**: up to 600px (`PHONE_LAYOUT_QUERY` in `00_state.js`, the same breakpoint as the CSS) the list and the chat pane are two levels (`css/18_phone_layout.css`). Anything that opens a view in the chat pane calls `showDetailPane()` (`03_navigation.js`), which on phones adds a history entry for the back gesture; code that returns to the list calls `closeDetailPane()`, which also drops that entry. Back first closes what is open over the pane (lightbox, gallery, drawers, popups: `_closeTopPaneOverlay()`), so a new overlay goes in that list. `test_phone_layout_two_levels` in `tests/ui/` covers it.
 
 ---
 

@@ -153,7 +153,14 @@
         return;
       }
 
-      // 6. Global sidebar search input
+      // 6. Phone layout: back from the open chat or call to the list (the sidebar search is hidden behind it)
+      if (phoneLayout.matches && document.body.classList.contains('pane-open')) {
+        closeDetailPane();
+        e.preventDefault();
+        return;
+      }
+
+      // 7. Global sidebar search input
       const searchInput = document.getElementById('search-input');
       if (searchInput && (document.activeElement === searchInput || searchInput.value)) {
         clearActiveSidebarSearch();
@@ -166,6 +173,7 @@
 
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
+      if (phoneLayout.matches) closeDetailPane();
       const searchInput = document.getElementById('search-input');
       if (searchInput) {
         searchInput.focus();
@@ -179,6 +187,7 @@
       const isEditable = document.activeElement && (document.activeElement.isContentEditable || tag === 'input' || tag === 'textarea');
       if (!isEditable) {
         e.preventDefault();
+        if (phoneLayout.matches) closeDetailPane();
         const searchInput = document.getElementById('search-input');
         if (searchInput) {
           searchInput.focus();

@@ -291,6 +291,7 @@
     const callInspector = document.getElementById('pane-call-inspector');
     if (!callInspector) return;
     callInspector.style.display = 'flex';
+    showDetailPane();
 
     const avatarEl = document.getElementById('call-inspect-avatar');
     if (avatarEl) {
