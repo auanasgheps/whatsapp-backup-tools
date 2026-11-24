@@ -8,7 +8,7 @@ A dedicated mobile chat view with fluid slide transitions, Call History, Archive
 
 We have reached parity with major WhatsApp features, and work continues on minor features.
 
-Also thanks to the first external contributors, @pablobeaus and @Piero-93!
+Also thanks to the first external contributor @Piero-93!
 
 
 #### **Release highlights:**
@@ -131,7 +131,7 @@ Also thanks to the first external contributors, @pablobeaus and @Piero-93!
 - **Media Gallery Audio Errors**: Fixed an error when playing audio in the media gallery or jumping into chat from a voice note.
 - **Quote Jump Auto-Expansion**: Clicking a quoted reply that refers to a collapsed long message now automatically expands it so you can read the full context.
 - **Thumbnail Cache Reliability**: Improved thumbnail caching so missing preview lookups reset properly across viewer sessions.
-- **iOS Location Message Chat List Crash**: Fixed an issue where an iPhone conversation whose latest message was a shared location caused the chat list to fail to load (#13 by @pablobeaus).
+- **iOS Location Message Chat List Crash**: Fixed an issue where an iPhone conversation whose latest message was a shared location caused the chat list to fail to load.
 
 ---
 
