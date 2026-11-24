@@ -1097,7 +1097,8 @@ class TestTrack1Endpoints:
                 CREATE TABLE message_media (
                     message_row_id INTEGER PRIMARY KEY,
                     file_path TEXT,
-                    mime_type TEXT
+                    mime_type TEXT,
+                    media_name TEXT
                 );
                 INSERT INTO jid VALUES (1, '15551111', '15551111@s.whatsapp.net');
                 INSERT INTO chat VALUES (10, 1, 'Project Alpha');
@@ -1416,7 +1417,8 @@ class TestTrack1Endpoints:
                 CREATE TABLE message_media (
                     message_row_id INTEGER PRIMARY KEY,
                     file_path TEXT,
-                    mime_type TEXT
+                    mime_type TEXT,
+                    media_name TEXT
                 );
                 CREATE TABLE call_log (
                     _id INTEGER PRIMARY KEY,
@@ -2352,3 +2354,54 @@ class TestReviewFixRegressions:
         q_starred = res_starred_q.get_json()["messages"]
         assert len(q_starred) == 1
         assert q_starred[0]["id"] == 201
+
+    def test_api_messages_empty_chat_with_hd_associations_does_not_error(self, tmp_path):
+        """Verify that an empty message result does not trigger an empty IN () SQL syntax error when HD association capability is present."""
+        wa_path = tmp_path / "msgstore.db"
+        with sqlite3.connect(str(wa_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, raw_string TEXT);
+                CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT);
+                CREATE TABLE message (
+                    _id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER,
+                    from_me INTEGER,
+                    sender_jid_row_id INTEGER,
+                    timestamp INTEGER,
+                    text_data TEXT,
+                    message_type INTEGER,
+                    key_id TEXT
+                );
+                CREATE TABLE message_association (
+                    _id INTEGER PRIMARY KEY,
+                    parent_message_row_id INTEGER,
+                    child_message_row_id INTEGER,
+                    association_type INTEGER
+                );
+                CREATE TABLE message_media (
+                    message_row_id INTEGER PRIMARY KEY,
+                    file_path TEXT,
+                    mime_type TEXT,
+                    media_name TEXT
+                );
+                CREATE TABLE message_quoted (
+                    message_row_id INTEGER PRIMARY KEY,
+                    chat_row_id INTEGER NOT NULL,
+                    parent_message_chat_row_id INTEGER NOT NULL,
+                    from_me INTEGER NOT NULL,
+                    sender_jid_row_id INTEGER,
+                    key_id TEXT NOT NULL,
+                    text_data TEXT,
+                    timestamp INTEGER
+                );
+                INSERT INTO jid VALUES (1, '15559876543', '15559876543@s.whatsapp.net');
+                INSERT INTO chat VALUES (10, 1, NULL);
+            """)
+            conn.commit()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/messages?chat_id=15559876543&chat_type=contact")
+            assert resp.status_code == 200
+            assert resp.get_json() == []

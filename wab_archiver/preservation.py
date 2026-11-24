@@ -1614,6 +1614,7 @@ def diff_and_extract_android(
             if has_add_on and extracted_rows:
                 msg_ids = [r["msg_id"] for r in extracted_rows]
                 chunk_size_rx = 900
+                all_rx_map: dict[int, str] = {}
                 for i in range(0, len(msg_ids), chunk_size_rx):
                     chunk = msg_ids[i : i + chunk_size_rx]
                     ph = ",".join("?" * len(chunk))
@@ -1626,10 +1627,12 @@ def diff_and_extract_android(
                         GROUP BY ao.parent_message_row_id
                     """
                     with contextlib.suppress(sqlite3.OperationalError):
-                        rx_map = dict(conn.execute(rx_sql, chunk).fetchall())
-                        for row in extracted_rows:
-                            if row["msg_id"] in rx_map:
-                                row["reactions"] = rx_map[row["msg_id"]]
+                        all_rx_map.update(dict(conn.execute(rx_sql, chunk).fetchall()))
+
+                if all_rx_map:
+                    for row in extracted_rows:
+                        if row["msg_id"] in all_rx_map:
+                            row["reactions"] = all_rx_map[row["msg_id"]]
 
             # 4. Hydrate interactive poll options and vote counts
             if has_poll_option and extracted_rows:

@@ -1132,3 +1132,118 @@ class TestPrepareInputIos:
             False,
             logger,
         )
+
+    def test_prepare_input_ios_preserve_deleted_baseline_first_run(self, tmp_path, logger):
+        args = argparse.Namespace(
+            ios_backup=str(tmp_path / "backup"),
+            ios_password=None,
+            ios_contacts=None,
+            business=False,
+            output=str(tmp_path),
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+            preserve_deleted=True,
+        )
+        fake_manifest = {"Message/photo.jpg": "/extracted/photo.jpg"}
+        fake_db = str(tmp_path / "ChatStorage.sqlite")
+
+        with (
+            patch("wab_archiver.backup_reader.detect_encrypted", return_value=False),
+            patch(
+                "wab_archiver.backup_reader.extract_plaintext",
+                return_value=(fake_manifest, fake_db, None),
+            ),
+        ):
+            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
+
+        assert platform == "ios"
+        assert args.msgstore == fake_db
+        assert getattr(args, "_preservation_stats", None) is not None
+        assert args._preservation_stats.messages == 0
+        assert args._preservation_stats.chats == 0
+
+    def test_prepare_input_ios_preserve_deleted_incremental_success(self, tmp_path, logger):
+        from wab_archiver.preservation import PreservationResult
+
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        existing_db = db_dir / "ChatStorage.sqlite"
+        existing_db.write_bytes(b"EXISTING_IOS_DB")
+
+        args = argparse.Namespace(
+            ios_backup=str(tmp_path / "backup"),
+            ios_password=None,
+            ios_contacts=None,
+            business=False,
+            output=str(tmp_path),
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+            preserve_deleted=True,
+        )
+        fake_manifest = {"Message/photo.jpg": "/extracted/photo.jpg"}
+        extracted_db = str(tmp_path / "incoming_ChatStorage.sqlite")
+
+        with (
+            patch("wab_archiver.backup_reader.detect_encrypted", return_value=False),
+            patch(
+                "wab_archiver.backup_reader.extract_plaintext",
+                return_value=(fake_manifest, extracted_db, None),
+            ),
+            patch(
+                "wab_archiver.preservation.preserve_deleted_messages",
+                return_value=PreservationResult(messages=7, chats=3),
+            ) as mock_preserve,
+        ):
+            platform, resolver, ios_contacts, contacts = wa._prepare_input(args, None, logger)
+
+        assert platform == "ios"
+        assert args._preservation_stats.messages == 7
+        assert args._preservation_stats.chats == 3
+        mock_preserve.assert_called_once()
+        call_args = mock_preserve.call_args[0]
+        assert call_args[0].endswith("ChatStorage.sqlite.old")
+        assert call_args[1] == extracted_db
+        assert call_args[4] == "ios"
+        # Verify ChatStorage.sqlite.old was cleaned up
+        assert not (db_dir / "ChatStorage.sqlite.old").exists()
+
+    def test_prepare_input_ios_preserve_deleted_error_rollback(self, tmp_path, logger):
+        db_dir = tmp_path / "Whatsapp Databases"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        existing_db = db_dir / "ChatStorage.sqlite"
+        existing_db.write_bytes(b"INITIAL_IOS_DB")
+
+        args = argparse.Namespace(
+            ios_backup=str(tmp_path / "backup"),
+            ios_password=None,
+            ios_contacts=None,
+            business=False,
+            output=str(tmp_path),
+            from_adb=False,
+            contacts=None,
+            msgstore="dummy",
+            preserve_deleted=True,
+        )
+        fake_manifest = {"Message/photo.jpg": "/extracted/photo.jpg"}
+        extracted_db = str(tmp_path / "incoming_ChatStorage.sqlite")
+
+        with (
+            patch("wab_archiver.backup_reader.detect_encrypted", return_value=False),
+            patch(
+                "wab_archiver.backup_reader.extract_plaintext",
+                return_value=(fake_manifest, extracted_db, None),
+            ),
+            patch(
+                "wab_archiver.preservation.preserve_deleted_messages",
+                side_effect=RuntimeError("Preservation diff failed"),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="Preservation diff failed"):
+                wa._prepare_input(args, None, logger)
+
+        # Verify rollback restored existing_db
+        assert existing_db.exists()
+        assert existing_db.read_bytes() == b"INITIAL_IOS_DB"
+        assert not (db_dir / "ChatStorage.sqlite.old").exists()

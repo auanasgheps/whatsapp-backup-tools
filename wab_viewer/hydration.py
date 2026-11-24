@@ -279,7 +279,6 @@ def _hydrate_android_service_participants(
     """Hydrate participant names list for Android service messages on demand."""
     if not has_mcp or not msg_ids:
         return {}
-    ph = ",".join("?" * len(msg_ids))
     ldn_col = "ldn.display_name AS lid_name," if has_lid_dn else "NULL AS lid_name,"
     ldn_join = (
         "LEFT JOIN lid_display_name ldn ON ldn.lid_row_id = mcp.user_jid_row_id"
@@ -292,55 +291,58 @@ def _hydrate_android_service_participants(
     )
     is_lid_pred = "j_part_raw.server = 'lid'" if has_jid_server else "0"
 
-    sql = f"""
-        SELECT
-            mcp.message_row_id,
-            j_part_raw.user AS raw_user,
-            {server_col}
-            {raw_str_col}
-            j_part_real.user AS real_user,
-            con_part.display_name AS contact_name,
-            {ldn_col}
-            con_part.number AS contact_num
-        FROM message_system_chat_participant mcp
-        LEFT JOIN _jid_map_resolved jm_part ON jm_part.lid_row_id = mcp.user_jid_row_id
-        LEFT JOIN jid j_part_real ON j_part_real._id = jm_part.jid_row_id
-        LEFT JOIN jid j_part_raw ON j_part_raw._id = mcp.user_jid_row_id
-        {ldn_join}
-        LEFT JOIN arch.contacts con_part ON con_part.number = COALESCE(j_part_real.user, CASE WHEN NOT ({is_lid_pred}) THEN j_part_raw.user END)
-        WHERE mcp.message_row_id IN ({ph})
-    """
-    try:
-        p_rows = conn.execute(sql, msg_ids).fetchall()
-    except sqlite3.OperationalError:
-        return {}
-
     p_map: dict[int, list[str]] = {}
-    for pr in p_rows:
-        mid = pr["message_row_id"]
-        raw_str = pr["raw_string"] or ""
-        raw_u = pr["raw_user"] or ""
-        raw_s = pr["raw_server"] or ""
-        real_u = pr["real_user"] or ""
-        c_name = pr["contact_name"] or ""
-        lid_n = pr["lid_name"] or ""
+    for i in range(0, len(msg_ids), 900):
+        chunk = msg_ids[i : i + 900]
+        ph = ",".join("?" * len(chunk))
+        sql = f"""
+            SELECT
+                mcp.message_row_id,
+                j_part_raw.user AS raw_user,
+                {server_col}
+                {raw_str_col}
+                j_part_real.user AS real_user,
+                con_part.display_name AS contact_name,
+                {ldn_col}
+                con_part.number AS contact_num
+            FROM message_system_chat_participant mcp
+            LEFT JOIN _jid_map_resolved jm_part ON jm_part.lid_row_id = mcp.user_jid_row_id
+            LEFT JOIN jid j_part_real ON j_part_real._id = jm_part.jid_row_id
+            LEFT JOIN jid j_part_raw ON j_part_raw._id = mcp.user_jid_row_id
+            {ldn_join}
+            LEFT JOIN arch.contacts con_part ON con_part.number = COALESCE(j_part_real.user, CASE WHEN NOT ({is_lid_pred}) THEN j_part_raw.user END)
+            WHERE mcp.message_row_id IN ({ph})
+        """
+        try:
+            p_rows = conn.execute(sql, chunk).fetchall()
+        except sqlite3.OperationalError:
+            continue
 
-        if raw_str == "lid_me" or raw_u == "me":
-            name = "You"
-        elif c_name:
-            name = c_name
-        elif (real_u or (raw_s != "lid" and raw_u)) == "0":
-            name = "WhatsApp"
-        elif real_u:
-            name = f"+{real_u}"
-        elif lid_n:
-            name = lid_n
-        elif raw_s != "lid" and raw_u:
-            name = f"+{raw_u}"
-        else:
-            name = "Unknown"
+        for pr in p_rows:
+            mid = pr["message_row_id"]
+            raw_str = pr["raw_string"] or ""
+            raw_u = pr["raw_user"] or ""
+            raw_s = pr["raw_server"] or ""
+            real_u = pr["real_user"] or ""
+            c_name = pr["contact_name"] or ""
+            lid_n = pr["lid_name"] or ""
 
-        p_map.setdefault(mid, []).append(name)
+            if raw_str == "lid_me" or raw_u == "me":
+                name = "You"
+            elif c_name:
+                name = c_name
+            elif (real_u or (raw_s != "lid" and raw_u)) == "0":
+                name = "WhatsApp"
+            elif real_u:
+                name = f"+{real_u}"
+            elif lid_n:
+                name = lid_n
+            elif raw_s != "lid" and raw_u:
+                name = f"+{raw_u}"
+            else:
+                name = "Unknown"
+
+            p_map.setdefault(mid, []).append(name)
 
     return p_map
 

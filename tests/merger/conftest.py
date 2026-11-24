@@ -307,7 +307,7 @@ def _build_wmi_with_receipts(
 
     wmi_data = (
         _build_field(1, 2, key_bytes)
-        + _build_field(2, 2, msg_bytes)
+        + (_build_field(2, 2, msg_bytes) if text else b"")
         + _build_field(3, 0, timestamp)
         + _build_field(4, 0, status)
         + b"".join(ur_bytes_list)

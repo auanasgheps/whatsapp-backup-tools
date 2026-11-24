@@ -422,44 +422,47 @@ def api_chats():
                         elif part.endswith("@s.whatsapp.net"):
                             needed_jids.add(part.split("@")[0])
         if needed_jids:
-            ph = ",".join("?" * len(needed_jids))
-            try:
-                c_rows = conn.execute(
-                    f"SELECT jid, full_name, phone_number FROM _ios_contacts WHERE jid IN ({ph})",
-                    list(needed_jids),
-                ).fetchall()
-                for cr in c_rows:
-                    ios_contacts_map[cr["jid"]] = (cr["full_name"], cr["phone_number"])
-            except sqlite3.OperationalError:
-                pass
-            try:
-                arch_rows = conn.execute(
-                    f"SELECT number, display_name FROM arch.contacts WHERE number IN ({ph})",
-                    list(needed_jids),
-                ).fetchall()
-                for ar in arch_rows:
-                    if ar["display_name"]:
-                        ios_contacts_map[ar["number"]] = (ar["display_name"], ar["number"])
-                        ios_contacts_map[f"{ar['number']}@s.whatsapp.net"] = (
-                            ar["display_name"],
-                            ar["number"],
-                        )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                push_rows = conn.execute(
-                    f"SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID IN ({ph})",
-                    list(needed_jids),
-                ).fetchall()
-                for pr in push_rows:
-                    if pr["ZPUSHNAME"]:
-                        if pr["ZJID"] not in ios_contacts_map:
-                            ios_contacts_map[pr["ZJID"]] = (pr["ZPUSHNAME"], None)
-                        bare_p = pr["ZJID"].split("@")[0]
-                        if bare_p not in ios_contacts_map:
-                            ios_contacts_map[bare_p] = (pr["ZPUSHNAME"], None)
-            except sqlite3.OperationalError:
-                pass
+            needed_list = list(needed_jids)
+            for i in range(0, len(needed_list), 900):
+                chunk = needed_list[i : i + 900]
+                ph = ",".join("?" * len(chunk))
+                try:
+                    c_rows = conn.execute(
+                        f"SELECT jid, full_name, phone_number FROM _ios_contacts WHERE jid IN ({ph})",
+                        chunk,
+                    ).fetchall()
+                    for cr in c_rows:
+                        ios_contacts_map[cr["jid"]] = (cr["full_name"], cr["phone_number"])
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    arch_rows = conn.execute(
+                        f"SELECT number, display_name FROM arch.contacts WHERE number IN ({ph})",
+                        chunk,
+                    ).fetchall()
+                    for ar in arch_rows:
+                        if ar["display_name"]:
+                            ios_contacts_map[ar["number"]] = (ar["display_name"], ar["number"])
+                            ios_contacts_map[f"{ar['number']}@s.whatsapp.net"] = (
+                                ar["display_name"],
+                                ar["number"],
+                            )
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    push_rows = conn.execute(
+                        f"SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID IN ({ph})",
+                        chunk,
+                    ).fetchall()
+                    for pr in push_rows:
+                        if pr["ZPUSHNAME"]:
+                            if pr["ZJID"] not in ios_contacts_map:
+                                ios_contacts_map[pr["ZJID"]] = (pr["ZPUSHNAME"], None)
+                            bare_p = pr["ZJID"].split("@")[0]
+                            if bare_p not in ios_contacts_map:
+                                ios_contacts_map[bare_p] = (pr["ZPUSHNAME"], None)
+                except sqlite3.OperationalError:
+                    pass
 
         try:
             user_row = conn.execute(
@@ -480,32 +483,59 @@ def api_chats():
 
     android_p_map = {}
     android_poll_mids = set()
+    android_vom_mids = set()
+    android_revoked_mids = set()
     if ctx.source_type == "android":
         candidate_last_mids = [r["last_msg_id"] for r in rows if r["last_msg_id"]]
         if candidate_last_mids:
-            c_ph = ",".join("?" * len(candidate_last_mids))
-            try:
-                android_poll_mids.update(
-                    r[0]
-                    for r in conn.execute(
-                        f"SELECT message_row_id FROM message_poll WHERE message_row_id IN ({c_ph})",
-                        candidate_last_mids,
-                    ).fetchall()
-                )
-            except sqlite3.OperationalError:
-                pass
             mao_cols = {r[1] for r in conn.execute("PRAGMA table_info(message_add_on)").fetchall()}
-            if "message_add_on_type" in mao_cols:
+            has_mao_type = "message_add_on_type" in mao_cols
+            for i in range(0, len(candidate_last_mids), 900):
+                c_chunk = candidate_last_mids[i : i + 900]
+                c_ph = ",".join("?" * len(c_chunk))
                 try:
                     android_poll_mids.update(
                         r[0]
                         for r in conn.execute(
-                            f"SELECT parent_message_row_id FROM message_add_on WHERE parent_message_row_id IN ({c_ph}) AND message_add_on_type = 67",
-                            candidate_last_mids,
+                            f"SELECT message_row_id FROM message_poll WHERE message_row_id IN ({c_ph})",
+                            c_chunk,
                         ).fetchall()
                     )
                 except sqlite3.OperationalError:
                     pass
+                if has_mao_type:
+                    try:
+                        android_poll_mids.update(
+                            r[0]
+                            for r in conn.execute(
+                                f"SELECT parent_message_row_id FROM message_add_on WHERE parent_message_row_id IN ({c_ph}) AND message_add_on_type = 67",
+                                c_chunk,
+                            ).fetchall()
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if ctx.caps.has_message_view_once_media:
+                    try:
+                        android_vom_mids.update(
+                            r[0]
+                            for r in conn.execute(
+                                f"SELECT message_row_id FROM message_view_once_media WHERE message_row_id IN ({c_ph})",
+                                c_chunk,
+                            ).fetchall()
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                if ctx.caps.has_message_revoked:
+                    try:
+                        android_revoked_mids.update(
+                            r[0]
+                            for r in conn.execute(
+                                f"SELECT message_row_id FROM message_revoked WHERE message_row_id IN ({c_ph})",
+                                c_chunk,
+                            ).fetchall()
+                        )
+                    except sqlite3.OperationalError:
+                        pass
         if ctx.caps.has_mcp:
             svc_mids = [
                 r["last_msg_id"]
@@ -523,30 +553,6 @@ def api_chats():
                     ctx.caps.has_jid_server,
                     ctx.caps.has_jid_raw_string,
                 )
-        android_vom_mids = set()
-        if ctx.caps.has_message_view_once_media and candidate_last_mids:
-            try:
-                android_vom_mids = {
-                    r[0]
-                    for r in conn.execute(
-                        f"SELECT message_row_id FROM message_view_once_media WHERE message_row_id IN ({c_ph})",
-                        candidate_last_mids,
-                    ).fetchall()
-                }
-            except sqlite3.OperationalError:
-                pass
-        android_revoked_mids = set()
-        if ctx.caps.has_message_revoked and candidate_last_mids:
-            try:
-                android_revoked_mids = {
-                    r[0]
-                    for r in conn.execute(
-                        f"SELECT message_row_id FROM message_revoked WHERE message_row_id IN ({c_ph})",
-                        candidate_last_mids,
-                    ).fetchall()
-                }
-            except sqlite3.OperationalError:
-                pass
 
         android_group_desc: dict[int, str | None] = {}
         group_c_ids = [
@@ -555,42 +561,47 @@ def api_chats():
             if r.get("type") == "group" and r.get("chat_row_id") is not None
         ]
         if group_c_ids:
-            g_ph = ",".join("?" * len(group_c_ids))
-            if ctx.caps.has_message_system:
-                try:
-                    desc_rows = conn.execute(
-                        f"""
-                        SELECT m.chat_row_id, ms.action_type, m.text_data
-                        FROM message m
-                        JOIN message_system ms ON ms.message_row_id = m._id
-                        WHERE ms.action_type IN (27, 28) AND m.chat_row_id IN ({g_ph})
-                        ORDER BY m.timestamp ASC, m._id ASC
-                        """,
-                        group_c_ids,
-                    ).fetchall()
-                    for dr in desc_rows:
-                        if dr["action_type"] == 27 and dr["text_data"]:
-                            android_group_desc[dr["chat_row_id"]] = dr["text_data"].strip() or None
-                        else:
-                            android_group_desc[dr["chat_row_id"]] = None
-                except sqlite3.OperationalError:
-                    pass
-            try:
-                arch_grp_cols = {
-                    c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()
-                }
-                if "description" in arch_grp_cols:
-                    arch_desc_rows = conn.execute(
-                        f"SELECT chat_row_id, NULLIF(description, '') AS description FROM arch.groups WHERE chat_row_id IN ({g_ph})",
-                        [str(cid) for cid in group_c_ids],
-                    ).fetchall()
-                    for ar in arch_desc_rows:
-                        cid_str = str(ar["chat_row_id"])
-                        cid_val = int(cid_str) if cid_str.isdigit() else cid_str
-                        if ar["description"] and not android_group_desc.get(cid_val):
-                            android_group_desc[cid_val] = ar["description"].strip()
-            except sqlite3.OperationalError:
-                pass
+            arch_grp_cols = {
+                c[1] for c in conn.execute("PRAGMA arch.table_info(groups)").fetchall()
+            }
+            has_grp_desc = "description" in arch_grp_cols
+            for i in range(0, len(group_c_ids), 900):
+                g_chunk = group_c_ids[i : i + 900]
+                g_ph = ",".join("?" * len(g_chunk))
+                if ctx.caps.has_message_system:
+                    try:
+                        desc_rows = conn.execute(
+                            f"""
+                            SELECT m.chat_row_id, ms.action_type, m.text_data
+                            FROM message m
+                            JOIN message_system ms ON ms.message_row_id = m._id
+                            WHERE ms.action_type IN (27, 28) AND m.chat_row_id IN ({g_ph})
+                            ORDER BY m.timestamp ASC, m._id ASC
+                            """,
+                            g_chunk,
+                        ).fetchall()
+                        for dr in desc_rows:
+                            if dr["action_type"] == 27 and dr["text_data"]:
+                                android_group_desc[dr["chat_row_id"]] = (
+                                    dr["text_data"].strip() or None
+                                )
+                            else:
+                                android_group_desc[dr["chat_row_id"]] = None
+                    except sqlite3.OperationalError:
+                        pass
+                if has_grp_desc:
+                    try:
+                        arch_desc_rows = conn.execute(
+                            f"SELECT chat_row_id, NULLIF(description, '') AS description FROM arch.groups WHERE chat_row_id IN ({g_ph})",
+                            [str(cid) for cid in g_chunk],
+                        ).fetchall()
+                        for ar in arch_desc_rows:
+                            cid_str = str(ar["chat_row_id"])
+                            cid_val = int(cid_str) if cid_str.isdigit() else cid_str
+                            if ar["description"] and not android_group_desc.get(cid_val):
+                                android_group_desc[cid_val] = ar["description"].strip()
+                    except sqlite3.OperationalError:
+                        pass
 
     for r in rows:
         d = dict(r)

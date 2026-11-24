@@ -4815,16 +4815,33 @@ def apply_messages_bin(
                             except ValueError:
                                 continue
                             cur.execute(
-                                "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
-                                "VALUES (?, ?, ?, ?, ?)",
+                                """
+                                UPDATE receipt_user
+                                SET receipt_timestamp = COALESCE(?, receipt_timestamp),
+                                    read_timestamp = COALESCE(?, read_timestamp),
+                                    played_timestamp = COALESCE(?, played_timestamp)
+                                WHERE message_row_id = ? AND receipt_user_jid_row_id = ?
+                                """,
                                 (
-                                    existing_id,
-                                    ur_jid_id,
                                     ur.get("receipt_timestamp"),
                                     ur.get("read_timestamp"),
                                     ur.get("played_timestamp"),
+                                    existing_id,
+                                    ur_jid_id,
                                 ),
                             )
+                            if cur.rowcount == 0:
+                                cur.execute(
+                                    "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
+                                    "VALUES (?, ?, ?, ?, ?)",
+                                    (
+                                        existing_id,
+                                        ur_jid_id,
+                                        ur.get("receipt_timestamp"),
+                                        ur.get("read_timestamp"),
+                                        ur.get("played_timestamp"),
+                                    ),
+                                )
             if msg.get("from_me") and msg.get("status", 0) > 0 and msg.get("key_id"):
                 existing_id = key_cache.get(msg["key_id"]) or find_message_row_id(
                     conn, msg["key_id"], key_cache
@@ -5609,16 +5626,33 @@ def apply_messages_bin(
                     except ValueError:
                         continue
                     cur.execute(
-                        "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
-                        "VALUES (?, ?, ?, ?, ?)",
+                        """
+                        UPDATE receipt_user
+                        SET receipt_timestamp = COALESCE(?, receipt_timestamp),
+                            read_timestamp = COALESCE(?, read_timestamp),
+                            played_timestamp = COALESCE(?, played_timestamp)
+                        WHERE message_row_id = ? AND receipt_user_jid_row_id = ?
+                        """,
                         (
-                            msg_row_id,
-                            ur_jid_id,
                             ur.get("receipt_timestamp"),
                             ur.get("read_timestamp"),
                             ur.get("played_timestamp"),
+                            msg_row_id,
+                            ur_jid_id,
                         ),
                     )
+                    if cur.rowcount == 0:
+                        cur.execute(
+                            "INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (
+                                msg_row_id,
+                                ur_jid_id,
+                                ur.get("receipt_timestamp"),
+                                ur.get("read_timestamp"),
+                                ur.get("played_timestamp"),
+                            ),
+                        )
 
         # Apply embedded reactions from WMI Tag 41 if present
         if msg.get("embedded_reactions") and msg_row_id:

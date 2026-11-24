@@ -146,25 +146,26 @@ def api_messages():
                 if not needs_refresh:
                     if ctx.caps.has_android_hd and ctx.get_wa() is not None:
                         mids = [r["msg_id"] for r in rows]
-                        placeholders = ",".join("?" * len(mids))
-                        try:
-                            hd_parents = {
-                                r[0]
-                                for r in ctx.get_wa()
-                                .execute(
-                                    f"""SELECT ma.parent_message_row_id FROM message_association ma
-                                       JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
-                                       WHERE ma.parent_message_row_id IN ({placeholders})
-                                         AND ma.association_type IN (12, 7)
-                                         AND mm_hd.file_path IS NOT NULL""",
-                                    mids,
-                                )
-                                .fetchall()
-                            }
-                            if hd_parents:
-                                rows = [r for r in rows if r["msg_id"] not in hd_parents]
-                        except sqlite3.OperationalError:
-                            pass
+                        if mids:
+                            placeholders = ",".join("?" * len(mids))
+                            try:
+                                hd_parents = {
+                                    r[0]
+                                    for r in ctx.get_wa()
+                                    .execute(
+                                        f"""SELECT ma.parent_message_row_id FROM message_association ma
+                                           JOIN message_media mm_hd ON mm_hd.message_row_id = ma.child_message_row_id
+                                           WHERE ma.parent_message_row_id IN ({placeholders})
+                                             AND ma.association_type IN (12, 7)
+                                             AND mm_hd.file_path IS NOT NULL""",
+                                        mids,
+                                    )
+                                    .fetchall()
+                                }
+                                if hd_parents:
+                                    rows = [r for r in rows if r["msg_id"] not in hd_parents]
+                            except sqlite3.OperationalError:
+                                pass
                     unresolved_media = [
                         r
                         for r in rows

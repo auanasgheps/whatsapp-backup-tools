@@ -453,6 +453,60 @@ def test_apply_messages_bin_populates_quoted_and_receipts(mock_db, tmp_path):
     conn.close()
 
 
+def test_apply_messages_bin_updates_existing_receipt_without_duplication(mock_db, tmp_path):
+    """Verify delta replay on existing message updates receipt_user in-place without duplicate rows."""
+    conn = sqlite3.connect(mock_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS receipt_user (
+            _id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_row_id INTEGER NOT NULL,
+            receipt_user_jid_row_id INTEGER NOT NULL,
+            receipt_timestamp INTEGER,
+            read_timestamp INTEGER,
+            played_timestamp INTEGER
+        );
+        INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, text_data, message_type)
+        VALUES (105, 1, 1, 'EXISTING_REC_MSG', 1729000800, 'Original sent message', 0);
+        INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp)
+        VALUES (105, 1, 1729000810000, NULL, NULL);
+    """)
+
+    wmi_receipted = _build_wmi_with_receipts(
+        "5550100@s.whatsapp.net",
+        "EXISTING_REC_MSG",
+        "",
+        1,
+        1729000800,
+        status=13,
+        user_receipts=[
+            {
+                "user_jid": "5550100@s.whatsapp.net",
+                "receipt_timestamp": 1729000810000,
+                "read_timestamp": 1729000850000,
+            }
+        ],
+    )
+    frame = _build_history_sync_frame("5550100@s.whatsapp.net", [wmi_receipted])
+    bin_file = tmp_path / "messages_rec_update.bin"
+    bin_file.write_bytes(frame)
+
+    inserted = increment_merger.apply_messages_bin(conn, str(bin_file), logger, None, None, None)
+    conn.commit()
+    assert inserted == 0  # Existing message updated in-place, not newly inserted
+
+    # Verify exactly one receipt_user row exists (no duplicates)
+    rec_rows = conn.execute(
+        "SELECT message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp FROM receipt_user WHERE message_row_id = 105"
+    ).fetchall()
+    assert len(rec_rows) == 1
+    assert rec_rows[0][0] == 105
+    assert rec_rows[0][1] == 1
+    assert rec_rows[0][2] == 1729000810000
+    assert rec_rows[0][3] == 1729000850000
+
+    conn.close()
+
+
 def test_resolve_or_create_chat_populates_hidden_zero(mock_db):
     conn = sqlite3.connect(mock_db)
     cur = conn.cursor()

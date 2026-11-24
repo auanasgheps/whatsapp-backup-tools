@@ -2583,3 +2583,51 @@ class TestLidAndContactResolution:
             chat = chats[0]
             assert "\u2219" not in chat["display_name"]
             assert chat["display_name"] == "Unknown Contact (3879)"
+
+    def test_api_chats_chunking_handles_large_contact_set(self, tmp_path):
+        """Verify that more than 900 contact JIDs/messages in a chat list are safely chunked without SQL variable limits."""
+        wa_path = tmp_path / "msgstore.db"
+        archive_path = tmp_path / ".wa_media_archiver.db"
+
+        conn = sqlite3.connect(str(wa_path))
+        conn.executescript("""
+            CREATE TABLE jid (_id INTEGER PRIMARY KEY, user TEXT, server TEXT, raw_string TEXT);
+            CREATE TABLE chat (_id INTEGER PRIMARY KEY, jid_row_id INTEGER, subject TEXT, hidden INTEGER DEFAULT 0, sort_timestamp INTEGER, display_message_row_id INTEGER);
+            CREATE TABLE message (_id INTEGER PRIMARY KEY, chat_row_id INTEGER NOT NULL, from_me INTEGER NOT NULL DEFAULT 0, sender_jid_row_id INTEGER, timestamp INTEGER, text_data TEXT, message_type INTEGER DEFAULT 0);
+            CREATE TABLE message_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER, chat_row_id INTEGER, file_path TEXT, file_size INTEGER, media_name TEXT, message_url TEXT, mime_type TEXT, file_hash TEXT, transferred INTEGER);
+            CREATE TABLE message_quoted (_id INTEGER PRIMARY KEY, message_row_id INTEGER, chat_row_id INTEGER, parent_message_chat_row_id INTEGER, from_me INTEGER, key_id TEXT, text_data TEXT);
+            CREATE TABLE jid_map (lid_row_id INTEGER, jid_row_id INTEGER);
+            CREATE TABLE lid_display_name (lid_row_id INTEGER PRIMARY KEY, display_name TEXT, username TEXT);
+            CREATE TABLE message_poll (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL);
+            CREATE TABLE message_view_once_media (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL);
+            CREATE TABLE message_revoked (_id INTEGER PRIMARY KEY, message_row_id INTEGER NOT NULL);
+        """)
+
+        # Insert 950 chats and messages (exceeding standard SQLite 900 batch size)
+        chat_rows = []
+        jid_rows = []
+        msg_rows = []
+        for i in range(1, 951):
+            jid_rows.append(
+                (i, f"1555000{i:04d}", "s.whatsapp.net", f"1555000{i:04d}@s.whatsapp.net")
+            )
+            chat_rows.append((i, i, None, 0, 1700000000000 + i, i))
+            msg_rows.append((i, i, 0, i, 1700000000000 + i, f"Message {i}", 0))
+
+        conn.executemany("INSERT INTO jid VALUES (?, ?, ?, ?)", jid_rows)
+        conn.executemany("INSERT INTO chat VALUES (?, ?, ?, ?, ?, ?)", chat_rows)
+        conn.executemany("INSERT INTO message VALUES (?, ?, ?, ?, ?, ?, ?)", msg_rows)
+        conn.commit()
+        conn.close()
+
+        archive_conn = make_archive_db(archive_path)
+        archive_conn.commit()
+        archive_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            resp = client.get("/api/chats")
+            assert resp.status_code == 200
+            chats = resp.get_json()
+            assert len(chats) == 950
