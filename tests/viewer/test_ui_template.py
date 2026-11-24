@@ -528,6 +528,34 @@ class TestTrack3FeaturePanes:
         assert ".jump-highlight-gold" in css
         assert ".jump-highlight-emerald" in css
 
+    def test_chat_toolbar_icon_alignment(self, app_and_tmp):
+        """Chat toolbar icons must have SVG graphics, uniform 32px targets, and flex alignment."""
+        client, _ = app_and_tmp
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+
+        assert 'id="chat-toolbar"' in html
+        assert 'id="toolbar-toggle"' in html
+        assert 'id="media-btn"' in html
+        assert 'id="chat-menu-btn"' in html
+
+        # Verify toolbar action buttons use SVGs rather than mismatched emoji glyphs
+        toolbar_html = html[html.find('id="chat-toolbar"') : html.find('id="toolbar-expanded"')]
+        assert "<svg" in toolbar_html
+        assert 'class="chat-toolbar-btn"' in toolbar_html
+
+        css_resp = client.get("/static/app.css")
+        assert css_resp.status_code == 200
+        css = css_resp.get_data(as_text=True)
+
+        assert ".chat-toolbar-btn" in css
+        assert "#toolbar-toggle" in css
+        assert "#media-btn" in css
+        assert "#chat-menu-btn" in css
+        assert "width: 32px" in css
+        assert "height: 32px" in css
+
     def test_api_messages_at_resolution_by_msg_id(self, app_and_tmp):
         """api_messages_at resolves target message by msg_id directly without requiring ts."""
         client, _ = app_and_tmp

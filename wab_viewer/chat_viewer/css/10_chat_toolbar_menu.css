@@ -2,6 +2,8 @@
     .chat-menu-container {
       position: relative;
       display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
 
     #chat-menu-btn {
@@ -10,19 +12,27 @@
       color: var(--text-muted);
       cursor: pointer;
       font-size: 18px;
-      padding: 4px 6px;
+      padding: 0;
+      width: 32px;
+      height: 32px;
       border-radius: 4px;
       line-height: 1;
       margin: 0;
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      box-sizing: border-box;
       transition: background 0.15s, color 0.15s;
     }
     #chat-menu-btn:hover,
     #chat-menu-btn.active {
       background: var(--surface2);
       color: var(--text);
+    }
+    #chat-menu-btn svg {
+      display: block;
+      flex-shrink: 0;
+      pointer-events: none;
     }
 
     .chat-menu-dropdown {
@@ -125,11 +135,31 @@
     }
 
     #media-btn {
-      background: none; border: none;
-      color: var(--text-muted); cursor: pointer;
-      font-size: 18px; padding: 4px 6px;
-      border-radius: 4px; line-height: 1; margin: 0;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 18px;
+      padding: 0;
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      line-height: 1;
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
       transition: background 0.15s, color 0.15s;
     }
-    #media-btn:hover { background: var(--surface2); color: var(--text); }
+    #media-btn:hover,
+    #media-btn.active {
+      background: var(--surface2);
+      color: var(--text);
+    }
+    #media-btn svg {
+      display: block;
+      flex-shrink: 0;
+      pointer-events: none;
+    }
 

@@ -103,8 +103,18 @@ HTML_TEMPLATE = (
           </div>
         </div>
         <div id="chat-toolbar">
-          <button id="toolbar-toggle" title="Search &amp; date">&#128269;</button>
-          <button id="media-btn" title="Media">&#128247;</button>
+          <button id="toolbar-toggle" class="chat-toolbar-btn" title="Search &amp; date" aria-label="Search in chat">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </button>
+          <button id="media-btn" class="chat-toolbar-btn" title="Media" aria-label="Media gallery">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+              <circle cx="12" cy="13" r="4"/>
+            </svg>
+          </button>
           <div id="chat-menu-container" class="chat-menu-container">
             <button id="chat-menu-btn" class="chat-toolbar-btn" title="Menu" aria-label="Chat options" aria-haspopup="true" aria-expanded="false">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
