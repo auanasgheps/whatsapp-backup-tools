@@ -112,6 +112,74 @@ class TestGroupDescriptionExtraction:
         b64 = base64.b64encode(bad_proto).decode("ascii")
         assert _extract_ios_group_description(b64) is None
 
+    def test_outer_wire_skips_and_unknown_wire(self) -> None:
+        # Outer wire 0, wire 1, wire 5, unknown wire 3
+        sub_desc = build_field(3, 2, b"Group Topic")
+        field1 = build_field(1, 2, sub_desc)
+        unknown_wire = encode_varint((99 << 3) | 3) + b"\x01"
+        top = (
+            build_field(10, 0, 50)
+            + build_field(11, 1, b"\x01" * 8)
+            + build_field(12, 5, b"\x02" * 4)
+            + field1
+            + unknown_wire
+        )
+        b64 = base64.b64encode(top).decode("ascii")
+        assert _extract_ios_group_description(b64) == "Group Topic"
+
+    def test_outer_truncations(self) -> None:
+        # Outer tag varint truncated
+        b64_tag = base64.b64encode(b"\x80").decode("ascii")
+        assert _extract_ios_group_description(b64_tag) is None
+
+        # Outer wire 0 val truncated
+        tag_w0 = encode_varint((10 << 3) | 0) + b"\x80"
+        b64_w0 = base64.b64encode(tag_w0).decode("ascii")
+        assert _extract_ios_group_description(b64_w0) is None
+
+        # Outer wire 2 len truncated
+        tag_w2 = encode_varint((1 << 3) | 2) + b"\x80"
+        b64_w2 = base64.b64encode(tag_w2).decode("ascii")
+        assert _extract_ios_group_description(b64_w2) is None
+
+    def test_subfield_wire_skips_and_unknown_wire(self) -> None:
+        # Subfields inside field 1: wire 0, 1, 5, and unknown wire 3
+        unknown_sub = encode_varint((99 << 3) | 3) + b"\x01"
+        sub_desc = (
+            build_field(10, 0, 50)
+            + build_field(11, 1, b"\x01" * 8)
+            + build_field(12, 5, b"\x02" * 4)
+            + build_field(3, 2, b"Verified Subfield Desc")
+            + unknown_sub
+        )
+        top = build_field(1, 2, sub_desc)
+        b64 = base64.b64encode(top).decode("ascii")
+        assert _extract_ios_group_description(b64) == "Verified Subfield Desc"
+
+    def test_subfield_truncations(self) -> None:
+        # Subfield tag truncated
+        top_tag = build_field(1, 2, b"\x80")
+        assert _extract_ios_group_description(base64.b64encode(top_tag).decode("ascii")) is None
+
+        # Subfield wire 0 val truncated
+        top_w0 = build_field(1, 2, encode_varint((5 << 3) | 0) + b"\x80")
+        assert _extract_ios_group_description(base64.b64encode(top_w0).decode("ascii")) is None
+
+        # Subfield wire 2 len truncated
+        top_w2 = build_field(1, 2, encode_varint((3 << 3) | 2) + b"\x80")
+        assert _extract_ios_group_description(base64.b64encode(top_w2).decode("ascii")) is None
+
+    def test_subfield_and_outer_unknown_wire_branches(self) -> None:
+        # Exercises line 84 (inner unknown wire break) and line 88 (outer unknown wire break)
+        sub_unknown = encode_varint((99 << 3) | 3) + b"\x01"
+        top = (
+            build_field(1, 2, sub_unknown)  # sub_offset encounters wire 3 -> breaks on line 84
+            + encode_varint((88 << 3) | 3)  # outer offset encounters wire 3 -> breaks on line 88
+            + b"\x01"
+        )
+        b64 = base64.b64encode(top).decode("ascii")
+        assert _extract_ios_group_description(b64) is None
+
 
 class TestPollBlobParsing:
     """Tests for _parse_ios_poll_blob parsing from ZRECEIPTINFO."""
@@ -205,6 +273,118 @@ class TestPollBlobParsing:
         res = _parse_ios_poll_blob(corrupted)
         assert res is None or res.get("question") == ""
 
+    def test_outer_wires_and_truncations(self) -> None:
+        # Outer wire 0, 1, 5, unknown wire 3
+        poll_inner = build_field(2, 2, b"Valid Question")
+        field8 = build_field(8, 2, poll_inner)
+        data = (
+            build_field(1, 0, 10)
+            + build_field(2, 1, b"\x01" * 8)
+            + build_field(3, 5, b"\x02" * 4)
+            + field8
+            + encode_varint((9 << 3) | 3)
+            + b"\x00"
+        )
+        parsed = _parse_ios_poll_blob(data)
+        assert parsed is not None and parsed["question"] == "Valid Question"
+
+        # Outer tag truncated
+        assert _parse_ios_poll_blob(b"\x80") is None
+
+        # Outer wire 0 val truncated
+        assert _parse_ios_poll_blob(encode_varint((1 << 3) | 0) + b"\x80") is None
+
+        # Outer wire 2 len truncated
+        assert _parse_ios_poll_blob(encode_varint((8 << 3) | 2) + b"\x80") is None
+
+    def test_poll_blob_sub_truncations_and_unknown_wire(self) -> None:
+        # Poll blob tag truncated
+        res_tag = _parse_ios_poll_blob(build_field(8, 2, b"\x80"))
+        assert res_tag is not None and res_tag["question"] == ""
+
+        # Poll blob wire 0 val truncated (lines 145-146)
+        res_w0 = _parse_ios_poll_blob(build_field(8, 2, encode_varint((4 << 3) | 0) + b"\x80"))
+        assert res_w0 is not None and res_w0["question"] == ""
+
+        # Poll blob wire 2 len truncated (lines 154-155)
+        res_w2 = _parse_ios_poll_blob(build_field(8, 2, encode_varint((2 << 3) | 2) + b"\x80"))
+        assert res_w2 is not None and res_w2["question"] == ""
+
+        # Poll blob unknown wire 3 (line 253), wire 1, wire 5
+        poll_inner = (
+            build_field(2, 2, b"Q?")
+            + build_field(10, 1, b"\x00" * 8)
+            + build_field(11, 5, b"\x00" * 4)
+            + encode_varint((12 << 3) | 3)
+            + b"\x01"
+        )
+        res_unknown = _parse_ios_poll_blob(build_field(8, 2, poll_inner))
+        assert res_unknown is not None and res_unknown["question"] == "Q?"
+
+    def test_poll_option_inner_wires_and_truncations(self) -> None:
+        # Option wire 0, 1, 5, unknown wire 3
+        opt_inner = (
+            build_field(10, 0, 42)
+            + build_field(11, 1, b"\x01" * 8)
+            + build_field(12, 5, b"\x02" * 4)
+            + build_field(1, 2, b"Clean Option")
+            + encode_varint((13 << 3) | 3)
+            + b"\x01"
+        )
+        poll_blob = build_field(2, 2, b"Question?") + build_field(3, 2, opt_inner)
+        res = _parse_ios_poll_blob(build_field(8, 2, poll_blob))
+        assert res is not None and res["options"] == ["Clean Option"]
+
+        # Option tag truncated
+        poll_opt_trunc_tag = build_field(3, 2, b"\x80")
+        assert _parse_ios_poll_blob(build_field(8, 2, poll_opt_trunc_tag)) is not None
+
+        # Option wire 0 val truncated
+        poll_opt_trunc_w0 = build_field(3, 2, encode_varint((10 << 3) | 0) + b"\x80")
+        assert _parse_ios_poll_blob(build_field(8, 2, poll_opt_trunc_w0)) is not None
+
+        # Option wire 2 len truncated
+        poll_opt_trunc_w2 = build_field(3, 2, encode_varint((1 << 3) | 2) + b"\x80")
+        assert _parse_ios_poll_blob(build_field(8, 2, poll_opt_trunc_w2)) is not None
+
+    def test_poll_vote_inner_wires_and_truncations(self) -> None:
+        # Vote containing server_ts (wire 0, v_num=5), wire 1, wire 5, unknown wire 3
+        vote_inner = (
+            build_field(1, 0, 0)  # option index
+            + build_field(2, 0, 1729000100)  # client_ts
+            + build_field(5, 0, 1729000200)  # server_ts
+            + build_field(10, 1, b"\x01" * 8)  # wire 1
+            + build_field(11, 5, b"\x02" * 4)  # wire 5
+            + build_field(3, 2, b"STANZA_VOTE")
+            + build_field(4, 2, b"5550100@s.whatsapp.net")
+            + encode_varint((12 << 3) | 3)
+            + b"\x01"  # unknown wire
+        )
+        poll_blob = build_field(2, 2, b"Q?") + build_field(5, 2, vote_inner)
+        res = _parse_ios_poll_blob(build_field(8, 2, poll_blob))
+        assert res is not None
+        assert len(res["votes"]) == 1
+        assert res["votes"][0]["server_ts"] == 1729000200
+        assert res["votes"][0]["stanza_id"] == "STANZA_VOTE"
+
+        # Vote tag truncated
+        poll_vote_trunc_tag = build_field(5, 2, b"\x80")
+        assert _parse_ios_poll_blob(build_field(8, 2, poll_vote_trunc_tag)) is not None
+
+        # Vote wire 0 val truncated
+        poll_vote_trunc_w0 = build_field(5, 2, encode_varint((2 << 3) | 0) + b"\x80")
+        assert _parse_ios_poll_blob(build_field(8, 2, poll_vote_trunc_w0)) is not None
+
+        # Vote wire 2 len truncated
+        poll_vote_trunc_w2 = build_field(5, 2, encode_varint((3 << 3) | 2) + b"\x80")
+        assert _parse_ios_poll_blob(build_field(8, 2, poll_vote_trunc_w2)) is not None
+
+        # Vote packed option indices truncated
+        poll_vote_trunc_packed = build_field(
+            5, 2, encode_varint((1 << 3) | 2) + encode_varint(1) + b"\x80"
+        )
+        assert _parse_ios_poll_blob(build_field(8, 2, poll_vote_trunc_packed)) is not None
+
 
 class TestProtobufParser:
     """Tests for _parse_protobuf general list-of-triples decoder."""
@@ -228,6 +408,10 @@ class TestProtobufParser:
         data = encode_varint(invalid_wire_tag) + b"\x01\x02"
         parsed = _parse_protobuf(data)
         assert parsed == []
+
+    def test_truncated_varint_catches_exception(self) -> None:
+        # Truncated varint tag triggers ValueError caught by lines 292-293
+        assert _parse_protobuf(b"\x80") == []
 
 
 class TestReactionsParsing:
@@ -260,6 +444,60 @@ class TestReactionsParsing:
         assert "👍" in emojis
         assert "🎉" in emojis
         assert "😀" in emojis
+
+    def test_scan_emojis_vs16_without_preceding_emoji(self) -> None:
+        # Starts immediately with Variation Selector 16 (\xef\xb8\x8f)
+        assert _scan_emojis(b"\xef\xb8\x8f\xef\xb8\x8f") == []
+
+    def test_reactions_missing_field_7(self) -> None:
+        blob = build_field(1, 2, b"other data")
+        assert _extract_ios_reactions(blob) == []
+        assert _extract_ios_reaction_reactors(blob) == []
+
+    def test_reactions_skips_non_len_subfields(self) -> None:
+        # Field 7 contains a wire 0 subfield alongside a valid reactor entry (covers line 355)
+        valid_reactor = build_field(1, 2, b"5550100") + build_field(2, 2, "🔥".encode())
+        field7_data = (
+            build_field(99, 0, 123)  # ew != "len"
+            + build_field(1, 2, valid_reactor)
+        )
+        receipt = build_field(7, 2, field7_data)
+        reactions = _extract_ios_reactions(receipt)
+        assert len(reactions) == 1
+        assert reactions[0][1] == "🔥"
+
+    def test_reaction_reactors_skips_non_len_and_missing_emojis(self) -> None:
+        # 1. ew != "len" in field 7
+        # 2. reactor with no emojis
+        # 3. reactor with wire 0 inside (sw != "len")
+        # 4. reactor with both phone and lid
+        # 5. reactor with neither (self-reaction)
+        reactor_no_emoji = build_field(1, 2, b"token_only")
+        reactor_with_wire0 = (
+            build_field(2, 2, "🎉".encode())
+            + build_field(10, 0, 999)  # sw != "len"
+            + build_field(3, 2, b"5550100@s.whatsapp.net")
+            + build_field(4, 2, b"100000000000001@lid")
+        )
+        self_reactor = build_field(2, 2, "💙".encode())
+
+        field7_data = (
+            build_field(99, 0, 100)  # ew != "len"
+            + build_field(1, 2, reactor_no_emoji)
+            + build_field(2, 2, reactor_with_wire0)
+            + build_field(3, 2, self_reactor)
+        )
+        receipt = build_field(7, 2, field7_data)
+        reactors = _extract_ios_reaction_reactors(receipt)
+        assert len(reactors) == 2
+
+        assert reactors[0]["emoji"] == "🎉"
+        assert reactors[0]["phone"] == "5550100"
+        assert reactors[0]["lid"] == "100000000000001@lid"
+
+        assert reactors[1]["emoji"] == "💙"
+        assert reactors[1]["phone"] is None
+        assert reactors[1]["lid"] is None
 
 
 class TestQuotedInfoExtraction:
@@ -381,6 +619,111 @@ class TestQuotedInfoExtraction:
         assert res["quoted_text"] == "📷 Photo with noise"
         assert res["quoted_has_thumb"] is True
 
+    def test_top_level_wires_and_overruns(self) -> None:
+        # Multi-byte varint wire 0 at top level and length >= 128 (covers line 442)
+        wire0_multibyte = encode_varint((10 << 3) | 0) + b"\x80\x01"
+        dummy_130_bytes = build_field(20, 2, b"x" * 130)
+        unknown_top = encode_varint((11 << 3) | 3) + b"\x00"
+        metadata = (
+            wire0_multibyte
+            + dummy_130_bytes
+            + build_field(5, 2, b"STANZA_TOP")
+            + build_field(19, 2, build_field(1, 2, b"Text"))
+            + unknown_top
+        )
+        res = _extract_ios_quoted_info(metadata)
+        assert res is not None and res["quoted_stanza_id"] == "STANZA_TOP"
+
+        # Wire 2 length overrun at top level
+        overrun_top = encode_varint((12 << 3) | 2) + encode_varint(100) + b"short"
+        assert _extract_ios_quoted_info(overrun_top) is None
+
+    def test_sub_message_wires_and_overruns(self) -> None:
+        # Sub-message inside field 19: multi-byte wire 0, length >= 128 (covers line 481), unknown wire 3
+        sub_payload = (
+            encode_varint((10 << 3) | 0)
+            + b"\x80\x01"
+            + build_field(1, 2, b"x" * 130)
+            + encode_varint((11 << 3) | 3)
+            + b"\x00"
+        )
+        metadata = build_field(5, 2, b"STANZA_SUB") + build_field(19, 2, sub_payload)
+        res = _extract_ios_quoted_info(metadata)
+        assert res is not None and res["quoted_text"] == "x" * 130
+
+        # Sub-message wire 2 overrun
+        sub_overrun = encode_varint((12 << 3) | 2) + encode_varint(100) + b"short"
+        metadata_overrun = build_field(5, 2, b"STANZA_OVER") + build_field(19, 2, sub_overrun)
+        res_o = _extract_ios_quoted_info(metadata_overrun)
+        assert res_o is not None and res_o["quoted_text"] == ""
+
+    def test_extended_text_wires_and_overruns(self) -> None:
+        # Extended text (field 6): multi-byte wire 0, unknown wire 3, length >= 128 (covers line 519)
+        # Also test efield == 2 fallback both when efield == 1 exists and when it doesn't
+        ext_with_both = (
+            encode_varint((10 << 3) | 0)
+            + b"\x80\x01"
+            + build_field(1, 2, b"Primary Text " + b"x" * 130)
+            + build_field(2, 2, b"Fallback Matched Text")
+            + encode_varint((11 << 3) | 3)
+            + b"\x00"
+        )
+        meta_both = build_field(5, 2, b"STANZA_EB") + build_field(
+            19, 2, build_field(6, 2, ext_with_both)
+        )
+        res_b = _extract_ios_quoted_info(meta_both)
+        assert res_b is not None and res_b["quoted_text"].startswith("Primary Text")
+
+        # efield == 2 fallback alone (efield == 1 absent)
+        ext_fallback = build_field(2, 2, b"Only Fallback Text")
+        meta_fb = build_field(5, 2, b"STANZA_EFB") + build_field(
+            19, 2, build_field(6, 2, ext_fallback)
+        )
+        res_fb = _extract_ios_quoted_info(meta_fb)
+        assert res_fb is not None and res_fb["quoted_text"] == "Only Fallback Text"
+
+        # Extended text wire 2 overrun
+        ext_overrun = encode_varint((12 << 3) | 2) + encode_varint(100) + b"short"
+        meta_eo = build_field(5, 2, b"STANZA_EO") + build_field(
+            19, 2, build_field(6, 2, ext_overrun)
+        )
+        res_eo = _extract_ios_quoted_info(meta_eo)
+        assert res_eo is not None and res_eo["quoted_text"] == ""
+
+    def test_image_message_wires_and_overruns(self) -> None:
+        # Image message (field 3): multi-byte wire 0, unknown wire 3, length >= 128 (covers line 567)
+        img_inner = (
+            encode_varint((10 << 3) | 0)
+            + b"\x80\x01"
+            + build_field(3, 2, b"Caption Here " + b"x" * 130)
+            + encode_varint((11 << 3) | 3)
+            + b"\x00"
+        )
+        meta_img = build_field(5, 2, b"STANZA_IMG") + build_field(
+            19, 2, build_field(3, 2, img_inner)
+        )
+        res_i = _extract_ios_quoted_info(meta_img)
+        assert res_i is not None and res_i["quoted_text"].startswith("📷 Caption Here")
+
+        # Image message wire 2 overrun
+        img_overrun = encode_varint((12 << 3) | 2) + encode_varint(100) + b"short"
+        meta_io = build_field(5, 2, b"STANZA_IO") + build_field(
+            19, 2, build_field(3, 2, img_overrun)
+        )
+        res_io = _extract_ios_quoted_info(meta_io)
+        assert res_io is not None and res_io["quoted_text"] == "📷 Photo"
+
+    def test_quoted_info_exception_handling(self) -> None:
+        # Trigger Exception catch in _extract_ios_quoted_info (lines 611-613)
+        class FaultyBytes(bytes):
+            def __len__(self) -> int:
+                return 10
+
+            def __getitem__(self, item: object) -> object:
+                raise RuntimeError("Synthetic simulated extraction crash")
+
+        assert _extract_ios_quoted_info(FaultyBytes()) is None
+
 
 class TestLinkDescriptionAndMentions:
     """Tests for link descriptions and mention cascades."""
@@ -407,6 +750,36 @@ class TestLinkDescriptionAndMentions:
         jpg_desc = build_field(3, 2, b"\xff\xd8\xff\xe0binary image data")
         assert _extract_ios_link_description(jpg_desc) is None
 
+    def test_link_description_wires_and_overruns(self) -> None:
+        # Wire 0 multi-byte varint, tag >= 128 (line 632), length >= 128 (line 648), wire 1, wire 5
+        data = (
+            encode_varint((1 << 3) | 0)
+            + b"\x80\x01"
+            + build_field(20, 2, b"x" * 130)  # tag 20 << 3 = 160 >= 128, length 130 >= 128
+            + build_field(2, 1, b"\x01" * 8)
+            + build_field(4, 5, b"\x02" * 4)
+            + build_field(3, 2, b"Valid Link Title")
+        )
+        assert _extract_ios_link_description(data) == "Valid Link Title"
+
+        # Wire 2 length overrun
+        overrun_data = encode_varint((3 << 3) | 2) + encode_varint(100) + b"short"
+        assert _extract_ios_link_description(overrun_data) is None
+
+        # Unknown wire type (line 663)
+        unknown_link = encode_varint((5 << 3) | 3) + b"\x00"
+        assert _extract_ios_link_description(unknown_link) is None
+
+    def test_link_description_exception_handling(self) -> None:
+        class FaultyLinkBytes(bytes):
+            def __len__(self) -> int:
+                return 10
+
+            def __getitem__(self, item: object) -> object:
+                raise RuntimeError("Synthetic simulated link crash")
+
+        assert _extract_ios_link_description(FaultyLinkBytes()) is None
+
     def test_iter_wire_fields_skips_and_limits(self) -> None:
         data = (
             build_field(1, 0, 42)
@@ -425,6 +798,25 @@ class TestLinkDescriptionAndMentions:
         tag_wire1 = (5 << 3) | 1
         truncated_w1 = encode_varint(tag_wire1) + b"\x01\x02"
         assert _iter_wire_fields(truncated_w1) == []
+
+    def test_iter_wire_fields_all_truncation_branches(self) -> None:
+        # Truncated tag varint
+        assert _iter_wire_fields(b"\x80") == []
+
+        # Truncated wire 0 val varint
+        assert _iter_wire_fields(encode_varint((1 << 3) | 0) + b"\x80") == []
+
+        # Truncated wire 2 length varint
+        assert _iter_wire_fields(encode_varint((1 << 3) | 2) + b"\x80") == []
+
+        # Wire 2 length overrun
+        assert _iter_wire_fields(encode_varint((1 << 3) | 2) + encode_varint(100) + b"short") == []
+
+        # Truncated wire 5 (<4 bytes)
+        assert _iter_wire_fields(encode_varint((1 << 3) | 5) + b"\x01\x02") == []
+
+        # Unknown wire type (wire 3)
+        assert _iter_wire_fields(encode_varint((1 << 3) | 3) + b"\x01") == []
 
     def test_extract_ios_mentions_direct_and_nested_in_quote(self) -> None:
         assert _extract_ios_mentions(None) == []
@@ -449,3 +841,22 @@ class TestLinkDescriptionAndMentions:
         q_msg = build_field(3, 2, img_msg)
         top_meta = build_field(19, 2, q_msg)
         assert _extract_ios_mentions(top_meta) == ["5550500@s.whatsapp.net"]
+
+    def test_extract_ios_mentions_skips_non_wire2_and_deduplicates(self) -> None:
+        # Tag 19 containing non-wire-2 fields (covers line 737: q_wire != 2)
+        inner_ctx = build_field(15, 2, b"5550100@s.whatsapp.net")
+        container_msg = build_field(14, 2, inner_ctx)  # ContextInfo tag 14
+        # Test container types: 18, 20, 26, 42, 45, etc.
+        video_msg = build_field(20, 2, container_msg)
+
+        non_wire2_quote = (
+            build_field(1, 0, 999)  # q_wire == 0
+            + build_field(2, 1, b"\x01" * 8)  # q_wire == 1
+            + video_msg
+        )
+        top = (
+            build_field(19, 2, non_wire2_quote)
+            + build_field(8, 2, b"5550100@s.whatsapp.net")  # duplicate mention
+        )
+        mentions = _extract_ios_mentions(top)
+        assert mentions == ["5550100@s.whatsapp.net"]
