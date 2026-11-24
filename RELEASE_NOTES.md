@@ -16,7 +16,7 @@ Also thanks to the first external contributor @Piero-93!
 
 > 🖥️ **New Look and feel**:
 > The UI/UX of the Viewer has been significantly expanded. Introducing chats avatars, navigation menu for Chats, Calls, Starred Messages and Archived Messages. A new chat submenu has been added to not clutter the chat bar.  
-<img src="docs/images/release-notes/image2.png" alt="New UI" width="80%" />
+<img src="docs/images/release-notes/image2.png" alt="New UI" width="60%" />
 
 > 📱 **Mobile Chat View & Fluid Navigation**:
 > Browsing backups on your phone now feels just like the native WhatsApp app. On small screens (under 600px), conversations open in a responsive full-screen view with a smooth slide transition, complete with an easy back button and full support for your phone's native swipe-to-go-back gesture. (#20 by @Piero-93)
@@ -27,11 +27,11 @@ Also thanks to the first external contributor @Piero-93!
 
 > 📞 **Call History**:
 > Browse your complete voice and video call logs directly within the viewer. A new Call side pane displays caller information, durations, and participants, with a "Jump to this Moment in Chat" button that brings you straight to that exact point in time. Calls are also displayed directly into chat timelines as chronological call bubbles.
-<img src="docs/images/release-notes/image3.png" alt="New UI" width="80%" />
+<img src="docs/images/release-notes/image3.png" alt="New UI" width="60%" />
 
 > ⭐ **Starred Messages & Bookmarks**:
 > Quickly view your saved and starred messages from the dedicated Starred tab or from an in-chat slide-out panel. Tapping any starred message jumps straight to that message in the conversation with a glowing golden highlight.
-<img src="docs/images/release-notes/image4.png" alt="Starred Messages" width="80%" />
+<img src="docs/images/release-notes/image4.png" alt="Starred Messages" width="60%" />
 
 > 🎙️ **Voice Message Waveforms & Audio Player**:
 > Voice notes now look and feel authentic with interactive sound waveforms, adjustable playback speeds (1x to 2x), and a circular play/pause button. Tap or drag anywhere on the waveform to scrub forward and backward.
