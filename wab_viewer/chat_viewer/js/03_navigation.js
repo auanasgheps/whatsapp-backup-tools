@@ -184,7 +184,7 @@
     // Keyboard users would be left on an element that is now hidden: take them to the back button.
     // Not after a tap, where focusing it would only draw a focus ring.
     if (fromKeyboard) {
-      const backBtn = Array.from(document.querySelectorAll('.pane-back-btn')).find(b => b.offsetParent !== null);
+      const backBtn = Array.from(document.querySelectorAll('.pane-back-btn')).find(b => b.offsetWidth > 0 || b.offsetParent !== null);
       if (backBtn) backBtn.focus({ preventScroll: true });
     }
   }

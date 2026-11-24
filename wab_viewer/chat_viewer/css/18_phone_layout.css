@@ -11,11 +11,34 @@
         max-width: none;
         border-right: 0;
       }
-      #chat-pane { display: none; }
+
+      #chat-pane {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        background: var(--bg);
+        transform: translateX(100%);
+        visibility: hidden;
+        box-shadow: -4px 0 24px rgba(0, 0, 0, 0.2);
+        transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+                    visibility 0s 0.22s;
+        will-change: transform;
+      }
 
       body.pane-open #header,
-      body.pane-open #sidebar { display: none; }
-      body.pane-open #chat-pane { display: flex; }
+      body.pane-open #sidebar {
+        visibility: hidden;
+        transition: visibility 0s 0.22s;
+        pointer-events: none;
+        user-select: none;
+      }
+
+      body.pane-open #chat-pane {
+        transform: translateX(0);
+        visibility: visible;
+        transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+                    visibility 0s 0s;
+      }
 
       .pane-back-btn {
         display: inline-flex;
@@ -49,4 +72,13 @@
     }
     @media (max-width: 600px) and (hover: hover) {
       .pane-back-btn:hover { background: var(--surface2); }
+    }
+    @media (max-width: 600px) and (prefers-reduced-motion: reduce) {
+      #chat-pane {
+        transition: none;
+      }
+      body.pane-open #header,
+      body.pane-open #sidebar {
+        transition: none;
+      }
     }

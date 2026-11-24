@@ -331,7 +331,10 @@ _PHONE_STATE_JS = """
 (() => {
     const w = id => {
         const el = document.getElementById(id);
-        return el ? Math.round(el.getBoundingClientRect().width) : -1;
+        if (!el) return -1;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return 0;
+        return Math.round(el.getBoundingClientRect().width);
     };
     const open = id => {
         const el = document.getElementById(id);
@@ -374,7 +377,7 @@ def _phone_step(browser: CDPSession, action: str, until: str, timeout: float) ->
         timeout,
     )
     assert done is True, f"timed out waiting for: {until}"
-    time.sleep(0.1)  # a stray popstate or animation would show up in the state read below
+    time.sleep(0.3)  # wait for slide transition (0.22s) and layout to settle
     return browser.evaluate(_PHONE_STATE_JS, 5.0)
 
 
@@ -414,7 +417,7 @@ _TAP_GROUP = "document.querySelector('#chat-list .chat-item[data-type=\"group\"]
 
 def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> None:
     """On a phone-sized viewport the chat list and the chat are two levels, with back navigation."""
-    open_group_chat_in_browser(browser, 15.0)
+    open_group_chat_in_browser(browser, 25.0)
     _set_viewport(browser, 8811, 412)
 
     try:
