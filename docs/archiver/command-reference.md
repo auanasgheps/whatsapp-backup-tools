@@ -42,7 +42,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
                      [--business] [--pull-media] [--staging PATH]
                      -o PATH [-l PATH] [--timezone TZ] [--config PATH]
                      [--dry-run] [--limit N] [--since DATE]
-                     [--link-duplicates] [-P] [--exif-timestamps]
+                     [--link-duplicates] [-P] [--exif-timestamps] [-v]
 ```
 
 ### Options & Arguments

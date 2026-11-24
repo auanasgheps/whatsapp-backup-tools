@@ -36,7 +36,7 @@ You can also download pre-built `.whl` packages from [GitHub Releases](https://g
 pip install whatsapp_backup_tools-x.xx-py3-none-any.whl
 ```
 
-> 💡 **Windows users:** If `pip install` is not recognized, run `py -m pip install .` instead.
+> 💡 **Windows users:** If `pip` is not recognized, run `py -m pip install whatsapp-backup-tools` (or `py -m pip install .` if installing from a local clone) instead.
 
 This registers the two unified CLI commands:
 - **`wab-archiver`**: Preserves and organizes media into a structured directory tree.

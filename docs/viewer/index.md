@@ -4,11 +4,14 @@
 
 Browse and search your archived WhatsApp chats offline through a local web UI replicating WhatsApp Web.
 
-**Whatsapp Backup Viewer screenshots**
+**WhatsApp Backup Viewer screenshots**
 
 <p float="left">
-  <img src="/docs/images/viewer_dark.png" width="700" />
-  <img src="/docs/images/viewer_clean.png" width="700" /> 
+  <img src="../images/viewer_dark_1_shots_so.jpg" width="100%" alt="WhatsApp Backup Viewer Hero" />
+</p>
+<p float="left">
+  <img src="../images/viewer_dark.png" width="49%" alt="WhatsApp Backup Viewer Dark Mode" />
+  <img src="../images/viewer_clean.png" width="49%" alt="WhatsApp Backup Viewer Light Mode" /> 
 </p>
 
 ## Quick Start
@@ -51,12 +54,13 @@ By default, routine HTTP request logs (`GET /api/... 200`) are silenced to keep 
 
 ## How It Works
 
-On first run (or with `--rescan`), the viewer builds a cache DB (`.wa_chat_viewer_cache.db`) combining:
+On first run (or with `--rescan`), the viewer builds a local cache database (`.wa_viewer.db`) combining:
 
 1. **Source WhatsApp database** (`msgstore.db` for Android, `ChatStorage.sqlite` for iOS) — timestamps, sender names, and text message bodies
 2. **Archive database** (`.wa_media_archiver.db`) — maps original media paths to archived file locations
+3. **Preserved messages database** (`preserved_messages.db`, optional) — retains messages deleted or revoked from the device when archived with `-P`
 
-The source WhatsApp database (`msgstore.db` or `ChatStorage.sqlite`) is strictly required for the viewer to launch and resolve chat messages and media paths.
+The source WhatsApp database (`msgstore.db` or `ChatStorage.sqlite`) is strictly required in `Whatsapp Databases/` (or directly in the archive root) for the viewer to launch and resolve chat messages and media paths.
 
 ### Storing Media on External Storage (Symlinks & Junctions)
 
@@ -77,28 +81,51 @@ If you have a large archive and prefer to keep heavy media folders (`Contacts/` 
 
 ## Features
 
-- **Sidebar** — all contacts and groups listed with message counts and last activity time
-- **Chat timeline** — messages displayed chronologically (oldest at top, newest at bottom), lazy-loaded as you scroll
-- **Phone layout** — on narrow screens the chat list and the chat open as two levels, like the WhatsApp app: tap a chat to open it full screen, use the back arrow, the browser back gesture or Escape to return to the list (back first closes an open photo, gallery or panel)
-- **Interactive WhatsApp polls** — poll cards rendered with options, vote count bars, percentages, checkmarks, and an interactive "View votes" popup detailing voter identities (Android & iOS)
-- **Revoked & view-once badges** — "This message was deleted" tombstones and View-Once badges for ephemeral media
-- **Full-text & chat list search** — search across chats and messages with instant query matching, displaying formatted international phone numbers for individual contacts, group descriptions (or "Group chat") for groups, and full-text keyword matching across message bodies
-- **Media & animated GIF playback** — images, videos, looping animated GIFs, and audio stream directly in the browser with HTTP Range support, interactive click-to-play GIF badges, and video/audio seeking
-- **Circular video notes (Push-to-Video)** — round video messages render in authentic circular bubbles with duration rings, play/pause controls, and standalone positioning (Android & iOS)
-- **Image lightbox** — click any image to open it full-screen with smooth zoom and pan
-- **Media gallery & stickers** — browse chat media by thumbnail grid or folder tree, with dedicated stickers section and contact cards (.vcf)
-- **Fast, lightweight scrolling** — chats and massive media collections load smoothly on demand without slowing down your browser
-- **Message & chat preservation** — messages deleted on the device ("Delete for Me"), messages revoked by sender ("Delete for Everyone"), or chats entirely deleted from the device are seamlessly preserved and badged when archiving with `-P` / `--preserve-deleted`
-- **Edit history progressive disclosure** — edited messages retain their pre-edited original draft; click the "Edited" badge or "ⓘ" message details button to inspect the original text and edit timestamp
-- **Interactive reply jumping** — reply bubbles accurately jump to original messages across both live and preserved conversations
-- **Shared location cards** — shared location pins render with venue names, addresses, and direct Google Maps links
+### 🖥️ WhatsApp Web Experience & Navigation
+- **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, contact avatars with generated initials, customizable display scale, and regional date formats.
+- **Dedicated Navigation Tabs**: Browse **Chats**, **Call History**, **Starred Bookmarks**, and **Archived Chats** from the sidebar bar.
+- **Two-Level Phone Layout**: On narrow screens ($\le 600\text{px}$), the chat list and detail conversation open as two responsive levels like the WhatsApp mobile app, with header back navigation and support for native swipe gestures.
+- **Chat Header Overflow Menu**: A clean 3-dot dropdown menu in the conversation header tucks away secondary actions (Media Gallery, Starred Messages drawer, Chat Info), keeping the chat bar uncluttered.
+
+### 💬 Rich Timeline & Interactive Messaging
+- **In-Chat Call Bubbles**: Voice and video calls rendered chronologically in chat timelines with outcome, duration, and metadata popovers.
+- **Dedicated Call History & Call Inspector**: Full-featured call log browser with call type filters (All, Missed, Video), two-line call cards, detailed Call Inspector side pane, and a "Jump to this Moment in Chat" button.
+- **Starred Messages & Bookmarks Drawer**: Browse starred messages globally in the sidebar or per-chat in a slide-out drawer, with 1-click context jumping and a golden halo highlight animation.
+- **Pinned Messages Banner Strip**: Authentic banner strip beneath the chat header to cycle through pinned messages (`1 of N`) and jump directly to them with an emerald highlight.
+- **Interactive WhatsApp Polls**: Native poll cards with proportional vote bars, percentages, checkmarks, and an interactive "View votes" popup detailing voter identities (Android & iOS).
+- **Group `@mentions` with 1-to-1 Chat Links**: Mentions in group chats styled as interactive badges opening direct 1-to-1 conversations.
+- **Theme-Adaptive Group Sender Colors**: 10-color high-contrast participant palettes for group sender headers and quoted reply borders across dark and light themes.
+- **Progressive Edit History**: Modified messages retain their pre-edited draft; click the "Edited" badge or "ⓘ" message details button to inspect original text and edit timestamps.
+- **Collapsible Long Messages & Media Captions**: Long text and photo captions are trimmed with an accessible "Read More" / "Show Less" toggle, preserving formatting and complex emojis.
+- **Revoked & View-Once Badges**: Native tombstones ("This message was deleted") and status pills ("① Photo · Opened") for ephemeral and revoked media.
+- **Shared Location Cards**: Location pins render with venue names, addresses, and direct Google Maps links.
+- **Interactive Reply Jumping**: Reply bubbles jump to original quoted messages with highlight pulse and auto-expansion of collapsed quotes.
+
+### 🎙️ Media, Waveforms & Video Notes
+- **Voice Message Waveforms & Audio Player**: Interactive 64-bar sound waveforms with tap/drag scrubbing, adjustable playback speeds (`1x`, `1.2x`, `1.5x`, `2x`), and duration counters (Android amplitude extraction and iOS client-side Web Audio API).
+- **Circular Video Notes (Push-to-Video)**: Round video messages render in authentic circular bubbles with duration rings, play/pause controls, fullscreen viewing, and viewport-aware pausing.
+- **In-Browser Gallery & Lightbox**: Full-screen photo/video lightbox with smooth slide transitions, image pre-loading, pan, and zoom. Categorized media browsing across Photos, Videos, Voice notes, Audio, Documents, Links, Stickers, and Contact cards (.vcf).
+- **Dynamic Missing Media Placeholders**: When media is absent from disk, styled placeholder cards (`.media-missing-card`) display blurred thumbnail previews extracted from database blobs.
+- **Audio & Voice Note Differentiation**: Voice notes (PTT) and audio tracks are differentiated with dedicated gallery cards, duration badges, and built-in inline audio playback.
+- **Media Streaming**: Videos and audio stream directly with HTTP Range support and video seeking; animated GIFs loop cleanly with click-to-play controls.
+
+### 🔍 Search & Keyboard Shortcuts
+- **Tab-Aware Universal Search**: Seamlessly adapts to the active tab—server-side full-text search across message bodies on Chats, or instant filtering across Call History, Starred messages, and Archived chats. Matches formatted phone numbers and group descriptions.
+- **Global Keyboard Shortcuts**: Instant focus via `/` or `Ctrl+K` / `Cmd+K`, and layered `Escape` dismissal for lightboxes, drawers, and panels.
+
+### 🛡️ Privacy, Storage & Deployment
+- **100% Local & Offline**: All databases and assets run locally; no external network requests or analytics.
+- **Sub-Path & Reverse Proxy Hosting**: Serve under custom base URLs (e.g. `/whatsapp`) behind Nginx, Traefik, or Caddy via `--base-path` or `WAB_BASE_PATH`.
+- **External Storage Support**: Seamlessly serves media folders (`Contacts/` and `Groups/`) placed on external drives via Linux/macOS symlinks or Windows NTFS Directory Junctions.
+- **Preserved Messages & Chats**: Retains and badges messages deleted from device ("Delete for Me"), sender-revoked messages ("Delete for Everyone"), and deleted chats when archived with `-P` / `--preserve-deleted`.
 
 ## Cache Invalidation
 
-The cache is rebuilt automatically when:
+The cache database (`.wa_viewer.db`) is rebuilt automatically when:
 
-- You pass `--rescan`
-- The number of rows in `archive_copies` differs from the number of messages in the cache
+- You pass `--rescan` on startup
+- The source WhatsApp database (`msgstore.db` or `ChatStorage.sqlite`) has changed (detected via file modification timestamp, file size, or inode)
+- An internal viewer database schema upgrade occurs
 
 ## Privacy & Network Access
 
