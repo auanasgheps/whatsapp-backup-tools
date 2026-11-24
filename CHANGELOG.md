@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🌐 WhatsApp Backup Viewer (`wab-viewer`)
 
+- **Two-Level Phone Layout & Navigation** (PR #20):
+  - Added responsive two-level layout on phones and narrow viewports ($\le 600\text{px}$): full-width chat list first, opening conversations into a dedicated full-screen pane without the main application header.
+  - Implemented smooth hardware-accelerated slide-over transition between list and conversation panes with reduced-motion accessibility support.
+  - Added HTML5 History integration (`pushState` / `popstate`) supporting browser back button and mobile swipe gestures, closing active overlays first before returning to the chat list.
+  - Contributed by @Piero-93.
+
 - **Sub-Path & Reverse Proxy Hosting (`--base-path` / `WAB_BASE_PATH`)** (PR #17):
   - Added `--base-path` CLI flag and `WAB_BASE_PATH` environment variable to serve the chat viewer under custom URL prefixes (e.g. `https://host/whatsapp/`) behind reverse proxies.
   - Implemented `BasePathMiddleware` handling standard WSGI `SCRIPT_NAME` / `PATH_INFO` rewrites, seamlessly supporting both prefix-preserving and prefix-stripping reverse proxies.
