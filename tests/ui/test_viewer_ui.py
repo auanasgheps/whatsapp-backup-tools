@@ -358,7 +358,7 @@ _PHONE_STATE_JS = """
 """
 
 
-def _phone_step(browser: CDPSession, action: str, until: str, timeout: float = 8.0) -> dict:
+def _phone_step(browser: CDPSession, action: str, until: str, timeout: float) -> dict:
     """Run ``action`` in the page, wait until the JS expression ``until`` holds, return the layout state."""
     done = browser.evaluate(
         f"""
@@ -420,7 +420,7 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
     try:
         # 1. Start from the list (a chat opened on the wide screen leaves the class set)
         state = _phone_step(
-            browser, "document.getElementById('chat-back-btn').click()", _PANE_CLOSED
+            browser, "document.getElementById('chat-back-btn').click()", _PANE_CLOSED, 8.0
         )
         assert state["sidebar"] == state["viewport"]
         assert state["pane"] == 0
@@ -428,7 +428,7 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
         browser.capture_screenshot(screenshot_dir / "phone_layout_list.png", 5.0)
 
         # 2. Opening a chat shows only the chat, with the back button focused and its own history entry
-        state = _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        state = _phone_step(browser, _TAP_GROUP, _PANE_OPEN, 8.0)
         assert state["pane"] == state["viewport"]
         assert state["sidebar"] == 0
         assert state["header"] == 0
@@ -438,42 +438,47 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
         browser.capture_screenshot(screenshot_dir / "phone_layout_chat.png", 5.0)
 
         # 3. The browser back gesture returns to the list and consumes the entry
-        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED, 8.0)
         assert state["sidebar"] == state["viewport"]
         assert state["paneEntry"] is False
 
         # 4. The same chat opens again, and the back button returns to the list too
-        state = _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        state = _phone_step(browser, _TAP_GROUP, _PANE_OPEN, 8.0)
         assert state["paneEntry"] is True
         state = _phone_step(
-            browser, "document.getElementById('chat-back-btn').click()", _PANE_CLOSED
+            browser, "document.getElementById('chat-back-btn').click()", _PANE_CLOSED, 8.0
         )
         assert state["paneEntry"] is False
 
         # 5. Escape is back as well
-        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN, 8.0)
         state = _phone_step(
             browser,
             "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))",
             _PANE_CLOSED,
+            8.0,
         )
         assert state["paneEntry"] is False
 
         # 6. Back closes what is open over the chat first: lightbox, then gallery, then the chat
-        _phone_step(browser, _TAP_FOODIES, _PANE_OPEN)
+        _phone_step(browser, _TAP_FOODIES, _PANE_OPEN, 8.0)
         _phone_step(
             browser,
             "document.getElementById('media-btn').click()",
             "document.querySelector('#media-gallery.open #media-gallery-grid .gallery-item[data-type=\"image\"]')",
+            8.0,
         )
         state = _phone_step(
             browser,
             "document.querySelector('#media-gallery-grid .gallery-item[data-type=\"image\"] img').click()",
             "document.getElementById('img-lightbox')",
+            8.0,
         )
         assert state["lightbox"] is True
         browser.capture_screenshot(screenshot_dir / "phone_layout_lightbox.png", 5.0)
-        state = _phone_step(browser, "history.back()", "!document.getElementById('img-lightbox')")
+        state = _phone_step(
+            browser, "history.back()", "!document.getElementById('img-lightbox')", 8.0
+        )
         assert state["gallery"] is True
         assert state["paneOpen"] is True
         assert state["paneEntry"] is True
@@ -481,32 +486,35 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
             browser,
             "history.back()",
             "!document.getElementById('media-gallery').classList.contains('open')",
+            8.0,
         )
         assert state["paneOpen"] is True
         assert state["paneEntry"] is True
-        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED, 8.0)
         assert state["paneEntry"] is False
 
         # 7. The chat info drawer closes on back the same way
-        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN, 8.0)
         _phone_step(
             browser,
             "document.getElementById('chat-info-btn').click()",
             "document.getElementById('chat-info-panel').classList.contains('open')",
+            8.0,
         )
         state = _phone_step(
             browser,
             "history.back()",
             "!document.getElementById('chat-info-panel').classList.contains('open')",
+            8.0,
         )
         assert state["paneOpen"] is True
-        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED, 8.0)
         assert state["paneEntry"] is False
 
         # 8. A tab of the bottom bar closes the open chat and its entry
-        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN, 8.0)
         state = _phone_step(
-            browser, "document.getElementById('tab-btn-starred').click()", _PANE_CLOSED
+            browser, "document.getElementById('tab-btn-starred').click()", _PANE_CLOSED, 8.0
         )
         assert state["tab"] == "starred"
         assert state["paneEntry"] is False
@@ -514,6 +522,7 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
             browser,
             "document.getElementById('tab-btn-chats').click()",
             "document.querySelector('#chat-list .chat-item')",
+            8.0,
         )
         assert state["tab"] == "chats"
 
@@ -557,11 +566,12 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
             browser,
             "document.getElementById('tab-btn-calls').click()",
             "document.querySelector('#chat-list .call-item')",
+            8.0,
         )
         # Opened from the keyboard: focus moves to the back button, and back to the call afterwards
         browser.evaluate("document.querySelector('#chat-list .call-item').focus()", 5.0)
         _press_enter(browser, 8820)
-        state = _phone_step(browser, "", _PANE_OPEN)
+        state = _phone_step(browser, "", _PANE_OPEN, 8.0)
         assert state["callBack"] > 0
         assert state["chatBack"] == 0
         assert state["paneEntry"] is True
@@ -580,7 +590,7 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
         assert overlap["cardTop"] >= overlap["backBottom"]
         browser.capture_screenshot(screenshot_dir / "phone_layout_call.png", 5.0)
         _press_enter(browser, 8822)
-        state = _phone_step(browser, "", _PANE_CLOSED)
+        state = _phone_step(browser, "", _PANE_CLOSED, 8.0)
         assert state["paneEntry"] is False
         assert (
             "call-item" in state["focusClass"]
@@ -589,10 +599,11 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
             browser,
             "document.getElementById('tab-btn-chats').click()",
             "document.querySelector('#chat-list .chat-item')",
+            8.0,
         )
 
         # 10. Rotating to a wide screen keeps the chat and its entry; back on the phone, no second entry
-        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN, 8.0)
         _set_viewport(browser, 8813, 1000)
         state = browser.evaluate(_PHONE_STATE_JS, 5.0)
         assert state["chatBack"] == 0
@@ -603,17 +614,17 @@ def test_phone_layout_two_levels(browser: CDPSession, screenshot_dir: Path) -> N
         state = browser.evaluate(_PHONE_STATE_JS, 5.0)
         assert state["paneOpen"] is True
         assert state["pane"] == state["viewport"]
-        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED, 8.0)
         assert state["paneEntry"] is False
 
         # 11. A chat opened on a wide screen gets its entry when the screen becomes a phone one
         _set_viewport(browser, 8815, 1000)
-        _phone_step(browser, _TAP_GROUP, _PANE_OPEN)
+        _phone_step(browser, _TAP_GROUP, _PANE_OPEN, 8.0)
         assert browser.evaluate(_PHONE_STATE_JS, 5.0)["paneEntry"] is False
         _set_viewport(browser, 8816, 412)
         state = browser.evaluate(_PHONE_STATE_JS, 5.0)
         assert state["paneEntry"] is True
-        state = _phone_step(browser, "history.back()", _PANE_CLOSED)
+        state = _phone_step(browser, "history.back()", _PANE_CLOSED, 8.0)
         assert state["sidebar"] == state["viewport"]
     finally:
         browser.evaluate(
