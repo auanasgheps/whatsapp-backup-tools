@@ -166,7 +166,9 @@ wab-sweeper sweep --config config.toml [--execute] [--yes] [--device SERIAL] [--
 - `--verbose`, `-v`: Enable debug logging.
 
 ### `wab-sweeper restore`
-Push archived media matching `config.toml` back to the Android device if it is currently missing on the phone.
+Push archived media matching `config.toml` back to the Android device via ADB if it is currently missing on the phone.
+
+> 💡 **Need an offline local copy without ADB?** Use [`wab-archiver restore`](../archiver/recipes.md#restore-mode) to reconstruct the full `Media/` folder tree and `Databases/msgstore.db` locally on disk.
 
 ```bash
 wab-sweeper restore --config config.toml [--execute] [--yes] [--device SERIAL] [--verbose]

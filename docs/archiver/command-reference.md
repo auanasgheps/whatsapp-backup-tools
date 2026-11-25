@@ -76,7 +76,9 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 
 ## Subcommand: `restore`
 
-Reconstructs the original flat `WhatsApp/Media/` directory tree and restores the latest `Databases/msgstore.db` directly inside the archive folder.
+Reconstructs the original flat `WhatsApp/Media/` directory tree and restores the latest `Databases/msgstore.db` locally inside the archive folder (offline, no ADB required).
+
+> 💡 **Pushing media back to a live phone?** Use [`wab-sweeper restore`](../sweeper/index.md#wab-sweeper-restore) to push missing or filtered media directly to a connected Android device over ADB.
 
 ### Syntax
 

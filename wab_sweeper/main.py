@@ -193,7 +193,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sweep.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
 
-    p_restore = sub.add_parser("restore", help="Push archived media back to device")
+    p_restore = sub.add_parser(
+        "restore",
+        help="Push missing/filtered archived media back to a connected Android device via ADB",
+        description=(
+            "Push archived media matching config.toml filters back to a connected Android "
+            "device via ADB if missing on the phone. For offline local reconstruction of the "
+            "full Media/ tree and Databases/msgstore.db without ADB, use 'wab-archiver restore'."
+        ),
+    )
     p_restore.add_argument("--config", required=True, help="Path to config.toml")
     p_restore.add_argument(
         "--execute", action="store_true", help="Actually push files (default: dry-run)"

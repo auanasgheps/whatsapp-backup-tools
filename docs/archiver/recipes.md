@@ -217,6 +217,8 @@ wab-archiver restore --output /path/to/output
 ```
 
 > ⚠️ **Android archives only.** iOS media cannot be restored this way.
+>
+> 💡 **Need to push media directly back to a connected Android phone?** Use [`wab-sweeper restore`](../sweeper/index.md#wab-sweeper-restore) for filtered, resumable ADB transfers back to the device. `wab-archiver restore` is for offline local reconstruction of the full `Media/` tree and `Databases/msgstore.db` on disk.
 
 The reconstructed tree is written to `<output>/Media/` and `<output>/Databases/msgstore.db`, alongside the existing `Contacts/` and `Groups/` folders. No files are overwritten — identical files already in place are skipped silently.
 

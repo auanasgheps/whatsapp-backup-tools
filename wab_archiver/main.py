@@ -2238,7 +2238,13 @@ def parse_args() -> argparse.Namespace:
     # --- restore ---
     restore_p = subs.add_parser(
         "restore",
-        help="Reconstruct the original Media/ tree from an archive (Android only).",
+        help="Offline local reconstruction of Media/ and Databases/msgstore.db (Android only).",
+        description=(
+            "Reconstruct the original Android WhatsApp Media/ folder tree and "
+            "Databases/msgstore.db locally inside the archive directory without requiring ADB "
+            "or a connected device. To push specific or filtered media directly back onto a "
+            "connected Android phone via ADB, use 'wab-sweeper restore' instead."
+        ),
     )
     restore_p.add_argument(
         "-o",
