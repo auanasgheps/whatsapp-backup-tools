@@ -72,7 +72,7 @@ jobs:
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
             echo "### Test Coverage Summary" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            pytest tests/ -v --cov=wab_archiver --cov=wab_viewer --cov=shared --cov-report=term-missing --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
+            pytest tests/ -v --cov=wab_archiver --cov=wab_viewer --cov=wab_sweeper --cov=shared --cov-report=term-missing --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
           else
             pytest tests/ -v
           fi
