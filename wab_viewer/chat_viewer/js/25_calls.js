@@ -113,16 +113,16 @@
 
   function _formatCallOutcomeText(callType, outcome, durationSec) {
     if (callType === 'missed' && (!durationSec || durationSec <= 0)) {
-      return outcome === 'declined' ? 'Declined' : 'Missed';
+      return t(outcome === 'declined' ? 'calls.declined' : 'calls.missed');
     }
-    const dirLabel = callType === 'outgoing' ? 'Outgoing' : 'Incoming';
+    const dirLabel = t(callType === 'outgoing' ? 'calls.outgoing' : 'calls.incoming');
     if (durationSec > 0) {
       return `${dirLabel} · ${fmtDuration(durationSec)}`;
     }
     if (outcome === 'canceled') {
-      return `${dirLabel} · Canceled`;
+      return `${dirLabel} · ${t('calls.canceled')}`;
     }
-    return `${dirLabel} · No answer`;
+    return `${dirLabel} · ${t('calls.no_answer')}`;
   }
 
   function renderCallCard(msg) {
@@ -176,7 +176,7 @@
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
 
-    const callerName = call.caller_name || 'Unknown';
+    const callerName = call.caller_name || t('common.unknown');
     const tsMs = call.timestamp_ms ?? (call.timestamp * 1000);
     const timeLabel = fmtTime(tsMs);
     const durSec = call.duration || 0;
@@ -186,11 +186,11 @@
     }
     const isMissed = callType === 'missed';
     const outcomeText = isMissed
-      ? (call.outcome === 'declined' ? 'Declined' : 'Missed')
+      ? t(call.outcome === 'declined' ? 'calls.declined' : 'calls.missed')
       : _formatCallOutcomeText(callType, durSec > 0 ? 'answered' : (call.outcome || 'unanswered'), durSec);
     el.setAttribute(
       'aria-label',
-      `${callerName}, ${call.is_video ? 'Video call' : 'Voice call'}, ${outcomeText}, ${timeLabel}`
+      `${callerName}, ${t(call.is_video ? 'calls.video_call' : 'calls.voice_call')}, ${outcomeText}, ${timeLabel}`
     );
 
     const avatar = document.createElement('div');
@@ -402,13 +402,13 @@
 
       if (matchedChat) {
         jumpBtn.disabled = false;
-        jumpBtn.title = 'Jump to this moment in conversation';
+        jumpBtn.title = t('calls.jump_tooltip');
         jumpBtn.onclick = () => {
           jumpFromCallToChat(call, matchedChat);
         };
       } else {
         jumpBtn.disabled = true;
-        jumpBtn.title = 'No archived conversation found for this caller';
+        jumpBtn.title = t('calls.no_chat_found');
         jumpBtn.onclick = null;
       }
     }

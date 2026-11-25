@@ -291,6 +291,7 @@
     "missed": "Persa",
     "declined": "Rifiutata",
     "canceled": "Annullata",
+    "answered": "Risposta",
     "no_answer": "Nessuna risposta",
     "dur_declined": "0s (Rifiutata)",
     "dur_missed": "0s (Persa)",

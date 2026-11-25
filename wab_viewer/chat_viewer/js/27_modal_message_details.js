@@ -28,10 +28,12 @@
 
   function showCallDetails(msg, anchorEl) {
     const c = msg.call || {};
-    const kind = (c.is_group ? 'Group ' : '') + (c.video ? 'Video call' : 'Voice call');
-    const dir = c.from_me ? 'Outgoing' : 'Incoming';
+    const kind = c.video
+      ? t(c.is_group ? 'calls.group_video_call' : 'calls.video_call')
+      : t(c.is_group ? 'calls.group_voice_call' : 'calls.voice_call');
+    const dir = t(c.from_me ? 'calls.outgoing' : 'calls.incoming');
     const outcomeMap = {
-      answered: 'Answered',
+      answered: t('calls.answered'),
       missed: t('calls.missed'),
       declined: t('calls.declined'),
       canceled: t('calls.canceled'),

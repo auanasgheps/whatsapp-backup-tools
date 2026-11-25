@@ -291,6 +291,7 @@
     "missed": "Manqué",
     "declined": "Refusé",
     "canceled": "Annulé",
+    "answered": "Répondu",
     "no_answer": "Sans réponse",
     "dur_declined": "0s (Refusé)",
     "dur_missed": "0s (Manqué)",

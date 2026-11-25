@@ -291,6 +291,7 @@
     "missed": "Missed",
     "declined": "Declined",
     "canceled": "Canceled",
+    "answered": "Answered",
     "no_answer": "No answer",
     "dur_declined": "0s (Declined)",
     "dur_missed": "0s (Missed)",

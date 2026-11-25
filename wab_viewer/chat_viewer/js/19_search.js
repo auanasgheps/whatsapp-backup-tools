@@ -236,13 +236,13 @@
     const statusData = await statusRes.json();
     if (statusData.status !== 'done') {
       nav.style.display = 'flex';
-      count.textContent = 'Search not ready yet…';
+      count.textContent = t('search.not_ready');
       document.getElementById('search-prev').disabled = true;
       document.getElementById('search-next').disabled = true;
       return;
     }
     nav.style.display = 'flex';
-    count.textContent = 'Searching…';
+    count.textContent = t('search.searching');
     document.getElementById('search-prev').disabled = true;
     document.getElementById('search-next').disabled = true;
     const params = new URLSearchParams({ q, chat_id: currentChat.id, chat_type: currentChat.type });
