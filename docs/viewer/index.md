@@ -1,4 +1,4 @@
-[← Back to Main Readme](../../README.md) • [Archiver Guide](../archiver/index.md)
+[← Back to Main Readme](../../README.md) • [Archiver Guide](../archiver/index.md) • [Sweeper Guide](../sweeper/index.md)
 
 # WhatsApp Backup Viewer (`wab-viewer`)
 
@@ -83,6 +83,7 @@ If you have a large archive and prefer to keep heavy media folders (`Contacts/` 
 
 ### 🖥️ WhatsApp Web Experience & Navigation
 - **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, contact avatars with generated initials, customizable display scale, and regional date formats.
+- **Multi-Language Interface**: Available in English, German, French, Italian, and Spanish. Automatically detects your browser language (`Auto`) or can be switched anytime in **Settings**.
 - **Dedicated Navigation Tabs**: Browse **Chats**, **Call History**, **Starred Bookmarks**, and **Archived Chats** from the sidebar bar.
 - **Two-Level Phone Layout**: On narrow screens ($\le 600\text{px}$), the chat list and detail conversation open as two responsive levels like the WhatsApp mobile app, with header back navigation and support for native swipe gestures.
 - **Chat Header Overflow Menu**: A clean 3-dot dropdown menu in the conversation header tucks away secondary actions (Media Gallery, Starred Messages drawer, Chat Info), keeping the chat bar uncluttered.
@@ -196,5 +197,6 @@ handle_path /whatsapp/* {
 ## Navigation
 
 - **Previous**: [Archiver Guide & Workflow](../archiver/index.md)
+- **Next**: [Sweeper Guide (`wab-sweeper`)](../sweeper/index.md)
 - **Home**: [Main Project Readme](../../README.md)
 

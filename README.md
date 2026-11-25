@@ -33,13 +33,14 @@
 
 ## Overview
 
-WhatsApp Backup Tools is a suite to archive and access your WhatsApp data.
-Consists of two complementary programs:
+WhatsApp Backup Tools is a suite to archive, manage, and access your WhatsApp data.
+Consists of three complementary programs:
 
 - **wab-archiver** (WhatsApp Backup Archiver) organises your WhatsApp media into a structured folder hierarchy using metadata from the WhatsApp database. Instead of an unstructured dump, you get a browsable archive sorted by contact or group, year, and direction (Sent/Received), with original message timestamps preserved.
-- **wab-viewer** (WhatsApp Backup Viewer) lets you browse and search your archived chats through a local web UI, replicating WhatsApp Web. 
+- **wab-viewer** (WhatsApp Backup Viewer) lets you browse and search your archived chats through a local web UI, replicating WhatsApp Web.
+- **wab-sweeper** (WhatsApp Backup Sweeper) safely reclaims storage on your phone by removing media that is already verified in your archive, with precision `restore` and `undo` support. _Android only_.
 
-Both tools run locally — **no data leaves your machine**. Windows, Linux, and macOS are supported. Python 3.11 required.
+All tools run locally — **no data leaves your machine**. Windows, Linux, and macOS are supported. Python 3.11 required.
 
 > ⚠️ **These tools are designed to run on a backup copy of your WhatsApp data — never on live device files.** The archiver always makes a copy of your data.
 
@@ -52,11 +53,13 @@ Both tools run locally — **no data leaves your machine**. Windows, Linux, and 
 - [Features](#features)
   - [WhatsApp Backup Archiver](#whatsapp-backup-archiver)
   - [WhatsApp Backup Viewer](#whatsapp-backup-viewer)
+  - [WhatsApp Backup Sweeper](#whatsapp-backup-sweeper)
 - [Archive Structure](#archive-structure)
 - [Installation & Quick Start](#installation--quick-start)
   - [Step 1: Install the Tool](#step-1-install-the-tool)
   - [Step 2: Get the Files from Your Phone](#step-2-get-the-files-from-your-phone)
   - [Step 3: Archive & View](#step-3-archive--view)
+  - [Step 4: Reclaim Phone Storage (Optional, Android)](#step-4-reclaim-phone-storage-optional-android)
 - [Re-running the Archiver](#re-running-the-archiver)
 - [Prerequisites](#prerequisites)
 - [Known Limitations](#known-limitations)
@@ -95,6 +98,7 @@ Explore and search your archived chats through a local web UI replicating WhatsA
 
 #### 🖥️ WhatsApp Web Experience & Navigation
 - **Authentic WhatsApp Web UI**: Fast, responsive layout with dark and light themes, contact avatars, customizable font size, and regional date formats. On phones, the chat list and the chat open as two levels like the WhatsApp app, with back navigation.
+- **Multi-Language Interface**: Available in English, German, French, Italian, and Spanish, with automatic browser language detection and manual selection in **Settings**.
 - **Dedicated Navigation Tabs**: Browse **Chats**, **Call History**, **Starred Bookmarks**, and **Archived Chats** from the sidebar, with tab-aware search and instant keyboard shortcuts (`Ctrl+K` / `/`).
 - **Full-Text & Contextual Search**: Search across all chats or within a single conversation, jump directly to matches, or jump to specific dates with the date picker.
 
@@ -115,6 +119,14 @@ Explore and search your archived chats through a local web UI replicating WhatsA
 - **100% Local & Offline**: All databases and assets run locally; no external network requests or analytics.
 - **Sub-Path & Reverse Proxy Hosting**: Serve under custom base URLs (e.g. `/whatsapp`) behind Nginx, Traefik, or Caddy via `--base-path`.
 - **External Storage Support**: Whitelisted symlinks and Windows NTFS Directory Junctions to keep heavy media folders on secondary hard drives.
+
+### WhatsApp Backup Sweeper
+Safely reclaim storage on your Android phone by removing media that has already been verified and archived.
+
+- **4-Gate Integrity Pipeline**: Never deletes a file on your phone unless it is cataloged in `.wa_media_archiver.db`, physically present in your local archive, confirmed on the device, and passes MD5 content verification (EXIF-stamp aware).
+- **Flexible Policies & Single-Chat Safety Handshake**: Filter by age, space quota (sorted by oldest or largest), minimum file size, media type, or target a single verified chat.
+- **Built-in Protections**: Defaults to dry-run preview, requires typed confirmation before deleting, and protects starred messages, preserved/revoked media, shared cross-chat media, system folders, and active WhatsApp backups.
+- **Precision Restore & Undo**: Push archived media back to your phone (`wab-sweeper restore`) or roll back the most recent sweep (`wab-sweeper undo --last`), restoring file permissions and original timestamps while tracking resumable state in `.wab-sweeper.db`.
 
 ---
 
@@ -197,6 +209,7 @@ pip install whatsapp-backup-tools
   ```bash
   python -m wab_archiver --help
   python -m wab_viewer --help
+  python -m wab_sweeper --help
   ```
 </details>
 
@@ -284,6 +297,20 @@ Open your browser at `http://127.0.0.1:5000` to browse, search, and relive your 
 
 ---
 
+### Step 4: Reclaim Phone Storage (Optional, Android only)
+
+Once your archive is verified, you can free up space on your Android device via ADB without losing your media. wab-sweeper always previews in dry-run mode first:
+
+```bash
+wab-sweeper init-config                          # Generate config.toml
+wab-sweeper sweep --config config.toml           # Preview (dry-run)
+wab-sweeper sweep --config config.toml --execute # Delete verified files
+```
+
+See the **[Sweeper Guide](docs/sweeper/index.md)** for single-chat targeting, `restore`, and `undo`.
+
+---
+
 ## Re-running the Archiver
 
 The archiver is **safe to re-run** on an existing archive:
@@ -323,6 +350,10 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 - **Profile pictures are not displayed**: Local WhatsApp backups do not store contact avatars (requires live WhatsApp connection or unbacked-up sandbox databases).
 - **Unsaved contact push names on Android require root**: Friendly push names for unsaved numbers reside in private application storage (`wa.db`), excluded from backups. Unsaved numbers display their international phone number.
 - See [viewer known limitations](docs/viewer/index.md#known-limitations) for full technical details on receipts and incremental preview caches.
+
+### Sweeper
+
+- **iOS is not supported**: Apple locks down app storage on iPhones and iPads, so external tools cannot delete or restore individual WhatsApp media files directly on the device. Because iOS backups on your computer are read-only snapshots rather than live phone storage, `wab-sweeper` only works with Android devices via ADB.
 
 ---
 

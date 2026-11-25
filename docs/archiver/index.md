@@ -1,4 +1,4 @@
-[← Back to Main Readme](../../README.md) • [Prerequisites](../prerequisites.md)
+[← Back to Main Readme](../../README.md) • [Prerequisites](../prerequisites.md) • [Viewer Guide](../viewer/index.md) • [Sweeper Guide](../sweeper/index.md)
 
 # WhatsApp Backup Archiver (`wab-archiver`)
 
@@ -8,19 +8,17 @@
 
 ## The 5-Step Archiving Journey
 
-Follow this workflow to create your structured archive:
-
-```
+```text
 ┌────────────────────────┐      ┌────────────────────────┐      ┌────────────────────────┐
-│  1. Setup Platform     │ ───> │  2. Configure Run      │ ───> │  3. Execute Dry-Run    │
-│  (Android or iOS)      │      │  (CLI or config.toml)  │      │  (--dry-run preview)   │
+│  1. Setup Platform     │ ───> │  2. Configure Run      │ ───> │  3. Dry-Run Preview    │
+│  (Android or iOS)      │      │  (config.toml or CLI)  │      │  (--dry-run)           │
 └────────────────────────┘      └────────────────────────┘      └────────────────────────┘
                                                                              │
                                                                              ▼
-┌────────────────────────┐      ┌────────────────────────┐      ┌────────────────────────┐
-│  Explore in Viewer     │ <─── │  5. Inspect Audit      │ <─── │  4. Live Run           │
-│  (wab-viewer)          │      │  (CSV audit reports)   │      │  (copy & preserve)     │
-└────────────────────────┘      └────────────────────────┘      └────────────────────────┘
+                                ┌────────────────────────┐      ┌────────────────────────┐
+                                │  5. Explore in Viewer  │ <─── │  4. Archive & Audit    │
+                                │  (wab-viewer)          │      │  (live run + reports)  │
+                                └────────────────────────┘      └────────────────────────┘
 ```
 
 ---
@@ -29,127 +27,68 @@ Follow this workflow to create your structured archive:
 
 Choose your mobile platform to extract the necessary databases and media files:
 
-- 📱 **[Android Setup Guide](setup-android.md)**:
-  - Enable in-app E2E encryption and save your 64-digit key.
-  - Pull your WhatsApp media folder over USB via **ADB** or sync using **Syncthing**.
-  - No root required.
-- 🍏 **[iOS Setup Guide](setup-ios.md)**:
-  - Disable in-app WhatsApp E2E encryption before backing up.
-  - Create a local device backup using **Finder** (macOS) or **Apple Devices / iTunes** (Windows).
-  - The archiver reads directly from the backup directory (unencrypted or encrypted).
+- 📱 **[Android Setup Guide](setup-android.md)**: Enable in-app E2E encryption (save your 64-digit key) and pull media via **ADB** or **Syncthing** (no root required).
+- 🍏 **[iOS Setup Guide](setup-ios.md)**: Disable in-app WhatsApp E2E encryption and create a local backup via **Finder** (macOS) or **Apple Devices / iTunes** (Windows).
 
 ---
 
 ### Step 2: Configure Your Run
 
-You can run the archiver using command-line arguments or via a convenient `config.toml` file:
+- **Config File (Recommended)**: Generate a starter template with `wab-archiver config generate`, rename `example-config.toml` to `config.toml`, and fill in your paths. See the **[Configuration Guide](configuration.md)** for all options.
+- **CLI Flags & Recipes**: Pass options directly on the command line. See the **[Command Reference](command-reference.md)** and **[Recipes & Workflows](recipes.md)**.
 
-- **Config File (Recommended for repeatable runs)**:
-  Generate an example config file:
-  ```bash
-  wab-archiver config generate
-  ```
-  Rename `example-config.toml` to `config.toml`, fill in your paths, and run simply with `wab-archiver archive`. See the **[Configuration Guide](configuration.md)** for all options and discovery rules.
-- **Command-Line Arguments & Recipes**:
-  Specify options directly on the terminal. See the **[Command Reference](command-reference.md)** for the full flag specification and **[Recipes & Workflows](recipes.md)** for practical examples.
-
-> 💡 **Tip — Cloud Photo Galleries (Google Photos, Immich, Apple Photos):**  
-> If you plan to sync or upload your archive to cloud photo managers, consider enabling `--exif-timestamps` (or `exif_timestamps = true` in `config.toml`) so message dates are stamped directly into media headers for proper chronological timeline indexing.
+> 💡 **Cloud Photo Galleries (Google Photos, Immich, Apple Photos):** Enable `--exif-timestamps` (or `exif_timestamps = true` in `config.toml`) to embed original message dates into image/video headers without re-compression. Already have an archive? Backfill it in-place with `wab-archiver update-metadata -o /path/to/archive` (see [Recipes](recipes.md#5-retroactively-backfill-metadata-on-existing-archives-update-metadata)).
 
 ---
 
-### Step 3: Always Run a Dry Run First
+### Step 3: Run a Dry-Run First
 
-Before writing any files to disk, run with `--dry-run` to verify that your paths, encryption keys, and contact mappings resolve properly:
+Before copying files, run with `--dry-run` to verify database decryption, schema compatibility, and expected file counts:
 
-**Android example:**
 ```bash
-wab-archiver archive \
-  --msgstore "/path/to/WhatsApp/Databases/msgstore.db.crypt15" \
-  --e2e-key YOUR_64_HEX_KEY \
-  --wa-root "/path/to/WhatsApp" \
-  --output "/path/to/archive" \
-  --dry-run
+wab-archiver archive --dry-run
 ```
 
-**iOS example:**
-```bash
-wab-archiver archive \
-  --ios-backup "/path/to/backup/folder" \
-  --output "/path/to/archive" \
-  --dry-run
-```
-
-The dry run simulates the entire process, tests database decryption, verifies schema compatibility, and displays expected file counts without copying media files or writing reports (note: if your database is encrypted, the decrypted SQLite database is extracted to allow querying).
+*(If you are not using `config.toml`, pass `--msgstore`, `--e2e-key`, `--wa-root` / `--ios-backup`, and `--output`; see [Command Reference](command-reference.md) for flag examples.)*
 
 ---
 
 ### Step 4: Perform the Live Run & Check Audit Reports
 
-Once satisfied with the dry run output, remove the `--dry-run` flag to execute:
+Remove `--dry-run` to build or update your archive:
 
 ```bash
-wab-archiver archive --config config.toml
+wab-archiver archive
 ```
 
-When finished, your output folder will be structured as follows:
-
-```
-<output>/
-├── Contacts/                    ← Media organized by contact name & phone
-│   └── John Doe (00123456789)/
-│       └── 2024/
-│           ├── Received/
-│           └── Sent/
-├── Groups/                      ← Media organized by group name
-│   └── Family Chat/
-│       └── 2024/
-├── Whatsapp Databases/          ← Decrypted SQLite databases saved for viewer
-├── preserved_messages.db        ← Preserved deleted messages & chats (when using -P)
-├── wab-archiver.log             ← Execution audit log
-├── missing_media_report.csv     ← Media referenced in chats but missing from storage
-├── duplicate_media_report.csv   ← Duplicate media files audited
-├── source_conflicts_report.csv  ← Conflicts across multiple backup roots (--wa-root)
-└── .wa_media_archiver.db        ← Archive state database
-```
-
-Review the generated CSV audit reports to identify any media files that were missing from device storage or duplicate files skipped.
-
-> 💡 **Photo Library & Cloud Sync (Google Photos, Immich, Apple Photos):**
-> By default, the archiver sets filesystem modification dates (`mtime`). However, cloud galleries prioritize embedded metadata tags (`DateTimeOriginal` for JPEG photos, `mvhd` creation time for MP4/MOV/3GP/M4A media).
-> 
-> Pass `--exif-timestamps` (or set `exif_timestamps = true` in `config.toml`) to inject message timestamps directly into media metadata headers without re-compression:
-> - **Zero Re-compression**: Loss-free header injection; pixel data and video streams are never transcoded.
-> - **Original Photos Protected**: Existing camera capture dates and orientation tags are strictly preserved.
-> - **Timezone Aware**: Pair with `--timezone <Region/City>` to embed exact UTC offsets (`OffsetTimeOriginal`).
->
-> 🔄 **Already have an existing archive without metadata?**  
-> You do not need to re-import or connect your device. Backfill your archive in seconds:
-> ```bash
-> wab-archiver update-metadata -o /path/to/output --timezone Europe/Berlin
-> ```
-> See the [Command Reference](command-reference.md#subcommand-update-metadata) or [Recipes](recipes.md#5-retroactively-backfill-metadata-on-existing-archives-update-metadata) for full details.
+Your output folder will contain:
+- **`Contacts/`** & **`Groups/`**: Media organized by contact/group, year, and `Sent/` / `Received/`.
+- **`WhatsApp Databases/`** & **`.wa_media_archiver.db`**: Decrypted databases and archive state (plus `preserved_messages.db` when using `-P`).
+- **CSV Audit Reports**: `missing_media_report.csv`, `duplicate_media_report.csv`, and `source_conflicts_report.csv` (see the [Main Readme](../../README.md#archive-structure) for the full layout).
 
 ---
 
 ### Step 5: Explore Your Archive in the Web Viewer
 
-Your archive is now ready for offline browsing! Launch the local chat viewer pointing to your output folder:
+Launch the local chat viewer pointing to your output folder:
 
 ```bash
 wab-viewer /path/to/archive
 ```
 
-See the **[WhatsApp Backup Viewer Guide](../viewer/index.md)** for timeline browsing, full-text search, and media playback instructions.
+See the **[WhatsApp Backup Viewer Guide](../viewer/index.md)** for browsing, search, and media playback.
+
+> 🧹 **Optional (Android): Reclaim Phone Storage**  
+> Once your archive is verified, you can safely remove older archived media from your Android device via ADB (with `restore` and `undo` support). See the **[Sweeper Guide](../sweeper/index.md)**.
 
 ---
 
 ## Guided Navigation
 
 - **Previous**: [Prerequisites & Installation](../prerequisites.md)
-- **Next**: Choose your platform guide:
+- **Reference Guides**:
   - 🤖 **[Android Setup Guide](setup-android.md)**
   - 🍎 **[iOS Setup Guide](setup-ios.md)**
-  - 📖 **[CLI Command Reference](command-reference.md)**
   - ⚙️ **[Configuration Guide](configuration.md)**
+  - 📖 **[CLI Command Reference](command-reference.md)**
   - 💡 **[CLI Recipes & Workflows](recipes.md)**
