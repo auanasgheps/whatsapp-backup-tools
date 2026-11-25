@@ -17,8 +17,9 @@
 
   function _formatMessagePreview(m) {
     let preview = m.text || m.text_body || '';
-    if (m.mentions && typeof resolveMentionsPlainText === 'function') {
-      preview = resolveMentionsPlainText(preview, m.mentions);
+    const isGroupChat = Boolean(currentChat && currentChat.type === 'group');
+    if ((m.mentions || isGroupChat) && typeof resolveMentionsPlainText === 'function') {
+      preview = resolveMentionsPlainText(preview, m.mentions, isGroupChat);
     }
     if (_isUnreadableToken(preview)) {
       preview = '';

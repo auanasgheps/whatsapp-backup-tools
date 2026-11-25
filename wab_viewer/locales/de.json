@@ -114,6 +114,7 @@
     "deleted_other": "Diese Nachricht wurde gelöscht",
     "deleted_admin": "Diese Nachricht wurde von einem Admin gelöscht",
     "quoted_fallback": "Zitierte Nachricht",
+    "mention_all": "alle",
     "jump_to_original": "Zur ursprünglichen Nachricht springen",
     "read_more": "Mehr lesen",
     "show_less": "Weniger",

@@ -416,7 +416,7 @@ function renderMedia(msg) {
       if (!isDuplicate && cleanBody) {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        renderCollapsibleMessageText(cap, cleanBody, msg.msg_id, msg.mentions);
+        renderCollapsibleMessageText(cap, cleanBody, msg.msg_id, msg.mentions, Boolean(currentChat && currentChat.type === 'group'));
         wrap.appendChild(cap);
       }
     }
@@ -443,7 +443,7 @@ function renderMedia(msg) {
 
     const q = document.createElement('div');
     q.className = 'msg-poll-question';
-    q.innerHTML = highlight(poll.question || 'Poll', '');
+    q.innerHTML = highlight(poll.question || 'Poll', '', null, false);
     header.appendChild(q);
 
     const badge = document.createElement('div');
@@ -486,7 +486,7 @@ function renderMedia(msg) {
         titleEl.appendChild(checkIcon);
       }
       const nameSpan = document.createElement('span');
-      nameSpan.innerHTML = highlight(opt.name || '', '');
+      nameSpan.innerHTML = highlight(opt.name || '', '', null, false);
       titleEl.appendChild(nameSpan);
       content.appendChild(titleEl);
 

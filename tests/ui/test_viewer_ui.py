@@ -4930,3 +4930,118 @@ def test_chat_video_first_frame_poster_preview(browser: CDPSession, ui_demo_dir:
         assert result["notePosterVal"].startswith("data:image/jpeg;base64,")
     finally:
         synth_video.unlink(missing_ok=True)
+
+
+def test_group_all_mention_highlight_and_i18n(browser, ui_server_url) -> None:
+    """@all in group chats is styled bold/highlighted and translated per active locale."""
+    import json as _json
+    import time
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{ui_server_url}/api/preferences",
+        data=_json.dumps({"key": "language", "value": "de"}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+
+    browser.evaluate("setTimeout(() => location.reload(), 10);", 5.0)
+    for _ in range(80):
+        try:
+            if browser.evaluate(
+                "window.INITIAL_LOCALE === 'de' && !!document.querySelector('#chat-list .chat-item')",
+                2.0,
+            ):
+                break
+        except RuntimeError:
+            pass
+        time.sleep(0.1)
+
+    res = browser.evaluate(
+        """
+        (async () => {
+            for (let i = 0; i < 60; i++) {
+                if (window.INITIAL_LOCALE === 'de' && document.querySelector('#chat-list .chat-item')) {
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            const chats = await (await fetch('/api/chats')).json();
+            const groupChat = chats.find(c => c.type === 'group');
+            const contactChat = chats.find(c => c.type === 'contact');
+            if (!groupChat || !contactChat) return { missingChats: true };
+
+            const origFetch = window.fetch.bind(window);
+            window.fetch = async (url, opts) => {
+                if (typeof url === 'string' && url.includes('/api/chat-index-status')) {
+                    return new Response(JSON.stringify({ indexed: true, percent: 100 }), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                }
+                if (typeof url === 'string' && url.includes('/api/messages')) {
+                    const isGrp = url.includes('chat_type=group');
+                    return new Response(JSON.stringify([{
+                        msg_id: isGrp ? 99001 : 99002,
+                        timestamp_ms: 1700000000000,
+                        from_me: 0,
+                        sender: isGrp ? 'Alice' : null,
+                        media_type: 'text',
+                        text_body: 'Hey @all, meet @allen and `@all`'
+                    }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+                }
+                return origFetch(url, opts);
+            };
+
+            try {
+                const grpItem = document.querySelector(`#chat-list .chat-item[data-id="${groupChat.id}"][data-type="group"]`);
+                grpItem.click();
+                let grpTextEl = null;
+                for (let i = 0; i < 40; i++) {
+                    grpTextEl = document.querySelector('#message-scroll .msg-row[data-msg-id="99001"] .msg-text');
+                    if (grpTextEl) break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                const mentionEl = grpTextEl ? grpTextEl.querySelector('.wa-mention.wa-mention-all') : null;
+                const grpResult = {
+                    html: grpTextEl ? grpTextEl.innerHTML : '',
+                    mentionText: mentionEl ? mentionEl.textContent : '',
+                    fontWeight: mentionEl ? getComputedStyle(mentionEl).fontWeight : ''
+                };
+
+                const ctcItem = document.querySelector(`#chat-list .chat-item[data-id="${contactChat.id}"][data-type="contact"]`);
+                ctcItem.click();
+                let ctcTextEl = null;
+                for (let i = 0; i < 40; i++) {
+                    ctcTextEl = document.querySelector('#message-scroll .msg-row[data-msg-id="99002"] .msg-text');
+                    if (ctcTextEl) break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                const ctcMention = ctcTextEl ? ctcTextEl.querySelector('.wa-mention') : null;
+
+                return {
+                    grpResult,
+                    contactHasMention: Boolean(ctcMention),
+                    contactHtml: ctcTextEl ? ctcTextEl.innerHTML : ''
+                };
+            } finally {
+                window.fetch = origFetch;
+                await origFetch('/api/preferences', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'language', value: 'auto' })
+                });
+            }
+        })()
+        """,
+        20.0,
+    )
+    assert not res.get("missingChats")
+    assert res["grpResult"]["mentionText"] == "@alle"
+    assert '<span class="wa-mention wa-mention-all">@alle</span>' in res["grpResult"]["html"]
+    assert "<code>@all</code>" in res["grpResult"]["html"]
+    assert "@allen" in res["grpResult"]["html"]
+    assert int(res["grpResult"]["fontWeight"]) >= 600
+    assert res["contactHasMention"] is False

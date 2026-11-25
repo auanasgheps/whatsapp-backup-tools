@@ -1,4 +1,5 @@
 function renderBubble(unit) {
+    const isGroupChat = Boolean(currentChat && currentChat.type === 'group');
     if (unit.type === 'group') {
       const group = unit.members;
       const msg = group[0];
@@ -21,7 +22,7 @@ function renderBubble(unit) {
       if (captionMsg) {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        renderCollapsibleMessageText(cap, captionMsg.text_body, captionMsg.msg_id, captionMsg.mentions);
+        renderCollapsibleMessageText(cap, captionMsg.text_body, captionMsg.msg_id, captionMsg.mentions, isGroupChat);
         bubble.appendChild(cap);
       }
 
@@ -129,7 +130,7 @@ function renderBubble(unit) {
       qSender.textContent = qs ? localizeSender(qs) : (currentChat && currentChat.type === 'contact' ? currentChat.display_name : '');
       const qText = document.createElement('div');
       qText.className = 'msg-quote-text';
-      qText.textContent = resolveMentionsPlainText(msg.quoted_text, msg.mentions) || (msg.quoted_msg_id ? t('msg.quoted_fallback') : '');
+      qText.textContent = resolveMentionsPlainText(msg.quoted_text, msg.mentions, isGroupChat) || (msg.quoted_msg_id ? t('msg.quoted_fallback') : '');
       qContent.appendChild(qSender);
       qContent.appendChild(qText);
       quote.appendChild(qContent);
@@ -320,13 +321,13 @@ function renderBubble(unit) {
         if (msg.text_body && msg.media_type !== 'vcard') {
           const cap = document.createElement('div');
           cap.className = 'msg-caption';
-          renderCollapsibleMessageText(cap, msg.text_body, msg.msg_id, msg.mentions);
+          renderCollapsibleMessageText(cap, msg.text_body, msg.msg_id, msg.mentions, isGroupChat);
           bubble.appendChild(cap);
         }
       } else {
         const txt = document.createElement('div');
         txt.className = 'msg-text';
-        renderCollapsibleMessageText(txt, msg.text_body, msg.msg_id, msg.mentions);
+        renderCollapsibleMessageText(txt, msg.text_body, msg.msg_id, msg.mentions, isGroupChat);
         bubble.appendChild(txt);
         if (msg.link_title || msg.link_url || msg.link_desc) {
           bubble.appendChild(renderLinkPreview(msg));
@@ -339,7 +340,7 @@ function renderBubble(unit) {
       if (msg.text_body && msg.media_type !== 'vcard') {
         const cap = document.createElement('div');
         cap.className = 'msg-caption';
-        renderCollapsibleMessageText(cap, msg.text_body, msg.msg_id, msg.mentions);
+        renderCollapsibleMessageText(cap, msg.text_body, msg.msg_id, msg.mentions, isGroupChat);
         bubble.appendChild(cap);
       }
     }

@@ -2169,7 +2169,7 @@ class TestReviewFixRegressions:
 
         assert "const captionMsg = group.find(m => m.text_body && m.text_body.trim());" in js
         assert (
-            "renderCollapsibleMessageText(cap, captionMsg.text_body, captionMsg.msg_id, captionMsg.mentions);"
+            "renderCollapsibleMessageText(cap, captionMsg.text_body, captionMsg.msg_id, captionMsg.mentions, isGroupChat);"
             in js
         )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import re
 import sqlite3
 
 from flask import Blueprint, jsonify, request
@@ -9,6 +11,7 @@ from flask import Blueprint, jsonify, request
 from ..context import get_viewer_context
 from ..db_cache import _find_ios_call_history_db, _find_ios_db
 from ..hydration import _hydrate_link_preview_rows, _hydrate_live_photos, _hydrate_mentions
+from ..locales_loader import SUPPORTED_LANGUAGES, load_locale
 from ..queries.calls import (
     _query_android_calls,
     _query_ios_calls,
@@ -260,6 +263,30 @@ def api_chat_pinned(chat_id: str):
     return jsonify({"pinned_message": first_pin, "pinned_messages": merged})
 
 
+_GROUP_ALL_BODY_RE = re.compile(r"(?<![A-Za-z0-9_])@all(?!\w)")
+_BARE_AT_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9_])@(?=\w)")
+
+
+@functools.lru_cache(maxsize=1)
+def _get_localized_all_mention_re() -> re.Pattern[str]:
+    tokens: set[str] = {"all"}
+    for lang in SUPPORTED_LANGUAGES:
+        tok = load_locale(lang).get("msg", {}).get("mention_all")
+        if isinstance(tok, str) and tok.strip():
+            tokens.add(tok.strip())
+    alts = "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True))
+    return re.compile(rf"(?<![A-Za-z0-9_])@(?:{alts})(?!\w)", re.IGNORECASE)
+
+
+def _prepare_fts_search_query(q: str) -> tuple[str, bool]:
+    """Normalize @mention syntax for FTS5 and rewrite localized @all tags to 'all'."""
+    loc_re = _get_localized_all_mention_re()
+    has_all_mention = bool(loc_re.search(q))
+    fts_q = loc_re.sub("all", q)
+    fts_q = _BARE_AT_PREFIX_RE.sub("", fts_q).strip()
+    return fts_q, has_all_mention
+
+
 @bp.route("/api/search")
 def api_search():
     ctx = get_viewer_context()
@@ -269,43 +296,52 @@ def api_search():
     if not q:
         return jsonify({"results": [], "indexed_count": 0})
 
+    fts_q, has_all_mention = _prepare_fts_search_query(q)
     fts_conn = ctx.get_cache()
     wa = ctx.get_wa()
+
+    if not fts_q or (has_all_mention and chat_type == "contact"):
+        indexed_count = fts_conn.execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
+        return jsonify({"results": [], "indexed_count": indexed_count})
+
+    group_clause = " AND mi.chat_type = 'group'" if has_all_mention else ""
+    global_limit = 2000 if has_all_mention else 100
+    chat_limit = 2000 if has_all_mention else 500
 
     try:
         if chat_id and chat_type:
             idx_rows = fts_conn.execute(
-                """
+                f"""
                 SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
                 FROM message_index_fts fts
                 JOIN message_index mi ON mi.rowid = fts.rowid
                 WHERE message_index_fts MATCH ?
                   AND mi.chat_id = ? AND mi.chat_type = ?
-                ORDER BY mi.timestamp_ms ASC LIMIT 500
+                ORDER BY mi.timestamp_ms ASC LIMIT {chat_limit}
             """,
-                (q, chat_id, chat_type),
+                (fts_q, chat_id, chat_type),
             ).fetchall()
         elif chat_id:
             idx_rows = fts_conn.execute(
-                """
+                f"""
                 SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
                 FROM message_index_fts fts
                 JOIN message_index mi ON mi.rowid = fts.rowid
-                WHERE message_index_fts MATCH ? AND mi.chat_id = ?
-                ORDER BY mi.timestamp_ms ASC LIMIT 500
+                WHERE message_index_fts MATCH ? AND mi.chat_id = ?{group_clause}
+                ORDER BY mi.timestamp_ms ASC LIMIT {chat_limit}
             """,
-                (q, chat_id),
+                (fts_q, chat_id),
             ).fetchall()
         else:
             idx_rows = fts_conn.execute(
-                """
+                f"""
                 SELECT mi.rowid, mi.chat_id, mi.chat_type, mi.timestamp_ms
                 FROM message_index_fts fts
                 JOIN message_index mi ON mi.rowid = fts.rowid
-                WHERE message_index_fts MATCH ?
-                ORDER BY mi.timestamp_ms ASC LIMIT 100
+                WHERE message_index_fts MATCH ?{group_clause}
+                ORDER BY mi.timestamp_ms ASC LIMIT {global_limit}
             """,
-                (q,),
+                (fts_q,),
             ).fetchall()
     except sqlite3.OperationalError as e:
         return jsonify({"error": f"Invalid search query: {e}"}), 400
@@ -369,6 +405,8 @@ def api_search():
         r.pop("audio_waveform", None)
         r.pop("waveform", None)
         r.pop("_raw_metadata", None)
+    if has_all_mention:
+        results = [r for r in results if _GROUP_ALL_BODY_RE.search(r.get("text_body") or "")]
     results.sort(key=lambda r: (r.get("timestamp_ms", 0), r.get("msg_id", 0)))
     indexed_count = ctx.get_cache().execute("SELECT COUNT(*) FROM indexed_chats").fetchone()[0]
     return jsonify({"results": results, "indexed_count": indexed_count})

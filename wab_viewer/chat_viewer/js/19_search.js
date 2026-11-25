@@ -104,17 +104,17 @@
     let subHtml = '';
     if (chat.type === 'group') {
       const desc = (chat.description || '').trim();
-      subHtml = desc ? highlight(desc.replace(/\s+/g, ' '), q) : esc(t('chat.group_conversation'));
+      subHtml = desc ? highlight(desc.replace(/\s+/g, ' '), q, null, false) : esc(t('chat.group_conversation'));
     } else {
       const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
-      subHtml = formattedPhone ? highlight(formattedPhone, q) : '';
+      subHtml = formattedPhone ? highlight(formattedPhone, q, null, false) : '';
     }
 
     const tagHtml = chat.is_preserved_only
       ? ` <span class="chat-preserved-tag" title="${esc(t('sidebar.preserved_badge_title'))}">${esc(t('common.preserved'))}</span>`
       : '';
 
-    el.innerHTML = `<div class="sr-chat">${highlight(chat.display_name, q)}${tagHtml}</div><div class="sr-text">${subHtml}</div>`;
+    el.innerHTML = `<div class="sr-chat">${highlight(chat.display_name, q, null, false)}${tagHtml}</div><div class="sr-text">${subHtml}</div>`;
     el.addEventListener('click', () => {
       document.getElementById('search-input').value = '';
       clearSearchResults();
@@ -133,7 +133,7 @@
     const snippet = r.text_body || (r.media_name ? '[📎 ' + r.media_name + ']' : '');
     el.innerHTML = `
       <div class="sr-chat">${esc(chatName)}</div>
-      <div class="sr-text">${highlight(resolveMentionsPlainText(snippet, r.mentions), q)}</div>
+      <div class="sr-text">${highlight(resolveMentionsPlainText(snippet, r.mentions, r.chat_type === 'group'), q, null, false)}</div>
       <div class="sr-time">${fmtTime(r.timestamp_ms)}</div>
     `;
     el.addEventListener('click', async () => {

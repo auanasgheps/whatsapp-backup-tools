@@ -114,6 +114,7 @@
     "deleted_other": "Ce message a été supprimé",
     "deleted_admin": "Ce message a été supprimé par un admin",
     "quoted_fallback": "Message cité",
+    "mention_all": "tous",
     "jump_to_original": "Aller au message d'origine",
     "read_more": "Lire la suite",
     "show_less": "Réduire",

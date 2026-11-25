@@ -777,3 +777,70 @@ class TestChatListSearchAndDescription:
             assert c["type"] == "contact"
             assert c["is_preserved_only"] is True
             assert c["description"] is None
+
+
+class TestLocalizedMentionSearch:
+    """Tests for localized @all mention search (@tutti, @alle, @tous, @todos, @all)."""
+
+    def test_search_localized_all_mentions_and_at_prefix(self, tmp_path):
+        make_archive_db(tmp_path / ".wa_media_archiver.db").close()
+        conn = make_android_db(tmp_path / "msgstore.db")
+        conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) "
+            "VALUES (1, '15550001111', '15550001111@s.whatsapp.net')"
+        )
+        conn.execute(
+            "INSERT INTO jid (_id, user, raw_string) "
+            "VALUES (2, '120363000000000999', '120363000000000999@g.us')"
+        )
+        conn.execute(
+            "INSERT INTO chat (_id, jid_row_id, subject) VALUES (1, 1, NULL), (2, 2, 'Team Group')"
+        )
+        conn.execute(
+            "INSERT INTO message (_id, chat_row_id, from_me, key_id, timestamp, message_type, text_data) "
+            "VALUES "
+            "(1, 1, 0, 'C1', 1700000001000, 0, 'Hey @all in 1-to-1'), "
+            "(2, 2, 0, 'G1', 1700000002000, 0, 'Hey @all, please check this'), "
+            "(3, 2, 0, 'G2', 1700000003000, 0, 'All good in this group'), "
+            "(4, 2, 0, 'G3', 1700000004000, 0, 'Hello @allen')"
+        )
+        conn.commit()
+        conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            client.get("/api/messages?chat_id=15550001111&chat_type=contact")
+            client.get("/api/messages?chat_id=2&chat_type=group")
+
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                s1 = client.get(
+                    "/api/chat-index-status?chat_id=15550001111&chat_type=contact"
+                ).get_json()["status"]
+                s2 = client.get("/api/chat-index-status?chat_id=2&chat_type=group").get_json()[
+                    "status"
+                ]
+                if s1 == "done" and s2 == "done":
+                    break
+                time.sleep(0.05)
+
+            for tok in ("@tutti", "@alle", "@tous", "@todos", "@all", "@TUTTI"):
+                resp = client.get(f"/api/search?q={tok}")
+                assert resp.status_code == 200
+                results = resp.get_json()["results"]
+                assert [r["msg_id"] for r in results] == [2], f"Failed for {tok}"
+
+            # In-chat group search matches @all; 1-to-1 chat search returns empty
+            grp_resp = client.get("/api/search?q=@tutti&chat_id=2&chat_type=group")
+            assert grp_resp.status_code == 200
+            assert [r["msg_id"] for r in grp_resp.get_json()["results"]] == [2]
+
+            ctc_resp = client.get("/api/search?q=@tutti&chat_id=15550001111&chat_type=contact")
+            assert ctc_resp.status_code == 200
+            assert ctc_resp.get_json()["results"] == []
+
+            # Bare @mention search (e.g. @allen) does not cause FTS5 syntax error
+            allen_resp = client.get("/api/search?q=@allen")
+            assert allen_resp.status_code == 200
+            assert [r["msg_id"] for r in allen_resp.get_json()["results"]] == [4]

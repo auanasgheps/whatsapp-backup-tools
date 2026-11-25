@@ -76,7 +76,7 @@
     if (editInfo && (editInfo.original_text || editInfo.edited_ts)) {
       html += '<div class="msg-details-section msg-edit-history">';
       if (editInfo.original_text) {
-        html += `<div class="msg-details-row"><span class="msg-details-label">${esc(t('details.original_pre_edit'))}</span><span class="msg-details-value msg-pre-edit-text">${esc(resolveMentionsPlainText(editInfo.original_text, editInfo.mentions))}</span></div>`;
+        html += `<div class="msg-details-row"><span class="msg-details-label">${esc(t('details.original_pre_edit'))}</span><span class="msg-details-value msg-pre-edit-text">${esc(resolveMentionsPlainText(editInfo.original_text, editInfo.mentions, Boolean(currentChat && currentChat.type === 'group')))}</span></div>`;
       }
       if (editInfo.edited_ts) {
         html += `<div class="msg-details-row"><span class="msg-details-label">${esc(t('details.edited_on'))}</span><span class="msg-details-value">${fmtTime(editInfo.edited_ts)}</span></div>`;

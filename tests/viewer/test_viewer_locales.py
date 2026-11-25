@@ -163,3 +163,16 @@ def test_flask_ssr_browser_detection_and_locale_api(tmp_path: Path) -> None:
     assert loc_resp.status_code == 200
     assert "Einstellungen" in loc_resp.get_data(as_text=True)
     assert client.get("/api/locales/xx").status_code == 404
+
+
+def test_group_mention_all_translations() -> None:
+    expected = {
+        "en": "all",
+        "de": "alle",
+        "fr": "tous",
+        "it": "tutti",
+        "es": "todos",
+    }
+    for lang, label in expected.items():
+        data = json.loads((_LOCALES_DIR / f"{lang}.json").read_text(encoding="utf-8"))
+        assert data["msg"]["mention_all"] == label

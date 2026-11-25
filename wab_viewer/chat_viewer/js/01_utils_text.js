@@ -341,6 +341,12 @@
     return result;
   }
 
+  const _GROUP_ALL_MENTION_RE = /(^|[^A-Za-z0-9_])@all(?!\w)/g;
+
+  function _getGroupAllMentionLabel() {
+    return typeof t === 'function' ? t('msg.mention_all') : 'all';
+  }
+
   function _buildMentionRegex(mentions) {
     if (!mentions || typeof mentions !== 'object') return null;
     const keys = Object.keys(mentions).filter(Boolean).sort((a, b) => b.length - a.length);
@@ -349,17 +355,23 @@
     return new RegExp('(^|[^A-Za-z0-9_])@(' + escaped + ')(?!\\d)', 'g');
   }
 
-  function resolveMentionsPlainText(text, mentions) {
+  function resolveMentionsPlainText(text, mentions, isGroup) {
     if (!text) return '';
+    let out = text;
+    if (isGroup) {
+      const allLabel = _getGroupAllMentionLabel();
+      _GROUP_ALL_MENTION_RE.lastIndex = 0;
+      out = out.replace(_GROUP_ALL_MENTION_RE, (_, prefix) => prefix + '@' + allLabel);
+    }
     const re = _buildMentionRegex(mentions);
-    if (!re) return text;
-    return text.replace(re, (full, prefix, tok) => {
+    if (!re) return out;
+    return out.replace(re, (full, prefix, tok) => {
       const m = mentions[tok];
       return m && m.name ? prefix + '@' + m.name : full;
     });
   }
 
-  function waFormat(text, mentions) {
+  function waFormat(text, mentions, isGroup) {
     if (!text) return '';
 
     const mentionRe = _buildMentionRegex(mentions);
@@ -411,6 +423,14 @@
           return prefix + '\x00MN' + (mentionPlaceholders.length - 1) + '\x00';
         });
       }
+      if (isGroup) {
+        const allLabel = _getGroupAllMentionLabel();
+        _GROUP_ALL_MENTION_RE.lastIndex = 0;
+        s = s.replace(_GROUP_ALL_MENTION_RE, (_, prefix) => {
+          mentionPlaceholders.push({ name: allLabel, is_all: true });
+          return prefix + '\x00MN' + (mentionPlaceholders.length - 1) + '\x00';
+        });
+      }
 
       // Inline: bold *text*, italic _text_, strikethrough ~text~
       // Markers must touch non-space on both inner sides
@@ -457,6 +477,9 @@
           const m = mentionPlaceholders[+i];
           if (!m || !m.name) return '';
           const label = '@' + esc(m.name);
+          if (m.is_all) {
+            return `<span class="wa-mention wa-mention-all">${label}</span>`;
+          }
           if (m.chat_id) {
             const cid = esc(String(m.chat_id));
             const ctype = esc(String(m.chat_type || 'contact'));
@@ -479,10 +502,10 @@
     );
   }
 
-  function highlight(text, q, mentions) {
-    if (!q || !text) return waFormat(text || '', mentions);
+  function highlight(text, q, mentions, isGroup) {
+    if (!q || !text) return waFormat(text || '', mentions, isGroup);
     const words = q.trim().split(/\s+/);
-    let result = waFormat(text, mentions);
+    let result = waFormat(text, mentions, isGroup);
     for (const w of words) {
       const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
       result = result.replace(/(<[^>]+>)|([^<]+)/g, (_, tag, txt) =>

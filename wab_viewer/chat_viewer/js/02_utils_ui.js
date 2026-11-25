@@ -250,11 +250,11 @@ const COLLAPSE_CHAR_LIMIT = 750;
     return btn;
   }
 
-  function renderCollapsibleMessageText(containerEl, text, msgId, mentions) {
+  function renderCollapsibleMessageText(containerEl, text, msgId, mentions, isGroup) {
     const raw = text || '';
     const key = (msgId !== undefined && msgId !== null) ? String(msgId) : '';
     const canTrack = key !== '';
-    const hasMentions = Boolean(mentions && typeof mentions === 'object' && Object.keys(mentions).length > 0);
+    const hasMentions = Boolean((mentions && typeof mentions === 'object' && Object.keys(mentions).length > 0) || (isGroup && raw.indexOf('@all') !== -1));
 
     if (!hasMentions && raw.length <= COLLAPSE_CHAR_LIMIT) {
       let nlCount = 0;
@@ -265,12 +265,12 @@ const COLLAPSE_CHAR_LIMIT = 750;
         }
       }
       if (nlCount < COLLAPSE_LINE_LIMIT) {
-        containerEl.innerHTML = highlight(raw, '', mentions);
+        containerEl.innerHTML = highlight(raw, '', mentions, isGroup);
         return;
       }
     }
 
-    const fullHtml = highlight(raw, '', mentions);
+    const fullHtml = highlight(raw, '', mentions, isGroup);
     const parsed = document.createElement('div');
     parsed.innerHTML = fullHtml;
     const metrics = measureRenderedContent(parsed);
@@ -293,7 +293,7 @@ const COLLAPSE_CHAR_LIMIT = 750;
         e.stopPropagation();
         if (canTrack) expandedMsgIds.delete(key);
         else expandedFallbackContainers.delete(containerEl);
-        renderCollapsibleMessageText(containerEl, raw, msgId, mentions);
+        renderCollapsibleMessageText(containerEl, raw, msgId, mentions, isGroup);
         _scrollRowIntoViewIfClipped(containerEl);
         _focusToggleIfKeyboard(containerEl, e);
       });
@@ -312,7 +312,7 @@ const COLLAPSE_CHAR_LIMIT = 750;
       e.stopPropagation();
       if (canTrack) expandedMsgIds.add(key);
       else expandedFallbackContainers.add(containerEl);
-      renderCollapsibleMessageText(containerEl, raw, msgId, mentions);
+      renderCollapsibleMessageText(containerEl, raw, msgId, mentions, isGroup);
       _focusToggleIfKeyboard(containerEl, e);
     });
     containerEl.appendChild(ellipsis);
@@ -339,7 +339,7 @@ const COLLAPSE_CHAR_LIMIT = 750;
       }
     }
     if (txtEl && matchedMsg) {
-      renderCollapsibleMessageText(txtEl, matchedMsg.text_body, matchedMsg.msg_id, matchedMsg.mentions);
+      renderCollapsibleMessageText(txtEl, matchedMsg.text_body, matchedMsg.msg_id, matchedMsg.mentions, Boolean(currentChat && currentChat.type === 'group'));
     }
   }
 
