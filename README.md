@@ -341,14 +341,14 @@ See [docs/prerequisites.md](docs/prerequisites.md) for full setup instructions: 
 
 ### Archiver
 
-- **Year folders reflect the local time of the machine running the script**, not UTC. A message sent just after midnight on 1 January will be filed under the new year only if your machine's clock agrees. This is intentional — the archive reflects your local experience of when media was shared
-- **iOS restore mode is not supported.** Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS. Running `wab-archiver restore` on an iOS archive exits with a clear error
-- **iOS number change tracking is best-effort.** Contacts present in the device address book are consolidated automatically. Contacts not saved to the address book appear as separate folders
-- **Recent Android link previews and media thumbnails may be missing until the next full backup.** To save space and mobile data, WhatsApp's daily incremental backups only save message text and details, leaving out image previews. Once WhatsApp completes its next full base backup on your phone (typically created every 5 to 7 days, or when manually triggering a backup in WhatsApp settings), those missing previews will appear in your archive after running the archiver again. Because this tool runs 100% locally and offline, it never connects to WhatsApp servers to download missing previews.
+- **iOS restore mode is not supported**: Restore mode reconstructs the Android `Media/` folder layout, which has no equivalent on iOS, also because Apple locks down app storage.
+- **iOS number change tracking is best-effort**: Unlike Android, iOS backups do not record an explicit number-change table. Saved address book contacts with a single number change consolidate automatically; unsaved contacts or contacts with multiple number changes appear as separate folders.
+
 ### Viewer
 
-- **Profile pictures are not displayed**: Local WhatsApp backups do not store contact avatars (requires live WhatsApp connection or unbacked-up sandbox databases).
+- **Profile pictures are not displayed**: Local WhatsApp backups do not store contact avatars.
 - **Unsaved contact push names on Android require root**: Friendly push names for unsaved numbers reside in private application storage (`wa.db`), excluded from backups. Unsaved numbers display their international phone number.
+- **Recent Android link previews and media thumbnails may be missing until the next full backup**: To save space and mobile data, WhatsApp's daily incremental backups only save message text and details, leaving out image previews. Once WhatsApp completes its next full base backup on your phone (typically every 5 to 7 days, or when manually triggering a backup in WhatsApp settings), those missing previews will appear after updating your archive. Because this tool runs 100% locally and offline, it never connects to WhatsApp servers to download missing previews.
 - See [viewer known limitations](docs/viewer/index.md#known-limitations) for full technical details on receipts and incremental preview caches.
 
 ### Sweeper
