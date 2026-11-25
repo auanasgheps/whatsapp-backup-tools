@@ -18,88 +18,31 @@ function clearVideoProbeQueue() {
     if (videoProbeQueue.some(item => item.cell === cell)) {
       return;
     }
-    videoProbeQueue.push({ cell, img, src, archivePath, msg: msg || cell._msg });
-    drainVideoProbeQueue();
-  }
-
-  function drainVideoProbeQueue() {
-    while (activeVideoProbes < MAX_CONCURRENT_VIDEO_PROBES && videoProbeQueue.length > 0) {
-      const next = videoProbeQueue.shift();
-      if (!next.cell.isConnected || next.cell.dataset.hydrated !== 'true') {
-        continue;
-      }
-      if (videoThumbCache.has(next.archivePath)) {
-        next.img.src = videoThumbCache.get(next.archivePath);
-        next.cell.classList.remove('is-loading-thumb');
-        continue;
-      }
-      activeVideoProbes++;
-      extractVideoFirstFrame(next);
-    }
-  }
-
-  function extractVideoFirstFrame(task) {
-    const vid = document.createElement('video');
-    vid.src = task.src;
-    vid.muted = true;
-    vid.preload = 'auto';
-    let settled = false;
-
-    const safetyTimeout = setTimeout(() => {
-      if (task.cell && task.cell.isConnected) {
-        task.cell.classList.remove('is-loading-thumb');
-        if (task.img) task.img.classList.add('gallery-video-thumb--err');
-      }
-      finish();
-    }, 6000);
-
-    function finish() {
-      if (settled) return;
-      settled = true;
-      clearTimeout(safetyTimeout);
-      vid.src = '';
-      activeVideoProbes--;
-      drainVideoProbeQueue();
-    }
-
-    function captureFrame() {
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = vid.videoWidth || 320;
-        canvas.height = vid.videoHeight || 180;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-        videoThumbCache.set(task.archivePath, dataUrl);
-        if (task.cell.isConnected && task.cell.dataset.hydrated === 'true') {
-          task.img.src = dataUrl;
-          task.cell.classList.remove('is-loading-thumb');
-          task.img.classList.remove('gallery-video-thumb--err');
+    enqueueVideoFrameProbe({
+      cell,
+      img,
+      src,
+      archivePath,
+      msg: msg || cell._msg,
+      isAlive: () => cell.isConnected && cell.dataset.hydrated === 'true',
+      onCached: (dataUrl) => {
+        img.src = dataUrl;
+        cell.classList.remove('is-loading-thumb');
+      },
+      onFrame: (dataUrl) => {
+        if (cell.isConnected && cell.dataset.hydrated === 'true') {
+          img.src = dataUrl;
+          cell.classList.remove('is-loading-thumb');
+          img.classList.remove('gallery-video-thumb--err');
         }
-      } catch {
-        if (task.cell.isConnected) {
-          task.cell.classList.remove('is-loading-thumb');
-          task.img.classList.add('gallery-video-thumb--err');
+      },
+      onError: () => {
+        if (cell.isConnected) {
+          cell.classList.remove('is-loading-thumb');
+          img.classList.add('gallery-video-thumb--err');
         }
-      } finally {
-        finish();
-      }
-    }
-
-    vid.addEventListener('loadeddata', () => {
-      captureFrame();
-    }, { once: true });
-
-    vid.addEventListener('error', () => {
-      try {
-        if (task.cell.isConnected) {
-          task.cell.classList.remove('is-loading-thumb');
-          task.img.classList.add('gallery-video-thumb--err');
-        }
-      } finally {
-        finish();
-      }
-    }, { once: true });
+      },
+    });
   }
 
   function hydrateGalleryItem(cell) {

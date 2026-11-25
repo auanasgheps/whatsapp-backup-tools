@@ -1,10 +1,6 @@
 // ---- media gallery -------------------------------------------------------
 
   const EMPTY_GALLERY_PIX = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>';
-  const videoThumbCache = new Map();
-  const MAX_CONCURRENT_VIDEO_PROBES = 2;
-  let activeVideoProbes = 0;
-  const videoProbeQueue = [];
   let galleryMediaObserver = null;
   let archiveMediaObserver = null;
   let archiveViewActive = false;

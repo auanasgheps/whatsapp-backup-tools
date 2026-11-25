@@ -4800,3 +4800,133 @@ def test_chat_info_duration_calculation_display(browser: CDPSession, screenshot_
         """,
         2.0,
     )
+
+
+def test_chat_video_first_frame_poster_preview(browser: CDPSession, ui_demo_dir: Path) -> None:
+    """Verify video messages in chat view capture and display the first frame as poster."""
+    open_group_chat_in_browser(browser, 25.0)
+
+    # Synthesize a tiny valid WebM video in-memory via Canvas + MediaRecorder and write it to ui_demo_dir
+    webm_b64 = browser.evaluate(
+        """
+        (async () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 48;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#22aa66';
+            ctx.fillRect(0, 0, 64, 48);
+
+            const stream = canvas.captureStream(10);
+            const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+            const chunks = [];
+            recorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) chunks.push(e.data);
+            };
+            const stopped = new Promise((resolve) => {
+                recorder.onstop = resolve;
+            });
+            recorder.start();
+            await new Promise((r) => setTimeout(r, 150));
+            recorder.stop();
+            await stopped;
+            stream.getTracks().forEach((t) => t.stop());
+
+            const blob = new Blob(chunks, { type: 'video/webm' });
+            const buf = await blob.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            let bin = '';
+            for (let i = 0; i < bytes.length; i++) {
+                bin += String.fromCharCode(bytes[i]);
+            }
+            return btoa(bin);
+        })()
+        """,
+        10.0,
+    )
+    import base64
+
+    synth_video = ui_demo_dir / "SYNTH-VID.webm"
+    synth_video.write_bytes(base64.b64decode(webm_b64))
+    try:
+        result = browser.evaluate(
+            """
+            (async () => {
+                const fakeMsgs = [
+                    {
+                        msg_id: 9901,
+                        timestamp_ms: 1775000010000,
+                        from_me: 0,
+                        sender: 'Alice Smith',
+                        media_type: 'video',
+                        is_video_note: 0,
+                        media_duration: 1,
+                        archive_path: 'SYNTH-VID.webm',
+                        text_body: '',
+                    },
+                    {
+                        msg_id: 9902,
+                        timestamp_ms: 1775000012000,
+                        from_me: 0,
+                        sender: 'Alice Smith',
+                        media_type: 'video',
+                        is_video_note: 1,
+                        media_duration: 1,
+                        archive_path: 'SYNTH-VID.webm',
+                        text_body: '',
+                    },
+                ];
+
+                const origFetch = window.fetch;
+                window.fetch = async (url, options) => {
+                    const urlStr = String(url);
+                    if (urlStr.includes('/api/messages?') && !urlStr.includes('before=') && !urlStr.includes('after=')) {
+                        return new Response(JSON.stringify(fakeMsgs), {
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' },
+                        });
+                    }
+                    return origFetch(url, options);
+                };
+
+                try {
+                    const firstChat = document.querySelector('#chat-list .chat-item');
+                    if (firstChat) firstChat.click();
+
+                    let targetVid = null;
+                    let notePoster = null;
+                    for (let i = 0; i < 40; i++) {
+                        targetVid = document.querySelector('#message-scroll .msg-media video:not(.msg-gif-video):not(.live-photo-video):not(.video-note-video)');
+                        notePoster = document.querySelector('#message-scroll .msg-video-note img.video-note-poster');
+                        if (targetVid && notePoster) break;
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                    if (!targetVid || !notePoster) {
+                        return { count: 0, posterVal: '', notePosterVal: '' };
+                    }
+
+                    let posterVal = '';
+                    let notePosterVal = '';
+                    for (let i = 0; i < 60; i++) {
+                        if (targetVid.poster && targetVid.poster.startsWith('data:image/jpeg')) {
+                            posterVal = targetVid.poster;
+                        }
+                        if (notePoster.src && notePoster.src.startsWith('data:image/jpeg') && notePoster.style.display === 'block') {
+                            notePosterVal = notePoster.src;
+                        }
+                        if (posterVal && notePosterVal) break;
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                    return { count: 1, posterVal, notePosterVal };
+                } finally {
+                    window.fetch = origFetch;
+                }
+            })()
+            """,
+            15.0,
+        )
+        assert result["count"] == 1
+        assert result["posterVal"].startswith("data:image/jpeg;base64,")
+        assert result["notePosterVal"].startswith("data:image/jpeg;base64,")
+    finally:
+        synth_video.unlink(missing_ok=True)

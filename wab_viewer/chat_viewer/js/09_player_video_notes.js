@@ -17,19 +17,28 @@ function renderVideoNote(msg) {
     vid.preload = 'metadata';
     vid.src = src;
 
-    vid.addEventListener('loadeddata', () => {
-      if (!vid.dataset.posterCaptured && vid.videoWidth > 0 && vid.videoHeight > 0) {
-        vid.dataset.posterCaptured = '1';
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = vid.videoWidth;
-          canvas.height = vid.videoHeight;
-          canvas.getContext('2d').drawImage(vid, 0, 0);
-          vid.poster = canvas.toDataURL('image/jpeg', 0.8);
-        } catch (_e) {
-          // Ignore canvas errors if frame capture fails
+    const posterImg = document.createElement('img');
+    posterImg.className = 'video-note-poster';
+    posterImg.alt = '';
+    posterImg.style.display = 'none';
+    const thumbUrl = msg.has_thumbnail && msg.msg_id
+      ? API + '/thumbnail/' + encodeURIComponent(msg.msg_id)
+      : '';
+    resolveVideoPreview(
+      wrap,
+      src,
+      msg.archive_path,
+      thumbUrl,
+      () => wrap.isConnected && !wrap.classList.contains('has-played'),
+      (previewUrl) => {
+        if (wrap.isConnected && !wrap.classList.contains('has-played')) {
+          posterImg.src = previewUrl;
+          posterImg.style.display = 'block';
         }
-      }
+      },
+    );
+
+    vid.addEventListener('loadeddata', () => {
       if (!totalSec && Number.isFinite(vid.duration) && vid.duration > 0) {
         durText.textContent = _formatTimer(Math.round(vid.duration));
       }
@@ -185,7 +194,8 @@ function renderVideoNote(msg) {
       }
       activeVideoNotePause = pauseVideoNote;
       vid.play().then(() => {
-        wrap.classList.add('is-playing');
+        wrap.classList.add('is-playing', 'has-played');
+        posterImg.style.display = 'none';
         wrap.setAttribute('aria-label', `${baseAriaLabel}, click to pause`);
         rafId = requestAnimationFrame(updateRingAndTimer);
       }).catch(() => {
@@ -230,6 +240,7 @@ function renderVideoNote(msg) {
     });
 
     wrap.appendChild(vid);
+    wrap.appendChild(posterImg);
     wrap.appendChild(ringSvg);
     wrap.appendChild(playWrap);
     wrap.appendChild(durBadge);

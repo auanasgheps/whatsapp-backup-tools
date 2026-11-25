@@ -118,6 +118,10 @@ function renderMedia(msg) {
       vid.controls = true;
       vid.preload = 'metadata';
       vid.src = src.includes('#') ? src : `${src}#t=0.001`;
+      const thumbUrl = msg.has_thumbnail && msg.msg_id
+        ? API + '/thumbnail/' + encodeURIComponent(msg.msg_id)
+        : '';
+      attachVideoPoster(vid, src, msg.archive_path, thumbUrl);
       wrap.appendChild(vid);
       const handleVideoError = () => {
         msg.is_missing = 1;

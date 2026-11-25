@@ -1589,3 +1589,16 @@ def test_api_returns_unicode_emoji(tmp_path):
             ]
             == 1
         )
+
+
+def test_chat_video_first_frame_poster_wiring():
+    """Chat view video bubbles, grouped videos, and video notes must share resolveVideoPreview."""
+    js = _get_app_js()
+    assert "function attachVideoPoster(vid, src, archivePath, thumbUrl)" in js
+    assert (
+        "function resolveVideoPreview(targetEl, src, archivePath, thumbUrl, isAlive, onPreview)"
+        in js
+    )
+    assert "function enqueueVideoFrameProbe(probeItem)" in js
+    assert "video-note-poster" in js
+    assert js.count("attachVideoPoster(") >= 3

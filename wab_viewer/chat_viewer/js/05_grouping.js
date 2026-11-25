@@ -314,6 +314,12 @@
         vid.controls = (mt === 'video');
         vid.preload = 'metadata';
         vid.src = src.includes('#') ? src : `${src}#t=0.001`;
+        if (mt === 'video') {
+          const thumbUrl = msg.has_thumbnail && msg.msg_id
+            ? API + '/thumbnail/' + encodeURIComponent(msg.msg_id)
+            : '';
+          attachVideoPoster(vid, src, msg.archive_path, thumbUrl);
+        }
         const handleGridVideoError = () => {
           msg.is_missing = 1;
           const missingCard = renderMissingMedia(msg);

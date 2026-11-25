@@ -37,6 +37,20 @@
       object-fit: cover;
       border-radius: 50%;
     }
+    .msg-media.msg-video-note img.video-note-poster {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      max-height: none;
+      object-fit: cover;
+      border-radius: 50%;
+      z-index: 1;
+      pointer-events: none;
+    }
+    .msg-media.msg-video-note.has-played img.video-note-poster {
+      display: none;
+    }
     .video-note-ring {
       position: absolute;
       inset: 0;

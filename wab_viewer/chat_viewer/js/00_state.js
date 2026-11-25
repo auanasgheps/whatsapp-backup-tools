@@ -47,3 +47,7 @@ const outputRoot = window.OUTPUT_ROOT;
     }
   }
   const MAX_WINDOW = 150;
+  const videoThumbCache = new Map();
+  const MAX_CONCURRENT_VIDEO_PROBES = 2;
+  let activeVideoProbes = 0;
+  const videoProbeQueue = [];
