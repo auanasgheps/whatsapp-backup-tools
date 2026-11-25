@@ -31,7 +31,7 @@ function isLightboxMedia(m) {
       zoomBadge = document.createElement('div');
       zoomBadge.className = 'lb-zoom-badge';
       zoomBadge.style.display = 'none';
-      zoomBadge.title = 'Click to reset zoom';
+      zoomBadge.title = t('gallery.zoom_reset_title');
       lb.appendChild(zoomBadge);
     }
 
@@ -41,7 +41,7 @@ function isLightboxMedia(m) {
       currentMedia.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
       if (scale > 1) {
         currentMedia.style.cursor = isDragging ? 'grabbing' : 'grab';
-        zoomBadge.textContent = `${Math.round(scale * 100)}% \u00d7 Reset`;
+        zoomBadge.textContent = t('gallery.zoom_reset', { pct: Math.round(scale * 100) });
         zoomBadge.style.display = 'block';
       } else {
         currentMedia.style.cursor = 'zoom-in';
@@ -246,8 +246,8 @@ function isLightboxMedia(m) {
 
     const liveBtn = document.createElement('button');
     liveBtn.className = 'lb-live-btn';
-    liveBtn.innerHTML = '<span class="live-icon">◎</span> LIVE';
-    liveBtn.title = 'Toggle Live Photo playback';
+    liveBtn.innerHTML = `<span class="live-icon">◎</span> ${esc(t('msg.live'))}`;
+    liveBtn.title = t('msg.live_photo_toggle');
     let isPlaying = false;
     let lbVid = null;
     liveBtn.addEventListener('click', e => {
@@ -379,14 +379,14 @@ function isLightboxMedia(m) {
       const closeBtn = document.createElement('button');
       closeBtn.className = 'lb-close';
       closeBtn.innerHTML = '&#10005;';
-      closeBtn.title = 'Close';
+      closeBtn.title = t('common.close');
       closeBtn.addEventListener('click', () => _closeLb());
       lb.appendChild(closeBtn);
 
       const prevBtn = document.createElement('button');
       prevBtn.className = 'lb-arrow prev';
       prevBtn.innerHTML = '&#10094;';
-      prevBtn.title = 'Previous';
+      prevBtn.title = t('common.previous');
       prevBtn.addEventListener('click', e => {
         e.stopPropagation();
         const i = _nextLightboxIndex(lightboxIndex, -1);
@@ -397,7 +397,7 @@ function isLightboxMedia(m) {
       const nextBtn = document.createElement('button');
       nextBtn.className = 'lb-arrow next';
       nextBtn.innerHTML = '&#10095;';
-      nextBtn.title = 'Next';
+      nextBtn.title = t('common.next');
       nextBtn.addEventListener('click', async e => {
         e.stopPropagation();
         let i = _nextLightboxIndex(lightboxIndex, 1);
@@ -425,7 +425,7 @@ function isLightboxMedia(m) {
       const pathText = document.createElement('span');
       const copyBtn = document.createElement('button');
       copyBtn.className = 'lb-copy-btn';
-      copyBtn.title = 'Copy path';
+      copyBtn.title = t('common.copy_path');
       copyBtn.innerHTML = '&#128203;';
       copyBtn.addEventListener('click', e => {
         e.stopPropagation();

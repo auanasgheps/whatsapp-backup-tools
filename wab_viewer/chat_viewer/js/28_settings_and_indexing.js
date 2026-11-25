@@ -15,11 +15,11 @@
         const fmtN = n => n.toLocaleString();
         document.getElementById('index-progress-label').textContent =
           d.total_msgs > 0
-            ? pct + '% (' + fmtN(d.indexed_msgs) + ' / ' + fmtN(d.total_msgs) + ' messages)'
-            : 'Starting…';
+            ? t('settings.index_progress', { pct, indexed: fmtN(d.indexed_msgs), total: fmtN(d.total_msgs) })
+            : t('settings.index_starting');
         if (!d.running) {
           document.getElementById('index-progress-bar').style.width = '100%';
-          document.getElementById('index-progress-label').textContent = 'Done.';
+          document.getElementById('index-progress-label').textContent = t('common.done');
           document.getElementById('index-all-btn').disabled = false;
           return;
         }
@@ -53,15 +53,38 @@
   });
   document.querySelectorAll('.pref-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      prefs[btn.dataset.pref] = btn.dataset.value;
+      const prefKey = btn.dataset.pref;
+      const prefVal = btn.dataset.value;
+      prefs[prefKey] = prefVal;
       applyPrefs();
       fetch(API + '/preferences', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: btn.dataset.pref, value: btn.dataset.value })
+        body: JSON.stringify({ key: prefKey, value: prefVal })
       });
     });
   });
+
+  const langSelect = document.getElementById('pref-language');
+  if (langSelect) {
+    langSelect.addEventListener('change', async () => {
+      const prefVal = langSelect.value || 'auto';
+      prefs.language = prefVal;
+      await fetch(API + '/preferences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'language', value: prefVal })
+      });
+      try {
+        if (currentChat) {
+          sessionStorage.setItem('wab_reopen_chat', JSON.stringify({ id: currentChat.id, type: currentChat.type }));
+        } else {
+          sessionStorage.removeItem('wab_reopen_chat');
+        }
+      } catch (_) {}
+      window.location.reload();
+    });
+  }
 
   document.getElementById('index-all-btn').addEventListener('click', async () => {
     let sizeBytes = 0;
@@ -73,9 +96,9 @@
 
     if (sizeBytes > 150 * 1024 * 1024) {
       const mb = Math.round(sizeBytes / 1024 / 1024);
-      if (!confirm('The database is large (' + mb + ' MB). Indexing may take several minutes. Continue?')) return;
+      if (!confirm(t('settings.index_large_confirm', { mb }))) return;
     }
-    if (!confirm('Index all chats for search? This will run in the background while you use the viewer.')) return;
+    if (!confirm(t('settings.index_all_confirm'))) return;
 
     const res = await fetch(API + '/index/all', { method: 'POST' });
     const data = await res.json();
@@ -84,16 +107,16 @@
     document.getElementById('index-all-btn').disabled = true;
     document.getElementById('index-all-progress').style.display = 'block';
     document.getElementById('index-progress-bar').style.width = '0%';
-    document.getElementById('index-progress-label').textContent = 'Starting…';
+    document.getElementById('index-progress-label').textContent = t('settings.index_starting');
     _startBulkIndexPoll();
   });
 
   document.getElementById('clear-index-btn').addEventListener('click', async () => {
-    if (!confirm('Clear the search index? Indexed data will be deleted. Chats will be re-indexed when you open them.')) return;
+    if (!confirm(t('settings.clear_index_confirm'))) return;
     const btn = document.getElementById('clear-index-btn');
     await fetch(API + '/index/clear', { method: 'POST' });
     const orig = btn.textContent;
-    btn.textContent = 'Cleared.';
+    btn.textContent = t('settings.cleared');
     setTimeout(() => { btn.textContent = orig; }, 2000);
     document.getElementById('index-all-progress').style.display = 'none';
     document.getElementById('index-all-btn').disabled = false;
@@ -105,9 +128,9 @@
       const statusEl = document.getElementById('optimize-db-status');
       optBtn.disabled = true;
       const orig = optBtn.textContent;
-      optBtn.textContent = 'Optimizing…';
+      optBtn.textContent = t('settings.optimizing');
       if (statusEl) {
-        statusEl.textContent = 'Defragmenting index and compacting database…';
+        statusEl.textContent = t('settings.optimizing_status');
         statusEl.style.display = 'block';
       }
       try {
@@ -115,7 +138,7 @@
         const data = await res.json();
         if (data.error) {
           if (statusEl) {
-            statusEl.textContent = 'Could not optimize: ' + data.error;
+            statusEl.textContent = t('settings.optimize_error', { error: data.error });
             statusEl.style.display = 'block';
           }
         } else {
@@ -123,16 +146,16 @@
           const mbCurrent = (data.size_after / (1024 * 1024)).toFixed(1);
           if (statusEl) {
             if (data.reclaimed > 0) {
-              statusEl.textContent = `Compacted! Reclaimed ${mbReclaimed} MB (Current size: ${mbCurrent} MB).`;
+              statusEl.textContent = t('settings.optimize_reclaimed', { reclaimed: mbReclaimed, current: mbCurrent });
             } else {
-              statusEl.textContent = `Database is already optimal (${mbCurrent} MB).`;
+              statusEl.textContent = t('settings.optimize_optimal', { current: mbCurrent });
             }
             statusEl.style.display = 'block';
           }
         }
       } catch (_) {
         if (statusEl) {
-          statusEl.textContent = 'Optimization failed.';
+          statusEl.textContent = t('settings.optimize_failed');
           statusEl.style.display = 'block';
         }
       } finally {

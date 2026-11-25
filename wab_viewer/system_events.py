@@ -132,6 +132,27 @@ def format_participant_names(names: list[str]) -> str:
     return f"{names[0]}, {names[1]}, {names[2]}, and {overflow} {suffix}"
 
 
+def _tok(val: str) -> str:
+    """Convert internal English placeholder sentinels into i18n marker tokens."""
+    low = val.strip().lower()
+    if low == "you":
+        return "__YOU__"
+    if low == "someone":
+        return "__SOMEONE__"
+    if low == "a contact":
+        return "__A_CONTACT__"
+    if low == "this contact":
+        return "__THIS_CONTACT__"
+    if low == "a participant":
+        return "__A_PARTICIPANT__"
+    return val
+
+
+def _ev(key: str, fallback: str, **params: object) -> tuple[str, dict]:
+    clean_params = {k: (_tok(v) if isinstance(v, str) else v) for k, v in params.items()}
+    return fallback, {"key": key, "params": clean_params}
+
+
 def format_android_system_event(
     action_type: int | None,
     actor: str,
@@ -140,85 +161,136 @@ def format_android_system_event(
     metadata: dict[str, str],
 ) -> str:
     """Format an Android service event into human-readable text."""
+    return build_android_system_event(action_type, actor, targets, text, metadata)[0]
+
+
+def build_android_system_event(
+    action_type: int | None,
+    actor: str,
+    targets: list[str],
+    text: str,
+    metadata: dict[str, str],
+) -> tuple[str, dict | None]:
+    """Build an Android service event returning (english_text, i18n_descriptor)."""
     target_str = format_participant_names(targets) if targets else "Someone"
 
     # Number change
     if "new_phone" in metadata and metadata["new_phone"]:
         old_name = metadata.get("old_phone", actor or "A contact")
         new_name = metadata["new_phone"]
-        return f"{old_name} changed their phone number to {new_name}."
+        return _ev(
+            "system.number_changed",
+            f"{old_name} changed their phone number to {new_name}.",
+            old_name=old_name,
+            new_name=new_name,
+        )
 
     # Security code change
     if metadata.get("is_device_change"):
         contact_name = target_str if target_str != "Someone" else (actor or "this contact")
-        return f"Your security code with {contact_name} changed."
+        return _ev(
+            "system.security_code_changed",
+            f"Your security code with {contact_name} changed.",
+            contact=contact_name,
+        )
 
     if action_type == SystemActionType.SUBJECT_CHANGE:
         if text:
-            return f'{actor} changed the subject to "{text}"'
-        return f"{actor} changed the group subject"
+            return _ev(
+                "system.subject_changed_to",
+                f'{actor} changed the subject to "{text}"',
+                actor=actor,
+                text=text,
+            )
+        return _ev("system.subject_changed", f"{actor} changed the group subject", actor=actor)
 
     if action_type in (
         SystemActionType.PARTICIPANT_ADDED,
         SystemActionType.PARTICIPANT_JOINED_LEGACY,
     ):
         if target_str in ("You", "you") and (not actor or actor in ("Someone", "You")):
-            return "You joined"
+            return _ev("system.you_joined", "You joined")
         if actor and actor != "Someone" and actor != target_str:
-            return f"{actor} added {target_str}"
-        return f"{target_str} joined"
+            return _ev(
+                "system.actor_added_target",
+                f"{actor} added {target_str}",
+                actor=actor,
+                target=target_str,
+            )
+        return _ev("system.target_joined", f"{target_str} joined", target=target_str)
 
     if action_type in (
         SystemActionType.JOINED_VIA_INVITE_LINK,
         SystemActionType.JOINED_VIA_INVITE_LINK_ALT,
     ):
         if target_str in ("You", "you"):
-            return "You joined using this group's invite link"
-        return f"{target_str} joined using this group's invite link"
+            return _ev(
+                "system.you_joined_link",
+                "You joined using this group's invite link",
+            )
+        return _ev(
+            "system.target_joined_link",
+            f"{target_str} joined using this group's invite link",
+            target=target_str,
+        )
 
     if action_type in (
         SystemActionType.PARTICIPANT_LEFT,
         SystemActionType.PARTICIPANT_LEFT_LEGACY,
     ):
         if target_str in ("You", "you"):
-            return "You left"
-        return f"{target_str} left"
+            return _ev("system.you_left", "You left")
+        return _ev("system.target_left", f"{target_str} left", target=target_str)
 
     if action_type == SystemActionType.PARTICIPANT_REMOVED:
         if target_str in ("You", "you"):
             if actor and actor not in ("Someone", "You"):
-                return f"{actor} removed you"
-            return "You were removed"
+                return _ev("system.actor_removed_you", f"{actor} removed you", actor=actor)
+            return _ev("system.you_were_removed", "You were removed")
         if actor and actor != "Someone" and actor != target_str:
-            return f"{actor} removed {target_str}"
-        return f"{target_str} was removed"
+            return _ev(
+                "system.actor_removed_target",
+                f"{actor} removed {target_str}",
+                actor=actor,
+                target=target_str,
+            )
+        return _ev("system.target_was_removed", f"{target_str} was removed", target=target_str)
 
     if action_type == SystemActionType.GROUP_CREATED:
         if text:
-            return f'{actor} created group "{text}"'
-        return f"{actor} created this group"
+            return _ev(
+                "system.group_created_named",
+                f'{actor} created group "{text}"',
+                actor=actor,
+                text=text,
+            )
+        return _ev("system.group_created", f"{actor} created this group", actor=actor)
 
     if action_type == SystemActionType.ICON_CHANGED:
-        return f"{actor} changed this group's icon"
+        return _ev("system.icon_changed", f"{actor} changed this group's icon", actor=actor)
 
     if action_type == SystemActionType.ICON_DELETED:
-        return f"{actor} deleted this group's icon"
+        return _ev("system.icon_deleted", f"{actor} deleted this group's icon", actor=actor)
 
     if action_type == SystemActionType.DESCRIPTION_CHANGED:
-        return f"{actor} changed the group description"
+        return _ev("system.desc_changed", f"{actor} changed the group description", actor=actor)
 
     if action_type == SystemActionType.DESCRIPTION_DELETED:
-        return f"{actor} deleted the group description"
+        return _ev("system.desc_deleted", f"{actor} deleted the group description", actor=actor)
 
     if action_type == SystemActionType.ADMIN_PROMOTED:
         if target_str in ("You", "you"):
-            return "You're now an admin"
-        return f"{target_str} is now an admin"
+            return _ev("system.admin_promoted_you", "You're now an admin")
+        return _ev(
+            "system.admin_promoted_other", f"{target_str} is now an admin", target=target_str
+        )
 
     if action_type == SystemActionType.ADMIN_DEMOTED:
         if target_str in ("You", "you"):
-            return "You're no longer an admin"
-        return f"{target_str} is no longer an admin"
+            return _ev("system.admin_demoted_you", "You're no longer an admin")
+        return _ev(
+            "system.admin_demoted_other", f"{target_str} is no longer an admin", target=target_str
+        )
 
     if action_type in (
         SystemActionType.E2E_ENCRYPTION,
@@ -226,8 +298,15 @@ def format_android_system_event(
     ):
         biz_name = metadata.get("verified_biz_name")
         if biz_name:
-            return f"This chat is with the official business account of {biz_name}. Messages and calls are end-to-end encrypted."
-        return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
+            return _ev(
+                "system.e2e_biz",
+                f"This chat is with the official business account of {biz_name}. Messages and calls are end-to-end encrypted.",
+                biz_name=biz_name,
+            )
+        return _ev(
+            "system.e2e_notice",
+            "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them.",
+        )
 
     if action_type == SystemActionType.INITIAL_PRIVACY_PROVIDER:
         if text and text.isdigit():
@@ -235,14 +314,31 @@ def format_android_system_event(
             if secs > 0:
                 days = secs // 86400
                 if days >= 1:
-                    return f"Disappearing messages set to {days} days"
+                    return _ev(
+                        "system.disappearing_days",
+                        f"Disappearing messages set to {days} days",
+                        count=days,
+                        plural=True,
+                    )
                 hours = secs // 3600
-                return f"Disappearing messages set to {hours} hours"
-            return "Disappearing messages turned off"
+                return _ev(
+                    "system.disappearing_hours",
+                    f"Disappearing messages set to {hours} hours",
+                    count=hours,
+                    plural=True,
+                )
+            return _ev("system.disappearing_off", "Disappearing messages turned off")
         biz_name = metadata.get("verified_biz_name")
         if biz_name:
-            return f"This chat is with the official business account of {biz_name}. Messages and calls are end-to-end encrypted."
-        return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
+            return _ev(
+                "system.e2e_biz",
+                f"This chat is with the official business account of {biz_name}. Messages and calls are end-to-end encrypted.",
+                biz_name=biz_name,
+            )
+        return _ev(
+            "system.e2e_notice",
+            "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them.",
+        )
 
     if action_type in (
         SystemActionType.EPHEMERAL_TOGGLE,
@@ -254,47 +350,92 @@ def format_android_system_event(
         if secs > 0:
             days = secs // 86400
             if days >= 1:
-                return f"Disappearing messages set to {days} days"
+                return _ev(
+                    "system.disappearing_days",
+                    f"Disappearing messages set to {days} days",
+                    count=days,
+                    plural=True,
+                )
             hours = secs // 3600
-            return f"Disappearing messages set to {hours} hours"
-        return "Disappearing messages turned off"
+            return _ev(
+                "system.disappearing_hours",
+                f"Disappearing messages set to {hours} hours",
+                count=hours,
+                plural=True,
+            )
+        return _ev("system.disappearing_off", "Disappearing messages turned off")
 
     if action_type == SystemActionType.LINKED_GROUP_CALL:
-        return "Group call"
+        return _ev("system.linked_group_call", "Group call")
 
     if action_type == SystemActionType.EPHEMERAL_DEFAULT_TIMER:
         secs = int(text) if text and text.isdigit() else 0
         if secs > 0:
             days = secs // 86400
-            return f"New messages in this chat will disappear after {days} days"
-        return "Disappearing messages turned off"
+            return _ev(
+                "system.disappearing_default_days",
+                f"New messages in this chat will disappear after {days} days",
+                count=days,
+                plural=True,
+            )
+        return _ev("system.disappearing_off", "Disappearing messages turned off")
 
     if action_type == SystemActionType.ANNOUNCEMENT_MODE:
         if text.lower() == "true":
-            return "Only admins can send messages in this group"
-        return "All participants can send messages in this group"
+            return _ev(
+                "system.announcement_admins_only",
+                "Only admins can send messages in this group",
+            )
+        return _ev(
+            "system.announcement_all",
+            "All participants can send messages in this group",
+        )
 
     if action_type in (SystemActionType.BIZ_ACCOUNT_STATE, SystemActionType.BIZ_ACCOUNT_VERIFIED):
-        return "This chat is now with a WhatsApp Business account."
+        return _ev("system.biz_account", "This chat is now with a WhatsApp Business account.")
 
     if action_type in (
         SystemActionType.MEMBERSHIP_APPROVAL_REQUEST,
         SystemActionType.MEMBERSHIP_APPROVAL_APPROVED,
     ):
         if actor and actor != "Someone" and actor != target_str:
-            return f"{actor} approved {target_str}'s request to join"
-        return f"{target_str} joined after admin approval"
+            return _ev(
+                "system.approval_approved",
+                f"{actor} approved {target_str}'s request to join",
+                actor=actor,
+                target=target_str,
+            )
+        return _ev(
+            "system.approval_joined",
+            f"{target_str} joined after admin approval",
+            target=target_str,
+        )
 
     if action_type == SystemActionType.COMMUNITY_LINK_CHANGED:
         parent_name = metadata.get("community_name", "")
         if parent_name:
-            return f'{actor} added this group to community "{parent_name}"'
-        return f"{actor} added this group to the community"
+            return _ev(
+                "system.community_added_named",
+                f'{actor} added this group to community "{parent_name}"',
+                actor=actor,
+                parent_name=parent_name,
+            )
+        return _ev(
+            "system.community_added",
+            f"{actor} added this group to the community",
+            actor=actor,
+        )
 
     if action_type == SystemActionType.MEMBERSHIP_APPROVAL_MODE:
         if text.lower() == "true":
-            return "Admin approval is required to join this group"
-        return "Admin approval is no longer required to join this group"
+            return _ev(
+                "system.approval_required",
+                "Admin approval is required to join this group",
+            )
+        return _ev(
+            "system.approval_not_required",
+            "Admin approval is no longer required to join this group",
+        )
 
     if (
         text
@@ -303,9 +444,9 @@ def format_android_system_event(
         and text.lower() not in ("true", "false")
         and not text.isdigit()
     ):
-        return text
+        return text, None
 
-    return "Group event"
+    return _ev("system.group_event", "Group event")
 
 
 def format_ios_system_event(
@@ -316,43 +457,77 @@ def format_ios_system_event(
     is_from_me: bool,
 ) -> str:
     """Format an iOS service event into human-readable text."""
+    return build_ios_system_event(event_type, actor, targets, text, is_from_me)[0]
+
+
+def build_ios_system_event(
+    event_type: int | None,
+    actor: str,
+    targets: list[str],
+    text: str,
+    is_from_me: bool,
+) -> tuple[str, dict | None]:
+    """Build an iOS service event returning (english_text, i18n_descriptor)."""
     target_str = format_participant_names(targets) if targets else "Someone"
 
     if event_type == IOSEventType.NUMBER_CHANGED:
         new_phone = text if text and not text.startswith("{") else ""
         if new_phone:
             old_name = actor if actor and actor != "Someone" else "A contact"
-            return f"{old_name} changed their phone number to {new_phone}."
-        return "Phone number changed"
+            return _ev(
+                "system.number_changed",
+                f"{old_name} changed their phone number to {new_phone}.",
+                old_name=old_name,
+                new_name=new_phone,
+            )
+        return _ev("system.number_changed_generic", "Phone number changed")
 
     if event_type == IOSEventType.SECURITY_CODE_CHANGED:
         contact_name = actor if actor and actor != "Someone" else target_str
-        return f"Your security code with {contact_name} changed."
+        return _ev(
+            "system.security_code_changed",
+            f"Your security code with {contact_name} changed.",
+            contact=contact_name,
+        )
 
     if event_type == IOSEventType.GROUP_CREATED:
         if text:
-            return f'{actor} created group "{text}"'
-        return f"{actor} created this group"
+            return _ev(
+                "system.group_created_named",
+                f'{actor} created group "{text}"',
+                actor=actor,
+                text=text,
+            )
+        return _ev("system.group_created", f"{actor} created this group", actor=actor)
 
     if event_type == IOSEventType.SUBJECT_CHANGED:
         if text:
-            return f'{actor} changed the subject to "{text}"'
-        return f"{actor} changed the group subject"
+            return _ev(
+                "system.subject_changed_to",
+                f'{actor} changed the subject to "{text}"',
+                actor=actor,
+                text=text,
+            )
+        return _ev("system.subject_changed", f"{actor} changed the group subject", actor=actor)
 
     if event_type == IOSEventType.ICON_CHANGED:
         if text == "deleted":
-            return f"{actor} deleted this group's icon"
-        return f"{actor} changed this group's icon"
+            return _ev("system.icon_deleted", f"{actor} deleted this group's icon", actor=actor)
+        return _ev("system.icon_changed", f"{actor} changed this group's icon", actor=actor)
 
     if event_type == IOSEventType.PARTICIPANT_LEFT:
         if is_from_me or target_str in ("You", "you"):
-            return "You left"
-        return f"{target_str} left"
+            return _ev("system.you_left", "You left")
+        return _ev("system.target_left", f"{target_str} left", target=target_str)
 
     if event_type == IOSEventType.JOINED_VIA_INVITE_LINK:
         if is_from_me or target_str in ("You", "you"):
-            return "You joined using this group's invite link"
-        return f"{target_str} joined using this group's invite link"
+            return _ev("system.you_joined_link", "You joined using this group's invite link")
+        return _ev(
+            "system.target_joined_link",
+            f"{target_str} joined using this group's invite link",
+            target=target_str,
+        )
 
     if event_type in (
         IOSEventType.PARTICIPANT_JOINED_OR_ADDED,
@@ -361,60 +536,98 @@ def format_ios_system_event(
     ):
         if target_str in ("You", "you"):
             if actor and actor != "Someone" and actor != "You":
-                return f"{actor} added you"
-            return "You joined"
+                return _ev("system.actor_added_you", f"{actor} added you", actor=actor)
+            return _ev("system.you_joined", "You joined")
         if actor == "You":
-            return f"You added {target_str}"
+            return _ev("system.you_added_target", f"You added {target_str}", target=target_str)
         if actor and actor != "Someone" and actor != target_str:
-            return f"{actor} added {target_str}"
-        return f"{target_str} joined"
+            return _ev(
+                "system.actor_added_target",
+                f"{actor} added {target_str}",
+                actor=actor,
+                target=target_str,
+            )
+        return _ev("system.target_joined", f"{target_str} joined", target=target_str)
 
     if event_type == IOSEventType.PARTICIPANT_REMOVED:
         if target_str in ("You", "you"):
             if actor and actor != "Someone" and actor != "You":
-                return f"{actor} removed you"
-            return "You left"
+                return _ev("system.actor_removed_you", f"{actor} removed you", actor=actor)
+            return _ev("system.you_left", "You left")
         if actor == "You":
-            return f"You removed {target_str}"
+            return _ev("system.you_removed_target", f"You removed {target_str}", target=target_str)
         if actor and actor != "Someone" and actor != target_str:
-            return f"{actor} removed {target_str}"
-        return f"{target_str} was removed"
+            return _ev(
+                "system.actor_removed_target",
+                f"{actor} removed {target_str}",
+                actor=actor,
+                target=target_str,
+            )
+        return _ev("system.target_was_removed", f"{target_str} was removed", target=target_str)
 
     if event_type == IOSEventType.ADMIN_PROMOTED:
         if target_str in ("You", "you"):
-            return "You're now an admin"
-        return f"{target_str} is now an admin"
+            return _ev("system.admin_promoted_you", "You're now an admin")
+        return _ev(
+            "system.admin_promoted_other", f"{target_str} is now an admin", target=target_str
+        )
 
     if event_type == IOSEventType.ADMIN_DEMOTED:
         if target_str in ("You", "you"):
-            return "You're no longer an admin"
-        return f"{target_str} is no longer an admin"
+            return _ev("system.admin_demoted_you", "You're no longer an admin")
+        return _ev(
+            "system.admin_demoted_other", f"{target_str} is no longer an admin", target=target_str
+        )
 
     if event_type == IOSEventType.DESCRIPTION_CHANGED:
         if text:
-            return f'{actor} changed the group description to "{text}"'
-        return f"{actor} changed the group description"
+            return _ev(
+                "system.desc_changed_to",
+                f'{actor} changed the group description to "{text}"',
+                actor=actor,
+                text=text,
+            )
+        return _ev("system.desc_changed", f"{actor} changed the group description", actor=actor)
 
     if event_type == IOSEventType.DISAPPEARING_MESSAGES:
         secs = int(text) if text and text.isdigit() else None
         if secs and secs > 0:
             days = secs // 86400
             if days >= 1:
-                return f"Disappearing messages set to {days} days"
+                return _ev(
+                    "system.disappearing_days",
+                    f"Disappearing messages set to {days} days",
+                    count=days,
+                    plural=True,
+                )
             hours = secs // 3600
-            return f"Disappearing messages set to {hours} hours"
-        return "Disappearing messages turned off"
+            return _ev(
+                "system.disappearing_hours",
+                f"Disappearing messages set to {hours} hours",
+                count=hours,
+                plural=True,
+            )
+        return _ev("system.disappearing_off", "Disappearing messages turned off")
 
     if event_type in (IOSEventType.SETTINGS_CHANGED_36, IOSEventType.SETTINGS_CHANGED_37):
-        return "Group settings changed"
+        return _ev("system.settings_changed", "Group settings changed")
 
     if event_type == IOSEventType.APPROVAL_CHANGE:
-        return "Group membership approval settings changed"
+        return _ev(
+            "system.approval_settings_changed",
+            "Group membership approval settings changed",
+        )
 
     if event_type == IOSEventType.ANNOUNCEMENT_MODE:
         if text and text.lower() == "false":
-            return "All participants can send messages in this group"
-        return "Only admins can send messages in this group"
+            return _ev(
+                "system.announcement_all",
+                "All participants can send messages in this group",
+            )
+        return _ev(
+            "system.announcement_admins_only",
+            "Only admins can send messages in this group",
+        )
 
     if (
         text
@@ -423,6 +636,6 @@ def format_ios_system_event(
         and not text.isdigit()
         and "@s.whatsapp.net" not in text
     ):
-        return text
+        return text, None
 
-    return "Group event"
+    return _ev("system.group_event", "Group event")

@@ -44,7 +44,7 @@
     if (!num) return '';
     const clean = String(num).trim();
     if (!clean) return '';
-    if (clean === '0') return 'WhatsApp';
+    if (clean === '0') return t('common.whatsapp');
     const digits = clean.replace(/\D/g, '');
     if (!digits) return clean;
     if (digits.length === 11 && digits.startsWith('1')) {
@@ -59,7 +59,7 @@
   function fmtTime(ts) {
     if (!ts) return '';
     const d = new Date(ts);
-    return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleString(getActiveLang(), { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
   function _formatTimer(seconds) {
@@ -74,14 +74,14 @@
     const m = Math.floor(s / 60);
     const remSec = s % 60;
     if (m === 0) {
-      return `${remSec}s`;
+      return t('time.sec_short', { n: remSec });
     }
     const h = Math.floor(m / 60);
     const remMin = m % 60;
     if (h === 0) {
-      return `${remMin}m ${remSec}s`;
+      return t('time.min_sec_short', { m: remMin, s: remSec });
     }
-    return `${h}h ${remMin}m ${remSec}s`;
+    return t('time.hour_min_sec_short', { h, m: remMin, s: remSec });
   }
 
   function fmtDurationLong(seconds) {
@@ -89,17 +89,17 @@
     const m = Math.floor(s / 60);
     const remSec = s % 60;
     if (m === 0) {
-      return `${remSec} ${remSec === 1 ? 'second' : 'seconds'}`;
+      return tp('time.seconds', remSec);
     }
     const h = Math.floor(m / 60);
     const remMin = m % 60;
     if (h === 0) {
-      const secPart = remSec > 0 ? `, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}` : '';
-      return `${remMin} ${remMin === 1 ? 'minute' : 'minutes'}${secPart}`;
+      const secPart = remSec > 0 ? ', ' + tp('time.seconds', remSec) : '';
+      return tp('time.minutes', remMin) + secPart;
     }
-    const minPart = remMin > 0 ? `, ${remMin} ${remMin === 1 ? 'minute' : 'minutes'}` : '';
-    const secPart = remSec > 0 ? `, ${remSec} ${remSec === 1 ? 'second' : 'seconds'}` : '';
-    return `${h} ${h === 1 ? 'hour' : 'hours'}${minPart}${secPart}`;
+    const minPart = remMin > 0 ? ', ' + tp('time.minutes', remMin) : '';
+    const secPart = remSec > 0 ? ', ' + tp('time.seconds', remSec) : '';
+    return tp('time.hours', h) + minPart + secPart;
   }
 
   function fmtTimeGap(diffMs, isPrior) {
@@ -110,18 +110,16 @@
 
     let gapStr = '';
     if (diffDays >= 365) {
-      const years = Math.floor(diffDays / 365);
-      gapStr = `${years} ${years === 1 ? 'year' : 'years'}`;
+      gapStr = tp('time.years', Math.floor(diffDays / 365));
     } else if (diffDays >= 30) {
-      const months = Math.floor(diffDays / 30);
-      gapStr = `${months} ${months === 1 ? 'month' : 'months'}`;
+      gapStr = tp('time.months', Math.floor(diffDays / 30));
     } else if (diffDays >= 1) {
-      gapStr = `${diffDays} ${diffDays === 1 ? 'day' : 'days'}`;
+      gapStr = tp('time.days', diffDays);
     } else if (diffHrs >= 1) {
-      gapStr = `${diffHrs} ${diffHrs === 1 ? 'hour' : 'hours'}`;
+      gapStr = tp('time.hours', diffHrs);
     }
     if (!gapStr) return '';
-    return ` • Nearest message: ${gapStr} ${isPrior ? 'prior' : 'later'}`;
+    return t(isPrior ? 'time.nearest_prior' : 'time.nearest_later', { gap: gapStr });
   }
 
   function fmtDateSep(ts) {
@@ -147,9 +145,9 @@
   function fmtMonthHeader(ts) {
     const d = new Date(ts);
     if (d.getFullYear() === new Date().getFullYear()) {
-      return d.toLocaleString('default', { month: 'long' });
+      return d.toLocaleString(getActiveLang(), { month: 'long' });
     }
-    return d.toLocaleString('default', { month: 'long', year: 'numeric' });
+    return d.toLocaleString(getActiveLang(), { month: 'long', year: 'numeric' });
   }
 
   function activeArchiveDir() {

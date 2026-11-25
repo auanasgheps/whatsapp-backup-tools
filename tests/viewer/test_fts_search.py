@@ -516,10 +516,10 @@ class TestPhase2ArchivedAndSearch:
         assert "function filterStarredList(searchQuery)" in js
         assert "function loadStarredList(reset)" in js
         assert "function renderStarredItem(m)" in js
-        assert "Search messages & chats…" in js
-        assert "Search archived chats…" in js
-        assert "Search starred bookmarks…" in js
-        assert "Search call history…" in js
+        assert "sidebar.search_chats_placeholder" in js
+        assert "sidebar.search_archived_placeholder" in js
+        assert "sidebar.search_starred_placeholder" in js
+        assert "sidebar.search_calls_placeholder" in js
         # Verify keyboard shortcuts
         assert "e.key === '/'" in js
         assert "e.key.toLowerCase() === 'k'" in js
@@ -530,10 +530,10 @@ class TestChatListSearchAndDescription:
 
     def test_app_js_bundle_includes_updated_search_subtitles_and_section_header(self):
         js = _get_app_js()
-        # Section header renamed to Chats
-        assert "makeSectionLabel('Chats')" in js
-        # Subtitle logic contains Group chat fallback
-        assert "'Group chat'" in js
+        # Section header renamed to Chats (via i18n key)
+        assert "makeSectionLabel(t('search.chats_section'))" in js
+        # Subtitle logic contains Group chat fallback (via i18n key)
+        assert "t('chat.group_conversation')" in js
         # Subtitle logic formats contact phone number
         assert "formatPhoneNumber(chat.phone_number || chat.id)" in js
         # Client-side search filters include description and phone_number

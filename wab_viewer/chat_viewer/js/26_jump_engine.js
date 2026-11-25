@@ -117,7 +117,7 @@
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
-    showJumpHud('Jumping to message in context…');
+    showJumpHud(t('chat.jumping_context'));
 
     try {
       const params = new URLSearchParams({
@@ -142,7 +142,7 @@
         flashHighlightRow(targetEl, 'gold');
       }
 
-      showContextJumpBanner('⭐', 'Viewing message in context', () => {
+      showContextJumpBanner('⭐', t('chat.context_banner'), () => {
         const contextBanner = document.getElementById('context-jump-banner');
         if (contextBanner) contextBanner.style.display = 'none';
         _activeStarredMsgId = null;
@@ -160,7 +160,7 @@
       return targetEl || null;
     } catch (err) {
       if (err.name === 'AbortError') return null;
-      showJumpHudError('Unable to load message');
+      showJumpHudError(t('chat.unable_to_load'));
       throw err;
     } finally {
       if (scroll) scroll.classList.remove('is-navigating');
@@ -189,7 +189,7 @@
     }
     if (!chat) {
       loading = false;
-      showJumpHudError('Unable to locate chat for this call');
+      showJumpHudError(t('calls.no_chat_found'));
       return null;
     }
 
@@ -206,7 +206,7 @@
 
     const loadingEl = document.getElementById('chat-loading');
     loadingEl.style.display = 'flex';
-    showJumpHud('Jumping to conversation moment…');
+    showJumpHud(t('chat.jumping_moment'));
 
     try {
       const params = new URLSearchParams({

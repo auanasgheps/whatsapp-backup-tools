@@ -20,7 +20,7 @@
     const address = locData.address ? locData.address.trim() : '';
 
     if (titleEl) {
-      titleEl.textContent = placeName || (locData.isLive ? 'Live Location' : 'Shared Location');
+      titleEl.textContent = placeName || t(locData.isLive ? 'msg.live_location' : 'msg.shared_location');
     }
     if (subtitleEl) {
       subtitleEl.textContent = address ? (address + ' · ' + formattedCoords) : formattedCoords;
@@ -35,7 +35,7 @@
     // 2. Bing Maps: centers view (cp), sets street zoom (lvl=16), drops named pushpin (sp=point.lat_lng_Name)
     const bingBtn = document.getElementById('map-provider-bing');
     if (bingBtn) {
-      const pinLabel = placeName || address || 'Location';
+      const pinLabel = placeName || address || t('media.location');
       bingBtn.href = 'https://www.bing.com/maps?cp=' + lat + '~' + lng + '&lvl=16&sp=point.' + lat + '_' + lng + '_' + encodeURIComponent(pinLabel);
     }
 
@@ -47,17 +47,18 @@
 
     // Copy Coordinates button
     if (copyBtn && copyTextEl) {
+      const coordsLabel = t('maps.copy_coords_val', { lat: lat.toFixed(4), lng: lng.toFixed(4) });
       copyBtn.classList.remove('copied');
-      copyTextEl.textContent = 'Copy Coordinates (' + lat.toFixed(4) + ', ' + lng.toFixed(4) + ')';
+      copyTextEl.textContent = coordsLabel;
       copyBtn.onclick = (e) => {
         e.preventDefault();
         const rawCoords = lat + ', ' + lng;
         navigator.clipboard.writeText(rawCoords).then(() => {
           copyBtn.classList.add('copied');
-          copyTextEl.textContent = 'Copied to clipboard! ✓';
+          copyTextEl.textContent = t('maps.copied');
           setTimeout(() => {
             copyBtn.classList.remove('copied');
-            copyTextEl.textContent = 'Copy Coordinates (' + lat.toFixed(4) + ', ' + lng.toFixed(4) + ')';
+            copyTextEl.textContent = coordsLabel;
           }, 2000);
         }).catch(() => {});
       };

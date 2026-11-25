@@ -12,8 +12,8 @@ from flask import Blueprint, jsonify, request
 from ..context import get_viewer_context
 from ..db_cache import _find_ios_call_history_db
 from ..hydration import (
-    _format_android_service_row,
-    _format_ios_service_row,
+    _build_android_service_row,
+    _build_ios_service_row,
     _hydrate_android_service_participants,
     _media_type_from_path,
     _resolve_ios_jid,
@@ -701,7 +701,10 @@ def api_chats():
                         else (last_msg_participant_name or "")
                     ),
                 }
-                d["last_msg_preview"] = _format_android_service_row(s_row)
+                preview_text, sys_ev = _build_android_service_row(s_row)
+                d["last_msg_preview"] = preview_text
+                if sys_ev is not None:
+                    d["last_msg_system_event"] = sys_ev
                 d["last_msg_type"] = "service"
             else:
                 d["last_msg_preview"] = ""
@@ -724,7 +727,10 @@ def api_chats():
                     "member_jid": last_msg_member_jid or "",
                     "chat_type": d.get("type", "contact"),
                 }
-                d["last_msg_preview"] = _format_ios_service_row(s_row, ios_contacts_map)
+                preview_text, sys_ev = _build_ios_service_row(s_row, ios_contacts_map)
+                d["last_msg_preview"] = preview_text
+                if sys_ev is not None:
+                    d["last_msg_system_event"] = sys_ev
                 d["last_msg_type"] = "service"
             else:
                 d["last_msg_preview"] = ""

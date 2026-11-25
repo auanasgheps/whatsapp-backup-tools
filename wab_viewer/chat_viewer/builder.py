@@ -8,6 +8,7 @@ _CSS_DIR = _CHAT_VIEWER_DIR / "css"
 
 MODULE_ORDER = [
     "00_state.js",
+    "00b_i18n.js",
     "01_utils_text.js",
     "02_utils_ui.js",
     "03_navigation.js",

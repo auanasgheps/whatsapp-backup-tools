@@ -66,8 +66,8 @@ function renderMedia(msg) {
         wrap.classList.add('msg-live-photo');
         const liveBadge = document.createElement('span');
         liveBadge.className = 'msg-live-badge';
-        liveBadge.innerHTML = '<span class="live-icon">◎</span> LIVE';
-        liveBadge.title = 'Live Photo: hover or click to play motion';
+        liveBadge.innerHTML = `<span class="live-icon">◎</span> ${esc(t('msg.live'))}`;
+        liveBadge.title = t('msg.live_photo_hint');
         wrap.appendChild(liveBadge);
 
         let liveVid = null;
@@ -179,11 +179,11 @@ function renderMedia(msg) {
 
       const nameEl = document.createElement('div');
       nameEl.className = 'vcard-name';
-      nameEl.textContent = msg.text_body || msg.media_name || 'Contact';
+      nameEl.textContent = msg.text_body || msg.media_name || t('media.contact');
 
       const subEl = document.createElement('div');
       subEl.className = 'vcard-sub';
-      subEl.textContent = 'Contact Card';
+      subEl.textContent = t('msg.contact_card');
 
       details.appendChild(nameEl);
       details.appendChild(subEl);
@@ -197,7 +197,7 @@ function renderMedia(msg) {
         ? msg.media_name
         : ((msg.text_body ? msg.text_body : 'contact') + '.vcf');
       downloadLink.download = downloadName;
-      downloadLink.innerHTML = '<span class="vcard-download-icon">📇</span><span>View Contact (.vcf)</span>';
+      downloadLink.innerHTML = `<span class="vcard-download-icon">📇</span><span>${esc(t('msg.view_contact_vcf'))}</span>`;
 
       wrap.appendChild(card);
       wrap.appendChild(downloadLink);
@@ -213,7 +213,7 @@ function renderMedia(msg) {
     if (msg.is_view_once) {
       const voBadge = document.createElement('span');
       voBadge.className = 'msg-view-once-badge';
-      voBadge.innerHTML = '<span class="vo-icon">①</span> View Once';
+      voBadge.innerHTML = `<span class="vo-icon">①</span> ${esc(t('msg.view_once'))}`;
       wrap.appendChild(voBadge);
     }
     return wrap;
@@ -301,12 +301,12 @@ function renderMedia(msg) {
       mapHeader.setAttribute('role', 'button');
       mapHeader.setAttribute('tabindex', '0');
       mapHeader.setAttribute('aria-haspopup', 'dialog');
-      mapHeader.setAttribute('aria-label', (msg.location_name ? (msg.location_name + ' — ') : '') + 'Open in Maps');
-      mapHeader.title = 'Click to open in maps';
+      mapHeader.setAttribute('aria-label', (msg.location_name ? (msg.location_name + ' — ') : '') + t('msg.open_in_maps'));
+      mapHeader.title = t('msg.click_open_maps');
 
       const hoverHint = document.createElement('div');
       hoverHint.className = 'location-map-hover-hint';
-      hoverHint.innerHTML = '<span class="hover-hint-icon" aria-hidden="true">🗺️</span><span>Open in Maps</span> <span class="hover-hint-arrow" aria-hidden="true">↗</span>';
+      hoverHint.innerHTML = `<span class="hover-hint-icon" aria-hidden="true">🗺️</span><span>${esc(t('msg.open_in_maps'))}</span> <span class="hover-hint-arrow" aria-hidden="true">↗</span>`;
       mapHeader.appendChild(hoverHint);
 
       const triggerMapChooser = (e) => {
@@ -338,7 +338,7 @@ function renderMedia(msg) {
     if (isLive) {
       const liveBadge = document.createElement('div');
       liveBadge.className = 'location-live-badge';
-      liveBadge.innerHTML = '<span class="live-dot" aria-hidden="true"></span><span class="live-label">Live location ended</span>';
+      liveBadge.innerHTML = `<span class="live-dot" aria-hidden="true"></span><span class="live-label">${esc(t('msg.live_location_ended'))}</span>`;
       details.appendChild(liveBadge);
 
       if (msg.live_location_share_duration || msg.timestamp_ms) {
@@ -381,7 +381,7 @@ function renderMedia(msg) {
       } else {
         const nameEl = document.createElement('div');
         nameEl.className = 'location-name';
-        nameEl.textContent = 'Pinned location';
+        nameEl.textContent = t('msg.pinned_location');
         details.appendChild(nameEl);
       }
       if (msg.location_address) {
@@ -432,7 +432,7 @@ function renderMedia(msg) {
     const container = document.createElement('div');
     container.className = 'msg-poll';
     container.setAttribute('role', 'group');
-    container.setAttribute('aria-label', 'Poll: ' + (poll.question || 'Poll'));
+    container.setAttribute('aria-label', t('msg.poll') + ': ' + (poll.question || t('msg.poll')));
 
     const header = document.createElement('div');
     header.className = 'msg-poll-header';
@@ -444,7 +444,7 @@ function renderMedia(msg) {
 
     const badge = document.createElement('div');
     badge.className = 'msg-poll-badge';
-    badge.textContent = poll.multiple_answers ? 'Multiple choice' : 'Single choice';
+    badge.textContent = t(poll.multiple_answers ? 'msg.poll_multiple' : 'msg.poll_single');
     header.appendChild(badge);
 
     container.appendChild(header);
@@ -503,13 +503,13 @@ function renderMedia(msg) {
     const totalEl = document.createElement('span');
     totalEl.className = 'msg-poll-total';
     const vCount = poll.total_voters !== undefined ? poll.total_voters : totalVotes;
-    totalEl.textContent = vCount === 1 ? '1 vote' : vCount + ' votes';
+    totalEl.textContent = tp('msg.votes', vCount);
     footer.appendChild(totalEl);
 
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'msg-poll-view-votes-btn';
-    btn.textContent = 'View votes';
+    btn.textContent = t('msg.view_votes');
     btn.setAttribute('aria-haspopup', 'dialog');
     btn.addEventListener('click', e => {
       e.stopPropagation();

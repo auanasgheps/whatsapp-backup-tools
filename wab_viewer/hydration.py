@@ -18,8 +18,8 @@ from .protobuf import (
 )
 from .system_events import (
     ALLOWED_GROUP_SYSTEM_ACTIONS,
-    format_android_system_event,
-    format_ios_system_event,
+    build_android_system_event,
+    build_ios_system_event,
     format_participant_names,
 )
 
@@ -111,6 +111,11 @@ def _resolve_ios_jid(jid_str: str, contacts_map: dict) -> str:
 
 def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
     """Format an iOS service event row into a friendly human-readable string."""
+    return _build_ios_service_row(row, contacts_map)[0]
+
+
+def _build_ios_service_row(row: dict, contacts_map: dict) -> tuple[str, dict | None]:
+    """Build an iOS service event row returning (english_text, i18n_descriptor)."""
     ev = row.get("group_event_type")
     txt = (row.get("text_body") or "").strip()
     member_jid = (row.get("member_jid") or "").strip()
@@ -141,11 +146,14 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
                 actor = sender
             else:
                 actor = "Someone"
-        return format_ios_system_event(ev, actor, [], subj, is_from_me)
+        return build_ios_system_event(ev, actor, [], subj, is_from_me)
 
     if ev in (1, 3, 10):  # Subject, icon, or description changed
         if row.get("chat_type") == "contact":
-            return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
+            return (
+                "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them.",
+                {"key": "system.e2e_notice", "params": {}},
+            )
         actor = (
             "You"
             if from_me == 1
@@ -153,7 +161,7 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
                 _resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone")
             )
         )
-        return format_ios_system_event(ev, actor, [], txt, is_from_me)
+        return build_ios_system_event(ev, actor, [], txt, is_from_me)
 
     if ev in (4, 15):  # Left or joined via invite link
         target = (
@@ -161,11 +169,14 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
             if member_jid
             else ("You" if from_me == 1 else "A participant")
         )
-        return format_ios_system_event(ev, sender or "Someone", [target], txt, is_from_me)
+        return build_ios_system_event(ev, sender or "Someone", [target], txt, is_from_me)
 
     if ev == 2:  # Participant added or joined / E2E notice for 1:1 contact chats
         if row.get("chat_type") == "contact" or (not member_jid and not txt):
-            return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
+            return (
+                "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them.",
+                {"key": "system.e2e_notice", "params": {}},
+            )
         if member_jid:
             actor = (
                 "You" if from_me == 1 else (_resolve_ios_jid(txt, contacts_map) if txt else None)
@@ -180,7 +191,7 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
         else:
             actor = _resolve_ios_jid(txt, contacts_map) if txt else None
             target = "you"
-        return format_ios_system_event(ev, actor or "Someone", [target], txt, is_from_me)
+        return build_ios_system_event(ev, actor or "Someone", [target], txt, is_from_me)
 
     if ev in (21, 50):  # Multiple participants added or shared via contact
         if ";" in txt:
@@ -191,7 +202,7 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
             actor = "You" if from_me == 1 else None
             target_jids = [j.strip() for j in txt.split(",") if j.strip()]
         targets = [_resolve_ios_jid(j, contacts_map) for j in target_jids]
-        return format_ios_system_event(ev, actor or "Someone", targets, txt, is_from_me)
+        return build_ios_system_event(ev, actor or "Someone", targets, txt, is_from_me)
 
     if ev == 7:  # Participant removed
         if member_jid:
@@ -208,7 +219,7 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
         else:
             actor = _resolve_ios_jid(txt, contacts_map) if txt else None
             target = "you"
-        return format_ios_system_event(ev, actor or "Someone", [target], txt, is_from_me)
+        return build_ios_system_event(ev, actor or "Someone", [target], txt, is_from_me)
 
     if ev in (5, 9):  # Admin changed
         target = (
@@ -216,17 +227,17 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
             if member_jid
             else (_resolve_ios_jid(txt, contacts_map) if txt else "You")
         )
-        return format_ios_system_event(ev, sender or "Someone", [target], txt, is_from_me)
+        return build_ios_system_event(ev, sender or "Someone", [target], txt, is_from_me)
 
     if ev == 6:  # Phone number changed
         target_phone = _resolve_ios_jid(txt, contacts_map) if txt else ""
-        return format_ios_system_event(ev, sender or "A contact", [], target_phone, is_from_me)
+        return build_ios_system_event(ev, sender or "A contact", [], target_phone, is_from_me)
 
     if ev == 56:  # Security code changed
         contact = sender or (
             _resolve_ios_jid(member_jid, contacts_map) if member_jid else "this contact"
         )
-        return format_ios_system_event(ev, contact, [], txt, is_from_me)
+        return build_ios_system_event(ev, contact, [], txt, is_from_me)
 
     if ev in (26, 36, 37, 38, 58):  # Settings, approvals, and announcements
         actor_name = (
@@ -236,15 +247,20 @@ def _format_ios_service_row(row: dict, contacts_map: dict) -> str:
                 _resolve_ios_jid(member_jid, contacts_map) if member_jid else (sender or "Someone")
             )
         )
-        return format_ios_system_event(ev, actor_name, [], txt, is_from_me)
+        return build_ios_system_event(ev, actor_name, [], txt, is_from_me)
 
     if txt and not txt.startswith("{") and "@lid" not in txt and not txt.isdigit():
-        return txt
-    return "Group event"
+        return txt, None
+    return "Group event", {"key": "system.group_event", "params": {}}
 
 
 def _format_android_service_row(row: dict) -> str:
     """Format an Android service event row into a friendly human-readable string."""
+    return _build_android_service_row(row)[0]
+
+
+def _build_android_service_row(row: dict) -> tuple[str, dict | None]:
+    """Build an Android service event row returning (english_text, i18n_descriptor)."""
     act = row.get("action_type")
     txt = (row.get("text_body") or "").strip()
     from_me = row.get("from_me")
@@ -257,15 +273,20 @@ def _format_android_service_row(row: dict) -> str:
     # Guard: In a 1-to-1 chat, group actions must never emit group labels
     if row.get("chat_type") == "contact" and act in ALLOWED_GROUP_SYSTEM_ACTIONS:
         if act == 1:
-            return "You deleted this message" if from_me == 1 else "This message was deleted"
-        return "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them."
+            if from_me == 1:
+                return "You deleted this message", {"key": "msg.deleted_you", "params": {}}
+            return "This message was deleted", {"key": "msg.deleted_other", "params": {}}
+        return (
+            "Messages and calls are end-to-end encrypted. No one outside of this chat, not even WhatsApp, can read or listen to them.",
+            {"key": "system.e2e_notice", "params": {}},
+        )
 
     actor = sender if sender else ("You" if from_me == 1 else "Someone")
     if not targets and act in (4, 5, 13, 79, 123):
         targets = [sender] if sender else (["You"] if from_me == 1 else [])
 
     metadata = row.get("service_metadata") or {}
-    return format_android_system_event(act, actor, targets, txt, metadata)
+    return build_android_system_event(act, actor, targets, txt, metadata)
 
 
 def _hydrate_android_service_participants(
@@ -455,7 +476,10 @@ def _format_service_rows(
             pass
 
         for r in service_rows:
-            r["text_body"] = _format_ios_service_row(r, contacts_map)
+            text_body, sys_ev = _build_ios_service_row(r, contacts_map)
+            r["text_body"] = text_body
+            if sys_ev is not None:
+                r["system_event"] = sys_ev
 
     elif source_type == "android":
         p_map = _hydrate_android_service_participants(
@@ -501,13 +525,17 @@ def _format_service_rows(
             act = r.get("service_action_type") or r.get("action_type")
             if r.get("chat_type") == "contact" and act == 1:
                 r["media_type"] = "deleted"
-                r["text_body"] = (
-                    "You deleted this message"
-                    if r.get("from_me") == 1
-                    else "This message was deleted"
-                )
+                if r.get("from_me") == 1:
+                    r["text_body"] = "You deleted this message"
+                    r["system_event"] = {"key": "msg.deleted_you", "params": {}}
+                else:
+                    r["text_body"] = "This message was deleted"
+                    r["system_event"] = {"key": "msg.deleted_other", "params": {}}
             else:
-                r["text_body"] = _format_android_service_row(r)
+                text_body, sys_ev = _build_android_service_row(r)
+                r["text_body"] = text_body
+                if sys_ev is not None:
+                    r["system_event"] = sys_ev
                 if r.get("chat_type") == "contact" and r["text_body"] in (
                     "You deleted this message",
                     "This message was deleted",

@@ -21,7 +21,7 @@
     if (reset) {
       _starredOffset = 0;
       _starredList = [];
-      chatListEl.innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading starred messages…</div>';
+      chatListEl.innerHTML = `<div id="chat-list-notice"><div class="loading-spinner"></div>${esc(t('starred.loading'))}</div>`;
     }
 
     try {
@@ -46,9 +46,9 @@
         chatListEl.innerHTML = '';
         if (msgs.length === 0) {
           if (q) {
-            chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No starred bookmarks matching "${esc(q)}"</span></div>`;
+            chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>${esc(t('sidebar.no_matches'))}</strong><span>${esc(t('starred.empty_match', { query: q }))}</span></div>`;
           } else {
-            chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>No starred bookmarks found</span></div>';
+            chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>${esc(t('starred.title'))}</strong><span>${esc(t('starred.empty_all'))}</span></div>`;
           }
           return;
         }
@@ -61,7 +61,7 @@
     } catch (err) {
       if (currentNavTab !== 'starred') return;
       if (reset) {
-        chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>Failed to load bookmarks</span></div>';
+        chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>${esc(t('starred.title'))}</strong><span>${esc(t('starred.load_failed'))}</span></div>`;
       }
       console.error('Failed to load starred bookmarks:', err);
     } finally {
@@ -90,7 +90,7 @@
     body.className = 'chat-item-body';
     const preview = _formatStarredPreview(m);
     const rawSender = m.sender_name || '';
-    const cleanSender = _isUnreadableToken(rawSender) ? '' : rawSender;
+    const cleanSender = _isUnreadableToken(rawSender) ? '' : localizeSender(rawSender);
     const authorPrefix = cleanSender ? `${cleanSender}: ` : '';
     body.innerHTML = `<div class="chat-name">${esc(chatName)}</div><div class="chat-meta">${esc(authorPrefix + preview)} · ${fmtTime(m.timestamp * 1000)}</div>`;
     el.appendChild(body);
@@ -106,7 +106,7 @@
     if (!list) return;
 
     if (_starredList.length === 0) {
-      list.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>Starred Messages</strong><span>No starred bookmarks found</span></div>';
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⭐</span><strong>${esc(t('starred.title'))}</strong><span>${esc(t('starred.empty_all'))}</span></div>`;
       return;
     }
 
@@ -117,7 +117,7 @@
 
     list.innerHTML = '';
     if (matches.length === 0) {
-      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No starred bookmarks matching "${esc(searchQuery)}"</span></div>`;
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>${esc(t('sidebar.no_matches'))}</strong><span>${esc(t('starred.empty_match', { query: searchQuery }))}</span></div>`;
       return;
     }
 

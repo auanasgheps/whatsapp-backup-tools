@@ -2,7 +2,7 @@ function renderGif(msg) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-media msg-gif';
     wrap.setAttribute('tabindex', '0');
-    wrap.setAttribute('aria-label', 'Animated GIF: click to play');
+    wrap.setAttribute('aria-label', t('msg.gif_play'));
 
     const ratio = _extractMsgAspectRatio(msg);
     _applyMediaOrientationBox(wrap, ratio);
@@ -90,7 +90,7 @@ function renderGif(msg) {
       } else {
         vid.pause();
         wrap.classList.remove('is-playing');
-        wrap.setAttribute('aria-label', 'Animated GIF: click to play');
+        wrap.setAttribute('aria-label', t('msg.gif_play'));
       }
     }
 
@@ -117,7 +117,7 @@ function renderGif(msg) {
     if (msg.is_view_once) {
       const voBadge = document.createElement('span');
       voBadge.className = 'msg-view-once-badge';
-      voBadge.innerHTML = '<span class="vo-icon">①</span> View Once';
+      voBadge.innerHTML = `<span class="vo-icon">①</span> ${esc(t('msg.view_once'))}`;
       wrap.appendChild(voBadge);
     }
 

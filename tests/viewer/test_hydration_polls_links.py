@@ -568,9 +568,9 @@ class TestPollSupport:
         js_content = _get_app_js()
         css_content = _get_app_css()
 
-        # Badge wording must describe without an action verb
-        assert "Multiple choice" in js_content
-        assert "Single choice" in js_content
+        # Badge wording uses i18n keys (verified in en.json as "Multiple choice" / "Single choice")
+        assert "msg.poll_multiple" in js_content
+        assert "msg.poll_single" in js_content
         assert "Select one or more" not in js_content
         assert "Select one" not in js_content
 

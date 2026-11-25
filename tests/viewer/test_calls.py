@@ -507,7 +507,7 @@ class TestPhase1CallsFeature:
         assert "function renderCallItem(call)" in js
         assert "function selectCallItem(call, el)" in js
         assert "function fmtTimeGap(diffMs, isPrior)" in js
-        assert "Nearest message:" in js
+        assert "time.nearest_prior" in js
         assert "function jumpFromCallToChat(call, matchedChat)" in js
         assert "async function openChatAtTimestamp(chatId, timestampMs)" in js
         assert "function showContextJumpBanner(icon, text, onSwitch)" in js
@@ -841,7 +841,7 @@ class TestInChatCallBubblesAndUI:
 
         assert "function renderCallCard(msg)" in js
         assert "function showCallDetails(msg, anchorEl)" in js
-        assert "_infoRow('Calls'" in js
+        assert "_infoRow(t('nav.calls')" in js
         assert "'Preserved calls'" not in js
         assert "async function openChatAtTimestamp(chatId, timestampMs)" in js
 

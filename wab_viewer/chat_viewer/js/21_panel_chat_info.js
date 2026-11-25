@@ -29,7 +29,7 @@
     const s = document.createElement('span');
     s.className = 'chat-info-spinner';
     s.setAttribute('role', 'status');
-    s.setAttribute('aria-label', 'Loading');
+    s.setAttribute('aria-label', t('common.loading'));
     return s;
   }
 
@@ -62,7 +62,7 @@
     if (!panel || !details) return;
 
     if (heading) {
-      heading.textContent = currentChat.type === 'group' ? 'Group Info' : 'Contact Info';
+      heading.textContent = t(currentChat.type === 'group' ? 'chat_info.title_group' : 'chat_info.title_contact');
     }
     if (avatar) {
       const avatarKey = currentChat.phone_number || currentChat.id || currentChat.display_name;
@@ -77,7 +77,7 @@
         const fmtPhone = formatPhoneNumber(currentChat.phone_number || currentChat.id);
         phone.textContent = fmtPhone ? fmtPhone : '';
       } else {
-        phone.textContent = 'Group conversation';
+        phone.textContent = t('chat.group_conversation');
       }
     }
     if (desc) {
@@ -110,7 +110,7 @@
       info = await infoResp.json();
     } catch (_) {
       if (currentChat === chatAtOpen && panel.classList.contains('open')) {
-        details.innerHTML = '<div class="chat-info-row" style="color:var(--text-muted)">Could not load chat info.</div>';
+        details.innerHTML = `<div class="chat-info-row" style="color:var(--text-muted)">${esc(t('chat_info.load_failed'))}</div>`;
       }
       return;
     }
@@ -121,14 +121,15 @@
     details.innerHTML = '';
 
     if (currentChat.type === 'group' && info.members && info.members.length) {
+      const partLabel = tp('chat.participants', info.members.length);
       if (phone) {
-        phone.textContent = `${info.members.length} participants`;
+        phone.textContent = partLabel;
       }
       const subEl = document.getElementById('chat-subtitle');
       if (subEl) {
-        let subHtml = `${info.members.length} participants`;
+        let subHtml = esc(partLabel);
         if (currentChat.is_preserved_only) {
-          subHtml += ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+          subHtml += ` <span class="chat-preserved-tag" title="${esc(t('sidebar.preserved_badge_title'))}">${esc(t('common.preserved'))}</span>`;
         }
         subEl.innerHTML = subHtml;
       }
@@ -167,22 +168,22 @@
       const years = Math.floor(days / 365);
       const months = Math.floor((days % 365) / 30);
       let span = '';
-      if (years > 0) span += years + (years === 1 ? ' year' : ' years');
-      if (months > 0) span += (span ? ', ' : '') + months + (months === 1 ? ' month' : ' months');
-      if (!span) span = days + (days === 1 ? ' day' : ' days');
-      overviewCard.appendChild(_infoRow('Duration', span).row);
+      if (years > 0) span += tp('time.years', years);
+      if (months > 0) span += (span ? ', ' : '') + tp('time.months', months);
+      if (!span) span = tp('time.days', days);
+      overviewCard.appendChild(_infoRow(t('calls.duration'), span).row);
     }
 
     if (currentChat.type === 'contact') {
       const sentReceived = document.createElement('span');
-      sentReceived.textContent = fmtNum(info.sent) + ' sent · ' + fmtNum(info.received) + ' received';
-      overviewCard.appendChild(_infoRow('Messages', sentReceived).row);
+      sentReceived.textContent = t('chat_info.sent_received', { sent: fmtNum(info.sent), received: fmtNum(info.received) });
+      overviewCard.appendChild(_infoRow(t('search.messages_section'), sentReceived).row);
     } else {
-      overviewCard.appendChild(_infoRow('Total messages', fmtNum(info.total)).row);
+      overviewCard.appendChild(_infoRow(t('search.messages_section'), fmtNum(info.total)).row);
     }
 
     if (info.calls_count) {
-      overviewCard.appendChild(_infoRow('Calls', fmtNum(info.calls_count)).row);
+      overviewCard.appendChild(_infoRow(t('nav.calls'), fmtNum(info.calls_count)).row);
     }
 
     // Media size row (placed before gallery link button)
@@ -197,9 +198,9 @@
     // Gallery link row (last button/row of the overview section)
     const galleryLink = document.createElement('button');
     galleryLink.className = 'chat-info-link';
-    galleryLink.textContent = 'Open Media Gallery →';
+    galleryLink.textContent = t('chat_info.open_gallery');
     galleryLink.addEventListener('click', () => { closeChatInfo(); openMediaGallery(); });
-    overviewCard.appendChild(_infoRow('Media', galleryLink).row);
+    overviewCard.appendChild(_infoRow(t('gallery.title'), galleryLink).row);
 
     details.appendChild(overviewCard);
 
@@ -210,7 +211,7 @@
       membersCard.className = 'chat-info-card';
       const membersTitle = document.createElement('div');
       membersTitle.className = 'chat-info-card-title';
-      membersTitle.textContent = 'Members (' + info.members.length + ')';
+      membersTitle.textContent = t('chat_info.members_header', { count: info.members.length });
       membersCard.appendChild(membersTitle);
 
       const membersWrap = document.createElement('div');
@@ -229,7 +230,7 @@
         more.className = 'chat-info-link';
         more.style.marginTop = '6px';
         const remaining = info.members.length - SHOW;
-        more.textContent = '+ ' + remaining + ' more…';
+        more.textContent = t('chat_info.more_members', { count: remaining });
         more.addEventListener('click', () => {
           info.members.slice(SHOW).forEach(m => membersWrap.insertBefore(renderMember(m), more));
           more.remove();
@@ -246,7 +247,7 @@
       sendersCard.className = 'chat-info-card';
       const sendersTitle = document.createElement('div');
       sendersTitle.className = 'chat-info-card-title';
-      sendersTitle.textContent = 'Top senders';
+      sendersTitle.textContent = t('chat_info.top_senders');
       sendersCard.appendChild(sendersTitle);
 
       const sendersWrap = document.createElement('div');

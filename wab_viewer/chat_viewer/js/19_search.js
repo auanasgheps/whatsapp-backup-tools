@@ -76,7 +76,7 @@
     // Show loading state while FTS fetch is in flight
     const container = document.getElementById('search-results');
     container.classList.add('has-results');
-    container.innerHTML = '<div class="sr-section-label">Searching…</div>';
+    container.innerHTML = `<div class="sr-section-label">${esc(t('search.searching'))}</div>`;
 
     // Full-text search across indexed chats
     const res = await fetch(API + '/search?' + new URLSearchParams({ q }));
@@ -104,14 +104,14 @@
     let subHtml = '';
     if (chat.type === 'group') {
       const desc = (chat.description || '').trim();
-      subHtml = desc ? highlight(desc.replace(/\s+/g, ' '), q) : 'Group chat';
+      subHtml = desc ? highlight(desc.replace(/\s+/g, ' '), q) : esc(t('chat.group_conversation'));
     } else {
       const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
       subHtml = formattedPhone ? highlight(formattedPhone, q) : '';
     }
 
     const tagHtml = chat.is_preserved_only
-      ? ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
+      ? ` <span class="chat-preserved-tag" title="${esc(t('sidebar.preserved_badge_title'))}">${esc(t('common.preserved'))}</span>`
       : '';
 
     el.innerHTML = `<div class="sr-chat">${highlight(chat.display_name, q)}${tagHtml}</div><div class="sr-text">${subHtml}</div>`;
@@ -171,19 +171,19 @@
     container.innerHTML = '';
 
     if (chatMatches.length) {
-      container.appendChild(makeSectionLabel('Chats'));
+      container.appendChild(makeSectionLabel(t('search.chats_section')));
       chatMatches.forEach(chat => container.appendChild(makeChatResultItem(chat, q)));
     }
 
     if (textResults.length) {
-      container.appendChild(makeSectionLabel('Messages'));
+      container.appendChild(makeSectionLabel(t('search.messages_section')));
       textResults.slice(0, 50).forEach(r => container.appendChild(makeTextResultItem(r, q)));
     }
 
     if (indexedCount != null && indexedCount < allChats.length) {
       const notice = document.createElement('div');
       notice.className = 'search-index-notice';
-      notice.textContent = `Searched ${indexedCount} of ${allChats.length} chats. Open more chats to index them.`;
+      notice.textContent = t('search.indexed_progress', { indexed: indexedCount, total: allChats.length });
       container.appendChild(notice);
     }
   }
@@ -274,7 +274,7 @@
     const count = document.getElementById('chat-search-count');
     nav.style.display = 'flex';
     if (!chatSearchResults.length) {
-      count.textContent = 'No results';
+      count.textContent = t('search.no_results');
       document.getElementById('search-prev').disabled = true;
       document.getElementById('search-next').disabled = true;
       return;

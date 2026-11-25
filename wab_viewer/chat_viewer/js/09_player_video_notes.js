@@ -89,17 +89,17 @@ function renderVideoNote(msg) {
     const muteBtn = document.createElement('button');
     muteBtn.type = 'button';
     muteBtn.className = 'video-note-action-btn';
-    muteBtn.title = 'Mute';
-    muteBtn.setAttribute('aria-label', 'Mute video message');
+    muteBtn.title = t('msg.mute');
+    muteBtn.setAttribute('aria-label', t('msg.mute_video_aria'));
     function syncMuteIcon() {
       if (vid.muted) {
         muteBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
-        muteBtn.title = 'Unmute';
-        muteBtn.setAttribute('aria-label', 'Unmute video message');
+        muteBtn.title = t('msg.unmute');
+        muteBtn.setAttribute('aria-label', t('msg.unmute_video_aria'));
       } else {
         muteBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
-        muteBtn.title = 'Mute';
-        muteBtn.setAttribute('aria-label', 'Mute video message');
+        muteBtn.title = t('msg.mute');
+        muteBtn.setAttribute('aria-label', t('msg.mute_video_aria'));
       }
     }
     syncMuteIcon();
@@ -116,12 +116,12 @@ function renderVideoNote(msg) {
     function syncEnlargeIcon() {
       const isEnlarged = wrap.classList.contains('is-enlarged');
       if (isEnlarged) {
-        enlargeBtn.title = 'Shrink';
-        enlargeBtn.setAttribute('aria-label', 'Shrink video message');
+        enlargeBtn.title = t('msg.shrink');
+        enlargeBtn.setAttribute('aria-label', t('msg.shrink_video_aria'));
         enlargeBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
       } else {
-        enlargeBtn.title = 'Enlarge';
-        enlargeBtn.setAttribute('aria-label', 'Enlarge video message');
+        enlargeBtn.title = t('msg.enlarge');
+        enlargeBtn.setAttribute('aria-label', t('msg.enlarge_video_aria'));
         enlargeBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
       }
     }
@@ -238,7 +238,7 @@ function renderVideoNote(msg) {
     if (msg.is_view_once) {
       const voBadge = document.createElement('span');
       voBadge.className = 'msg-view-once-badge';
-      voBadge.innerHTML = '<span class="vo-icon">①</span> View Once';
+      voBadge.innerHTML = `<span class="vo-icon">①</span> ${esc(t('msg.view_once'))}`;
       wrap.appendChild(voBadge);
     }
 

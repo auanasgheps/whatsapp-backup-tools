@@ -50,35 +50,35 @@
       if (mt === 'location') {
         const rawLoc = m.place_name || preview;
         const loc = _isUnreadableToken(rawLoc) ? '' : rawLoc;
-        return loc ? `📍 Location • ${loc}` : '📍 Location';
+        return loc ? `📍 ${t('media.location')} • ${loc}` : `📍 ${t('media.location')}`;
       }
       if (mt === 'live_location') {
-        return '📍 Live location';
+        return `📍 ${t('media.live_location')}`;
       }
       if (mt === 'vcard') {
-        const rawContact = preview || 'Contact';
-        const contact = _isUnreadableToken(rawContact) ? 'Contact' : rawContact;
+        const rawContact = preview || t('media.contact');
+        const contact = _isUnreadableToken(rawContact) ? t('media.contact') : rawContact;
         return `👤 ${contact}`;
       }
       if (mt === 'sticker') {
-        return '🎭 Sticker';
+        return `🎭 ${t('media.sticker')}`;
       }
       if (mt === 'poll') {
-        return preview ? `📊 Poll • ${preview}` : '📊 Poll';
+        return preview ? `📊 ${t('media.poll')} • ${preview}` : `📊 ${t('media.poll')}`;
       }
       if (mt === 'gif') {
-        return preview ? `🎞 GIF • ${preview}` : '🎞 GIF';
+        return preview ? `🎞 ${t('media.gif')} • ${preview}` : `🎞 ${t('media.gif')}`;
       }
       if (mt === 'deleted') {
-        return '🚫 This message was deleted';
+        return `🚫 ${t('msg.deleted_other')}`;
       }
       if (mt === 'link') {
-        return preview ? `🔗 ${preview}` : '🔗 Link';
+        return preview ? `🔗 ${preview}` : `🔗 ${t('media.link')}`;
       }
-      const label = MEDIA_LABELS[mt] || '📎 Media';
+      const label = getMediaLabel(mt);
       return preview ? `${label} • ${preview}` : label;
     }
-    return preview || (m.is_pinned ? 'Pinned message' : 'Message');
+    return preview || t(m.is_pinned ? 'msg.pinned_icon' : 'pinned.label');
   }
 
   function _formatStarredPreview(m) {
@@ -158,7 +158,7 @@
       const pinLabel = _chatPins.length > 1
         ? `Pinned Message (${_currentPinIndex + 1} of ${_chatPins.length})`
         : 'Pinned';
-      const cleanAuthor = _isUnreadableToken(pin.sender_name) ? '' : (pin.sender_name || '');
+      const cleanAuthor = _isUnreadableToken(pin.sender_name) ? '' : localizeSender(pin.sender_name || '');
       authorEl.textContent = cleanAuthor ? `${pinLabel} • ${cleanAuthor}:` : `${pinLabel}:`;
     }
     if (snippetEl) {
@@ -170,7 +170,7 @@
     if (navEl && countEl) {
       if (_chatPins.length > 1) {
         navEl.style.display = 'flex';
-        countEl.textContent = `${_currentPinIndex + 1} of ${_chatPins.length}`;
+        countEl.textContent = t('pinned.counter', { current: _currentPinIndex + 1, total: _chatPins.length });
       } else {
         navEl.style.display = 'none';
       }

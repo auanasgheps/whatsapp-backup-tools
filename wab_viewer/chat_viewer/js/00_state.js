@@ -11,12 +11,16 @@ const outputRoot = window.OUTPUT_ROOT;
   let currentChat = null;
   let msgList = [];
   let suppressScroll = false;
-  let prefs = { theme: 'dark', date_format: 'DD/MM/YYYY', font_size: 'medium' };
+  let prefs = { theme: 'dark', date_format: 'DD/MM/YYYY', font_size: 'medium', language: 'auto' };
 
   async function loadPrefs() {
     const res = await fetch(API + '/preferences');
-    prefs = await res.json();
+    const loaded = await res.json();
+    prefs = Object.assign({ theme: 'dark', date_format: 'DD/MM/YYYY', font_size: 'medium', language: 'auto' }, loaded);
+    const resolvedLang = resolveLanguage(prefs.language);
+    await ensureLocaleLoaded(resolvedLang);
     applyPrefs();
+    applyDOMTranslations();
   }
 
   function applyPrefs() {
@@ -37,5 +41,9 @@ const outputRoot = window.OUTPUT_ROOT;
     document.querySelectorAll('.pref-btn').forEach(btn => {
       btn.classList.toggle('active', prefs[btn.dataset.pref] === btn.dataset.value);
     });
+    const langSelect = document.getElementById('pref-language');
+    if (langSelect) {
+      langSelect.value = prefs.language || 'auto';
+    }
   }
   const MAX_WINDOW = 150;

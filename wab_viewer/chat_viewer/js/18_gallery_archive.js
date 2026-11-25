@@ -5,7 +5,7 @@ async function _loadAllArchivePages() {
     const requestedChatId = currentChat ? currentChat.id : null;
     const tree = document.getElementById('media-archive-tree');
     if (tree && !currentArchiveItems.length) {
-      tree.innerHTML = '<div class="gallery-filter-loading"><span class="gallery-filter-spinner"></span><span>Loading archive…</span></div>';
+      tree.innerHTML = `<div class="gallery-filter-loading"><span class="gallery-filter-spinner"></span><span>${esc(t('gallery.loading_archive'))}</span></div>`;
     }
     let before = currentArchiveItems.length
       ? currentArchiveItems[currentArchiveItems.length - 1].timestamp_ms

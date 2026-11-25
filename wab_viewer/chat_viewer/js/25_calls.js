@@ -10,7 +10,7 @@
     if (!list) return;
 
     if (_callsList.length === 0) {
-      list.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>No Call History</strong><span>No calls found in this backup</span></div>';
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>${esc(t('calls.empty_title'))}</strong><span>${esc(t('calls.empty_body'))}</span></div>`;
       return;
     }
 
@@ -21,7 +21,7 @@
 
     list.innerHTML = '';
     if (matches.length === 0) {
-      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No calls matching "${esc(searchQuery)}"</span></div>`;
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>${esc(t('sidebar.no_matches'))}</strong><span>${esc(t('calls.empty_match', { query: searchQuery }))}</span></div>`;
       return;
     }
 
@@ -45,7 +45,7 @@
     if (reset) {
       _callsOffset = 0;
       _callsList = [];
-      chatListEl.innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading Call History…</div>';
+      chatListEl.innerHTML = `<div id="chat-list-notice"><div class="loading-spinner"></div>${esc(t('calls.loading'))}</div>`;
     }
 
     try {
@@ -70,9 +70,9 @@
         chatListEl.innerHTML = '';
         if (calls.length === 0) {
           if (q) {
-            chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No calls matching "${esc(q)}"</span></div>`;
+            chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>${esc(t('sidebar.no_matches'))}</strong><span>${esc(t('calls.empty_match', { query: q }))}</span></div>`;
           } else {
-            chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>No Call History</strong><span>No calls found in this backup</span></div>';
+            chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📞</span><strong>${esc(t('calls.empty_title'))}</strong><span>${esc(t('calls.empty_body'))}</span></div>`;
           }
           return;
         }
@@ -85,7 +85,7 @@
     } catch (err) {
       if (currentNavTab !== 'calls') return;
       if (reset) {
-        chatListEl.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⚠️</span><strong>Call History Error</strong><span>Unable to load call records</span></div>';
+        chatListEl.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">⚠️</span><strong>${esc(t('calls.error_title'))}</strong><span>${esc(t('common.unavailable'))}</span></div>`;
       }
       console.error('Failed to load call history:', err);
     } finally {
@@ -146,8 +146,10 @@
 
     const title = document.createElement('div');
     title.className = 'msg-call-title';
-    const baseLabel = c.video ? 'Video call' : 'Voice call';
-    title.textContent = c.is_group ? `Group ${baseLabel.toLowerCase()}` : baseLabel;
+    const titleText = c.video
+      ? t(c.is_group ? 'calls.group_video_call' : 'calls.video_call')
+      : t(c.is_group ? 'calls.group_voice_call' : 'calls.voice_call');
+    title.textContent = titleText;
     body.appendChild(title);
 
     const status = document.createElement('div');
@@ -210,14 +212,14 @@
     if (call.is_group) {
       const grpIcon = document.createElement('span');
       grpIcon.className = 'call-item-group-icon';
-      grpIcon.title = 'Group call';
+      grpIcon.title = t('calls.group_call');
       grpIcon.innerHTML = ' 👥';
       nameEl.appendChild(grpIcon);
     }
     if (call.is_preserved) {
       const presBadge = document.createElement('span');
       presBadge.className = 'call-item-pres-badge';
-      presBadge.textContent = 'Preserved';
+      presBadge.textContent = t('common.preserved');
       nameEl.appendChild(presBadge);
     }
     row1.appendChild(nameEl);
@@ -225,7 +227,7 @@
     const mediaIcon = document.createElement('span');
     mediaIcon.className = 'call-item-media-icon';
     mediaIcon.innerHTML = _getCallMediaSvg(!!call.is_video, 15);
-    mediaIcon.title = call.is_video ? 'Video call' : 'Voice call';
+    mediaIcon.title = t(call.is_video ? 'calls.video_call' : 'calls.voice_call');
     row1.appendChild(mediaIcon);
     body.appendChild(row1);
 
@@ -300,7 +302,7 @@
     }
 
     const nameEl = document.getElementById('call-inspect-name');
-    if (nameEl) nameEl.textContent = call.caller_name || 'Unknown';
+    if (nameEl) nameEl.textContent = call.caller_name || t('common.unknown');
 
     const phoneEl = document.getElementById('call-inspect-phone');
     if (phoneEl) {
@@ -311,16 +313,15 @@
     const badgeIcon = document.getElementById('call-inspect-badge-icon');
     const badgeLabel = document.getElementById('call-inspect-badge-label');
     if (badgeIcon && badgeLabel) {
-      const typeStr = call.is_group ? 'Group ' : '';
       if (call.is_video) {
         badgeIcon.textContent = '📹';
-        badgeLabel.textContent = `${typeStr}Video Call`;
+        badgeLabel.textContent = t(call.is_group ? 'calls.group_video_call' : 'calls.video_call');
       } else {
         badgeIcon.textContent = call.is_group ? '👥' : '📞';
-        badgeLabel.textContent = `${typeStr}Voice Call`;
+        badgeLabel.textContent = t(call.is_group ? 'calls.group_voice_call' : 'calls.voice_call');
       }
       if (call.is_preserved) {
-        badgeLabel.textContent += ' • Preserved';
+        badgeLabel.textContent += ' • ' + t('common.preserved');
       }
     }
 
@@ -332,18 +333,18 @@
     const dirEl = document.getElementById('call-inspect-dir');
     if (dirEl) {
       if (inspectCallType === 'missed') {
-        dirEl.innerHTML = '<span class="call-icon-missed call-dir-label">Missed</span>';
+        dirEl.innerHTML = `<span class="call-icon-missed call-dir-label">${esc(t('calls.missed'))}</span>`;
       } else if (inspectCallType === 'incoming') {
-        dirEl.innerHTML = '<svg class="call-item-arrow call-icon-incoming" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg> <span class="call-icon-incoming call-dir-label">Incoming</span>';
+        dirEl.innerHTML = `<svg class="call-item-arrow call-icon-incoming" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 18 22 18 22 12"/><line x1="22" y1="18" x2="11" y2="7"/></svg> <span class="call-icon-incoming call-dir-label">${esc(t('calls.incoming'))}</span>`;
       } else {
-        dirEl.innerHTML = '<svg class="call-item-arrow call-icon-outgoing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg> <span class="call-icon-outgoing call-dir-label">Outgoing</span>';
+        dirEl.innerHTML = `<svg class="call-item-arrow call-icon-outgoing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 6 2 6 2 12"/><line x1="2" y1="6" x2="13" y2="17"/></svg> <span class="call-icon-outgoing call-dir-label">${esc(t('calls.outgoing'))}</span>`;
       }
     }
 
     const timeEl = document.getElementById('call-inspect-time');
     if (timeEl) {
       const d = new Date(call.timestamp * 1000);
-      timeEl.textContent = d.toLocaleString(undefined, {
+      timeEl.textContent = d.toLocaleString(getActiveLang(), {
         weekday: 'short',
         year: 'numeric',
         month: 'short',
@@ -359,11 +360,11 @@
       if (call.duration > 0) {
         durEl.textContent = fmtDurationLong(call.duration);
       } else if (inspectCallType === 'missed') {
-        durEl.textContent = call.outcome === 'declined' ? '0s (Declined)' : '0s (Missed)';
+        durEl.textContent = t(call.outcome === 'declined' ? 'calls.dur_declined' : 'calls.dur_missed');
       } else if (inspectCallType === 'outgoing') {
-        durEl.textContent = call.outcome === 'canceled' ? '0s (Canceled)' : '0s (No answer)';
+        durEl.textContent = t(call.outcome === 'canceled' ? 'calls.dur_canceled' : 'calls.dur_no_answer');
       } else {
-        durEl.textContent = '0s';
+        durEl.textContent = t('time.sec_short', { n: 0 });
       }
     }
 

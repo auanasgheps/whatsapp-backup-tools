@@ -244,8 +244,8 @@ const COLLAPSE_CHAR_LIMIT = 750;
     btn.type = 'button';
     btn.className = isBlockTail ? 'msg-read-more is-block-tail' : 'msg-read-more';
     btn.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
-    btn.setAttribute('aria-label', isExpanded ? 'Collapse message' : 'Read full message');
-    btn.textContent = isExpanded ? 'Show Less' : 'Read More';
+    btn.setAttribute('aria-label', t(isExpanded ? 'msg.collapse_aria' : 'msg.read_full_aria'));
+    btn.textContent = t(isExpanded ? 'msg.show_less' : 'msg.read_more');
     btn.addEventListener('click', onClick);
     return btn;
   }
@@ -377,7 +377,7 @@ const COLLAPSE_CHAR_LIMIT = 750;
       }
       const data = await res.json();
       const calls = data.calls || [];
-      setTabEnabled('tab-btn-calls', calls.length > 0, 'Calls', 'No call history in this backup');
+      setTabEnabled('tab-btn-calls', calls.length > 0, t('nav.calls'), t('nav.calls_empty_title'));
     } catch (err) {
       console.warn('Failed to check calls availability:', err);
     }

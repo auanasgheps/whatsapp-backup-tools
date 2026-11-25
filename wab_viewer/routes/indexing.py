@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import threading
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 from ..context import get_viewer_context
 from ..db_cache import VALID_PREF_VALUES, get_cache_db_path
 from ..fts import _clear_fts_index, bg_index_all
+from ..locales_loader import SUPPORTED_LANGUAGES, load_locale
 
 bp = Blueprint("indexing", __name__)
 
@@ -141,3 +142,18 @@ def api_preferences_post():
     )
     ctx.get_cache().commit()
     return jsonify({"ok": True})
+
+
+@bp.route("/api/locales/<lang_code>", methods=["GET"])
+def api_locale_get(lang_code: str):
+    """Serve a UTF-8 locale dictionary JSON file by language code."""
+    import json
+
+    base = (lang_code or "").split("-")[0].lower()
+    if base not in SUPPORTED_LANGUAGES:
+        return jsonify({"error": f"unsupported language: {lang_code}"}), 404
+    data = load_locale(base)
+    return Response(
+        json.dumps(data, ensure_ascii=False),
+        mimetype="application/json; charset=utf-8",
+    )

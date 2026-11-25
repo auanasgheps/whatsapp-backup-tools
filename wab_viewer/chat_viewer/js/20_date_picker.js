@@ -294,7 +294,7 @@
     if (scroll) scroll.classList.add('is-navigating');
 
     const dateLabel = ts ? fmtDateSep(ts) : '';
-    const hudText = dateLabel ? `Jumping to message · ${dateLabel}` : 'Jumping to message…';
+    const hudText = dateLabel ? t('chat.jumping_date', { date: dateLabel }) : t('chat.jumping');
     showJumpHud(hudText);
 
     try {

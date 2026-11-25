@@ -47,8 +47,8 @@
   function createMetaPinIcon() {
     const pinIcon = document.createElement('span');
     pinIcon.className = 'msg-meta-icon msg-pinned-icon';
-    pinIcon.title = 'Pinned message';
-    pinIcon.setAttribute('aria-label', 'Pinned message');
+    pinIcon.title = t('msg.pinned_icon');
+    pinIcon.setAttribute('aria-label', t('msg.pinned_icon'));
     pinIcon.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"></line><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path></svg>';
     return pinIcon;
   }
@@ -56,8 +56,8 @@
   function createMetaStarIcon() {
     const starIcon = document.createElement('span');
     starIcon.className = 'msg-meta-icon msg-starred-icon';
-    starIcon.title = 'Starred message';
-    starIcon.setAttribute('aria-label', 'Starred message');
+    starIcon.title = t('msg.starred_icon');
+    starIcon.setAttribute('aria-label', t('msg.starred_icon'));
     starIcon.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>';
     return starIcon;
   }

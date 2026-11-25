@@ -713,8 +713,8 @@ class TestPhase3InBubbleIndicators:
         assert "msg-pinned-icon" in js
         assert "msg-starred-icon" in js
         assert "msg-meta-icon" in js
-        assert "Pinned message" in js
-        assert "Starred message" in js
+        assert "msg.pinned_icon" in js
+        assert "msg.starred_icon" in js
 
     def test_android_pinned_unpinned_state_exclusion(self, tmp_path):
         """Android message with pin_in_chat_state = 2 (unpinned) must have is_pinned = 0."""
@@ -876,7 +876,7 @@ class TestPhase3InBubbleIndicators:
         assert resp.status_code == 200
         js = resp.get_data(as_text=True)
         assert "function showContextJumpBanner(icon, text, onSwitch)" in js
-        assert "showContextJumpBanner('⭐', 'Viewing message in context'" in js
+        assert "showContextJumpBanner('⭐', t('chat.context_banner')" in js
         assert "showContextJumpBanner('📞', `Viewing Call Moment in context" in js
         assert "if (currentNavTab === 'chats')" in js
         assert "el.dataset.msgId = String(m.id);" in js

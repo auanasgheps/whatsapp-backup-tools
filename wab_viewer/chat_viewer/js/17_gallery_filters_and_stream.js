@@ -23,14 +23,19 @@
     _syncStatPills();
   }
 
+  function _formatStatPillHtml(pillKey, count, missing) {
+    const numCount = typeof count === 'number' ? count : 0;
+    const displayLabel = tp('gallery.pills.' + pillKey, numCount);
+    const ms = missing ? ` <span class="gallery-stat-missing">${esc(t('gallery.pills.missing', { count: missing }))}</span>` : '';
+    return `<strong>${count}</strong> ${esc(displayLabel)}${ms}`;
+  }
+
   function _hydrateStatPills(counts) {
     if (!counts) return;
     currentGalleryStats = counts;
     const stats = document.getElementById('media-gallery-stats');
     if (!stats) return;
 
-    const plurals = { voice: 'voice notes', audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links', vcard: 'contacts', total: 'items' };
-    const singulars = { voice: 'voice note', vcard: 'contact', total: 'item' };
     const typeOrder = ['image', 'video', 'voice', 'audio', 'gif', 'sticker', 'document', 'link', 'vcard'];
     const totalMissing = Object.values(counts.by_type || {}).reduce((acc, d) => acc + (d.missing || 0), 0);
 
@@ -40,29 +45,25 @@
       totalPill = _makeStatPill('total', counts.total, null, totalMissing);
       stats.prepend(totalPill);
     } else {
-      const ms = totalMissing ? ` <span class="gallery-stat-missing">(${totalMissing} missing)</span>` : '';
-      const displayLabel = counts.total === 1 ? 'item' : 'items';
-      totalPill.innerHTML = `<strong>${counts.total}</strong> ${displayLabel}${ms}`;
+      totalPill.innerHTML = _formatStatPillHtml('total', counts.total, totalMissing);
       totalPill.classList.remove('is-loading');
       totalPill.style.display = '';
     }
 
     // Update each type pill
-    for (const t of typeOrder) {
-      const d = counts.by_type?.[t];
+    for (const typeKey of typeOrder) {
+      const d = counts.by_type?.[typeKey];
       const count = d?.count || 0;
       const missing = d?.missing || 0;
-      let pill = stats.querySelector(`.gallery-stat[data-type="${t}"]`);
+      let pill = stats.querySelector(`.gallery-stat[data-type="${typeKey}"]`);
       if (!pill) {
-        pill = _makeStatPill(t, count, t, missing);
+        pill = _makeStatPill(typeKey, count, typeKey, missing);
         stats.appendChild(pill);
       } else {
-        const displayLabel = count === 1 ? (singulars[t] || t) : (plurals[t] || t + 's');
-        const ms = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
-        pill.innerHTML = `<strong>${count}</strong> ${displayLabel}${ms}`;
+        pill.innerHTML = _formatStatPillHtml(typeKey, count, missing);
         pill.classList.remove('is-loading');
       }
-      if (count === 0 && !activeTypes.has(t)) {
+      if (count === 0 && !activeTypes.has(typeKey)) {
         pill.style.display = 'none';
       } else {
         pill.style.display = '';
@@ -111,7 +112,7 @@
     document.getElementById('media-archive-view').classList.remove('active');
 
     document.getElementById('media-gallery-title').textContent =
-      currentChat.display_name ? `Media — ${currentChat.display_name}` : 'Media';
+      currentChat.display_name ? t('gallery.title_chat', { name: currentChat.display_name }) : t('gallery.title');
 
     grid.innerHTML = '<div class="gallery-filter-loading gallery-initial-loading"><span class="gallery-filter-spinner"></span><span>Loading media…</span></div>';
     document.getElementById('media-gallery').classList.add('open');
@@ -235,7 +236,7 @@
             grid.querySelectorAll('.gallery-filter-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
             const notice = document.createElement('div');
             notice.className = 'gallery-empty-notice';
-            notice.textContent = 'No media in this chat.';
+            notice.textContent = t('gallery.no_media');
             const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
             grid.insertBefore(notice, sentinel);
           }
@@ -247,7 +248,7 @@
       if (cachedCounts && cachedCounts.total === 0) {
         const notice = document.createElement('div');
         notice.className = 'gallery-empty-notice';
-        notice.textContent = 'No media in this chat.';
+        notice.textContent = t('gallery.no_media');
         const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
         grid.insertBefore(notice, sentinel);
         return;
@@ -276,7 +277,7 @@
           grid.querySelectorAll('.gallery-filter-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
           const notice = document.createElement('div');
           notice.className = 'gallery-empty-notice';
-          notice.textContent = 'No media in this chat.';
+          notice.textContent = t('gallery.no_media');
           const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
           grid.insertBefore(notice, sentinel);
           return;
@@ -300,7 +301,7 @@
       grid.querySelectorAll('.gallery-filter-loading, .gallery-end-notice, .gallery-empty-notice').forEach(el => el.remove());
       const notice = document.createElement('div');
       notice.className = 'gallery-empty-notice';
-      notice.textContent = 'Failed to load media gallery.';
+      notice.textContent = t('gallery.load_failed');
       const sentinel = (gallerySentinel && gallerySentinel.parentNode === grid) ? gallerySentinel : null;
       grid.insertBefore(notice, sentinel);
       return;
@@ -541,14 +542,10 @@
   }
 
   function _makeStatPill(label, count, type, missing) {
-    const plurals = { voice: 'voice notes', audio: 'audio', sticker: 'stickers', document: 'documents', link: 'links', vcard: 'contacts', total: 'items' };
-    const singulars = { voice: 'voice note', vcard: 'contact', total: 'item' };
-    const displayLabel = count === 1 ? (singulars[label] || label) : (plurals[label] || label + 's');
     const span = document.createElement('span');
     span.className = 'gallery-stat';
     span.dataset.type = type || 'total';
-    const ms = missing ? ` <span class="gallery-stat-missing">(${missing} missing)</span>` : '';
-    span.innerHTML = `<strong>${count}</strong> ${displayLabel}${ms}`;
+    span.innerHTML = _formatStatPillHtml(label, count, missing);
     span.addEventListener('click', () => _toggleTypeFilter(type));
     return span;
   }

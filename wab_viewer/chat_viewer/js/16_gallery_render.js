@@ -15,7 +15,7 @@ function renderGalleryItem(msg) {
       cell.classList.add('is-video-note');
       const ptvBadge = document.createElement('div');
       ptvBadge.className = 'gallery-ptv-badge';
-      ptvBadge.title = 'Video message';
+      ptvBadge.title = t('msg.video_msg');
       ptvBadge.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>';
       cell.appendChild(ptvBadge);
     }
@@ -40,7 +40,7 @@ function renderGalleryItem(msg) {
 
         const warnBadge = document.createElement('div');
         warnBadge.className = 'gallery-missing-indicator-badge';
-        warnBadge.title = 'Media file not found on disk';
+        warnBadge.title = t('media.not_found');
         warnBadge.innerHTML = '<svg class="gallery-missing-indicator-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
         cell.appendChild(warnBadge);
 
@@ -170,19 +170,19 @@ function renderGalleryItem(msg) {
       const title = document.createElement('div');
       title.className = 'gallery-audio-title';
       if (isVn) {
-        title.textContent = 'Voice message';
+        title.textContent = t('media.voice_message');
       } else {
         const cleanTitle = (cleanName && cleanName !== 'audio')
           ? cleanName.replace(/\.[a-z0-9]+$/i, '')
-          : 'Audio track';
+          : t('media.audio_track');
         title.textContent = cleanTitle;
-        title.title = cleanName || 'Audio track';
+        title.title = cleanName || t('media.audio_track');
       }
       body.appendChild(title);
 
       const sub = document.createElement('div');
       sub.className = 'gallery-audio-sub';
-      const senderText = msg.sender || (msg.from_me ? 'You' : '');
+      const senderText = msg.sender || (msg.from_me ? t('common.you') : '');
       const timeText = msg.timestamp_ms ? fmtTime(msg.timestamp_ms) : '';
       sub.textContent = [senderText, timeText].filter(Boolean).join(' · ');
       body.appendChild(sub);
@@ -193,8 +193,8 @@ function renderGalleryItem(msg) {
 
       const playBtn = document.createElement('button');
       playBtn.className = 'gallery-audio-play';
-      playBtn.title = 'Play / Pause';
-      playBtn.setAttribute('aria-label', isVn ? 'Play voice message' : 'Play audio');
+      playBtn.title = t('media.play_pause');
+      playBtn.setAttribute('aria-label', t(isVn ? 'msg.play_voice_aria' : 'media.play_audio'));
       playBtn.innerHTML = '<svg class="play-icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg><svg class="pause-icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
       playBtn.addEventListener('click', e => {
         e.stopPropagation();
@@ -204,13 +204,13 @@ function renderGalleryItem(msg) {
 
       const gotoBtn = document.createElement('button');
       gotoBtn.className = 'gallery-goto';
-      gotoBtn.title = 'Go to message';
-      gotoBtn.textContent = '→ in chat';
+      gotoBtn.title = t('gallery.go_to_message');
+      gotoBtn.textContent = t('gallery.in_chat');
       gotoBtn.addEventListener('click', e => {
         e.stopPropagation();
         if (gotoBtn.disabled) return;
         gotoBtn.disabled = true;
-        gotoBtn.textContent = '⏳ in chat';
+        gotoBtn.textContent = t('gallery.in_chat_pending');
         if (currentGalleryAudio) {
           currentGalleryAudio.pause();
           currentGalleryAudio = null;
@@ -267,7 +267,7 @@ function renderGalleryItem(msg) {
       titleEl.rel = 'noopener noreferrer';
       titleEl.title = titleText;
       titleEl.textContent = titleText;
-      titleEl.setAttribute('aria-label', 'Open link: ' + titleText);
+      titleEl.setAttribute('aria-label', t('media.open_link', { title: titleText }));
       body.appendChild(titleEl);
 
       if (msg.link_desc) {
@@ -285,7 +285,7 @@ function renderGalleryItem(msg) {
         month: 'short',
         day: 'numeric'
       });
-      const senderStr = msg.sender || 'You';
+      const senderStr = localizeSender(msg.sender) || t('common.you');
       const metaText = senderStr + ' · ' + dateStr + (url ? ' · ' + url : '');
       metaEl.textContent = metaText;
       metaEl.title = metaText;
@@ -304,7 +304,7 @@ function renderGalleryItem(msg) {
       name.textContent = '📄 ' + (cleanName || 'file');
       const meta = document.createElement('div');
       meta.className = 'gallery-link-meta';
-      meta.textContent = (msg.sender || 'You') + ' · ' + new Date(msg.timestamp_ms).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+      meta.textContent = (localizeSender(msg.sender) || t('common.you')) + ' · ' + new Date(msg.timestamp_ms).toLocaleDateString(getActiveLang(), {year:'numeric', month:'short', day:'numeric'});
       cell.appendChild(name);
       cell.appendChild(meta);
       cell.addEventListener('click', () => window.open(src, '_blank'));
@@ -331,13 +331,13 @@ function renderGalleryItem(msg) {
 
     const btn = document.createElement('button');
     btn.className = 'gallery-goto';
-    btn.title = 'Go to message';
-    btn.textContent = '→ in chat';
+    btn.title = t('gallery.go_to_message');
+    btn.textContent = t('gallery.in_chat');
     btn.addEventListener('click', e => {
       e.stopPropagation();
       if (btn.disabled) return;
       btn.disabled = true;
-      btn.textContent = '⏳ in chat';
+      btn.textContent = t('gallery.in_chat_pending');
       closeMediaGallery();
       jumpToMessage(msg, 'default');
     });

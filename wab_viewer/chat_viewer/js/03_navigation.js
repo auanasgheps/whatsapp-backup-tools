@@ -2,12 +2,12 @@
 
   async function loadChats() {
     if (currentNavTab === 'chats') {
-      document.getElementById('chat-list').innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>Loading Chats…</div>';
+      document.getElementById('chat-list').innerHTML = '<div id="chat-list-notice"><div class="loading-spinner"></div>' + esc(t('sidebar.loading_chats')) + '</div>';
     }
     const res = await fetch(API + '/chats');
     allChats = await res.json();
     const hasArchived = allChats.some(c => c.is_archived);
-    setTabEnabled('tab-btn-archived', hasArchived, 'Archived', 'No archived chats in this backup');
+    setTabEnabled('tab-btn-archived', hasArchived, t('nav.archived'), t('nav.archived_empty_title'));
     await checkCallsAvailability();
     if (currentNavTab === 'chats') {
       renderChatList();
@@ -68,26 +68,44 @@
     poll();
   }
 
-  const MEDIA_LABELS = {image:'📷 Photo', video:'🎥 Video', audio:'🎵 Voice message',
-                        gif:'🎞 GIF', sticker:'🎭 Sticker', document:'📄 Document', link:'🔗 Link',
-                        location:'📍 Location', live_location:'📍 Live location', vcard:'👤 Contact'};
+  function getMediaLabel(type) {
+    const map = {
+      image: '📷 ' + t('media.photo'),
+      video: '🎥 ' + t('media.video'),
+      audio: '🎵 ' + t('media.voice_message'),
+      gif: '🎞 ' + t('media.gif'),
+      sticker: '🎭 ' + t('media.sticker'),
+      document: '📄 ' + t('media.document'),
+      link: '🔗 ' + t('media.link'),
+      location: '📍 ' + t('media.location'),
+      live_location: '📍 ' + t('media.live_location'),
+      vcard: '👤 ' + t('media.contact'),
+    };
+    return map[type] || ('📎 ' + t('gallery.title'));
+  }
   function chatPreview(chat) {
-    const prefix = chat.last_msg_from_me ? 'You: ' : '';
+    const prefix = chat.last_msg_from_me ? (t('common.you') + ': ') : '';
     if (chat.last_msg_type === 'service') {
-      return esc(chat.last_msg_preview || '…');
+      const sysText = chat.last_msg_system_event
+        ? formatSystemEventText({ system_event: chat.last_msg_system_event, text_body: chat.last_msg_preview })
+        : chat.last_msg_preview;
+      return esc(sysText || '…');
     }
     if (chat.last_msg_type === 'deleted') {
-      return '<span class="deleted-preview">🚫 ' + esc(chat.last_msg_preview || 'This message was deleted') + '</span>';
+      const delText = chat.last_msg_preview === 'This message was deleted by an admin'
+        ? t('msg.deleted_admin')
+        : t(chat.last_msg_from_me ? 'msg.deleted_you' : 'msg.deleted_other');
+      return '<span class="deleted-preview">🚫 ' + esc(delText) + '</span>';
     }
     if (chat.last_msg_type === 'poll') {
-      return prefix + '📊 ' + esc(chat.last_msg_preview || 'Poll');
+      return prefix + '📊 ' + esc(chat.last_msg_preview || t('msg.poll'));
     }
     if (chat.is_view_once) {
-      const voLabel = chat.last_msg_type === 'video' ? 'Video' : (chat.last_msg_type === 'audio' ? 'Voice message' : 'Photo');
-      return prefix + '<span class="vo-preview">① ' + voLabel + '</span>';
+      const voLabel = chat.last_msg_type === 'video' ? t('media.video') : (chat.last_msg_type === 'audio' ? t('media.voice_message') : t('media.photo'));
+      return prefix + '<span class="vo-preview">① ' + esc(voLabel) + '</span>';
     }
     if (chat.last_msg_type !== 'text') {
-      return prefix + (MEDIA_LABELS[chat.last_msg_type] || '📎 Media');
+      return prefix + esc(getMediaLabel(chat.last_msg_type));
     }
     const text = chat.last_msg_preview || '';
     return (prefix + esc(text.slice(0, 60))) || '…';
@@ -117,7 +135,7 @@
     const body = document.createElement('div');
     body.className = 'chat-item-body';
     const tagHtml = chat.is_preserved_only
-      ? '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>'
+      ? `<span class="chat-preserved-tag" title="${esc(t('sidebar.preserved_badge_title'))}">${esc(t('common.preserved'))}</span>`
       : '';
     body.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
     el.appendChild(body);
@@ -141,7 +159,7 @@
 
     const archivedChats = allChats.filter(c => Boolean(c.is_archived));
     if (archivedChats.length === 0) {
-      list.innerHTML = '<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📦</span><strong>Archived Chats</strong><span>Chats tucked away will appear here</span></div>';
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">📦</span><strong>${esc(t('sidebar.archived_title'))}</strong><span>${esc(t('sidebar.archived_empty'))}</span></div>`;
       return;
     }
 
@@ -151,7 +169,7 @@
       : archivedChats;
 
     if (matches.length === 0) {
-      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>No Matches</strong><span>No archived chats matching "${esc(searchQuery)}"</span></div>`;
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">🔍</span><strong>${esc(t('sidebar.no_matches'))}</strong><span>${esc(t('sidebar.no_archived_match', { query: searchQuery }))}</span></div>`;
       return;
     }
 
@@ -295,7 +313,7 @@
     updateSidebarSearchClearBtn();
 
     if (tabName === 'chats') {
-      if (searchInput) searchInput.placeholder = 'Search messages & chats…';
+      if (searchInput) searchInput.placeholder = t('sidebar.search_chats_placeholder');
       if (filtersEl) filtersEl.style.display = 'flex';
       const callInspector = document.getElementById('pane-call-inspector');
       if (callInspector) callInspector.style.display = 'none';
@@ -309,7 +327,7 @@
       } else {
         const emptyPane = document.getElementById('empty-pane');
         if (emptyPane) {
-          emptyPane.textContent = 'Select a chat to browse messages';
+          emptyPane.textContent = t('sidebar.select_chat');
           emptyPane.style.display = 'flex';
         }
       }
@@ -320,7 +338,7 @@
       if (callInspector) callInspector.style.display = 'none';
 
       if (tabName === 'calls') {
-        if (searchInput) searchInput.placeholder = 'Search call history…';
+        if (searchInput) searchInput.placeholder = t('sidebar.search_calls_placeholder');
         const emptyPane = document.getElementById('empty-pane');
         const chatHeader = document.getElementById('chat-header');
         const msgScroll = document.getElementById('message-scroll');
@@ -337,14 +355,14 @@
         closeMediaGallery();
 
         if (emptyPane) {
-          emptyPane.textContent = 'Select a call from the history to view connection metrics and duration.';
+          emptyPane.textContent = t('sidebar.select_call');
           emptyPane.style.display = 'flex';
         }
 
         loadCallsList(true);
       } else if (tabName === 'starred') {
         _activeStarredMsgId = null;
-        if (searchInput) searchInput.placeholder = 'Search starred bookmarks…';
+        if (searchInput) searchInput.placeholder = t('sidebar.search_starred_placeholder');
         const emptyPane = document.getElementById('empty-pane');
         const chatHeader = document.getElementById('chat-header');
         const msgScroll = document.getElementById('message-scroll');
@@ -361,13 +379,13 @@
         closeMediaGallery();
 
         if (emptyPane) {
-          emptyPane.textContent = 'Select a starred message to jump to its conversational context.';
+          emptyPane.textContent = t('sidebar.select_starred');
           emptyPane.style.display = 'flex';
         }
 
         loadStarredList(true);
       } else if (tabName === 'archived') {
-        if (searchInput) searchInput.placeholder = 'Search archived chats…';
+        if (searchInput) searchInput.placeholder = t('sidebar.search_archived_placeholder');
         const emptyPane = document.getElementById('empty-pane');
         const chatHeader = document.getElementById('chat-header');
         const msgScroll = document.getElementById('message-scroll');
@@ -384,7 +402,7 @@
         closeMediaGallery();
 
         if (emptyPane) {
-          emptyPane.textContent = 'Select an archived chat to browse messages.';
+          emptyPane.textContent = t('sidebar.select_archived');
           emptyPane.style.display = 'flex';
         }
 
@@ -470,16 +488,16 @@
     const subtitleEl = document.getElementById('chat-subtitle');
     if (subtitleEl) {
       if (chat.type === 'group') {
-        let subHtml = 'Group chat';
+        let subHtml = esc(t('chat.group_conversation'));
         if (chat.is_preserved_only) {
-          subHtml += ' <span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+          subHtml += ` <span class="chat-preserved-tag" title="${esc(t('sidebar.preserved_badge_title'))}">${esc(t('common.preserved'))}</span>`;
         }
         subtitleEl.innerHTML = subHtml;
       } else {
         const formattedPhone = formatPhoneNumber(chat.phone_number || chat.id);
         let subHtml = formattedPhone ? esc(formattedPhone) : '';
         if (chat.is_preserved_only) {
-          subHtml += (subHtml ? ' ' : '') + '<span class="chat-preserved-tag" title="Preserved from backup • Chat deleted on device">Preserved</span>';
+          subHtml += (subHtml ? ' ' : '') + `<span class="chat-preserved-tag" title="${esc(t('sidebar.preserved_badge_title'))}">${esc(t('common.preserved'))}</span>`;
         }
         subtitleEl.innerHTML = subHtml;
       }
@@ -487,7 +505,7 @@
 
     const infoMenuLabel = document.getElementById('chat-info-menu-label');
     if (infoMenuLabel) {
-      infoMenuLabel.textContent = chat.type === 'group' ? 'Group info' : 'Contact info';
+      infoMenuLabel.textContent = t(chat.type === 'group' ? 'chat.group_info' : 'chat.contact_info');
     }
 
     document.getElementById('empty-pane').style.display = 'none';

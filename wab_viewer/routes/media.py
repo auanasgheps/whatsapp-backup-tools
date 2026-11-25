@@ -32,6 +32,7 @@ from ..hydration import (
     _hydrate_live_photos,
     _hydrate_quoted_rows,
 )
+from ..locales_loader import DEFAULT_LANGUAGE, load_locale, resolve_request_lang, server_t
 from ..preserved import (
     _merge_messages,
     _query_preserved_messages,
@@ -1221,6 +1222,13 @@ def index():
     p_name = (
         "iOS" if ctx.source_type == "ios" else ("Android" if ctx.source_type == "android" else "")
     )
+    try:
+        cache_conn = ctx.get_cache()
+    except Exception:
+        cache_conn = None
+    lang = resolve_request_lang(cache_conn, request.headers.get("Accept-Language"))
+    locale_data = load_locale(lang)
+    en_fallback_data = load_locale(DEFAULT_LANGUAGE)
     return render_template_string(
         HTML_TEMPLATE,
         output_root=str(ctx.output_root),
@@ -1228,4 +1236,8 @@ def index():
         version=get_version(),
         platform_name=p_name,
         schema_alert=current_app.config.get("SCHEMA_ALERT"),
+        lang=lang,
+        locale_data=locale_data,
+        en_fallback_data=en_fallback_data,
+        t=lambda key, **kw: server_t(lang, key, **kw),
     )

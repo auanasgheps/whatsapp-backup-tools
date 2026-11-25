@@ -145,17 +145,17 @@ function closeMediaGallery() {
     const label = document.createElement('div');
     label.className = 'gallery-missing-label';
     if (msg && msg.is_view_once) {
-      label.textContent = (mt === 'video') ? 'Video · View Once' : 'Photo · View Once';
+      label.textContent = t(mt === 'video' ? 'media.view_once_video' : 'media.view_once_photo');
     } else {
-      const typeStr = videoNote ? 'Video message' :
-                      isVn ? 'Voice message' :
-                      mt === 'video' ? 'Video' :
-                      mt === 'gif' ? 'GIF' :
-                      mt === 'audio' ? 'Audio' :
-                      mt === 'document' ? 'Document' :
-                      mt === 'sticker' ? 'Sticker' :
-                      (mt === 'location' || mt === 'live_location') ? 'Location' : 'Photo';
-      label.textContent = typeStr + ' unavailable';
+      const typeStr = videoNote ? t('msg.video_msg') :
+                      isVn ? t('media.voice_message') :
+                      mt === 'video' ? t('media.video') :
+                      mt === 'gif' ? t('media.gif') :
+                      mt === 'audio' ? t('media.audio') :
+                      mt === 'document' ? t('media.document') :
+                      mt === 'sticker' ? t('media.sticker') :
+                      (mt === 'location' || mt === 'live_location') ? t('media.location') : t('media.photo');
+      label.textContent = t('media.type_unavailable', { type: typeStr });
     }
     info.appendChild(label);
 
@@ -178,13 +178,13 @@ function closeMediaGallery() {
     if (msg) {
       const btn = document.createElement('button');
       btn.className = 'gallery-goto';
-      btn.title = 'Go to message';
-      btn.textContent = '→ in chat';
+      btn.title = t('gallery.go_to_message');
+      btn.textContent = t('gallery.in_chat');
       btn.addEventListener('click', e => {
         e.stopPropagation();
         if (btn.disabled) return;
         btn.disabled = true;
-        btn.textContent = '⏳ in chat';
+        btn.textContent = t('gallery.in_chat_pending');
         closeMediaGallery();
         jumpToMessage(msg, 'default');
       });

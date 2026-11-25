@@ -78,6 +78,7 @@ VALID_PREF_VALUES = {
     "theme": {"dark", "light"},
     "date_format": {"DD/MM/YYYY", "MM/DD/YYYY", "YYYY/MM/DD"},
     "font_size": {"small", "medium", "large"},
+    "language": {"auto", "en", "de", "fr", "it", "es"},
 }
 
 

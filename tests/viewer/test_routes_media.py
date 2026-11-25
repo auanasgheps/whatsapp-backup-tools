@@ -1298,7 +1298,8 @@ class TestApiMedia:
         assert ".gallery-item.has-thumb" in css
         assert "buildMissingGalleryCard" in js
         assert "_sanitizeMediaName" in js
-        assert "View Once" in js
+        assert "media.view_once_video" in js
+        assert "media.view_once_photo" in js
         assert "gallery-missing-indicator-badge" in js
 
     def test_gallery_video_note_circular_styling_and_lightbox(self):

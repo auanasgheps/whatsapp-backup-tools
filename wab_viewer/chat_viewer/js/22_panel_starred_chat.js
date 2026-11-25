@@ -60,12 +60,12 @@
     drawer.style.display = 'flex';
     drawer.classList.add('open');
     if (closeBtn) closeBtn.focus();
-    body.innerHTML = '<div style="color:var(--text-muted);padding:24px;text-align:center"><div class="chat-info-spinner"></div> Loading starred messages…</div>';
+    body.innerHTML = `<div style="color:var(--text-muted);padding:24px;text-align:center"><div class="chat-info-spinner"></div> ${esc(t('starred.loading'))}</div>`;
 
     try {
       const res = await fetch(`${API}/chat/${encodeURIComponent(currentChat.id)}/starred?limit=100`);
       if (!res.ok) {
-        body.innerHTML = '<div class="starred-empty"><span class="starred-empty-icon">⚠️</span><span>Failed to load starred messages</span></div>';
+        body.innerHTML = `<div class="starred-empty"><span class="starred-empty-icon">⚠️</span><span>${esc(t('starred.load_failed'))}</span></div>`;
         return;
       }
       const data = await res.json();
@@ -80,14 +80,14 @@
       }
 
       if (messages.length === 0) {
-        body.innerHTML = '<div class="starred-empty"><span class="starred-empty-icon">⭐</span><span>No starred messages in this chat</span></div>';
+        body.innerHTML = `<div class="starred-empty"><span class="starred-empty-icon">⭐</span><span>${esc(t('starred.empty_chat'))}</span></div>`;
         return;
       }
 
       body.innerHTML = '';
       const subheader = document.createElement('div');
       subheader.className = 'chat-starred-subheader';
-      subheader.textContent = `${messages.length} starred message${messages.length === 1 ? '' : 's'} in this conversation:`;
+      subheader.textContent = tp('starred.chat_count', messages.length);
       body.appendChild(subheader);
 
       messages.forEach(m => {
@@ -96,8 +96,8 @@
         card.setAttribute('tabindex', '0');
         const rawSender = m.sender_name || '';
         const cleanSender = _isUnreadableToken(rawSender) ? '' : rawSender;
-        const senderDisplay = cleanSender || 'Unknown';
-        card.setAttribute('aria-label', `Starred message from ${senderDisplay}`);
+        const senderDisplay = cleanSender ? localizeSender(cleanSender) : t('common.unknown');
+        card.setAttribute('aria-label', t('starred.aria_from', { sender: senderDisplay }));
 
         const topRow = document.createElement('div');
         topRow.className = 'starred-card-top';

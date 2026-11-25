@@ -149,7 +149,7 @@ function getSharedAudioContext() {
     const playBtn = document.createElement('button');
     playBtn.type = 'button';
     playBtn.className = 'voice-play-btn';
-    playBtn.setAttribute('aria-label', 'Play voice message');
+    playBtn.setAttribute('aria-label', t('msg.play_voice_aria'));
     playBtn.innerHTML = VOICE_PLAY_SVG;
     if (!hasAudioFile) {
       playBtn.disabled = true;
@@ -158,7 +158,7 @@ function getSharedAudioContext() {
     const waveformContainer = document.createElement('div');
     waveformContainer.className = 'voice-waveform-container';
     waveformContainer.setAttribute('role', 'slider');
-    waveformContainer.setAttribute('aria-label', 'Voice message timeline');
+    waveformContainer.setAttribute('aria-label', t('msg.voice_timeline_aria'));
     waveformContainer.setAttribute('aria-valuemin', '0');
     waveformContainer.setAttribute('aria-valuemax', '100');
     waveformContainer.setAttribute('aria-valuenow', '0');
@@ -185,14 +185,14 @@ function getSharedAudioContext() {
     const timeText = document.createElement('span');
     timeText.className = 'voice-time';
     timeText.textContent = !hasAudioFile
-      ? (totalSec > 0 ? `${_formatAudioTime(totalSec)} (unavailable)` : 'Unavailable')
+      ? (totalSec > 0 ? `${_formatAudioTime(totalSec)} (${t('common.unavailable').toLowerCase()})` : t('common.unavailable'))
       : (totalSec > 0 ? _formatAudioTime(totalSec) : '0:00');
 
     const speedPill = document.createElement('button');
     speedPill.type = 'button';
     speedPill.className = 'voice-speed-pill';
     speedPill.textContent = `${savedRate}x`;
-    speedPill.setAttribute('aria-label', `Playback speed ${savedRate}x`);
+    speedPill.setAttribute('aria-label', t('msg.playback_speed_aria', { rate: savedRate }));
 
     subRow.appendChild(timeText);
     subRow.appendChild(speedPill);
@@ -265,7 +265,7 @@ function getSharedAudioContext() {
       audio.pause();
       wrap.classList.remove('is-playing');
       playBtn.innerHTML = VOICE_PLAY_SVG;
-      playBtn.setAttribute('aria-label', 'Play voice message');
+      playBtn.setAttribute('aria-label', t('msg.play_voice_aria'));
       if (activeVoiceNoteStop === pausePlayback) {
         activeVoiceNoteStop = null;
       }
@@ -295,7 +295,7 @@ function getSharedAudioContext() {
       audio.play().then(() => {
         wrap.classList.add('is-playing');
         playBtn.innerHTML = VOICE_PAUSE_SVG;
-        playBtn.setAttribute('aria-label', 'Pause voice message');
+        playBtn.setAttribute('aria-label', t('msg.pause_voice_aria'));
       }).catch((err) => {
         console.warn('Voice playback failed:', err);
         pausePlayback();
@@ -336,7 +336,7 @@ function getSharedAudioContext() {
     audio.addEventListener('error', () => {
       wrap.classList.add('is-unavailable');
       playBtn.disabled = true;
-      timeText.textContent = 'Unavailable';
+      timeText.textContent = t('common.unavailable');
       pausePlayback();
     });
 
@@ -413,7 +413,7 @@ function getSharedAudioContext() {
       sessionStorage.setItem('wa_voice_playback_rate', String(nextRate));
       audio.playbackRate = nextRate;
       speedPill.textContent = `${nextRate}x`;
-      speedPill.setAttribute('aria-label', `Playback speed ${nextRate}x`);
+      speedPill.setAttribute('aria-label', t('msg.playback_speed_aria', { rate: nextRate }));
       window.dispatchEvent(new CustomEvent('wa-voice-speed-change', { detail: { rate: nextRate } }));
     });
 
@@ -422,7 +422,7 @@ function getSharedAudioContext() {
         savedRate = e.detail.rate;
         audio.playbackRate = savedRate;
         speedPill.textContent = `${savedRate}x`;
-        speedPill.setAttribute('aria-label', `Playback speed ${savedRate}x`);
+        speedPill.setAttribute('aria-label', t('msg.playback_speed_aria', { rate: savedRate }));
       }
     };
     window.addEventListener('wa-voice-speed-change', onGlobalSpeedChange);

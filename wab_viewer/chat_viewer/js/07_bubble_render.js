@@ -30,17 +30,17 @@ function renderBubble(unit) {
       if (msg.from_me) {
         const badge = document.createElement('span');
         badge.className = 'direction-badge sent';
-        badge.textContent = 'You';
+        badge.textContent = t('common.you');
         meta.appendChild(badge);
       }
       const isGroupEdited = unit.members.some(m => m.is_edited);
       if (isGroupEdited) {
         const editedSpan = document.createElement('span');
         editedSpan.className = 'msg-edited';
-        editedSpan.textContent = 'Edited';
+        editedSpan.textContent = t('msg.edited');
         const editedMember = unit.members.find(m => m.edited_ts || m.original_text_body);
         if (editedMember && editedMember.edited_ts) {
-          editedSpan.title = 'Edited: ' + fmtTime(editedMember.edited_ts);
+          editedSpan.title = t('msg.edited_on', { time: fmtTime(editedMember.edited_ts) });
         }
         editedSpan.addEventListener('click', e => {
           e.stopPropagation();
@@ -73,19 +73,20 @@ function renderBubble(unit) {
 
     const msg = unit.msg;
     if (currentChat && currentChat.type === 'contact' && msg.media_type === 'service') {
-      if (
-        !msg.text_body ||
-        !msg.text_body.trim() ||
-        msg.text_body.includes('subject') ||
-        msg.text_body.includes('description') ||
-        msg.text_body.includes('deleted')
-      ) {
+      const sysKey = msg.system_event && msg.system_event.key;
+      const isDeletedService = !msg.text_body || !msg.text_body.trim() ||
+        (sysKey
+          ? (sysKey.includes('subject') || sysKey.includes('desc_') || sysKey.includes('deleted'))
+          : (msg.text_body.includes('subject') || msg.text_body.includes('description') || msg.text_body.includes('deleted')));
+      if (isDeletedService) {
         msg.media_type = 'deleted';
-        msg.text_body = msg.from_me ? 'You deleted this message' : 'This message was deleted';
+        msg.text_body = t(msg.from_me ? 'msg.deleted_you' : 'msg.deleted_other');
+        msg.system_event = { key: msg.from_me ? 'msg.deleted_you' : 'msg.deleted_other', params: {} };
       }
     }
     if (msg.media_type === 'service') {
-      if (!msg.text_body || !msg.text_body.trim()) {
+      const sysText = formatSystemEventText(msg);
+      if (!sysText || !sysText.trim()) {
         return document.createDocumentFragment();
       }
       const row = document.createElement('div');
@@ -95,7 +96,7 @@ function renderBubble(unit) {
 
       const bubble = document.createElement('div');
       bubble.className = 'msg-service-bubble';
-      bubble.textContent = msg.text_body;
+      bubble.textContent = sysText;
       if (msg.timestamp_ms) {
         bubble.title = fmtTime(msg.timestamp_ms);
       }
@@ -125,10 +126,10 @@ function renderBubble(unit) {
       qContent.className = 'msg-quote-content';
       const qSender = document.createElement('div');
       qSender.className = 'msg-quote-sender';
-      qSender.textContent = qs || (currentChat && currentChat.type === 'contact' ? currentChat.display_name : '');
+      qSender.textContent = qs ? localizeSender(qs) : (currentChat && currentChat.type === 'contact' ? currentChat.display_name : '');
       const qText = document.createElement('div');
       qText.className = 'msg-quote-text';
-      qText.textContent = resolveMentionsPlainText(msg.quoted_text, msg.mentions) || (msg.quoted_msg_id ? 'Quoted message' : '');
+      qText.textContent = resolveMentionsPlainText(msg.quoted_text, msg.mentions) || (msg.quoted_msg_id ? t('msg.quoted_fallback') : '');
       qContent.appendChild(qSender);
       qContent.appendChild(qText);
       quote.appendChild(qContent);
@@ -154,7 +155,7 @@ function renderBubble(unit) {
 
       if (msg.quoted_msg_id || msg.quoted_ts) {
         quote.style.cursor = 'pointer';
-        quote.title = 'Jump to original message';
+        quote.title = t('msg.jump_to_original');
         quote.addEventListener('click', async (e) => {
           e.stopPropagation();
           if (msg.quoted_msg_id) {
@@ -180,7 +181,7 @@ function renderBubble(unit) {
     if (msg.from_me) {
       const badge = document.createElement('span');
       badge.className = 'direction-badge sent';
-      badge.textContent = 'You';
+      badge.textContent = t('common.you');
       meta.appendChild(badge);
     }
     const isCallEvent = msg.media_type === 'call' && !!msg.call;
@@ -193,8 +194,9 @@ function renderBubble(unit) {
       const infoBtn = document.createElement('button');
       infoBtn.type = 'button';
       infoBtn.className = 'msg-info-btn';
-      infoBtn.title = isCallEvent ? 'Call details' : 'Message details';
-      infoBtn.setAttribute('aria-label', isCallEvent ? 'Call details' : 'Message details');
+      const detailsLabel = t(isCallEvent ? 'details.call_details' : 'details.msg_details');
+      infoBtn.title = detailsLabel;
+      infoBtn.setAttribute('aria-label', detailsLabel);
       infoBtn.textContent = 'ⓘ';
       infoBtn.addEventListener('click', e => {
         e.stopPropagation();
@@ -215,24 +217,24 @@ function renderBubble(unit) {
     if (msg.is_preserved) {
       const presSpan = document.createElement('span');
       presSpan.className = 'msg-preserved';
-      presSpan.textContent = 'Preserved';
+      presSpan.textContent = t('common.preserved');
       const reasonLabel = msg.preservation_reason === 'revoked_by_sender'
-        ? 'Revoked by sender'
+        ? t('details.reason_msg_deleted')
         : (msg.preservation_reason === 'chat_deleted'
-          ? 'Chat deleted on device'
-          : 'Deleted on device');
+          ? t('details.reason_chat_deleted')
+          : t('details.reason_msg_deleted'));
       const presTs = typeof msg.preserved_at === 'number' ? msg.preserved_at * 1000 : Date.parse(msg.preserved_at);
       const presDate = !isNaN(presTs) ? fmtTime(presTs) : (msg.preserved_at || '');
-      const backupPrefix = presDate ? `Preserved from backup (${presDate})` : 'Preserved from backup';
+      const backupPrefix = presDate ? `${t('details.preserved_from_backup')} (${presDate})` : t('details.preserved_from_backup');
       presSpan.title = `${backupPrefix} • ${reasonLabel}`;
       meta.appendChild(presSpan);
     }
     if (msg.is_edited && msg.media_type !== 'deleted') {
       const editedSpan = document.createElement('span');
       editedSpan.className = 'msg-edited';
-      editedSpan.textContent = 'Edited';
+      editedSpan.textContent = t('msg.edited');
       if (msg.edited_ts) {
-        editedSpan.title = 'Edited: ' + fmtTime(msg.edited_ts);
+        editedSpan.title = t('msg.edited_on', { time: fmtTime(msg.edited_ts) });
       }
       editedSpan.addEventListener('click', e => {
         e.stopPropagation();
@@ -265,7 +267,11 @@ function renderBubble(unit) {
       icon.textContent = '⃠';
       const txt = document.createElement('span');
       txt.className = 'deleted-text';
-      txt.textContent = msg.text_body || 'This message was deleted';
+      txt.textContent = msg.system_event
+        ? formatSystemEventText(msg)
+        : (msg.text_body === 'This message was deleted by an admin'
+          ? t('msg.deleted_admin')
+          : t(msg.from_me ? 'msg.deleted_you' : 'msg.deleted_other'));
       delEl.appendChild(icon);
       delEl.appendChild(document.createTextNode(' '));
       delEl.appendChild(txt);
@@ -279,8 +285,8 @@ function renderBubble(unit) {
       voIcon.textContent = '①';
       const voLabel = document.createElement('span');
       voLabel.className = 'vo-label';
-      const typeLabel = msg.media_type === 'video' ? 'Video' : (msg.media_type === 'audio' ? 'Voice message' : 'Photo');
-      voLabel.textContent = typeLabel + ' · Opened';
+      const typeLabel = msg.media_type === 'video' ? t('media.video') : (msg.media_type === 'audio' ? t('media.voice_message') : t('media.photo'));
+      voLabel.textContent = typeLabel + ' · ' + t('msg.opened');
       voEl.appendChild(voIcon);
       voEl.appendChild(voLabel);
       bubble.appendChild(voEl);
@@ -288,8 +294,9 @@ function renderBubble(unit) {
       bubble.classList.add('call-event');
       bubble.setAttribute('role', 'article');
       const callMeta = msg.call;
-      const callLabelPrefix = callMeta.is_group ? 'Group ' : '';
-      const callKindLabel = callLabelPrefix + (callMeta.video ? 'video call' : 'voice call');
+      const callKindLabel = callMeta.is_group
+        ? t(callMeta.video ? 'calls.group_video_call' : 'calls.group_voice_call')
+        : t(callMeta.video ? 'calls.video_call' : 'calls.voice_call');
       const outcomeLabel = _formatCallOutcomeText(
         callMeta.call_type || (msg.from_me ? 'outgoing' : 'incoming'),
         callMeta.outcome || 'unanswered',
@@ -393,8 +400,8 @@ function renderBubble(unit) {
     anchor.target = '_blank';
     anchor.rel = 'noopener noreferrer';
     const domain = extractDomain(msg.link_url);
-    const ariaTitle = msg.link_title || domain || 'Web page';
-    anchor.setAttribute('aria-label', 'Link preview: ' + ariaTitle);
+    const ariaTitle = msg.link_title || domain || t('media.link');
+    anchor.setAttribute('aria-label', t('msg.link_preview_aria', { title: ariaTitle }));
 
     if (msg.has_thumbnail && msg.msg_id) {
       const mediaBox = document.createElement('div');
@@ -493,13 +500,13 @@ function renderBubble(unit) {
 
     const label = document.createElement('div');
     label.className = 'media-missing-label';
-    label.textContent = videoNote ? 'Video message' :
-                        isVn ? 'Voice message' :
-                        msg.media_type === 'video' ? 'Video' :
-                        msg.media_type === 'gif' ? 'GIF' :
-                        msg.media_type === 'audio' ? 'Audio' :
-                        msg.media_type === 'document' ? 'Document' :
-                        msg.media_type === 'sticker' ? 'Sticker' : 'Photo';
+    label.textContent = videoNote ? t('msg.video_msg') :
+                        isVn ? t('msg.voice_msg') :
+                        msg.media_type === 'video' ? t('media.video') :
+                        msg.media_type === 'gif' ? t('media.gif') :
+                        msg.media_type === 'audio' ? t('media.audio') :
+                        msg.media_type === 'document' ? t('media.document') :
+                        msg.media_type === 'sticker' ? t('media.sticker') : t('media.photo');
     info.appendChild(label);
 
     const sizeStr = _formatBytes(msg.media_size);
