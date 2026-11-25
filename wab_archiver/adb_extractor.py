@@ -3,11 +3,58 @@ import logging
 import os
 import posixpath
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
-import time
+
+from shared.adb import (
+    _ADB_RETRIES as _ADB_RETRIES,
+)
+from shared.adb import (
+    _ADB_TIMEOUT as _ADB_TIMEOUT,
+)
+from shared.adb import (
+    _TRANSIENT_ERRORS as _TRANSIENT_ERRORS,
+)
+from shared.adb import (
+    _classify_adb_error as _classify_adb_error,
+)
+from shared.adb import (
+    _confirm_restart_prompt as _confirm_restart_prompt,
+)
+from shared.adb import (
+    _parse_adb_devices as _parse_adb_devices,
+)
+from shared.adb import (
+    _prompt_user_to_continue as _prompt_user_to_continue,
+)
+from shared.adb import (
+    _query_adb_devices as _query_adb_devices,
+)
+from shared.adb import (
+    _remote_md5 as _remote_md5,
+)
+from shared.adb import (
+    _restart_adb_server as _restart_adb_server,
+)
+from shared.adb import (
+    _run_adb as _run_adb,
+)
+from shared.adb import (
+    check_adb as check_adb,
+)
+from shared.adb import (
+    check_device_connected as check_device_connected,
+)
+from shared.adb import (
+    enumerate_remote_files as enumerate_remote_files,
+)
+from shared.adb import (
+    get_device_serial as get_device_serial,
+)
+from shared.adb import (
+    probe_md5_binary as probe_md5_binary,
+)
 
 from .increment_merger import filter_active_increments
 from .progress import ProgressReporter
@@ -25,180 +72,6 @@ _WA_BUSINESS_MEDIA_ROOT = (
 )
 _CONTACTS_URI = "content://com.android.contacts/data"
 _CONTACTS_PROJECTION = "display_name:data1:data4:mimetype"
-
-_TRANSIENT_ERRORS = (
-    "error: closed",
-    "Connection reset by peer",
-    "Broken pipe",
-    "device offline",
-)
-_ADB_TIMEOUT = 120  # seconds per adb call; WiFi ADB can hang silently
-_ADB_RETRIES = 2
-
-
-def check_adb(logger) -> bool:
-    if shutil.which("adb"):
-        return True
-    logger.error(
-        "ADB not found on PATH. Install Android SDK Platform Tools and add it to your PATH.\n"
-        "  Download: https://developer.android.com/tools/releases/platform-tools"
-    )
-    return False
-
-
-def _parse_adb_devices(stdout: str) -> list[tuple[str, str]]:
-    devices = []
-    for line in stdout.splitlines():
-        trimmed = line.strip()
-        if not trimmed or trimmed.startswith("*") or trimmed.startswith("List of devices"):
-            continue
-        parts = trimmed.split()
-        if len(parts) >= 2:
-            serial = parts[0]
-            if parts[1] == "no" and len(parts) >= 3 and parts[2].startswith("permission"):
-                state = "no permissions"
-            else:
-                state = parts[1]
-            devices.append((serial, state))
-    return devices
-
-
-def _query_adb_devices(logger) -> list[tuple[str, str]] | None:
-    try:
-        result = subprocess.run(
-            ["adb", "devices"],
-            capture_output=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        logger.error(f"'adb devices' failed: {e.stderr.decode(errors='replace').strip()}")
-        return None
-    return _parse_adb_devices(result.stdout.decode(errors="replace"))
-
-
-def _confirm_restart_prompt(prompt: str) -> bool:
-    if not sys.stdin.isatty():
-        return False
-    try:
-        response = input(prompt)
-        return response.strip().lower() in ("y", "yes")
-    except (EOFError, KeyboardInterrupt):
-        return False
-
-
-def _prompt_user_to_continue(prompt: str) -> bool:
-    if not sys.stdin.isatty():
-        return False
-    try:
-        input(prompt)
-        return True
-    except (EOFError, KeyboardInterrupt):
-        return False
-
-
-def _restart_adb_server(logger) -> None:
-    logger.info("Restarting ADB server...")
-    try:
-        subprocess.run(
-            ["adb", "kill-server"],
-            check=True,
-            capture_output=True,
-            timeout=_ADB_TIMEOUT,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"'adb kill-server' warning: {e}")
-    time.sleep(2)
-
-
-def check_device_connected(logger) -> bool:
-    devices = _query_adb_devices(logger)
-    if devices is None:
-        return False
-
-    if not devices:
-        logger.error(
-            "No Android device detected over USB or Wi-Fi. Ensure:\n"
-            "  1. The device is connected via a data-capable USB cable\n"
-            "  2. USB debugging is enabled in Settings > Developer options"
-        )
-        return False
-
-    if len(devices) > 1:
-        summary = ", ".join(f"{s} ({st})" for s, st in devices)
-        logger.error(
-            f"Multiple Android devices detected: {summary}.\n"
-            "  Disconnect all devices except the one you wish to archive."
-        )
-        return False
-
-    serial, state = devices[0]
-    if state == "device":
-        logger.info(f"Android device connected and authorized: {serial}")
-        return True
-
-    if state == "unauthorized":
-        logger.warning(
-            f"Android device '{serial}' is connected but unauthorized "
-            "(the USB debugging authorization prompt was not accepted on the phone)."
-        )
-        prompt_msg = "Restart ADB server to re-trigger authorization prompt on your phone? [y/N]: "
-        if _confirm_restart_prompt(prompt_msg):
-            logger.info("Restarting ADB server... Please ensure your phone screen is unlocked.")
-            _restart_adb_server(logger)
-            _query_adb_devices(logger)
-            continue_prompt = (
-                "Unlock your phone, tap 'Allow USB debugging' (check 'Always allow'), "
-                "then press Enter to continue: "
-            )
-            if not _prompt_user_to_continue(continue_prompt):
-                logger.error("Authorization check cancelled by user.")
-                return False
-            devices_after = _query_adb_devices(logger)
-            if devices_after and len(devices_after) == 1 and devices_after[0][1] == "device":
-                logger.info(f"Android device connected and authorized: {devices_after[0][0]}")
-                return True
-            logger.error(
-                f"Device '{serial}' is still unauthorized.\n"
-                "  1. Unlock your phone screen and look for the 'Allow USB debugging' prompt\n"
-                "  2. In Settings > Developer options, tap 'Revoke USB debugging authorizations'\n"
-                "  3. Ensure USB connection mode is set to 'File Transfer (MTP)' rather than 'Charge only'"
-            )
-            return False
-
-        logger.error(
-            f"Android device '{serial}' is connected but unauthorized.\n"
-            "  Unlock your phone and accept the 'Allow USB debugging' prompt "
-            "(check 'Always allow from this computer')."
-        )
-        return False
-
-    if state == "offline":
-        logger.error(
-            f"Android device '{serial}' is connected but offline.\n"
-            "  Reconnect the USB cable, toggle USB debugging off and on in Developer options, "
-            "or restart the ADB server ('adb kill-server')."
-        )
-        return False
-
-    if state == "no permissions":
-        logger.error(
-            f"Android device '{serial}' detected, but ADB lacks host permissions to access it.\n"
-            "  Check your USB permissions or driver (on Linux, check udev rules / plugdev group)."
-        )
-        return False
-
-    if state in ("recovery", "sideload", "bootloader"):
-        logger.error(
-            f"Android device '{serial}' is in '{state}' mode.\n"
-            "  Normal Android OS is required for WhatsApp extraction."
-        )
-        return False
-
-    logger.error(
-        f"Android device '{serial}' is in unexpected state '{state}'.\n"
-        "  Reconnect the device and ensure USB debugging is enabled."
-    )
-    return False
 
 
 def pull_msgstore(output_dir: str, business: bool = False, logger=None) -> str:
@@ -383,134 +256,6 @@ def pull_contacts(output_dir: str, logger=None) -> str:
 # ---------------------------------------------------------------------------
 # ADB media pull helpers
 # ---------------------------------------------------------------------------
-
-
-def get_device_serial(logger) -> str:
-    """Return the serial number of the connected ADB device."""
-    result = subprocess.run(
-        ["adb", "get-serialno"],
-        capture_output=True,
-        timeout=_ADB_TIMEOUT,
-    )
-    serial = result.stdout.decode(errors="replace").strip()
-    if result.returncode != 0 or not serial or serial == "unknown":
-        raise RuntimeError(
-            f"Could not get device serial: {result.stderr.decode(errors='replace').strip()}"
-        )
-    logger.debug(f"Device serial: {serial}")
-    return serial
-
-
-def probe_md5_binary(logger) -> str:
-    """Return the name of the md5 binary available on the device ('md5sum' or 'md5')."""
-    result = subprocess.run(
-        ["adb", "shell", "which md5sum || which md5"],
-        capture_output=True,
-        timeout=_ADB_TIMEOUT,
-    )
-    path = result.stdout.decode(errors="replace").strip().splitlines()
-    if not path or result.returncode == 127:
-        raise RuntimeError(
-            "Neither md5sum nor md5 found on device — cannot verify file hashes for ADB pull."
-        )
-    binary = os.path.basename(path[0])
-    logger.debug(f"md5 binary on device: {binary}")
-    return binary
-
-
-def _run_adb(cmd: list, logger) -> subprocess.CompletedProcess:
-    """Run an ADB command with retries on transient connection errors."""
-    last_exc = None
-    for attempt in range(_ADB_RETRIES + 1):
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=_ADB_TIMEOUT,
-            )
-            if result.returncode == 0:
-                return result
-            stderr = result.stderr.decode(errors="replace")
-            if any(e in stderr for e in _TRANSIENT_ERRORS):
-                if attempt < _ADB_RETRIES:
-                    logger.warning(
-                        f"Transient ADB error (attempt {attempt + 1}/{_ADB_RETRIES + 1}): "
-                        f"{stderr.strip()}"
-                    )
-                    time.sleep(2)
-                    continue
-            raise subprocess.CalledProcessError(
-                result.returncode, cmd, result.stdout, result.stderr
-            )
-        except subprocess.TimeoutExpired as e:
-            last_exc = e
-            if attempt < _ADB_RETRIES:
-                logger.warning(
-                    f"ADB command timed out (attempt {attempt + 1}/{_ADB_RETRIES + 1}), retrying..."
-                )
-                time.sleep(2)
-                continue
-            raise RuntimeError(
-                f"ADB command timed out after {_ADB_RETRIES + 1} attempts: {' '.join(cmd)}"
-            ) from last_exc
-    raise subprocess.CalledProcessError(1, cmd)
-
-
-def _classify_adb_error(stderr: str) -> str:
-    """Return a human-readable explanation of an ADB pull failure."""
-    if "does not exist" in stderr:
-        return "Remote path not found"
-    if "Permission denied" in stderr or "open failed" in stderr:
-        return "Permission denied — file not accessible without root"
-    if "device not found" in stderr or "device offline" in stderr:
-        return "Device disconnected or offline"
-    if "No space left on device" in stderr:
-        return "Host disk is full"
-    return stderr.strip()
-
-
-def enumerate_remote_files(wa_media_root: str, logger) -> list:
-    """Return list of (remote_path, size_bytes) for all files under wa_media_root."""
-    logger.info(f"Enumerating remote files under {wa_media_root}...")
-    result = _run_adb(
-        ["adb", "shell", f'find "{wa_media_root}" -type f -printf "%p\\t%s\\n"'],
-        logger,
-    )
-    entries = []
-    for line in result.stdout.decode(errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Filter find error lines mixed into stdout
-        if "Permission denied" in line or "No such file or directory" in line:
-            logger.debug(f"find: skipped inaccessible path: {line}")
-            continue
-        parts = line.rsplit("\t", 1)
-        if len(parts) != 2:
-            continue
-        remote_path, size_str = parts
-        try:
-            entries.append((remote_path.strip(), int(size_str.strip())))
-        except ValueError:
-            logger.debug(f"find: could not parse size in line: {line!r}")
-    logger.info(f"Found {len(entries)} files on device.")
-    return entries
-
-
-def _remote_md5(remote_path: str, md5_binary: str, logger) -> bytes:
-    """Return the MD5 hash of a remote file as bytes."""
-    result = _run_adb(
-        ["adb", "shell", f'{md5_binary} "{remote_path}"'],
-        logger,
-    )
-    out = result.stdout.decode(errors="replace").strip()
-    # md5sum: "<hash>  <path>"; md5 (older): "<hash> <path>" or "<path>: <hash>"
-    if ":" in out and not out.startswith("/"):
-        # "<path>: <hash>" format
-        hex_str = out.split(":", 1)[1].strip()
-    else:
-        hex_str = out.split()[0]
-    return bytes.fromhex(hex_str)
 
 
 def _staging_path(remote_path: str, remote_root: str, staging_dir: str) -> str:

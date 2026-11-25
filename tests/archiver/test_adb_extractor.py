@@ -23,11 +23,11 @@ from tests.archiver.conftest import (
 
 class TestCheckAdb:
     def test_found(self, logger):
-        with patch("wab_archiver.adb_extractor.shutil.which", return_value="/usr/bin/adb"):
+        with patch("shared.adb.shutil.which", return_value="/usr/bin/adb"):
             assert adb.check_adb(logger) is True
 
     def test_not_found(self, logger):
-        with patch("wab_archiver.adb_extractor.shutil.which", return_value=None):
+        with patch("shared.adb.shutil.which", return_value=None):
             assert adb.check_adb(logger) is False
 
 
@@ -73,9 +73,7 @@ class TestCheckDeviceConnected:
     def test_device_connected(self, logger):
         output = "List of devices attached\nemulator-5554\tdevice\n"
         with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
-            ),
+            patch("shared.adb.subprocess.run", return_value=self._make_result(output)),
             patch.object(logger, "info") as mock_info,
         ):
             assert adb.check_device_connected(logger) is True
@@ -84,9 +82,7 @@ class TestCheckDeviceConnected:
     def test_no_devices(self, logger):
         output = "List of devices attached\n"
         with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
-            ),
+            patch("shared.adb.subprocess.run", return_value=self._make_result(output)),
             patch.object(logger, "error") as mock_err,
         ):
             assert adb.check_device_connected(logger) is False
@@ -104,9 +100,7 @@ class TestCheckDeviceConnected:
     def test_unauthorized_device_exit(self, logger, is_tty, user_input):
         output = "List of devices attached\n98abc123\tunauthorized\n"
         with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
-            ),
+            patch("shared.adb.subprocess.run", return_value=self._make_result(output)),
             patch("sys.stdin.isatty", return_value=is_tty),
             patch("builtins.input", return_value=user_input),
             patch.object(logger, "error") as mock_err,
@@ -125,7 +119,7 @@ class TestCheckDeviceConnected:
 
         with (
             patch(
-                "wab_archiver.adb_extractor.subprocess.run",
+                "shared.adb.subprocess.run",
                 side_effect=[unauth_out, kill_out, unauth_out, auth_out],
             ) as mock_run,
             patch("sys.stdin.isatty", return_value=True),
@@ -146,7 +140,7 @@ class TestCheckDeviceConnected:
 
         with (
             patch(
-                "wab_archiver.adb_extractor.subprocess.run",
+                "shared.adb.subprocess.run",
                 side_effect=[unauth_out, kill_out, unauth_out, unauth_out],
             ),
             patch("sys.stdin.isatty", return_value=True),
@@ -165,7 +159,7 @@ class TestCheckDeviceConnected:
 
         with (
             patch(
-                "wab_archiver.adb_extractor.subprocess.run",
+                "shared.adb.subprocess.run",
                 side_effect=[unauth_out, kill_out, unauth_out],
             ),
             patch("sys.stdin.isatty", return_value=True),
@@ -179,9 +173,7 @@ class TestCheckDeviceConnected:
     def test_offline_device(self, logger):
         output = "List of devices attached\n98abc123\toffline\n"
         with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
-            ),
+            patch("shared.adb.subprocess.run", return_value=self._make_result(output)),
             patch.object(logger, "error") as mock_err,
         ):
             assert adb.check_device_connected(logger) is False
@@ -190,9 +182,7 @@ class TestCheckDeviceConnected:
     def test_no_permissions_device(self, logger):
         output = "List of devices attached\n98abc123\tno permissions (missing udev rules?)\n"
         with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
-            ),
+            patch("shared.adb.subprocess.run", return_value=self._make_result(output)),
             patch.object(logger, "error") as mock_err,
         ):
             assert adb.check_device_connected(logger) is False
@@ -201,9 +191,7 @@ class TestCheckDeviceConnected:
     def test_recovery_device(self, logger):
         output = "List of devices attached\n98abc123\trecovery\n"
         with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
-            ),
+            patch("shared.adb.subprocess.run", return_value=self._make_result(output)),
             patch.object(logger, "error") as mock_err,
         ):
             assert adb.check_device_connected(logger) is False
@@ -212,9 +200,7 @@ class TestCheckDeviceConnected:
     def test_multiple_devices(self, logger):
         output = "List of devices attached\ndev1\tdevice\ndev2\tdevice\n"
         with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", return_value=self._make_result(output)
-            ),
+            patch("shared.adb.subprocess.run", return_value=self._make_result(output)),
             patch.object(logger, "error") as mock_err,
         ):
             assert adb.check_device_connected(logger) is False
@@ -222,7 +208,7 @@ class TestCheckDeviceConnected:
 
     def test_adb_failure(self, logger):
         with patch(
-            "wab_archiver.adb_extractor.subprocess.run",
+            "shared.adb.subprocess.run",
             side_effect=subprocess.CalledProcessError(1, "adb", stderr=b"error"),
         ):
             assert adb.check_device_connected(logger) is False
@@ -331,24 +317,24 @@ class TestPullContacts:
 class TestGetDeviceSerial:
     def test_returns_serial(self, logger):
         mock = MagicMock(returncode=0, stdout=b"emulator-5554\n", stderr=b"")
-        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+        with patch("shared.adb.subprocess.run", return_value=mock):
             assert adb.get_device_serial(logger) == "emulator-5554"
 
     def test_nonzero_returncode_raises(self, logger):
         mock = MagicMock(returncode=1, stdout=b"", stderr=b"no device")
-        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+        with patch("shared.adb.subprocess.run", return_value=mock):
             with pytest.raises(RuntimeError):
                 adb.get_device_serial(logger)
 
     def test_empty_output_raises(self, logger):
         mock = MagicMock(returncode=0, stdout=b"\n", stderr=b"")
-        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+        with patch("shared.adb.subprocess.run", return_value=mock):
             with pytest.raises(RuntimeError):
                 adb.get_device_serial(logger)
 
     def test_unknown_output_raises(self, logger):
         mock = MagicMock(returncode=0, stdout=b"unknown\n", stderr=b"")
-        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+        with patch("shared.adb.subprocess.run", return_value=mock):
             with pytest.raises(RuntimeError):
                 adb.get_device_serial(logger)
 
@@ -356,17 +342,17 @@ class TestGetDeviceSerial:
 class TestProbeMd5Binary:
     def test_md5sum_found(self, logger):
         mock = MagicMock(returncode=0, stdout=b"/usr/bin/md5sum\n", stderr=b"")
-        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+        with patch("shared.adb.subprocess.run", return_value=mock):
             assert adb.probe_md5_binary(logger) == "md5sum"
 
     def test_md5_found(self, logger):
         mock = MagicMock(returncode=0, stdout=b"/usr/bin/md5\n", stderr=b"")
-        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+        with patch("shared.adb.subprocess.run", return_value=mock):
             assert adb.probe_md5_binary(logger) == "md5"
 
     def test_neither_found_raises(self, logger):
         mock = MagicMock(returncode=0, stdout=b"\n", stderr=b"")
-        with patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock):
+        with patch("shared.adb.subprocess.run", return_value=mock):
             with pytest.raises(RuntimeError):
                 adb.probe_md5_binary(logger)
 
@@ -375,8 +361,8 @@ class TestRunAdb:
     def test_success_returns_result(self, logger):
         mock = MagicMock(returncode=0, stdout=b"", stderr=b"")
         with (
-            patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock),
-            patch("wab_archiver.adb_extractor.time.sleep"),
+            patch("shared.adb.subprocess.run", return_value=mock),
+            patch("shared.adb.time.sleep"),
         ):
             result = adb._run_adb(["adb", "pull", "/remote", "/local"], logger)
         assert result is mock
@@ -385,10 +371,8 @@ class TestRunAdb:
         first = MagicMock(returncode=1, stdout=b"", stderr=b"error: closed")
         second = MagicMock(returncode=0, stdout=b"", stderr=b"")
         with (
-            patch(
-                "wab_archiver.adb_extractor.subprocess.run", side_effect=[first, second]
-            ) as mock_run,
-            patch("wab_archiver.adb_extractor.time.sleep"),
+            patch("shared.adb.subprocess.run", side_effect=[first, second]) as mock_run,
+            patch("shared.adb.time.sleep"),
         ):
             result = adb._run_adb(["adb", "test"], logger)
         assert mock_run.call_count == 2
@@ -397,8 +381,8 @@ class TestRunAdb:
     def test_non_transient_error_raises_immediately(self, logger):
         mock = MagicMock(returncode=1, stdout=b"", stderr=b"fatal: something")
         with (
-            patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock) as mock_run,
-            patch("wab_archiver.adb_extractor.time.sleep"),
+            patch("shared.adb.subprocess.run", return_value=mock) as mock_run,
+            patch("shared.adb.time.sleep"),
         ):
             with pytest.raises(subprocess.CalledProcessError):
                 adb._run_adb(["adb", "test"], logger)
@@ -407,10 +391,10 @@ class TestRunAdb:
     def test_timeout_retries_then_raises(self, logger):
         with (
             patch(
-                "wab_archiver.adb_extractor.subprocess.run",
+                "shared.adb.subprocess.run",
                 side_effect=subprocess.TimeoutExpired("adb", 120),
             ) as mock_run,
-            patch("wab_archiver.adb_extractor.time.sleep"),
+            patch("shared.adb.time.sleep"),
         ):
             with pytest.raises(RuntimeError):
                 adb._run_adb(["adb", "test"], logger)
@@ -419,15 +403,15 @@ class TestRunAdb:
     def test_transient_exhausted_raises(self, logger):
         mock = MagicMock(returncode=1, stdout=b"", stderr=b"error: closed")
         with (
-            patch("wab_archiver.adb_extractor.subprocess.run", return_value=mock) as mock_run,
-            patch("wab_archiver.adb_extractor.time.sleep"),
+            patch("shared.adb.subprocess.run", return_value=mock) as mock_run,
+            patch("shared.adb.time.sleep"),
         ):
             with pytest.raises(subprocess.CalledProcessError):
                 adb._run_adb(["adb", "test"], logger)
         assert mock_run.call_count == adb._ADB_RETRIES + 1
 
     def test_exhausted_loop_fallback(self, logger):
-        with patch("wab_archiver.adb_extractor._ADB_RETRIES", -1):
+        with patch("shared.adb._ADB_RETRIES", -1):
             with pytest.raises(subprocess.CalledProcessError):
                 adb._run_adb(["adb", "test"], logger)
 
@@ -458,26 +442,26 @@ class TestClassifyAdbError:
 class TestEnumerateRemoteFiles:
     def test_parses_path_and_size(self, logger):
         stdout = b"/storage/WA/Media/img.jpg\t12345\n"
-        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+        with patch("shared.adb._run_adb", return_value=MagicMock(stdout=stdout)):
             entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
         assert entries == [("/storage/WA/Media/img.jpg", 12345)]
 
     def test_multiple_files(self, logger):
         stdout = b"/storage/WA/Media/img.jpg\t12345\n/storage/WA/Media/vid.mp4\t67890\n"
-        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+        with patch("shared.adb._run_adb", return_value=MagicMock(stdout=stdout)):
             entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
         assert len(entries) == 2
         assert entries[1] == ("/storage/WA/Media/vid.mp4", 67890)
 
     def test_skips_permission_denied_lines(self, logger):
         stdout = b"/storage/WA/Media/img.jpg\t12345\n/storage/WA/restricted: Permission denied\n"
-        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+        with patch("shared.adb._run_adb", return_value=MagicMock(stdout=stdout)):
             entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
         assert entries == [("/storage/WA/Media/img.jpg", 12345)]
 
     def test_skips_unparseable_lines(self, logger):
         stdout = b"badline\n/storage/WA/Media/img.jpg\t12345\n"
-        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+        with patch("shared.adb._run_adb", return_value=MagicMock(stdout=stdout)):
             entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
         assert entries == [("/storage/WA/Media/img.jpg", 12345)]
 
@@ -488,14 +472,14 @@ _EMPTY_MD5_HEX = "d41d8cd98f00b204e9800998ecf8427e"
 class TestRemoteMd5:
     def test_md5sum_format(self, logger):
         stdout = f"{_EMPTY_MD5_HEX}  /path/file\n".encode()
-        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+        with patch("shared.adb._run_adb", return_value=MagicMock(stdout=stdout)):
             result = adb._remote_md5("/path/file", "md5sum", logger)
         assert result == bytes.fromhex(_EMPTY_MD5_HEX)
 
     def test_md5_format(self, logger):
         # "<name>: <hash>" format produced by older md5 binaries on non-absolute paths
         stdout = f"img.jpg: {_EMPTY_MD5_HEX}\n".encode()
-        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+        with patch("shared.adb._run_adb", return_value=MagicMock(stdout=stdout)):
             result = adb._remote_md5("img.jpg", "md5", logger)
         assert result == bytes.fromhex(_EMPTY_MD5_HEX)
 
@@ -916,10 +900,10 @@ class TestInteractivePromptsAndServerLifecycle:
     def test_restart_adb_server_handles_errors(self, logger):
         with (
             patch(
-                "wab_archiver.adb_extractor.subprocess.run",
+                "shared.adb.subprocess.run",
                 side_effect=subprocess.CalledProcessError(1, "adb kill-server"),
             ),
-            patch("wab_archiver.adb_extractor.time.sleep") as mock_sleep,
+            patch("shared.adb.time.sleep") as mock_sleep,
             patch.object(logger, "warning") as mock_warn,
         ):
             adb._restart_adb_server(logger)
@@ -929,10 +913,10 @@ class TestInteractivePromptsAndServerLifecycle:
 
         with (
             patch(
-                "wab_archiver.adb_extractor.subprocess.run",
+                "shared.adb.subprocess.run",
                 side_effect=subprocess.TimeoutExpired("adb kill-server", 120),
             ),
-            patch("wab_archiver.adb_extractor.time.sleep"),
+            patch("shared.adb.time.sleep"),
             patch.object(logger, "warning") as mock_warn,
         ):
             adb._restart_adb_server(logger)
@@ -945,7 +929,7 @@ class TestDeviceConnectedAdditionalStates:
             output = f"List of devices attached\nDEV123\t{state}\n"
             r = MagicMock(stdout=output.encode())
             with (
-                patch("wab_archiver.adb_extractor.subprocess.run", return_value=r),
+                patch("shared.adb.subprocess.run", return_value=r),
                 patch.object(logger, "error") as mock_err,
             ):
                 assert adb.check_device_connected(logger) is False
@@ -955,7 +939,7 @@ class TestDeviceConnectedAdditionalStates:
         output = "List of devices attached\nDEV123\tauthorizing\n"
         r = MagicMock(stdout=output.encode())
         with (
-            patch("wab_archiver.adb_extractor.subprocess.run", return_value=r),
+            patch("shared.adb.subprocess.run", return_value=r),
             patch.object(logger, "error") as mock_err,
         ):
             assert adb.check_device_connected(logger) is False
@@ -1162,13 +1146,13 @@ class TestPullMsgstoreAndIncrements:
 class TestEnumerateRemoteFilesEdgeCases:
     def test_skips_no_such_file_and_empty_lines(self, logger):
         stdout = b"\n   \n/storage/WA/Media/missing: No such file or directory\n/storage/WA/Media/img.jpg\t500\n"
-        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+        with patch("shared.adb._run_adb", return_value=MagicMock(stdout=stdout)):
             entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
         assert entries == [("/storage/WA/Media/img.jpg", 500)]
 
     def test_skips_invalid_size_integer(self, logger):
         stdout = b"/storage/WA/Media/img.jpg\tnot_a_number\n/storage/WA/Media/valid.jpg\t250\n"
-        with patch("wab_archiver.adb_extractor._run_adb", return_value=MagicMock(stdout=stdout)):
+        with patch("shared.adb._run_adb", return_value=MagicMock(stdout=stdout)):
             entries = adb.enumerate_remote_files("/storage/WA/Media", logger)
         assert entries == [("/storage/WA/Media/valid.jpg", 250)]
 

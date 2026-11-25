@@ -57,13 +57,14 @@ Issues = "https://github.com/auanasgheps/whatsapp-backup-tools/issues"
 [project.scripts]
 wab-archiver = "wab_archiver.__main__:main"
 wab-viewer = "wab_viewer.__main__:main"
+wab-sweeper = "wab_sweeper.__main__:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["shared*", "wab_archiver*", "wab_viewer*"]
+include = ["shared*", "wab_archiver*", "wab_viewer*", "wab_sweeper*"]
 
 [tool.setuptools.package-data]
 "wab_viewer.chat_viewer" = ["*.svg", "pico.min.css", "css/*.css", "js/*.js"]
@@ -71,7 +72,7 @@ include = ["shared*", "wab_archiver*", "wab_viewer*"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-src = ["shared", "wab_archiver", "wab_viewer", "tests"]
+src = ["shared", "wab_archiver", "wab_viewer", "wab_sweeper", "tests"]
 
 [tool.ruff.lint]
 select = [
