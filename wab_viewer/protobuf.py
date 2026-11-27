@@ -19,6 +19,48 @@ def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
     raise ValueError("Truncated varint in protobuf payload")
 
 
+def _parse_ios_chat_session_meta(raw_b64: str) -> tuple[int, bool, int]:
+    """Extract (ephemeral_duration, is_pinned, pinned_time_ms) from iOS ZLASTMESSAGETEXT."""
+    if not raw_b64:
+        return 0, False, 0
+    try:
+        data = base64.b64decode(raw_b64)
+    except Exception:
+        return 0, False, 0
+
+    ephemeral_duration = 0
+    is_pinned = False
+    pinned_time = 0
+    offset = 0
+    while offset < len(data):
+        try:
+            tag, offset = _read_varint(data, offset)
+        except ValueError:
+            break
+        field_num = tag >> 3
+        wire_type = tag & 0x07
+        if wire_type == 0:
+            try:
+                val, offset = _read_varint(data, offset)
+            except ValueError:
+                break
+            if field_num == 2 and val > 0:
+                ephemeral_duration = int(val)
+        elif wire_type == 1:
+            offset += 8
+        elif wire_type == 2:
+            try:
+                length, offset = _read_varint(data, offset)
+            except ValueError:
+                break
+            offset += length
+        elif wire_type == 5:
+            offset += 4
+        else:
+            break
+    return ephemeral_duration, is_pinned, pinned_time
+
+
 def _extract_ios_group_description(raw_pic_id: str) -> str | None:
     """Extract group description text from iOS ZWAGROUPINFO.ZPICTUREID protobuf."""
     if not raw_pic_id:

@@ -65,6 +65,7 @@ HTML_TEMPLATE = (
         <button class="filter-btn active" data-filter="all" data-i18n="sidebar.filter_all">All</button>
         <button class="filter-btn" data-filter="contact" data-i18n="sidebar.filter_chats">Chats</button>
         <button class="filter-btn" data-filter="group" data-i18n="sidebar.filter_groups">Groups</button>
+        <button class="filter-btn" data-filter="unread" data-i18n="sidebar.filter_unread">Unread</button>
       </div>
       <div id="search-results"></div>
       <div id="chat-list"></div>
@@ -96,6 +97,10 @@ HTML_TEMPLATE = (
           <div class="chat-header-meta">
             <div class="chat-header-title-wrap">
               <h2 id="chat-title"></h2>
+              <span id="chat-header-business-badge" class="chat-business-badge" style="display:none;" data-i18n-title="chat.business_badge_title">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>
+                <span data-i18n="chat.business_badge">Business</span>
+              </span>
               <span class="chat-header-arrow" aria-hidden="true">›</span>
             </div>
             <div id="chat-subtitle" class="chat-header-subtitle"></div>

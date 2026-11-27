@@ -67,7 +67,14 @@
     "select_chat": "Sélectionnez une discussion pour afficher les messages",
     "select_call": "Sélectionnez un appel dans l'historique pour voir les détails et la durée.",
     "select_starred": "Sélectionnez un message important pour accéder à son contexte.",
-    "select_archived": "Sélectionnez une discussion archivée pour afficher les messages."
+    "select_archived": "Sélectionnez une discussion archivée pour afficher les messages.",
+    "filter_unread": "Non lus",
+    "no_unread_chats": "Aucune discussion non lue",
+    "pinned_title": "Discussion épinglée",
+    "disappearing_title": "Messages éphémères ({duration})",
+    "disappearing_preserved_note": "Préservation activée : les messages expirés peuvent encore apparaître",
+    "unread_tooltip_one": "{count} message non lu lors de la sauvegarde (archive en lecture seule)",
+    "unread_tooltip_other": "{count} messages non lus lors de la sauvegarde (archive en lecture seule)"
   },
   "chat": {
     "loading": "Chargement de la discussion…",
@@ -96,7 +103,9 @@
     "participants_one": "{count} participant",
     "participants_other": "{count} participants",
     "archived_badge": "Archivée",
-    "group_conversation": "Discussion de groupe"
+    "group_conversation": "Discussion de groupe",
+    "business_badge": "Entreprise",
+    "business_badge_title": "Compte WhatsApp Business"
   },
   "pinned": {
     "label": "Épinglé",
@@ -252,7 +261,13 @@
     "open_gallery": "Ouvrir la galerie des médias →",
     "members_header": "Membres ({count})",
     "more_members": "+ {count} autres…",
-    "top_senders": "Principaux expéditeurs"
+    "top_senders": "Principaux expéditeurs",
+    "disappearing_messages": "Messages éphémères",
+    "ephemeral_off": "Désactivés",
+    "ephemeral_24h": "24 heures",
+    "ephemeral_7d": "7 jours",
+    "ephemeral_90d": "90 jours",
+    "business_account": "Compte professionnel"
   },
   "starred": {
     "title": "Messages importants",

@@ -111,6 +111,12 @@ class SchemaCapabilities:
     has_msg_origin: bool
     has_ios_media_origin: bool
     has_audio_data: bool
+    has_chat_unseen: bool = False
+    has_chat_ephemeral: bool = False
+    has_chat_business_state: bool = False
+    has_msg_sys_biz_state: bool = False
+    has_cs_unread: bool = False
+    has_cs_last_msg_text: bool = False
 
 
 @dataclass(frozen=True)
@@ -233,7 +239,8 @@ class ViewerContext:
         """Attach ancillary iOS databases and populate the temporary contact resolution table."""
         conn.execute(
             "CREATE TEMP TABLE IF NOT EXISTS _ios_contacts "
-            "(jid TEXT PRIMARY KEY, full_name TEXT, phone_number TEXT)"
+            "(jid TEXT PRIMARY KEY, full_name TEXT, phone_number TEXT, "
+            "business_name TEXT, disappearing_duration INTEGER DEFAULT 0)"
         )
         contacts_v2 = _find_ios_db(self.wa_db_path, "ContactsV2.sqlite", self.output_root)
         if contacts_v2:
@@ -242,66 +249,88 @@ class ViewerContext:
                 r["name"]
                 for r in conn.execute("PRAGMA cv.table_info(ZWAADDRESSBOOKCONTACT)").fetchall()
             }
+            biz_col = "NULLIF(ZBUSINESSNAME, '')" if "ZBUSINESSNAME" in cv_cols else "NULL"
+            dis_col = (
+                "COALESCE(ZDISAPPEARINGMODEDURATION, 0)"
+                if "ZDISAPPEARINGMODEDURATION" in cv_cols
+                else "0"
+            )
             if "ZLID" in cv_cols:
-                conn.execute("""
-                    INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                conn.execute(f"""
+                    INSERT INTO _ios_contacts (jid, full_name, phone_number, business_name, disappearing_duration)
                     SELECT
                         ZLID AS jid,
                         ZFULLNAME AS full_name,
                         CASE WHEN ZWHATSAPPID LIKE '%@s.whatsapp.net'
                              THEN SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
-                        END AS phone_number
+                        END AS phone_number,
+                        {biz_col} AS business_name,
+                        {dis_col} AS disappearing_duration
                     FROM cv.ZWAADDRESSBOOKCONTACT
                     WHERE ZLID IS NOT NULL
-                      AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net'))
+                      AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net') OR ({biz_col} IS NOT NULL))
                     ON CONFLICT(jid) DO UPDATE SET
                         full_name = COALESCE(excluded.full_name, _ios_contacts.full_name),
-                        phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number)
+                        phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number),
+                        business_name = COALESCE(excluded.business_name, _ios_contacts.business_name),
+                        disappearing_duration = MAX(COALESCE(_ios_contacts.disappearing_duration, 0), COALESCE(excluded.disappearing_duration, 0))
                 """)
-                conn.execute("""
-                    INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                conn.execute(f"""
+                    INSERT INTO _ios_contacts (jid, full_name, phone_number, business_name, disappearing_duration)
                     SELECT
                         SUBSTR(ZLID, 1, INSTR(ZLID, '@') - 1) AS jid,
                         ZFULLNAME AS full_name,
                         CASE WHEN ZWHATSAPPID LIKE '%@s.whatsapp.net'
                              THEN SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
-                        END AS phone_number
+                        END AS phone_number,
+                        {biz_col} AS business_name,
+                        {dis_col} AS disappearing_duration
                     FROM cv.ZWAADDRESSBOOKCONTACT
                     WHERE ZLID LIKE '%@lid'
-                      AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net'))
+                      AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net') OR ({biz_col} IS NOT NULL))
                     ON CONFLICT(jid) DO UPDATE SET
                         full_name = COALESCE(excluded.full_name, _ios_contacts.full_name),
-                        phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number)
+                        phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number),
+                        business_name = COALESCE(excluded.business_name, _ios_contacts.business_name),
+                        disappearing_duration = MAX(COALESCE(_ios_contacts.disappearing_duration, 0), COALESCE(excluded.disappearing_duration, 0))
                 """)
             if "ZWHATSAPPID" in cv_cols:
-                conn.execute("""
-                    INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                conn.execute(f"""
+                    INSERT INTO _ios_contacts (jid, full_name, phone_number, business_name, disappearing_duration)
                     SELECT
                         ZWHATSAPPID AS jid,
                         ZFULLNAME AS full_name,
                         CASE WHEN ZWHATSAPPID LIKE '%@s.whatsapp.net'
                              THEN SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
-                        END AS phone_number
+                        END AS phone_number,
+                        {biz_col} AS business_name,
+                        {dis_col} AS disappearing_duration
                     FROM cv.ZWAADDRESSBOOKCONTACT
                     WHERE ZWHATSAPPID IS NOT NULL
-                      AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net'))
+                      AND ((ZFULLNAME IS NOT NULL AND ZFULLNAME != '') OR (ZWHATSAPPID LIKE '%@s.whatsapp.net') OR ({biz_col} IS NOT NULL))
                     ON CONFLICT(jid) DO UPDATE SET
                         full_name = COALESCE(excluded.full_name, _ios_contacts.full_name),
-                        phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number)
+                        phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number),
+                        business_name = COALESCE(excluded.business_name, _ios_contacts.business_name),
+                        disappearing_duration = MAX(COALESCE(_ios_contacts.disappearing_duration, 0), COALESCE(excluded.disappearing_duration, 0))
                 """)
-                conn.execute("""
-                    INSERT INTO _ios_contacts (jid, full_name, phone_number)
+                conn.execute(f"""
+                    INSERT INTO _ios_contacts (jid, full_name, phone_number, business_name, disappearing_duration)
                     SELECT
                         SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1) AS jid,
                         ZFULLNAME AS full_name,
                         CASE WHEN ZWHATSAPPID LIKE '%@s.whatsapp.net'
                              THEN SUBSTR(ZWHATSAPPID, 1, INSTR(ZWHATSAPPID, '@') - 1)
-                        END AS phone_number
+                        END AS phone_number,
+                        {biz_col} AS business_name,
+                        {dis_col} AS disappearing_duration
                     FROM cv.ZWAADDRESSBOOKCONTACT
                     WHERE ZWHATSAPPID LIKE '%@s.whatsapp.net'
                     ON CONFLICT(jid) DO UPDATE SET
                         full_name = COALESCE(excluded.full_name, _ios_contacts.full_name),
-                        phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number)
+                        phone_number = COALESCE(excluded.phone_number, _ios_contacts.phone_number),
+                        business_name = COALESCE(excluded.business_name, _ios_contacts.business_name),
+                        disappearing_duration = MAX(COALESCE(_ios_contacts.disappearing_duration, 0), COALESCE(excluded.disappearing_duration, 0))
                 """)
 
         lid_db = _find_ios_db(self.wa_db_path, "LID.sqlite", self.output_root)

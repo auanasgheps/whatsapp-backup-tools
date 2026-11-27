@@ -6,6 +6,7 @@ import contextlib
 import json
 import re
 import sqlite3
+from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
@@ -19,7 +20,11 @@ from ..hydration import (
     _resolve_ios_jid,
 )
 from ..preserved import _merge_preserved_chats
-from ..protobuf import _extract_ios_group_description, _parse_ios_poll_blob
+from ..protobuf import (
+    _extract_ios_group_description,
+    _parse_ios_chat_session_meta,
+    _parse_ios_poll_blob,
+)
 from ..queries.calls import (
     _resolve_android_call_targets,
     _resolve_ios_call_schema,
@@ -37,6 +42,41 @@ from ..system_events import ALLOWED_GROUP_SYSTEM_ACTIONS, format_participant_nam
 bp = Blueprint("chats", __name__)
 
 
+def _load_android_pinned_chats(ctx) -> dict[str, int]:
+    """Load pinned chat JIDs -> pinned_time from optional chatsettingsbackup.db."""
+    pinned: dict[str, int] = {}
+    if ctx.source_type != "android" or not ctx.output_root:
+        return pinned
+    cand = ctx.output_root / "Whatsapp Databases" / "chatsettingsbackup.db"
+    if not cand.exists() and ctx.wa_db_path:
+        alt = Path(ctx.wa_db_path).parent / "chatsettingsbackup.db"
+        if alt.exists():
+            cand = alt
+    if not cand.exists():
+        return pinned
+    try:
+        cs_conn = sqlite3.connect(f"file:{cand.resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            cols = {r[1] for r in cs_conn.execute("PRAGMA table_info(settings)").fetchall()}
+            if "jid" not in cols or "pinned" not in cols:
+                return pinned
+            pt_col = "COALESCE(pinned_time, 0)" if "pinned_time" in cols else "0"
+            for row in cs_conn.execute(
+                f"SELECT jid, {pt_col} FROM settings WHERE pinned = 1 AND jid IS NOT NULL"
+            ).fetchall():
+                jid_str = str(row[0])
+                pt = int(row[1] or 0)
+                pinned[jid_str] = max(pinned.get(jid_str, 0), pt)
+                if "@" in jid_str:
+                    bare = jid_str.split("@", 1)[0]
+                    pinned[bare] = max(pinned.get(bare, 0), pt)
+        finally:
+            cs_conn.close()
+    except sqlite3.Error:
+        return {}
+    return pinned
+
+
 @bp.route("/api/chats")
 def api_chats():
     ctx = get_viewer_context()
@@ -46,6 +86,8 @@ def api_chats():
         pres = ctx.get_preserved()
         if pres is not None:
             result = _merge_preserved_chats(result, pres, ctx.get_archive())
+            for c in result:
+                c["has_preservation"] = True
         return jsonify(result)
 
     if ctx.source_type == "android":
@@ -126,10 +168,21 @@ def api_chats():
         )
         ldn_chat_user_arm = "NULLIF(ldn_c.username, '')," if ctx.caps.has_lid_dn else ""
         chat_archived_col = "COALESCE(c.archived, 0)" if ctx.caps.has_chat_archived else "0"
+        chat_unseen_col = "COALESCE(c.unseen_message_count, 0)" if ctx.caps.has_chat_unseen else "0"
+        chat_ephemeral_col = (
+            "COALESCE(c.ephemeral_expiration, 0)" if ctx.caps.has_chat_ephemeral else "0"
+        )
+        chat_raw_jid_col = "j_chat.raw_string" if ctx.caps.has_jid_raw_string else "NULL"
+        chat_real_jid_col = "j_chat_real.raw_string" if ctx.caps.has_jid_raw_string else "NULL"
+        android_pinned_map = _load_android_pinned_chats(ctx)
         rows = conn.execute(f"""
             SELECT
                 c._id                                               AS chat_row_id,
                 {chat_archived_col}                                 AS is_archived,
+                {chat_unseen_col}                                   AS unread_count,
+                {chat_ephemeral_col}                                AS ephemeral_duration,
+                {chat_raw_jid_col}                                  AS chat_raw_jid,
+                {chat_real_jid_col}                                 AS chat_real_jid,
                 CASE WHEN {is_group_chat} THEN CAST(c._id AS TEXT)
                      ELSE COALESCE(
                          {_clean_user_sql("j_chat_real.user")},
@@ -223,9 +276,29 @@ def api_chats():
         for r in rows:
             cid = r["id"]
             r_dict = dict(r)
+            raw_jid = r_dict.pop("chat_raw_jid", None)
+            real_jid = r_dict.pop("chat_real_jid", None)
+            p_time = 0
+            is_pin = False
+            for jid_cand in (real_jid, raw_jid, cid):
+                if jid_cand and jid_cand in android_pinned_map:
+                    is_pin = True
+                    p_time = max(p_time, android_pinned_map[jid_cand])
+            r_dict["is_pinned"] = is_pin
+            r_dict["pinned_time"] = p_time
+            r_dict["unread_count"] = int(r_dict.get("unread_count") or 0)
+            r_dict["ephemeral_duration"] = int(r_dict.get("ephemeral_duration") or 0)
             if cid in deduped_chats:
+                existing = deduped_chats[cid]
                 if r_dict.get("is_archived"):
-                    deduped_chats[cid]["is_archived"] = 1
+                    existing["is_archived"] = 1
+                existing["unread_count"] = max(existing["unread_count"], r_dict["unread_count"])
+                existing["ephemeral_duration"] = max(
+                    existing["ephemeral_duration"], r_dict["ephemeral_duration"]
+                )
+                if r_dict["is_pinned"]:
+                    existing["is_pinned"] = True
+                    existing["pinned_time"] = max(existing["pinned_time"], r_dict["pinned_time"])
                 continue
             deduped_chats[cid] = r_dict
         rows = list(deduped_chats.values())
@@ -242,6 +315,8 @@ def api_chats():
         ios_archived_col = (
             f"COALESCE(cs.{ctx.caps.cs_archived_col_name}, 0)" if ctx.caps.has_cs_archived else "0"
         )
+        ios_unread_col = "COALESCE(cs.ZUNREADCOUNT, 0)" if ctx.caps.has_cs_unread else "0"
+        ios_last_msg_text_col = "cs.ZLASTMESSAGETEXT" if ctx.caps.has_cs_last_msg_text else "NULL"
         ios_raw_ts_expr = (
             "COALESCE(m.ZMESSAGEDATE, cs.ZLASTMESSAGEDATE)"
             if ctx.caps.has_cs_last_msg_date
@@ -316,6 +391,9 @@ def api_chats():
             SELECT
                 CAST(cs.Z_PK AS TEXT)                               AS id,
                 {ios_archived_col}                                  AS is_archived,
+                {ios_unread_col}                                    AS unread_count,
+                {ios_last_msg_text_col}                             AS last_msg_proto,
+                COALESCE(ic.disappearing_duration, 0)               AS contact_ephemeral_duration,
                 CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
                      ELSE 'contact' END                            AS type,
                 CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN ''
@@ -612,6 +690,13 @@ def api_chats():
             else:
                 d["description"] = None
         elif ctx.source_type == "ios":
+            last_msg_proto = d.pop("last_msg_proto", None)
+            contact_ephem = int(d.pop("contact_ephemeral_duration", 0) or 0)
+            ephem_pb, is_pin, p_time = _parse_ios_chat_session_meta(last_msg_proto or "")
+            d["unread_count"] = int(d.get("unread_count") or 0)
+            d["ephemeral_duration"] = ephem_pb if ephem_pb > 0 else contact_ephem
+            d["is_pinned"] = is_pin
+            d["pinned_time"] = p_time
             group_direct_desc = d.pop("group_direct_desc", None)
             group_picture_id = d.pop("group_picture_id", None)
             group_arch_desc = d.pop("group_arch_desc", None)
@@ -820,12 +905,27 @@ def api_chats():
             d["last_msg_type"] = "text"
         result.append(d)
     pres = ctx.get_preserved()
+    has_preservation = pres is not None
     if pres is not None:
         result = _merge_preserved_chats(result, pres, ctx.get_archive())
     else:
         for c in result:
             c.setdefault("is_preserved_only", False)
             c.setdefault("description", None)
+            c.setdefault("unread_count", 0)
+            c.setdefault("ephemeral_duration", 0)
+            c.setdefault("is_pinned", False)
+            c.setdefault("pinned_time", 0)
+        result.sort(
+            key=lambda c: (
+                bool(c.get("is_pinned")),
+                int(c.get("pinned_time") or 0),
+                int(c.get("newest_ts") or 0),
+            ),
+            reverse=True,
+        )
+    for c in result:
+        c["has_preservation"] = has_preservation
     return jsonify(result)
 
 
@@ -905,6 +1005,9 @@ def api_chat_info():
     created_ts = None
     creator_number = None
     creator_name = None
+    is_business = False
+    business_name = None
+    ephemeral_duration = 0
 
     if conn is not None:
         if ctx.source_type == "android":
@@ -914,9 +1017,15 @@ def api_chat_info():
             extra = ctx.queries.android_filter
 
             if chat_type == "contact":
+                ephem_col = (
+                    "COALESCE(c.ephemeral_expiration, 0)" if ctx.caps.has_chat_ephemeral else "0"
+                )
+                biz_col = "c.business_chat_state" if ctx.caps.has_chat_business_state else "NULL"
                 row = conn.execute(
-                    """
-                    SELECT COALESCE(j_real.user, j.user) AS user
+                    f"""
+                    SELECT MAX(COALESCE(j_real.user, j.user)) AS user,
+                           MAX({ephem_col}) AS ephemeral_duration,
+                           MAX(CASE WHEN {biz_col} > 0 THEN 1 ELSE 0 END) AS has_biz_state
                     FROM chat c
                     LEFT JOIN jid j ON j._id = c.jid_row_id
                     LEFT JOIN (
@@ -926,11 +1035,34 @@ def api_chat_info():
                     LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
                     WHERE c.subject IS NULL
                       AND COALESCE(j_real.user, j.user) = ?
-                    LIMIT 1
                 """,
                     (chat_id,),
                 ).fetchone()
-                number = row["user"] if row else chat_id
+                number = (row["user"] if row and row["user"] else None) or chat_id
+                if row:
+                    ephemeral_duration = int(row["ephemeral_duration"] or 0)
+                    if row["has_biz_state"]:
+                        is_business = True
+
+                if ctx.caps.has_msg_sys_biz_state:
+                    try:
+                        biz_row = conn.execute(
+                            f"""
+                            SELECT b.business_name
+                            FROM message m
+                            JOIN message_system_business_state b ON b.message_row_id = m._id
+                            WHERE {chat_pred} AND m.message_type = 7
+                            ORDER BY m.timestamp DESC
+                            LIMIT 1
+                            """,
+                            chat_params,
+                        ).fetchone()
+                        if biz_row:
+                            is_business = True
+                            if biz_row["business_name"]:
+                                business_name = str(biz_row["business_name"]).strip() or None
+                    except sqlite3.OperationalError:
+                        pass
 
                 name_row = conn.execute(
                     """
@@ -948,6 +1080,13 @@ def api_chat_info():
                     display_name = None
             else:
                 members = _group_members_android(conn, chat_id)
+                if ctx.caps.has_chat_ephemeral:
+                    ep_row = conn.execute(
+                        "SELECT COALESCE(ephemeral_expiration, 0) FROM chat WHERE _id = CAST(? AS INTEGER)",
+                        (chat_id,),
+                    ).fetchone()
+                    if ep_row:
+                        ephemeral_duration = int(ep_row[0] or 0)
 
                 top_rows = conn.execute(
                     f"SELECT CASE WHEN from_me=1 THEN 'You' ELSE sender END AS sndr,"
@@ -1098,10 +1237,29 @@ def api_chat_info():
                         ic.phone_number
                     )
                 """
+                ios_lmt_col = "cs.ZLASTMESSAGETEXT" if ctx.caps.has_cs_last_msg_text else "NULL"
+                ic_ident_join = (
+                    "LEFT JOIN _ios_contacts ic_ident ON ic_ident.jid = cs.ZCONTACTIDENTIFIER"
+                    if has_cs_ident
+                    else ""
+                )
+                ic_biz_expr = (
+                    "COALESCE(ic.business_name, ic_ident.business_name)"
+                    if has_cs_ident
+                    else "ic.business_name"
+                )
+                ic_dis_expr = (
+                    "MAX(COALESCE(ic.disappearing_duration, 0), COALESCE(ic_ident.disappearing_duration, 0))"
+                    if has_cs_ident
+                    else "COALESCE(ic.disappearing_duration, 0)"
+                )
                 row = conn.execute(
                     f"""
                     SELECT
                         ({phone_expr}) AS user,
+                        {ic_biz_expr} AS business_name,
+                        {ic_dis_expr} AS contact_ephemeral_duration,
+                        {ios_lmt_col} AS last_msg_proto,
                         COALESCE(
                             NULLIF(con.display_name,''),
                             NULLIF(con_lid.display_name,''),
@@ -1115,6 +1273,7 @@ def api_chat_info():
                         ) AS name
                     FROM ZWACHATSESSION cs
                     LEFT JOIN _ios_contacts ic ON ic.jid = cs.ZCONTACTJID
+                    {ic_ident_join}
                     LEFT JOIN arch.contacts con ON con.number = ({phone_expr})
                     LEFT JOIN arch.contacts con_lid ON con_lid.number = NULLIF(
                         SUBSTR(COALESCE(cs.ZCONTACTJID,''), 1,
@@ -1125,6 +1284,43 @@ def api_chat_info():
                 ).fetchone()
                 number = row["user"] if row else None
                 display_name = row["name"] if row else None
+                if row:
+                    if row["business_name"]:
+                        is_business = True
+                        business_name = str(row["business_name"]).strip() or None
+                    ephem_pb, _, _ = _parse_ios_chat_session_meta(row["last_msg_proto"] or "")
+                    ephemeral_duration = (
+                        ephem_pb if ephem_pb > 0 else int(row["contact_ephemeral_duration"] or 0)
+                    )
+                if not is_business and ctx.caps.has_ios_group_event:
+                    try:
+                        biz_ev = conn.execute(
+                            """
+                            SELECT ZTEXT
+                            FROM ZWAMESSAGE
+                            WHERE ZCHATSESSION = CAST(? AS INTEGER)
+                              AND ZMESSAGETYPE IN (6, 10)
+                              AND ZGROUPEVENTTYPE IN (38, 61, 69)
+                            ORDER BY ZMESSAGEDATE DESC
+                            LIMIT 1
+                            """,
+                            (chat_id,),
+                        ).fetchone()
+                        if biz_ev:
+                            is_business = True
+                            raw_txt = (biz_ev["ZTEXT"] or "").strip()
+                            if raw_txt.startswith("{"):
+                                try:
+                                    bdata = json.loads(raw_txt)
+                                    bname = bdata.get("verified_biz_name") or bdata.get(
+                                        "business_name"
+                                    )
+                                    if bname:
+                                        business_name = str(bname).strip() or None
+                                except (json.JSONDecodeError, AttributeError):
+                                    pass
+                    except sqlite3.OperationalError:
+                        pass
             else:
                 members = _group_members_ios(conn, chat_id)
 
@@ -1162,9 +1358,15 @@ def api_chat_info():
                     extra_gi_cols.append("gi.ZGROUPDESCRIPTION AS direct_desc")
                 extra_gi_select = (", " + ", ".join(extra_gi_cols)) if extra_gi_cols else ""
 
+                ios_grp_lmt_col = (
+                    "cs.ZLASTMESSAGETEXT AS last_msg_proto"
+                    if ctx.caps.has_cs_last_msg_text
+                    else "NULL AS last_msg_proto"
+                )
                 cre_row = conn.execute(
                     f"""
                     SELECT CAST((gi.ZCREATIONDATE + 978307200) * 1000 AS INTEGER) AS created_ms,
+                           {ios_grp_lmt_col},
                            COALESCE({phone_expr_c}, '') AS creator_number,
                            COALESCE(
                                CASE WHEN ic.full_name NOT LIKE '+%' THEN NULLIF(ic.full_name, '') END,
@@ -1192,6 +1394,8 @@ def api_chat_info():
                 ).fetchone()
                 if cre_row:
                     created_ts = cre_row["created_ms"]
+                    ephem_pb, _, _ = _parse_ios_chat_session_meta(cre_row["last_msg_proto"] or "")
+                    ephemeral_duration = ephem_pb
                     creator_number = cre_row["creator_number"] or None
                     creator_name = cre_row["creator_name"] or None
                     cre_keys = cre_row.keys()
@@ -1393,6 +1597,10 @@ def api_chat_info():
         "total": total,
         "calls_count": calls_count,
         "calls": calls_count,
+        "is_business": is_business,
+        "business_name": business_name,
+        "ephemeral_duration": ephemeral_duration,
+        "has_preservation": ctx.get_preserved() is not None,
     }
     if chat_type == "group":
         result["description"] = description

@@ -67,7 +67,14 @@
     "select_chat": "Selecciona un chat para ver los mensajes",
     "select_call": "Selecciona una llamada del historial para ver los detalles y la duración.",
     "select_starred": "Selecciona un mensaje destacado para ir a su contexto.",
-    "select_archived": "Selecciona un chat archivado para ver los mensajes."
+    "select_archived": "Selecciona un chat archivado para ver los mensajes.",
+    "filter_unread": "No leídos",
+    "no_unread_chats": "No hay chats sin leer",
+    "pinned_title": "Chat fijado",
+    "disappearing_title": "Mensajes temporales ({duration})",
+    "disappearing_preserved_note": "Preservación activada: los mensajes caducados aún pueden mostrarse",
+    "unread_tooltip_one": "{count} mensaje sin leer en la copia de seguridad (archivo de solo lectura)",
+    "unread_tooltip_other": "{count} mensajes sin leer en la copia de seguridad (archivo de solo lectura)"
   },
   "chat": {
     "loading": "Cargando chat…",
@@ -96,7 +103,9 @@
     "participants_one": "{count} participante",
     "participants_other": "{count} participantes",
     "archived_badge": "Archivado",
-    "group_conversation": "Chat grupal"
+    "group_conversation": "Chat grupal",
+    "business_badge": "Empresa",
+    "business_badge_title": "Cuenta de WhatsApp Business"
   },
   "pinned": {
     "label": "Fijado",
@@ -252,7 +261,13 @@
     "open_gallery": "Abrir galería multimedia →",
     "members_header": "Participantes ({count})",
     "more_members": "+ {count} más…",
-    "top_senders": "Remitentes principales"
+    "top_senders": "Remitentes principales",
+    "disappearing_messages": "Mensajes temporales",
+    "ephemeral_off": "Desactivados",
+    "ephemeral_24h": "24 horas",
+    "ephemeral_7d": "7 días",
+    "ephemeral_90d": "90 días",
+    "business_account": "Cuenta de empresa"
   },
   "starred": {
     "title": "Mensajes destacados",

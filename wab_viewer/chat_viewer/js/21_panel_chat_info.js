@@ -186,6 +186,20 @@
       overviewCard.appendChild(_infoRow(t('nav.calls'), fmtNum(info.calls_count)).row);
     }
 
+    const ephemDur = Number(info.ephemeral_duration) || 0;
+    const ephemVal = document.createElement('span');
+    ephemVal.textContent = _formatEphemeralDuration(ephemDur);
+    if (ephemDur > 0 && info.has_preservation) {
+      ephemVal.title = t('sidebar.disappearing_preserved_note');
+    }
+    overviewCard.appendChild(_infoRow(t('chat_info.disappearing_messages'), ephemVal).row);
+
+    if (currentChat.type === 'contact' && info.is_business) {
+      overviewCard.appendChild(
+        _infoRow(t('chat_info.business_account'), info.business_name || t('chat.business_badge')).row
+      );
+    }
+
     // Media size row (placed before gallery link button)
     const sizeRowObj = _infoRow('Media size', 'Calculating…');
     overviewCard.appendChild(sizeRowObj.row);

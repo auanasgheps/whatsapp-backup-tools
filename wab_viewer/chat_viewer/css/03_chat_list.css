@@ -37,6 +37,10 @@
       border-left: 3px solid var(--accent);
       padding-left: 11px;
     }
+    .chat-item-avatar-wrap {
+      position: relative;
+      flex-shrink: 0;
+    }
     .chat-item-avatar {
       width: 42px;
       height: 42px;
@@ -53,21 +57,65 @@
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
       user-select: none;
     }
+    .chat-ephemeral-badge {
+      position: absolute;
+      bottom: -2px;
+      right: -2px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    }
+    .chat-item:hover .chat-ephemeral-badge,
+    .chat-item.active .chat-ephemeral-badge {
+      background: var(--surface2);
+    }
     .chat-item-body {
       min-width: 0;
       flex: 1;
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 3px;
+    }
+    .chat-item-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
     }
     .chat-item .chat-name {
       font-size: var(--font-size);
       font-weight: 500;
-      margin-bottom: 2px;
       color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      min-width: 0;
+      flex: 1;
+    }
+    .chat-item .chat-time {
+      font-size: 11px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .chat-item .chat-time.is-unread {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .chat-item-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
     }
     .chat-item .chat-meta {
       font-size: 12px;
@@ -75,6 +123,34 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      min-width: 0;
+      flex: 1;
+    }
+    .chat-badges {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .chat-pin-icon {
+      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .chat-unread-badge {
+      min-width: 19px;
+      height: 19px;
+      padding: 0 5px;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
     }
     .chat-item.group .chat-name::before { content: '👥 '; }
     .chat-preserved-tag {

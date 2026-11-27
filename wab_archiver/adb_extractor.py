@@ -66,6 +66,10 @@ _MSGSTORE_BUSINESS_PATH = (
     "/storage/emulated/0/Android/media/com.whatsapp.w4b"
     "/WhatsApp Business/Databases/msgstore.db.crypt15"
 )
+_BACKUPS_DIR = "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Backups"
+_BACKUPS_BUSINESS_DIR = (
+    "/storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups"
+)
 _WA_MEDIA_ROOT = "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media"
 _WA_BUSINESS_MEDIA_ROOT = (
     "/storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp Business/Media"
@@ -210,6 +214,30 @@ def pull_msgstore_and_increments(
             raise
 
     return local_base, local_increments
+
+
+def pull_chat_settings(output_dir: str, business: bool, logger: logging.Logger) -> str | None:
+    """Pull optional chatsettingsbackup.db(.crypt15/.crypt14) from device Backups/ if present."""
+    backups_dir = _BACKUPS_BUSINESS_DIR if business else _BACKUPS_DIR
+    os.makedirs(output_dir, exist_ok=True)
+    for filename in ("chatsettingsbackup.db.crypt15", "chatsettingsbackup.db.crypt14"):
+        remote = f"{backups_dir}/{filename}"
+        dest = os.path.join(output_dir, filename)
+        try:
+            res = subprocess.run(
+                ["adb", "pull", remote, dest],
+                check=False,
+                capture_output=True,
+            )
+        except OSError:
+            return None
+        if res.returncode == 0 and os.path.isfile(dest):
+            logger.info(f"Pulled {filename} from device Backups/.")
+            return dest
+    logger.debug(
+        "Optional chatsettingsbackup.db not found on device; pinned chat status unavailable."
+    )
+    return None
 
 
 def pull_contacts(output_dir: str, logger=None) -> str:

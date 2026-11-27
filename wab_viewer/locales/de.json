@@ -67,7 +67,14 @@
     "select_chat": "Wähle einen Chat aus, um Nachrichten anzuzeigen",
     "select_call": "Wähle einen Anruf aus dem Verlauf, um Details und Dauer anzuzeigen.",
     "select_starred": "Wähle eine mit Stern markierte Nachricht, um zum Kontext zu springen.",
-    "select_archived": "Wähle einen archivierten Chat aus, um Nachrichten anzuzeigen."
+    "select_archived": "Wähle einen archivierten Chat aus, um Nachrichten anzuzeigen.",
+    "filter_unread": "Ungelesen",
+    "no_unread_chats": "Keine ungelesenen Chats",
+    "pinned_title": "Angehefteter Chat",
+    "disappearing_title": "Selbstlöschende Nachrichten ({duration})",
+    "disappearing_preserved_note": "Archivierung aktiv: abgelaufene Nachrichten können weiterhin sichtbar sein",
+    "unread_tooltip_one": "{count} ungelesene Nachricht zum Zeitpunkt des Backups (schreibgeschütztes Archiv)",
+    "unread_tooltip_other": "{count} ungelesene Nachrichten zum Zeitpunkt des Backups (schreibgeschütztes Archiv)"
   },
   "chat": {
     "loading": "Chat wird geladen…",
@@ -96,7 +103,9 @@
     "participants_one": "{count} Teilnehmer",
     "participants_other": "{count} Teilnehmer",
     "archived_badge": "Archiviert",
-    "group_conversation": "Gruppenchat"
+    "group_conversation": "Gruppenchat",
+    "business_badge": "Business",
+    "business_badge_title": "WhatsApp Business-Konto"
   },
   "pinned": {
     "label": "Fixiert",
@@ -252,7 +261,13 @@
     "open_gallery": "Mediengalerie öffnen →",
     "members_header": "Teilnehmer ({count})",
     "more_members": "+ {count} weitere…",
-    "top_senders": "Aktivste Absender"
+    "top_senders": "Aktivste Absender",
+    "disappearing_messages": "Selbstlöschende Nachrichten",
+    "ephemeral_off": "Aus",
+    "ephemeral_24h": "24 Stunden",
+    "ephemeral_7d": "7 Tage",
+    "ephemeral_90d": "90 Tage",
+    "business_account": "Unternehmenskonto"
   },
   "starred": {
     "title": "Mit Stern markierte",

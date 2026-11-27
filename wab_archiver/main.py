@@ -2638,6 +2638,74 @@ def _decrypt_msgstore_if_needed(args: argparse.Namespace, logger: logging.Logger
             args._staged_increments = []
 
 
+def _discover_chat_settings_source(args: argparse.Namespace) -> str | None:
+    """Locate chatsettingsbackup.db(.crypt15/.crypt14) from ADB staging or local backup folders."""
+    staged = getattr(args, "_staged_chat_settings", None)
+    if staged and os.path.isfile(staged):
+        return staged
+
+    candidates: list[str] = []
+    msgstore = getattr(args, "msgstore", None)
+    if msgstore:
+        msg_dir = os.path.dirname(os.path.abspath(msgstore))
+        parent_dir = os.path.dirname(msg_dir)
+        for base in (
+            msg_dir,
+            os.path.join(msg_dir, "Backups"),
+            os.path.join(parent_dir, "Backups"),
+        ):
+            for name in (
+                "chatsettingsbackup.db.crypt15",
+                "chatsettingsbackup.db.crypt14",
+                "chatsettingsbackup.db",
+            ):
+                candidates.append(os.path.join(base, name))
+
+    for root in getattr(args, "wa_roots", None) or []:
+        for name in (
+            "chatsettingsbackup.db.crypt15",
+            "chatsettingsbackup.db.crypt14",
+            "chatsettingsbackup.db",
+        ):
+            candidates.append(os.path.join(root, "Backups", name))
+
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _sync_chat_settings_db(args: argparse.Namespace, logger: logging.Logger) -> None:
+    """Decrypt or copy optional chatsettingsbackup.db into Whatsapp Databases/ for pinned chats."""
+    src = _discover_chat_settings_source(args)
+    if not src:
+        return
+
+    db_dir = os.path.join(args.output, "Whatsapp Databases")
+    os.makedirs(db_dir, exist_ok=True)
+    dest = os.path.join(db_dir, "chatsettingsbackup.db")
+    incoming = os.path.join(db_dir, "chatsettingsbackup.db.incoming")
+    _clean_sqlite_files(incoming)
+
+    is_encrypted = src.endswith((".crypt15", ".crypt14"))
+    try:
+        if is_encrypted:
+            e2e_key = getattr(args, "e2e_key", None)
+            if not e2e_key:
+                logger.warning(
+                    "Found encrypted chatsettingsbackup.db without --e2e-key; skipping pinned chat sync."
+                )
+                return
+            decrypt_msgstore(src, e2e_key, incoming, logger)
+        else:
+            shutil.copy2(src, incoming)
+        _safe_replace_sqlite_db(incoming, dest)
+        logger.info("Synced chatsettingsbackup.db for pinned chat metadata.")
+    except BaseException:
+        _clean_sqlite_files(incoming)
+        raise
+
+
 def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: logging.Logger):
     """
     Resolve all input sources into a ready-to-query state.
@@ -2843,12 +2911,16 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
             args.msgstore, args._staged_increments = adb_extractor.pull_msgstore_and_increments(
                 tmp_dir, args.business, logger
             )
+            args._staged_chat_settings = adb_extractor.pull_chat_settings(
+                tmp_dir, args.business, logger
+            )
             args._staging_dir = tmp_dir
             args.contacts = adb_extractor.pull_contacts(tmp_dir, logger)
         except subprocess.CalledProcessError:
             raise SystemExit(1)
 
         _decrypt_msgstore_if_needed(args, logger)
+        _sync_chat_settings_db(args, logger)
 
         if args.pull_media:
             target_paths = None
@@ -2895,6 +2967,7 @@ def _prepare_input(args: argparse.Namespace, since_ms: int | None, logger: loggi
     # --- Decrypt if needed ---
     if not getattr(args, "from_adb", False):
         _decrypt_msgstore_if_needed(args, logger)
+        _sync_chat_settings_db(args, logger)
 
     return platform, media_resolver, ios_contacts_path, contacts
 

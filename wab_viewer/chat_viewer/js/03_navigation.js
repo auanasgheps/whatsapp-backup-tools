@@ -117,6 +117,25 @@
     return document.querySelector(`.chat-item[data-id="${idSel}"][data-type="${typeSel}"]`);
   }
 
+  function _formatEphemeralDuration(sec) {
+    const s = Number(sec) || 0;
+    if (s <= 0) return t('chat_info.ephemeral_off');
+    if (s === 86400) return t('chat_info.ephemeral_24h');
+    if (s === 604800) return t('chat_info.ephemeral_7d');
+    if (s === 7776000) return t('chat_info.ephemeral_90d');
+    if (s >= 86400) return tp('time.days', Math.round(s / 86400));
+    return Math.max(1, Math.round(s / 3600)) + 'h';
+  }
+
+  function _ephemeralTooltip(sec, hasPreservation) {
+    const dur = _formatEphemeralDuration(sec);
+    let tip = t('sidebar.disappearing_title', { duration: dur });
+    if (hasPreservation) {
+      tip += ' • ' + t('sidebar.disappearing_preserved_note');
+    }
+    return tip;
+  }
+
   function _createChatListItem(chat) {
     const el = document.createElement('div');
     const isActive = currentChat && String(currentChat.id) === String(chat.id) && currentChat.type === chat.type;
@@ -124,20 +143,51 @@
     el.dataset.id = chat.id;
     el.dataset.type = chat.type;
 
+    const avatarWrap = document.createElement('div');
+    avatarWrap.className = 'chat-item-avatar-wrap';
+
     const avatar = document.createElement('div');
     avatar.className = 'chat-item-avatar';
     const avatarKey = chat.phone_number || chat.id || chat.display_name;
     avatar.style.backgroundColor = getAvatarColor(avatarKey);
     avatar.textContent = getInitials(chat.display_name);
     avatar.setAttribute('aria-hidden', 'true');
-    el.appendChild(avatar);
+    avatarWrap.appendChild(avatar);
+
+    const ephemSec = Number(chat.ephemeral_duration) || 0;
+    if (ephemSec > 0) {
+      const ephemBadge = document.createElement('span');
+      ephemBadge.className = 'chat-ephemeral-badge';
+      const ephemTip = _ephemeralTooltip(ephemSec, Boolean(chat.has_preservation));
+      ephemBadge.title = ephemTip;
+      ephemBadge.setAttribute('aria-label', ephemTip);
+      ephemBadge.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>';
+      avatarWrap.appendChild(ephemBadge);
+    }
+    el.appendChild(avatarWrap);
 
     const body = document.createElement('div');
     body.className = 'chat-item-body';
     const tagHtml = chat.is_preserved_only
       ? `<span class="chat-preserved-tag" title="${esc(t('sidebar.preserved_badge_title'))}">${esc(t('common.preserved'))}</span>`
       : '';
-    body.innerHTML = `<div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><div class="chat-meta">${chatPreview(chat)} · ${fmtTime(chat.newest_ts)}</div>`;
+    const unreadCount = Number(chat.unread_count) || 0;
+    const timeStr = fmtTime(chat.newest_ts);
+    const timeCls = 'chat-time' + (unreadCount > 0 ? ' is-unread' : '');
+
+    let badgesHtml = '';
+    if (chat.is_pinned) {
+      const pinTitle = esc(t('sidebar.pinned_title'));
+      badgesHtml += `<span class="chat-pin-icon" title="${pinTitle}" aria-label="${pinTitle}"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg></span>`;
+    }
+    if (unreadCount > 0) {
+      const unreadText = unreadCount > 99 ? '99+' : String(unreadCount);
+      const unreadTip = esc(tp('sidebar.unread_tooltip', unreadCount, { count: unreadCount }));
+      badgesHtml += `<span class="chat-unread-badge" title="${unreadTip}" aria-label="${unreadTip}">${unreadText}</span>`;
+    }
+    const badgesWrap = badgesHtml ? `<div class="chat-badges">${badgesHtml}</div>` : '';
+
+    body.innerHTML = `<div class="chat-item-top"><div class="chat-name">${esc(chat.display_name)}${tagHtml}</div><span class="${timeCls}">${esc(timeStr)}</span></div><div class="chat-item-bottom"><div class="chat-meta">${chatPreview(chat)}</div>${badgesWrap}</div>`;
     el.appendChild(body);
 
     el.addEventListener('click', () => selectChat(chat, el));
@@ -148,7 +198,18 @@
     const list = document.getElementById('chat-list');
     list.innerHTML = '';
     const activeChats = allChats.filter(c => !c.is_archived);
-    const visible = currentFilter === 'all' ? activeChats : activeChats.filter(c => c.type === currentFilter);
+    let visible;
+    if (currentFilter === 'all') {
+      visible = activeChats;
+    } else if (currentFilter === 'unread') {
+      visible = activeChats.filter(c => (Number(c.unread_count) || 0) > 0);
+    } else {
+      visible = activeChats.filter(c => c.type === currentFilter);
+    }
+    if (visible.length === 0 && currentFilter === 'unread') {
+      list.innerHTML = `<div class="sidebar-tab-placeholder"><span class="placeholder-icon">✓</span><strong>${esc(t('sidebar.no_unread_chats'))}</strong></div>`;
+      return;
+    }
     visible.forEach(chat => list.appendChild(_createChatListItem(chat)));
   }
 
@@ -477,6 +538,34 @@
 
     document.getElementById('chat-header').style.display = 'flex';
     document.getElementById('chat-title').textContent = chat.display_name;
+
+    const bizBadge = document.getElementById('chat-header-business-badge');
+    if (bizBadge) {
+      bizBadge.style.display = 'none';
+      const applyBizBadge = (bizInfo) => {
+        if (currentChat !== chat || !bizInfo || !bizInfo.is_business) return;
+        bizBadge.title = bizInfo.business_name
+          ? `${t('chat.business_badge_title')}: ${bizInfo.business_name}`
+          : t('chat.business_badge_title');
+        bizBadge.style.display = 'inline-flex';
+      };
+      if (chat._bizInfo) {
+        applyBizBadge(chat._bizInfo);
+      } else if (chat.type === 'contact') {
+        const bizParams = new URLSearchParams({ chat_id: chat.id, chat_type: chat.type });
+        fetch(API + '/chat-info?' + bizParams)
+          .then(r => (r.ok ? r.json() : null))
+          .then(info => {
+            if (!info) return;
+            chat._bizInfo = {
+              is_business: Boolean(info.is_business),
+              business_name: info.business_name || null,
+            };
+            applyBizBadge(chat._bizInfo);
+          })
+          .catch(() => {});
+      }
+    }
 
     const avatarEl = document.getElementById('chat-header-avatar');
     if (avatarEl) {

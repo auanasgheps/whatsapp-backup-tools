@@ -611,7 +611,13 @@ def detect_schema_capabilities(
     has_ios_mdi_summary = False
     has_pin_in_chat_table = False
     has_chat_archived = False
+    has_chat_unseen = False
+    has_chat_ephemeral = False
+    has_chat_business_state = False
+    has_msg_sys_biz_state = False
     has_cs_archived = False
+    has_cs_unread = False
+    has_cs_last_msg_text = False
     has_cs_ident = False
     has_cs_last_msg_date = False
     if wa_db_path is not None:
@@ -767,12 +773,18 @@ def detect_schema_capabilities(
                 else set()
             )
             has_chat_archived = "archived" in _chat_cols
+            has_chat_unseen = "unseen_message_count" in _chat_cols
+            has_chat_ephemeral = "ephemeral_expiration" in _chat_cols
+            has_chat_business_state = "business_chat_state" in _chat_cols
+            has_msg_sys_biz_state = "message_system_business_state" in _wa_tables
             _cs_cols = (
                 {r[1] for r in _tmp_wa.execute("PRAGMA table_info(ZWACHATSESSION)").fetchall()}
                 if "ZWACHATSESSION" in _wa_tables
                 else set()
             )
             has_cs_archived = "ZARCHIVED" in _cs_cols or "ZISARCHIVED" in _cs_cols
+            has_cs_unread = "ZUNREADCOUNT" in _cs_cols
+            has_cs_last_msg_text = "ZLASTMESSAGETEXT" in _cs_cols
             cs_archived_col_name = (
                 "ZARCHIVED"
                 if "ZARCHIVED" in _cs_cols
@@ -870,6 +882,12 @@ def detect_schema_capabilities(
         has_msg_origin=has_msg_origin if wa_db_path is not None else False,
         has_ios_media_origin=has_ios_media_origin if wa_db_path is not None else False,
         has_audio_data=has_audio_data,
+        has_chat_unseen=has_chat_unseen,
+        has_chat_ephemeral=has_chat_ephemeral,
+        has_chat_business_state=has_chat_business_state,
+        has_msg_sys_biz_state=has_msg_sys_biz_state,
+        has_cs_unread=has_cs_unread,
+        has_cs_last_msg_text=has_cs_last_msg_text,
     )
 
 

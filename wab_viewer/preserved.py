@@ -465,6 +465,10 @@ def _merge_preserved_chats(
         c.setdefault("is_preserved_only", False)
         c.setdefault("is_archived", 0)
         c.setdefault("description", None)
+        c.setdefault("unread_count", 0)
+        c.setdefault("ephemeral_duration", 0)
+        c.setdefault("is_pinned", False)
+        c.setdefault("pinned_time", 0)
 
     try:
         pres_cols = {
@@ -580,9 +584,20 @@ def _merge_preserved_chats(
                 "is_view_once": is_vo,
                 "is_preserved_only": True,
                 "is_archived": 0,
+                "unread_count": 0,
+                "ephemeral_duration": 0,
+                "is_pinned": False,
+                "pinned_time": 0,
             }
         )
         existing_chats.add((cid, ctype))
 
-    result.sort(key=lambda c: c.get("newest_ts") or 0, reverse=True)
+    result.sort(
+        key=lambda c: (
+            bool(c.get("is_pinned")),
+            int(c.get("pinned_time") or 0),
+            int(c.get("newest_ts") or 0),
+        ),
+        reverse=True,
+    )
     return result
