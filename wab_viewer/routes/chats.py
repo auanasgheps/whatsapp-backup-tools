@@ -77,6 +77,36 @@ def _load_android_pinned_chats(ctx) -> dict[str, int]:
     return pinned
 
 
+def _load_android_business_chats(conn: sqlite3.Connection, ctx) -> dict[int, str | None]:
+    """Load chat_row_id -> business_name from optional message_system_business_state."""
+    biz_map: dict[int, str | None] = {}
+    if not ctx.caps.has_msg_sys_biz_state:
+        return biz_map
+    try:
+        rows = conn.execute(
+            """
+            SELECT m.chat_row_id, b.business_name
+            FROM message_system_business_state b
+            JOIN message m ON m._id = b.message_row_id
+            WHERE m.message_type = 7
+            ORDER BY m.timestamp DESC
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return biz_map
+    for row in rows:
+        cid = row[0]
+        if cid is None:
+            continue
+        cid_int = int(cid)
+        bname = str(row[1]).strip() if row[1] else None
+        if cid_int not in biz_map:
+            biz_map[cid_int] = bname or None
+        elif not biz_map[cid_int] and bname:
+            biz_map[cid_int] = bname
+    return biz_map
+
+
 @bp.route("/api/chats")
 def api_chats():
     ctx = get_viewer_context()
@@ -172,15 +202,20 @@ def api_chats():
         chat_ephemeral_col = (
             "COALESCE(c.ephemeral_expiration, 0)" if ctx.caps.has_chat_ephemeral else "0"
         )
+        chat_biz_col = (
+            "COALESCE(c.business_chat_state, 0)" if ctx.caps.has_chat_business_state else "0"
+        )
         chat_raw_jid_col = "j_chat.raw_string" if ctx.caps.has_jid_raw_string else "NULL"
         chat_real_jid_col = "j_chat_real.raw_string" if ctx.caps.has_jid_raw_string else "NULL"
         android_pinned_map = _load_android_pinned_chats(ctx)
+        android_biz_map = _load_android_business_chats(conn, ctx)
         rows = conn.execute(f"""
             SELECT
                 c._id                                               AS chat_row_id,
                 {chat_archived_col}                                 AS is_archived,
                 {chat_unseen_col}                                   AS unread_count,
                 {chat_ephemeral_col}                                AS ephemeral_duration,
+                {chat_biz_col}                                      AS business_chat_state,
                 {chat_raw_jid_col}                                  AS chat_raw_jid,
                 {chat_real_jid_col}                                 AS chat_real_jid,
                 CASE WHEN {is_group_chat} THEN CAST(c._id AS TEXT)
@@ -288,6 +323,17 @@ def api_chats():
             r_dict["pinned_time"] = p_time
             r_dict["unread_count"] = int(r_dict.get("unread_count") or 0)
             r_dict["ephemeral_duration"] = int(r_dict.get("ephemeral_duration") or 0)
+            biz_state = int(r_dict.pop("business_chat_state", 0) or 0)
+            c_row_id_int = r_dict.get("chat_row_id")
+            has_biz_msg = c_row_id_int is not None and int(c_row_id_int) in android_biz_map
+            r_dict["is_business"] = r_dict.get("type") == "contact" and (
+                biz_state > 0 or has_biz_msg
+            )
+            r_dict["business_name"] = (
+                android_biz_map.get(int(c_row_id_int))
+                if r_dict["is_business"] and has_biz_msg
+                else None
+            )
             if cid in deduped_chats:
                 existing = deduped_chats[cid]
                 if r_dict.get("is_archived"):
@@ -299,6 +345,10 @@ def api_chats():
                 if r_dict["is_pinned"]:
                     existing["is_pinned"] = True
                     existing["pinned_time"] = max(existing["pinned_time"], r_dict["pinned_time"])
+                if r_dict["is_business"]:
+                    existing["is_business"] = True
+                    if not existing["business_name"] and r_dict["business_name"]:
+                        existing["business_name"] = r_dict["business_name"]
                 continue
             deduped_chats[cid] = r_dict
         rows = list(deduped_chats.values())
@@ -396,6 +446,7 @@ def api_chats():
                 {ios_last_msg_text_col}                             AS last_msg_proto,
                 {ios_cs_last_date_col}                              AS cs_last_msg_date,
                 COALESCE(ic.disappearing_duration, 0)               AS contact_ephemeral_duration,
+                ic.business_name                                    AS contact_business_name,
                 CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
                      ELSE 'contact' END                            AS type,
                 CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN ''
@@ -695,6 +746,7 @@ def api_chats():
             last_msg_proto = d.pop("last_msg_proto", None)
             cs_last_msg_date = d.pop("cs_last_msg_date", None)
             contact_ephem = int(d.pop("contact_ephemeral_duration", 0) or 0)
+            contact_biz = d.pop("contact_business_name", None)
             ephem_pb, _pb_pin, _pb_ptime = _parse_ios_chat_session_meta(last_msg_proto or "")
             is_pin = cs_last_msg_date is not None and float(cs_last_msg_date) >= 100_000_000_000
             p_time = int(float(cs_last_msg_date)) if is_pin else 0
@@ -702,6 +754,9 @@ def api_chats():
             d["ephemeral_duration"] = ephem_pb if ephem_pb > 0 else contact_ephem
             d["is_pinned"] = is_pin
             d["pinned_time"] = p_time
+            bname = str(contact_biz).strip() if contact_biz else None
+            d["is_business"] = d.get("type") == "contact" and bool(bname)
+            d["business_name"] = bname if d["is_business"] else None
             group_direct_desc = d.pop("group_direct_desc", None)
             group_picture_id = d.pop("group_picture_id", None)
             group_arch_desc = d.pop("group_arch_desc", None)
@@ -921,6 +976,8 @@ def api_chats():
             c.setdefault("ephemeral_duration", 0)
             c.setdefault("is_pinned", False)
             c.setdefault("pinned_time", 0)
+            c.setdefault("is_business", False)
+            c.setdefault("business_name", None)
         result.sort(
             key=lambda c: (
                 bool(c.get("is_pinned")),
@@ -1033,10 +1090,7 @@ def api_chat_info():
                            MAX(CASE WHEN {biz_col} > 0 THEN 1 ELSE 0 END) AS has_biz_state
                     FROM chat c
                     LEFT JOIN jid j ON j._id = c.jid_row_id
-                    LEFT JOIN (
-                        SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                        FROM jid_map GROUP BY lid_row_id
-                    ) jm ON jm.lid_row_id = c.jid_row_id
+                    LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = c.jid_row_id
                     LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
                     WHERE c.subject IS NULL
                       AND COALESCE(j_real.user, j.user) = ?

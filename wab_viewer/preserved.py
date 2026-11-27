@@ -469,6 +469,8 @@ def _merge_preserved_chats(
         c.setdefault("ephemeral_duration", 0)
         c.setdefault("is_pinned", False)
         c.setdefault("pinned_time", 0)
+        c.setdefault("is_business", False)
+        c.setdefault("business_name", None)
 
     try:
         pres_cols = {
@@ -588,6 +590,8 @@ def _merge_preserved_chats(
                 "ephemeral_duration": 0,
                 "is_pinned": False,
                 "pinned_time": 0,
+                "is_business": False,
+                "business_name": None,
             }
         )
         existing_chats.add((cid, ctype))

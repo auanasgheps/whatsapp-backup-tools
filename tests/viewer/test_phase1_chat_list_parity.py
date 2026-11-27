@@ -115,10 +115,14 @@ def test_android_phase1_chats_and_chat_info(tmp_path):
         assert chats[0]["unread_count"] == 3
         assert chats[0]["ephemeral_duration"] == 86400
         assert chats[0]["has_preservation"] is False
+        assert chats[0]["is_business"] is False
+        assert chats[0]["business_name"] is None
 
         assert chats[1]["id"] == "15550102"
         assert chats[1]["is_pinned"] is False
         assert chats[1]["unread_count"] == 0
+        assert chats[1]["is_business"] is True
+        assert chats[1]["business_name"] == "Acme Corp"
 
         info_biz = client.get("/api/chat-info?chat_id=15550102&chat_type=contact").get_json()
         assert info_biz["is_business"] is True
@@ -195,11 +199,15 @@ def test_ios_phase1_chats_and_chat_info(tmp_path):
         assert chats[0]["is_pinned"] is True
         assert chats[0]["pinned_time"] == 221716128054
         assert chats[0]["newest_ts"] == (700000000 + 978307200) * 1000
+        assert chats[0]["is_business"] is True
+        assert chats[0]["business_name"] == "Bob Bakery LLC"
 
         assert chats[1]["id"] == "2"
         assert chats[1]["is_pinned"] is False
         assert chats[1]["pinned_time"] == 0
         assert chats[1]["unread_count"] == 0
+        assert chats[1]["is_business"] is False
+        assert chats[1]["business_name"] is None
 
         info = client.get("/api/chat-info?chat_id=1&chat_type=contact").get_json()
         assert info["is_business"] is True

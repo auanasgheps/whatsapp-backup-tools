@@ -542,28 +542,11 @@
     const bizBadge = document.getElementById('chat-header-business-badge');
     if (bizBadge) {
       bizBadge.style.display = 'none';
-      const applyBizBadge = (bizInfo) => {
-        if (currentChat !== chat || !bizInfo || !bizInfo.is_business) return;
-        bizBadge.title = bizInfo.business_name
-          ? `${t('chat.business_badge_title')}: ${bizInfo.business_name}`
+      if (chat.type === 'contact' && chat.is_business) {
+        bizBadge.title = chat.business_name
+          ? `${t('chat.business_badge_title')}: ${chat.business_name}`
           : t('chat.business_badge_title');
         bizBadge.style.display = 'inline-flex';
-      };
-      if (chat._bizInfo) {
-        applyBizBadge(chat._bizInfo);
-      } else if (chat.type === 'contact') {
-        const bizParams = new URLSearchParams({ chat_id: chat.id, chat_type: chat.type });
-        fetch(API + '/chat-info?' + bizParams)
-          .then(r => (r.ok ? r.json() : null))
-          .then(info => {
-            if (!info) return;
-            chat._bizInfo = {
-              is_business: Boolean(info.is_business),
-              business_name: info.business_name || null,
-            };
-            applyBizBadge(chat._bizInfo);
-          })
-          .catch(() => {});
       }
     }
 
