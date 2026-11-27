@@ -16,7 +16,9 @@ def _pb_varint_field(field_num: int, val: int) -> bytes:
 
 
 def test_parse_ios_chat_session_meta():
-    blob = _pb_varint_field(2, 604800)
+    blob = (
+        _pb_varint_field(2, 604800) + _pb_varint_field(76, 1700000000000) + _pb_varint_field(77, 1)
+    )
     b64 = base64.b64encode(blob).decode("ascii")
     ephem, is_pinned, pinned_time = _parse_ios_chat_session_meta(b64)
     assert ephem == 604800
@@ -139,15 +141,25 @@ def test_ios_phase1_chats_and_chat_info(tmp_path):
     wa_conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZUNREADCOUNT INTEGER DEFAULT 0")
 
     pb_b64 = base64.b64encode(_pb_varint_field(2, 7776000)).decode("ascii")
+    unpinned_pb_b64 = base64.b64encode(_pb_varint_field(76, 0)).decode("ascii")
 
     wa_conn.execute(
-        "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZUNREADCOUNT, ZLASTMESSAGETEXT) "
-        "VALUES (1, '15550103@s.whatsapp.net', 'Bob', 0, 2, ?)",
+        "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZUNREADCOUNT, ZLASTMESSAGEDATE, ZLASTMESSAGETEXT) "
+        "VALUES (1, '15550103@s.whatsapp.net', 'Bob', 0, 2, 221716128054, ?)",
         (pb_b64,),
+    )
+    wa_conn.execute(
+        "INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZHIDDEN, ZUNREADCOUNT, ZLASTMESSAGEDATE, ZLASTMESSAGETEXT) "
+        "VALUES (2, '15550104@s.whatsapp.net', 'Carol', 0, 0, 750000000.0, ?)",
+        (unpinned_pb_b64,),
     )
     wa_conn.execute(
         "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZSTANZAID) "
         "VALUES (1, 1, 0, 700000000.0, 0, 'Hi Bob', 'ST1')"
+    )
+    wa_conn.execute(
+        "INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZISFROMME, ZMESSAGEDATE, ZMESSAGETYPE, ZTEXT, ZSTANZAID) "
+        "VALUES (2, 2, 0, 750000000.0, 0, 'Hi Carol', 'ST2')"
     )
     wa_conn.commit()
     wa_conn.close()
@@ -176,10 +188,18 @@ def test_ios_phase1_chats_and_chat_info(tmp_path):
     app.config["TESTING"] = True
     with app.test_client() as client:
         chats = client.get("/api/chats").get_json()
-        assert len(chats) == 1
+        assert len(chats) == 2
+        assert chats[0]["id"] == "1"
         assert chats[0]["unread_count"] == 2
         assert chats[0]["ephemeral_duration"] == 7776000
-        assert chats[0]["is_pinned"] is False
+        assert chats[0]["is_pinned"] is True
+        assert chats[0]["pinned_time"] == 221716128054
+        assert chats[0]["newest_ts"] == (700000000 + 978307200) * 1000
+
+        assert chats[1]["id"] == "2"
+        assert chats[1]["is_pinned"] is False
+        assert chats[1]["pinned_time"] == 0
+        assert chats[1]["unread_count"] == 0
 
         info = client.get("/api/chat-info?chat_id=1&chat_type=contact").get_json()
         assert info["is_business"] is True

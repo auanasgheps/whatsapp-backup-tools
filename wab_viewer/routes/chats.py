@@ -317,8 +317,9 @@ def api_chats():
         )
         ios_unread_col = "COALESCE(cs.ZUNREADCOUNT, 0)" if ctx.caps.has_cs_unread else "0"
         ios_last_msg_text_col = "cs.ZLASTMESSAGETEXT" if ctx.caps.has_cs_last_msg_text else "NULL"
+        ios_cs_last_date_col = "cs.ZLASTMESSAGEDATE" if ctx.caps.has_cs_last_msg_date else "NULL"
         ios_raw_ts_expr = (
-            "COALESCE(m.ZMESSAGEDATE, cs.ZLASTMESSAGEDATE)"
+            "COALESCE(m.ZMESSAGEDATE, CASE WHEN cs.ZLASTMESSAGEDATE < 100000000000 THEN cs.ZLASTMESSAGEDATE END)"
             if ctx.caps.has_cs_last_msg_date
             else "m.ZMESSAGEDATE"
         )
@@ -393,6 +394,7 @@ def api_chats():
                 {ios_archived_col}                                  AS is_archived,
                 {ios_unread_col}                                    AS unread_count,
                 {ios_last_msg_text_col}                             AS last_msg_proto,
+                {ios_cs_last_date_col}                              AS cs_last_msg_date,
                 COALESCE(ic.disappearing_duration, 0)               AS contact_ephemeral_duration,
                 CASE WHEN cs.ZGROUPINFO IS NOT NULL THEN 'group'
                      ELSE 'contact' END                            AS type,
@@ -691,8 +693,11 @@ def api_chats():
                 d["description"] = None
         elif ctx.source_type == "ios":
             last_msg_proto = d.pop("last_msg_proto", None)
+            cs_last_msg_date = d.pop("cs_last_msg_date", None)
             contact_ephem = int(d.pop("contact_ephemeral_duration", 0) or 0)
-            ephem_pb, is_pin, p_time = _parse_ios_chat_session_meta(last_msg_proto or "")
+            ephem_pb, _pb_pin, _pb_ptime = _parse_ios_chat_session_meta(last_msg_proto or "")
+            is_pin = cs_last_msg_date is not None and float(cs_last_msg_date) >= 100_000_000_000
+            p_time = int(float(cs_last_msg_date)) if is_pin else 0
             d["unread_count"] = int(d.get("unread_count") or 0)
             d["ephemeral_duration"] = ephem_pb if ephem_pb > 0 else contact_ephem
             d["is_pinned"] = is_pin
