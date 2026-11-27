@@ -2128,14 +2128,27 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
         pass
     phone_col_expr = ", phone_number" if has_phone_col else ", NULL AS phone_number"
 
-    members = []
+    merged_members: dict[str, dict] = {}
+    anon_idx = 0
     for lid, delivered_delta, read_delta in parsed:
         name = lid
+        resolved_phone = None
         if lid:
-            row = conn.execute(
-                f"SELECT full_name {phone_col_expr} FROM _ios_contacts WHERE jid = ?",
-                (f"{lid}@lid",),
-            ).fetchone()
+            row = None
+            try:
+                row = conn.execute(
+                    f"SELECT full_name {phone_col_expr} FROM _ios_contacts WHERE jid = ?",
+                    (f"{lid}@lid",),
+                ).fetchone()
+                if not row:
+                    row = conn.execute(
+                        f"SELECT full_name {phone_col_expr} FROM _ios_contacts WHERE jid = ?",
+                        (f"{lid}@s.whatsapp.net",),
+                    ).fetchone()
+            except Exception:
+                row = None
+            if row and row[1]:
+                resolved_phone = row[1]
             if row and row[0]:
                 name = row[0]
             elif row and row[1]:
@@ -2147,23 +2160,52 @@ def _parse_ios_receipt_blob(blob: bytes, conn, is_group: bool = False, msg_ts_s:
                 else:
                     name = f"+{row[1]}"
             else:
-                row = conn.execute(
+                c_row = conn.execute(
                     "SELECT display_name FROM arch.contacts WHERE number = ?", (lid,)
                 ).fetchone()
-                if row and row[0]:
-                    name = row[0]
-        members.append(
-            {
+                if c_row and c_row[0]:
+                    name = c_row[0]
+                    resolved_phone = lid
+
+        deliv_ts = (anchor + delivered_delta) * 1000 if delivered_delta is not None else None
+        read_ts = (anchor + read_delta) * 1000 if read_delta is not None else None
+
+        if resolved_phone:
+            key = f"phone:{resolved_phone}"
+        elif lid:
+            key = f"id:{lid}"
+        else:
+            key = f"anon:{anon_idx}"
+            anon_idx += 1
+
+        if key not in merged_members:
+            merged_members[key] = {
                 "name": name or lid or "",
                 "jid": lid or "",
-                "delivered_ts": (anchor + delivered_delta) * 1000
-                if delivered_delta is not None
-                else None,
-                "read_ts": (anchor + read_delta) * 1000 if read_delta is not None else None,
+                "delivered_ts": deliv_ts,
+                "read_ts": read_ts,
                 "played_ts": None,
             }
+        else:
+            entry = merged_members[key]
+            if name and (not entry["name"] or entry["name"] == entry["jid"]):
+                entry["name"] = name
+            _merge_receipt_timestamps(entry, deliv_ts, read_ts, None)
+    return list(merged_members.values())
+
+
+def _merge_receipt_timestamps(entry: dict, deliv, read, played) -> None:
+    """Merge earliest non-None delivery/read/played timestamps into an existing receipt dict."""
+    if deliv is not None:
+        entry["delivered_ts"] = (
+            min(entry["delivered_ts"], deliv) if entry["delivered_ts"] is not None else deliv
         )
-    return members
+    if read is not None:
+        entry["read_ts"] = min(entry["read_ts"], read) if entry["read_ts"] is not None else read
+    if played is not None:
+        entry["played_ts"] = (
+            min(entry["played_ts"], played) if entry["played_ts"] is not None else played
+        )
 
 
 def _ios_read_without_timestamp(msg_status: int, read_ts) -> bool:
@@ -2176,45 +2218,70 @@ def _ios_read_without_timestamp(msg_status: int, read_ts) -> bool:
 
 
 def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> list[dict]:
-    """Group per-device receipt rows from infra.receipt_device by user_jid."""
+    """Group per-device receipt rows from infra.receipt_device by canonical user identity."""
+    has_phone_col = False
+    try:
+        ic_cols = {
+            r["name"] if isinstance(r, sqlite3.Row) else r[1]
+            for r in conn.execute("PRAGMA table_info(_ios_contacts)").fetchall()
+        }
+        has_phone_col = "phone_number" in ic_cols
+    except Exception:
+        pass
+    phone_col_expr = ", phone_number" if has_phone_col else ", NULL AS phone_number"
+
+    lid_to_canonical: dict[str, str] = {}
     by_user: dict[str, dict] = {}
     for row in infra_rows:
         ujid = row["user_jid"]
         if not ujid:
             continue
+        if ":" in ujid and "@" in ujid:
+            user_part, domain_part = ujid.split("@", 1)
+            clean_ujid = f"{user_part.split(':', 1)[0]}@{domain_part}"
+        else:
+            clean_ujid = ujid
+
+        canonical_jid = clean_ujid
+        if has_phone_col and (clean_ujid.endswith("@lid") or "@" not in clean_ujid):
+            if clean_ujid in lid_to_canonical:
+                canonical_jid = lid_to_canonical[clean_ujid]
+            else:
+                lookup_jid = clean_ujid if "@" in clean_ujid else f"{clean_ujid}@lid"
+                try:
+                    p_row = conn.execute(
+                        "SELECT phone_number FROM _ios_contacts WHERE jid = ?",
+                        (lookup_jid,),
+                    ).fetchone()
+                    if p_row and p_row[0]:
+                        canonical_jid = f"{p_row[0]}@s.whatsapp.net"
+                except Exception:
+                    pass
+                lid_to_canonical[clean_ujid] = canonical_jid
+
         deliv = row["delivered_timestamp"]
         read = row["read_timestamp"]
         played = row["played_timestamp"]
 
-        if ujid not in by_user:
-            by_user[ujid] = {
-                "delivered_sec": deliv,
-                "read_sec": read,
-                "played_sec": played,
+        if canonical_jid not in by_user:
+            by_user[canonical_jid] = {
+                "delivered_ts": deliv,
+                "read_ts": read,
+                "played_ts": played,
+                "alt_jids": [clean_ujid] if clean_ujid != canonical_jid else [],
             }
         else:
-            entry = by_user[ujid]
-            if deliv is not None:
-                entry["delivered_sec"] = (
-                    min(entry["delivered_sec"], deliv)
-                    if entry["delivered_sec"] is not None
-                    else deliv
-                )
-            if read is not None:
-                entry["read_sec"] = (
-                    min(entry["read_sec"], read) if entry["read_sec"] is not None else read
-                )
-            if played is not None:
-                entry["played_sec"] = (
-                    min(entry["played_sec"], played) if entry["played_sec"] is not None else played
-                )
+            entry = by_user[canonical_jid]
+            if clean_ujid != canonical_jid and clean_ujid not in entry["alt_jids"]:
+                entry["alt_jids"].append(clean_ujid)
+            _merge_receipt_timestamps(entry, deliv, read, played)
 
     if not is_group:
         delivered_secs = [
-            d["delivered_sec"] for d in by_user.values() if d["delivered_sec"] is not None
+            d["delivered_ts"] for d in by_user.values() if d["delivered_ts"] is not None
         ]
-        read_secs = [d["read_sec"] for d in by_user.values() if d["read_sec"] is not None]
-        played_secs = [d["played_sec"] for d in by_user.values() if d["played_sec"] is not None]
+        read_secs = [d["read_ts"] for d in by_user.values() if d["read_ts"] is not None]
+        played_secs = [d["played_ts"] for d in by_user.values() if d["played_ts"] is not None]
         if not delivered_secs and not read_secs and not played_secs:
             return []
         deliv_ts = min(delivered_secs) * 1000 if delivered_secs else None
@@ -2231,34 +2298,25 @@ def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> li
             }
         ]
 
-    has_phone_col = False
-    try:
-        ic_cols = {
-            r["name"] if isinstance(r, sqlite3.Row) else r[1]
-            for r in conn.execute("PRAGMA table_info(_ios_contacts)").fetchall()
-        }
-        has_phone_col = "phone_number" in ic_cols
-    except Exception:
-        pass
-    phone_col_expr = ", phone_number" if has_phone_col else ", NULL AS phone_number"
-
     members = []
     for ujid, data in by_user.items():
         name = None
-        c_row = conn.execute(
-            f"SELECT full_name {phone_col_expr} FROM _ios_contacts WHERE jid = ?", (ujid,)
-        ).fetchone()
-        if c_row and c_row[0]:
-            name = c_row[0]
-        elif c_row and c_row[1]:
-            con_row = conn.execute(
-                "SELECT display_name FROM arch.contacts WHERE number = ?", (c_row[1],)
+        for lookup_jid in [ujid, *data["alt_jids"]]:
+            c_row = conn.execute(
+                f"SELECT full_name {phone_col_expr} FROM _ios_contacts WHERE jid = ?",
+                (lookup_jid,),
             ).fetchone()
-            if con_row and con_row[0]:
-                name = con_row[0]
-            else:
-                name = f"+{c_row[1]}"
-        else:
+            if c_row and c_row[0]:
+                name = c_row[0]
+                break
+            if c_row and c_row[1]:
+                con_row = conn.execute(
+                    "SELECT display_name FROM arch.contacts WHERE number = ?", (c_row[1],)
+                ).fetchone()
+                name = con_row[0] if (con_row and con_row[0]) else f"+{c_row[1]}"
+                break
+
+        if not name:
             prefix = ujid.split("@")[0]
             c_row2 = conn.execute(
                 f"SELECT full_name {phone_col_expr} FROM _ios_contacts WHERE jid = ?", (prefix,)
@@ -2269,23 +2327,22 @@ def _parse_ios_receipt_device_rows(infra_rows: list, conn, is_group: bool) -> li
                 con_row = conn.execute(
                     "SELECT display_name FROM arch.contacts WHERE number = ?", (c_row2[1],)
                 ).fetchone()
-                if con_row and con_row[0]:
-                    name = con_row[0]
-                else:
-                    name = f"+{c_row2[1]}"
+                name = con_row[0] if (con_row and con_row[0]) else f"+{c_row2[1]}"
             else:
-                p_row = conn.execute(
-                    "SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ?", (ujid,)
-                ).fetchone()
-                if p_row and p_row[0]:
-                    name = p_row[0]
-                else:
+                for lookup_jid in [ujid, *data["alt_jids"]]:
+                    p_row = conn.execute(
+                        "SELECT ZPUSHNAME FROM ZWAPROFILEPUSHNAME WHERE ZJID = ?", (lookup_jid,)
+                    ).fetchone()
+                    if p_row and p_row[0]:
+                        name = p_row[0]
+                        break
+                if not name:
                     name = prefix
 
         jid_clean = ujid.split("@")[0]
-        deliv_ts = data["delivered_sec"] * 1000 if data["delivered_sec"] is not None else None
-        read_ts = data["read_sec"] * 1000 if data["read_sec"] is not None else None
-        played_ts = data["played_sec"] * 1000 if data["played_sec"] is not None else None
+        deliv_ts = data["delivered_ts"] * 1000 if data["delivered_ts"] is not None else None
+        read_ts = data["read_ts"] * 1000 if data["read_ts"] is not None else None
+        played_ts = data["played_ts"] * 1000 if data["played_ts"] is not None else None
 
         members.append(
             {

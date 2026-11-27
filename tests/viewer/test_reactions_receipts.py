@@ -1470,6 +1470,166 @@ class TestMessageReceipts:
                 assert "999888777" in returned_jids
                 assert "outsider" not in returned_jids
 
+    def test_android_group_receipts_deduplicates_lid_and_phone_rows(self, tmp_path):
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550101', 'Alice', 'Alice')"
+        )
+        arc_conn.commit()
+        wa_conn = make_android_db(tmp_path / "msgstore.db")
+        seed_android_db(wa_conn, arc_conn)
+        wa_conn.executescript("""
+            CREATE TABLE IF NOT EXISTS jid_map (
+                lid_row_id INTEGER NOT NULL,
+                jid_row_id INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS receipt_user (
+                _id INTEGER PRIMARY KEY,
+                message_row_id INTEGER,
+                receipt_user_jid_row_id INTEGER,
+                receipt_timestamp INTEGER,
+                read_timestamp INTEGER,
+                played_timestamp INTEGER
+            );
+            INSERT INTO jid (_id, user, raw_string)
+                VALUES (2, '15550101', '15550101@s.whatsapp.net');
+            INSERT INTO jid (_id, user, raw_string)
+                VALUES (3, '900000101', '900000101@lid');
+            INSERT INTO jid_map (lid_row_id, jid_row_id) VALUES (3, 2);
+            INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp)
+                VALUES (1, 2, 1700000005000, NULL, NULL);
+            INSERT INTO receipt_user (message_row_id, receipt_user_jid_row_id, receipt_timestamp, read_timestamp, played_timestamp)
+                VALUES (1, 3, 1700000003000, 1700000010000, NULL);
+        """)
+        wa_conn.commit()
+        wa_conn.close()
+        arc_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/message_receipts/1")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["available"] is True
+            assert len(data["members"]) == 1
+            m = data["members"][0]
+            assert m["name"] == "Alice"
+            assert m["jid"] == "15550101@s.whatsapp.net"
+            assert m["delivered_ts"] == 1700000003000
+            assert m["read_ts"] == 1700000010000
+
+    def test_ios_group_receipt_device_deduplicates_lid_and_phone(self, tmp_path):
+        arc_conn = make_archive_db(tmp_path / ".wa_media_archiver.db")
+        arc_conn.execute(
+            "INSERT INTO contacts (number, folder, display_name) VALUES ('15550102', 'Bob', 'Bob')"
+        )
+        arc_conn.commit()
+        arc_conn.close()
+
+        conn = sqlite3.connect(str(tmp_path / "ChatStorage.sqlite"))
+        conn.executescript("""
+            CREATE TABLE ZWACHATSESSION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCONTACTJID TEXT,
+                ZGROUPINFO INTEGER,
+                ZPARTNERNAME TEXT
+            );
+            CREATE TABLE ZWAGROUPINFO (Z_PK INTEGER PRIMARY KEY);
+            CREATE TABLE ZWAMESSAGE (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZISFROMME INTEGER,
+                ZMESSAGEINFO INTEGER,
+                ZMESSAGEDATE REAL,
+                ZMESSAGESTATUS INTEGER,
+                ZSTANZAID TEXT,
+                ZFROMJID TEXT,
+                ZGROUPMEMBER INTEGER
+            );
+            CREATE TABLE ZWAMESSAGEINFO (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMESSAGE INTEGER,
+                ZRECEIPTINFO BLOB
+            );
+            CREATE TABLE ZWAGROUPMEMBER (
+                Z_PK INTEGER PRIMARY KEY,
+                ZCHATSESSION INTEGER,
+                ZMEMBERJID TEXT,
+                ZCONTACTNAME TEXT
+            );
+            CREATE TABLE ZWAPROFILEPUSHNAME (ZJID TEXT, ZPUSHNAME TEXT);
+            INSERT INTO ZWAGROUPINFO VALUES (1);
+            INSERT INTO ZWACHATSESSION VALUES (1, 'group1@g.us', 1, 'Group 1');
+            INSERT INTO ZWAGROUPMEMBER VALUES (10, 1, '15550102@s.whatsapp.net', 'Bob');
+            INSERT INTO ZWAMESSAGE VALUES (100, 1, 1, 1, 700000000.0, 3, 'stanza_dup', NULL, 10);
+            INSERT INTO ZWAMESSAGEINFO VALUES (1, 100, NULL);
+        """)
+        conn.commit()
+        conn.close()
+
+        lid_conn = sqlite3.connect(str(tmp_path / "LID.sqlite"))
+        lid_conn.executescript("""
+            CREATE TABLE ZWAZACCOUNT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZIDENTIFIER TEXT,
+                ZPHONENUMBER TEXT
+            );
+            INSERT INTO ZWAZACCOUNT VALUES (1, '900000102@lid', '15550102');
+        """)
+        lid_conn.commit()
+        lid_conn.close()
+
+        infra_conn = sqlite3.connect(str(tmp_path / "MessagingInfraDatabase.sqlite"))
+        infra_conn.executescript("""
+            CREATE TABLE receipt_device (
+                stanza_id TEXT,
+                user_jid TEXT,
+                device_id INTEGER,
+                delivered_timestamp INTEGER,
+                read_timestamp INTEGER,
+                played_timestamp INTEGER
+            );
+            INSERT INTO receipt_device VALUES ('stanza_dup', '15550102@s.whatsapp.net', 0, 1700000005, NULL, NULL);
+            INSERT INTO receipt_device VALUES ('stanza_dup', '900000102@lid', 1, 1700000004, 1700000020, NULL);
+        """)
+        infra_conn.commit()
+        infra_conn.close()
+
+        app = viewer.create_app(tmp_path, rescan=False)
+        with app.test_client() as client:
+            resp = client.get("/api/message_receipts/100")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["available"] is True
+            assert len(data["members"]) == 1
+            m = data["members"][0]
+            assert m["name"] == "Bob"
+            assert m["delivered_ts"] == 1700000004000
+            assert m["read_ts"] == 1700000020000
+
+    def test_parse_ios_receipt_blob_deduplicates_repeated_entries(self):
+        base_ts = 1700000000
+        blob = make_receipt_blob(
+            base_ts,
+            [
+                {"lid": "15550101", "noise4": None, "delivered_delta": 10, "read_delta": None},
+                {"lid": "15550101", "noise4": None, "delivered_delta": 8, "read_delta": 30},
+            ],
+        )
+        conn = sqlite3.connect(":memory:")
+        conn.executescript("""
+            CREATE TABLE _ios_contacts (jid TEXT PRIMARY KEY, full_name TEXT, phone_number TEXT);
+            ATTACH DATABASE ':memory:' AS arch;
+            CREATE TABLE arch.contacts (number TEXT PRIMARY KEY, display_name TEXT);
+            INSERT INTO _ios_contacts VALUES ('15550101@lid', 'Alice', '15550101');
+        """)
+        members = viewer_hydration._parse_ios_receipt_blob(blob, conn, is_group=True)
+        conn.close()
+        assert len(members) == 1
+        assert members[0]["name"] == "Alice"
+        assert members[0]["delivered_ts"] == (base_ts + 8) * 1000
+        assert members[0]["read_ts"] == (base_ts + 30) * 1000
+
 
 class TestProtobufParserEdgeCases:
     def test_read_varint(self):

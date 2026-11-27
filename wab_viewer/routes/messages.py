@@ -21,6 +21,7 @@ from ..hydration import (
     _hydrate_quoted_rows,
     _ios_reactions,
     _ios_read_without_timestamp,
+    _merge_receipt_timestamps,
     _normalize_message_rows,
     _parse_ios_receipt_blob,
     _parse_ios_receipt_device_rows,
@@ -816,17 +817,15 @@ def api_message_receipts(message_id):
         if not table_exists:
             return jsonify({"available": False})
 
+        _ensure_jid_map_resolved(conn, ctx.get_archive())
         has_jid_map = bool(
             conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jid_map'"
+                "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_jid_map_resolved'"
             ).fetchone()
         )
         jm_join = (
             """
-            LEFT JOIN (
-                SELECT lid_row_id, MIN(jid_row_id) AS jid_row_id
-                FROM jid_map GROUP BY lid_row_id
-            ) jm ON jm.lid_row_id = ru.receipt_user_jid_row_id
+            LEFT JOIN _jid_map_resolved jm ON jm.lid_row_id = ru.receipt_user_jid_row_id
             LEFT JOIN jid j_real ON j_real._id = jm.jid_row_id
         """
             if has_jid_map
@@ -891,16 +890,44 @@ def api_message_receipts(message_id):
                 )
             return jsonify({"available": True, "members": []})
 
-        members = [
-            {
-                "name": r["name"] or r["jid"] or "",
-                "jid": r["jid"] or "",
-                "delivered_ts": r["receipt_timestamp"] or None,
-                "read_ts": r["read_timestamp"] or None,
-                "played_ts": r["played_timestamp"] or None,
-            }
-            for r in rows
-        ]
+        merged_members: dict[str, dict] = {}
+        anon_idx = 0
+        for r in rows:
+            raw_jid = r["jid"] or ""
+            if ":" in raw_jid and "@" in raw_jid:
+                user_part, domain_part = raw_jid.split("@", 1)
+                clean_jid = f"{user_part.split(':', 1)[0]}@{domain_part}"
+            else:
+                clean_jid = raw_jid
+
+            name_val = r["name"] or clean_jid or ""
+            if clean_jid:
+                key = f"jid:{clean_jid}"
+            elif name_val:
+                key = f"name:{name_val}"
+            else:
+                key = f"anon:{anon_idx}"
+                anon_idx += 1
+
+            deliv = r["receipt_timestamp"] or None
+            read = r["read_timestamp"] or None
+            played = r["played_timestamp"] or None
+
+            if key not in merged_members:
+                merged_members[key] = {
+                    "name": name_val,
+                    "jid": clean_jid,
+                    "delivered_ts": deliv,
+                    "read_ts": read,
+                    "played_ts": played,
+                }
+            else:
+                entry = merged_members[key]
+                if not entry["name"] and name_val:
+                    entry["name"] = name_val
+                _merge_receipt_timestamps(entry, deliv, read, played)
+
+        members = list(merged_members.values())
         result = {"available": True, "members": members}
         if len(members) == 1:
             result["delivered_ts"] = members[0]["delivered_ts"]
