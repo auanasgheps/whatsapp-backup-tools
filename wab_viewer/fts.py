@@ -311,6 +311,10 @@ def _ensure_chat_indexed(
         _build_fts_chat(cache_conn, source_type, wa_db_path, chat_id, chat_type)
 
 
+_INDEX_QUEUES: dict[int, list[tuple[str, str, str, str, str]]] = {}
+_INDEX_WORKERS: set[int] = set()
+
+
 def _maybe_start_indexing(
     chat_id: str,
     chat_type: str,
@@ -327,23 +331,42 @@ def _maybe_start_indexing(
     ).fetchone()
     if already:
         return
+    lock_id = id(indexing_lock)
+    cache_db_path = str(get_cache_db_path(output_root))
     with indexing_lock:
         if key in indexing_state:
             return
         indexing_state[key] = "indexing"
+        queue = _INDEX_QUEUES.setdefault(lock_id, [])
+        queue.append((cache_db_path, source_type, wa_db_path, chat_id, chat_type))
+        if lock_id in _INDEX_WORKERS:
+            return
+        _INDEX_WORKERS.add(lock_id)
     threading.Thread(
-        target=_bg_index_chat,
-        args=(
-            str(get_cache_db_path(output_root)),
-            source_type,
-            wa_db_path,
-            chat_id,
-            chat_type,
-            indexing_state,
-            indexing_lock,
-        ),
+        target=_bg_index_worker,
+        args=(lock_id, indexing_state, indexing_lock),
         daemon=True,
     ).start()
+
+
+def _bg_index_worker(lock_id: int, state: dict, lock: threading.Lock):
+    """Drain queued FTS chat indexing tasks one at a time, prioritizing the latest chat."""
+    try:
+        while True:
+            with lock:
+                queue = _INDEX_QUEUES.get(lock_id)
+                if not queue:
+                    _INDEX_QUEUES.pop(lock_id, None)
+                    _INDEX_WORKERS.discard(lock_id)
+                    return
+                task = queue.pop()
+            cache_db_path, source_type, wa_db_path, chat_id, chat_type = task
+            _bg_index_chat(cache_db_path, source_type, wa_db_path, chat_id, chat_type, state, lock)
+    except BaseException:
+        with lock:
+            _INDEX_QUEUES.pop(lock_id, None)
+            _INDEX_WORKERS.discard(lock_id)
+        raise
 
 
 def _bg_index_chat(
@@ -358,6 +381,7 @@ def _bg_index_chat(
     try:
         cache_conn = sqlite3.connect(cache_db_path)
         try:
+            cache_conn.execute("PRAGMA busy_timeout = 5000")
             cache_conn.execute("PRAGMA journal_mode = WAL")
             cache_conn.execute("PRAGMA synchronous = NORMAL")
             cache_conn.row_factory = sqlite3.Row

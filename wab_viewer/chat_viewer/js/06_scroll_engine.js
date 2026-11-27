@@ -3,20 +3,26 @@
   function setupScrollTrigger() {
     const scroll = document.getElementById('message-scroll');
     const btn = document.getElementById('scroll-to-bottom');
+    let scrollRafPending = false;
     scroll.addEventListener('scroll', function () {
-      if (suppressScroll) return;
-      hideMsgDetails();
-      const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
-      isUserAtBottom = atBottom;
-      btn.classList.toggle('visible', !atBottom);
-      if (scroll.scrollTop < 100) {
-        if (loading) return;
-        loadMessages('older');
-      } else if (atBottom) {
-        if (loading) return;
-        loadMessages('newer');
-      }
-    });
+      if (suppressScroll || scrollRafPending) return;
+      scrollRafPending = true;
+      requestAnimationFrame(() => {
+        scrollRafPending = false;
+        if (suppressScroll) return;
+        hideMsgDetails();
+        const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
+        isUserAtBottom = atBottom;
+        btn.classList.toggle('visible', !atBottom);
+        if (scroll.scrollTop < 100) {
+          if (loading) return;
+          loadMessages('older');
+        } else if (atBottom) {
+          if (loading) return;
+          loadMessages('newer');
+        }
+      });
+    }, { passive: true });
     scroll.addEventListener('wheel', function (e) {
       if (e.deltaY < 0 && scroll.scrollTop < 100) {
         if (loading || noMoreOlder) return;

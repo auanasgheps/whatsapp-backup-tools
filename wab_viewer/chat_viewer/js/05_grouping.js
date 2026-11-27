@@ -177,20 +177,96 @@
     return units;
   }
 
+  function _unitDomKey(unit) {
+    if (unit.type === 'group') {
+      return String(unit.members[0].msg_id) + '|' + unit.members.map(m => String(m.msg_id)).join(' ');
+    }
+    return String(unit.msg.msg_id) + '|';
+  }
+
   function renderWindow() {
     const scroll = document.getElementById('message-scroll');
-    scroll.innerHTML = '';
     const units = computeRenderUnits(msgList);
+    const hasExisting = Boolean(scroll.querySelector('.msg-row[data-msg-id]'));
+
+    if (!hasExisting) {
+      scroll.innerHTML = '';
+      const frag = document.createDocumentFragment();
+      let prevTs = null;
+      for (const unit of units) {
+        const ts = unit.type === 'group' ? unit.members[0].timestamp_ms : unit.msg.timestamp_ms;
+        if (prevTs === null || dayKey(ts) !== dayKey(prevTs)) {
+          frag.appendChild(makeDateSeparator(ts));
+        }
+        frag.appendChild(renderBubble(unit));
+        prevTs = unit.type === 'group'
+          ? unit.members[unit.members.length - 1].timestamp_ms
+          : unit.msg.timestamp_ms;
+      }
+      scroll.appendChild(frag);
+      return;
+    }
+
+    const existingRows = new Map();
+    scroll.querySelectorAll('.msg-row[data-msg-id]').forEach(row => {
+      const key = (row.dataset.msgId || '') + '|' + (row.dataset.groupIds || '');
+      existingRows.set(key, row);
+    });
+    const neededKeys = new Set(units.map(_unitDomKey));
+    existingRows.forEach((row, key) => {
+      if (!neededKeys.has(key)) {
+        row.remove();
+        existingRows.delete(key);
+      }
+    });
+
+    let cursor = scroll.firstElementChild;
     let prevTs = null;
     for (const unit of units) {
       const ts = unit.type === 'group' ? unit.members[0].timestamp_ms : unit.msg.timestamp_ms;
-      if (prevTs === null || dayKey(ts) !== dayKey(prevTs)) {
-        scroll.appendChild(makeDateSeparator(ts));
+      const dk = dayKey(ts);
+      if (prevTs === null || dk !== dayKey(prevTs)) {
+        while (cursor && cursor.classList.contains('date-separator') && cursor.dataset.dayKey !== dk) {
+          const stale = cursor;
+          cursor = cursor.nextElementSibling;
+          stale.remove();
+        }
+        if (cursor && cursor.classList.contains('date-separator') && cursor.dataset.dayKey === dk) {
+          cursor = cursor.nextElementSibling;
+        } else {
+          scroll.insertBefore(makeDateSeparator(ts), cursor);
+        }
       }
-      scroll.appendChild(renderBubble(unit));
+
+      const key = _unitDomKey(unit);
+      const existing = existingRows.get(key);
+      if (existing) {
+        while (cursor && cursor !== existing && cursor.classList.contains('date-separator')) {
+          const stale = cursor;
+          cursor = cursor.nextElementSibling;
+          stale.remove();
+        }
+        if (existing === cursor) {
+          cursor = cursor.nextElementSibling;
+        } else {
+          scroll.insertBefore(existing, cursor);
+        }
+      } else {
+        const node = renderBubble(unit);
+        if (node && node.nodeType === 1) {
+          scroll.insertBefore(node, cursor);
+        }
+      }
+
       prevTs = unit.type === 'group'
         ? unit.members[unit.members.length - 1].timestamp_ms
         : unit.msg.timestamp_ms;
+    }
+
+    while (cursor) {
+      const next = cursor.nextElementSibling;
+      cursor.remove();
+      cursor = next;
     }
   }
 
