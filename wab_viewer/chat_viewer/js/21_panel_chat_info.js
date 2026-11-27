@@ -147,21 +147,21 @@
     overviewCard.className = 'chat-info-card';
 
     if (currentChat.type === 'contact' && info.number) {
-      overviewCard.appendChild(_infoRow('Phone', '+' + info.number).row);
+      overviewCard.appendChild(_infoRow(t('chat_info.phone'), '+' + info.number).row);
     }
 
     if (currentChat.type === 'group' && info.created_ts) {
-      overviewCard.appendChild(_infoRow('Group created', fmtTs(info.created_ts)).row);
+      overviewCard.appendChild(_infoRow(t('chat_info.group_created'), fmtTs(info.created_ts)).row);
       if (info.creator_number || info.creator_name) {
         const match = info.creator_number ? (info.members || []).find(m => m.number && m.number === info.creator_number) : null;
         const creatorName = (match && match.name) ? match.name : (info.creator_name || (info.creator_number ? '+' + info.creator_number : ''));
         if (creatorName) {
-          overviewCard.appendChild(_infoRow('Created by', creatorName).row);
+          overviewCard.appendChild(_infoRow(t('chat_info.created_by'), creatorName).row);
         }
       }
     }
 
-    overviewCard.appendChild(_infoRow('Conversation since', fmtTs(info.first_ts)).row);
+    overviewCard.appendChild(_infoRow(t('chat_info.conversation_since'), fmtTs(info.first_ts)).row);
 
     if (info.first_ts && info.last_ts && info.last_ts !== info.first_ts) {
       const days = Math.round((info.last_ts - info.first_ts) / 86400000);
@@ -201,7 +201,7 @@
     }
 
     // Media size row (placed before gallery link button)
-    const sizeRowObj = _infoRow('Media size', 'Calculating…');
+    const sizeRowObj = _infoRow(t('chat_info.media_size'), t('chat_info.calculating'));
     overviewCard.appendChild(sizeRowObj.row);
     sizePromise.then(sizeData => {
       if (currentChat === chatAtOpen && panel.classList.contains('open')) {
