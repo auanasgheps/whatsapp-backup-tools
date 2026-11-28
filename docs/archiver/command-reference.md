@@ -42,7 +42,8 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
                      [--business] [--pull-media] [--staging PATH]
                      -o PATH [-l PATH] [--timezone TZ] [--config PATH]
                      [--dry-run] [--limit N] [--since DATE]
-                     [--link-duplicates] [-P] [--exif-timestamps] [-v]
+                     [--link-duplicates] [-P] [--exif-timestamps]
+                     [--ping-url URL] [-v]
 ```
 
 ### Options & Arguments
@@ -71,6 +72,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--link-duplicates` | Flag | No | Hardlink duplicate media across chats instead of copying bytes to save disk space. Automatically falls back to standard copy on unsupported filesystems (e.g. exFAT, FAT32). |
 | `-P`, `--preserve-deleted` | Flag | No | Retain messages deleted on the phone ("Delete for Me"), sender-revoked messages ("Delete for Everyone"), and deleted chats into `preserved_messages.db`. |
 | `--exif-timestamps` | Flag | No | Inject WhatsApp message timestamps directly into media headers (EXIF `DateTimeOriginal` for JPEG, QuickTime `creation_time` for MP4/MOV) for chronological cloud gallery indexing. |
+| `--ping-url URL` | URL | No | When the run ends, send an HTTP GET to this URL with `status=up` (exit code 0) or `status=down` and the exit code in `msg`, e.g. an [Uptime Kuma](https://github.com/louislam/uptime-kuma) push monitor. Only the status is sent, never archive data. Skipped on `--dry-run`; a failed ping is logged and does not change the exit code. |
 
 ---
 

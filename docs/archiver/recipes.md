@@ -206,6 +206,23 @@ wab-archiver update-metadata \
 - **Force re-evaluation**: Pass `--force` if you changed timezone settings and want to re-evaluate all files.
 - **Fast and idempotent**: Tracks stamping state in `.wa_media_archiver.db` (`exif_stamped` column); subsequent runs skip already-stamped files in milliseconds.
 
+### 6. Report Scheduled Runs to a Monitor (`--ping-url`)
+
+When the archiver runs unattended (cron, systemd timer, a Docker container), pass a push URL so a monitor such as [Uptime Kuma](https://github.com/louislam/uptime-kuma) or any healthchecks-style endpoint alerts you when a run fails or never happens:
+
+```bash
+wab-archiver archive \
+  --config config.toml \
+  --ping-url "https://kuma.example.com/api/push/TOKEN"
+```
+
+Or set `ping_url = "..."` in `config.toml`.
+
+- **What is sent**: one HTTP GET at the end of the run, with `status=up&msg=OK` on success or `status=down&msg=wab-archiver exit N` on failure, appended to the URL's query string. No archive data, paths, or chat content is ever sent.
+- **Opt-in only**: nothing is sent unless `--ping-url` or `ping_url` is set, and never on `--dry-run`.
+- **Never breaks the run**: if the endpoint is unreachable, a warning is logged and the archiver's exit code is unchanged.
+- **Pair with a heartbeat interval**: configure the monitor to expect a ping slightly more often than your schedule, so a run that never starts is also reported.
+
 ---
 
 ## Restore Mode
