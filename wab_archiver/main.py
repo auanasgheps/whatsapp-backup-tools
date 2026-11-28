@@ -34,6 +34,7 @@ from . import (
     backup_reader,
     increment_merger,
     ios_handler,
+    ping,
     preservation,
 )
 from .progress import ProgressReporter
@@ -1837,6 +1838,7 @@ _VALID_CONFIG_KEYS = {
     "link_duplicates",
     "preserve_deleted",
     "exif_timestamps",
+    "ping_url",
 }
 
 _EXAMPLE_CONFIG = """\
@@ -1859,6 +1861,7 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # debug    = false                      # Enable debug logging in the log file (default: false, INFO level)
 # timezone = ""                         # IANA timezone (e.g. Europe/Rome, UTC) for year folders & reports
 # business = false                      # Target WhatsApp Business instead of regular WhatsApp
+# ping_url = ""                         # Push URL pinged with status=up/down when the run ends (e.g. Uptime Kuma)
 
 # -----------------------------------------------------------------------------
 # Archiving Features & Filtering
@@ -2222,6 +2225,14 @@ def parse_args() -> argparse.Namespace:
         dest="exif_timestamps",
         default=False,
         help="Write WhatsApp message timestamps to media EXIF/metadata headers (disabled by default).",
+    )
+    archive_p.add_argument(
+        "--ping-url",
+        dest="ping_url",
+        default=None,
+        metavar="URL",
+        help="When the run ends, GET this URL with status=up (exit 0) or status=down and the "
+        "exit code, e.g. an Uptime Kuma push URL. Only the status is sent. Skipped on --dry-run.",
     )
     archive_p.add_argument(
         "-v",
@@ -3466,7 +3477,16 @@ def main():
     )
     if args.dry_run:
         logger.info("*** DRY RUN MODE — no files will be copied ***")
-    run_forward_mode(args, logger)
+    ping_url = getattr(args, "ping_url", None)
+    failure = None
+    try:
+        run_forward_mode(args, logger)
+    except BaseException as e:
+        failure = e
+        raise
+    finally:
+        if ping_url and not args.dry_run:
+            ping.send(ping_url, ping.exit_code(failure), logger)
 
 
 if __name__ == "__main__":

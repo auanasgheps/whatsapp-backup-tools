@@ -34,6 +34,7 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # debug    = false                      # Enable debug logging in the log file (default: false, INFO level)
 # timezone = ""                         # IANA timezone (e.g. Europe/Rome, UTC) for folders & reports
 # business = false                      # Target WhatsApp Business instead of regular WhatsApp
+# ping_url = ""                         # Push URL pinged with status=up/down when the run ends (e.g. Uptime Kuma)
 
 # --- Archiving Features & Filtering ---
 # preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
