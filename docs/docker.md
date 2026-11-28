@@ -1,7 +1,7 @@
 # Running with Docker
 
-A Docker image with all tools (`wab-archiver`, `wab-viewer`, `wab-sweeper`) is published
-to the GitHub Container Registry for every release:
+A Docker image for running `wab-archiver` and `wab-viewer` is published to the GitHub
+Container Registry for every release:
 
 ```bash
 docker pull ghcr.io/auanasgheps/whatsapp-backup-tools:latest
@@ -12,8 +12,9 @@ and `linux/arm64`. Each image is built only after the test suite passes on the i
 own Python.
 
 The image is meant for servers and NAS boxes where the WhatsApp folder reaches the
-machine by other means (Syncthing, SFTP, a mounted backup). Pulling from a phone over USB
-(`--from-adb`) is not supported inside the container.
+machine by other means (Syncthing, SFTP, a mounted backup). Anything that talks to a
+phone over ADB is not supported inside the container: `wab-archiver --from-adb` and
+`wab-sweeper`.
 
 ## Archiving
 

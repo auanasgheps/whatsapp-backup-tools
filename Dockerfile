@@ -1,4 +1,4 @@
-# One image, all tools: pick the command at run time.
+# Archiver and viewer for servers: pick the command at run time.
 #   wab-archiver archive --config /config/config.toml
 #   wab-viewer /archive --host 0.0.0.0 --port 5000 --no-browser
 FROM python:3.13-slim
