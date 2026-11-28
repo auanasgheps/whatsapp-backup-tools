@@ -205,6 +205,10 @@ pip install whatsapp-backup-tools
   cd whatsapp-backup-tools
   pip install .
   ```
+- **Docker (servers and NAS):** a multi-arch image is published on every release, see the [Docker Guide](docs/docker.md):
+  ```bash
+  docker pull ghcr.io/auanasgheps/whatsapp-backup-tools:latest
+  ```
 - **Manual execution without pip:**
   ```bash
   python -m wab_archiver --help
