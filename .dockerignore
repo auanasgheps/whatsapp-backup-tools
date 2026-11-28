@@ -1,0 +1,11 @@
+# Allowlist: only what pip needs to build the package.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!shared/
+!wab_archiver/
+!wab_viewer/
+!wab_sweeper/
+**/__pycache__
+**/*.py[cod]
